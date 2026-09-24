@@ -1,1 +1,1 @@
-"""Serology store: titre tables from the WHO CC labs, and queries over them."""
+"""Serology store: titres across all tables, and queries over them."""

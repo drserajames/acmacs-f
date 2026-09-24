@@ -1,1 +1,1 @@
-"""Clade definitions from the upstream nomenclature, plus local additions."""
+"""Clade assignment from the pinned upstream nomenclature, plus local additions."""

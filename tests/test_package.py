@@ -9,15 +9,22 @@ import af
 SUBPACKAGES = [
     "af.util",
     "af.run",
+    "af.store",
+    "af.pipeline",
     "af.seq",
+    "af.tables",
+    "af.clades",
     "af.tree",
     "af.tree.build",
-    "af.tree.io",
+    "af.tree.asr",
     "af.tree.draw",
-    "af.clades",
     "af.chart",
-    "af.serology",
+    "af.chain",
     "af.map",
+    "af.serology",
+    "af.geo",
+    "af.stat",
+    "af.report",
 ]
 
 

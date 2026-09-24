@@ -1,1 +1,1 @@
-"""Phylogenetic trees: building, the tree model, file formats and report figures."""
+"""Phylogenetic trees: building, ancestral reconstruction and report figures."""

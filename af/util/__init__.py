@@ -1,1 +1,1 @@
-"""Shared helpers: artefact checks, provenance records and explicit config loading."""
+"""Shared helpers: explicit config loading, artefact checks and provenance records."""
