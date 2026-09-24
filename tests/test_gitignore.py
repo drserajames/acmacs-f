@@ -6,7 +6,6 @@ code existed on disk, tests passed locally, and nothing reached the repository.
 
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 from conftest import REPO_ROOT
