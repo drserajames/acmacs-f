@@ -1,0 +1,19 @@
+# who-data-gate baseline — REVIEWED grandfathered files.
+#
+# One line per file:   <path>\t<token-set-hash>\t<n>\t<expires>\t# <justification>
+#
+# The hash covers that file's WHOLE set of matched tokens (sha256 of the sorted,
+# uppercased set, truncated) — no strain/serum/clade plaintext is ever stored here.
+# Suppression is scoped to the one path, so a token grandfathered here still fails
+# anywhere else; and adding OR removing a token changes the hash, which re-surfaces
+# the whole file for review. Entries expire, and --strict fails on expired or
+# unjustified ones, so nothing stays grandfathered by inertia.
+#
+# THE BASELINE IS THE DANGEROUS PART OF THIS TOOL. Every line is a standing decision
+# that some real-looking data may live in the repo. Justify each one in words, and
+# prefer fixing the data or using [allow-literal]/[allow-regex] for true false
+# positives. Never add an entry to silence a hit you have not read.
+#
+# Regenerate: tools/who-data-gate.py --update-baseline --justification "..."
+#   (existing justifications and expiry dates are carried over per path)
+# 0 grandfathered file(s), 0 suppressed match(es).

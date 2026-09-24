@@ -1,0 +1,8 @@
+#!/bin/sh
+# WHO-data gate: pre-commit. Scans the STAGED file contents.
+# --strict: fail if the private strain list (../acmacs-data/.who-strain-list) is missing.
+# Install once per clone:  git config core.hooksPath .githooks
+# Bypassing this gate (--no-verify) is forbidden. See tools/WHO-DATA-GATE.md.
+set -e
+ROOT="$(git rev-parse --show-toplevel)"
+exec python3 "$ROOT/tools/who-data-gate.py" --staged --strict --quiet

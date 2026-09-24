@@ -1,0 +1,5 @@
+#!/bin/sh
+# WHO-data gate: commit-msg. Scans the commit message ($1).
+set -e
+ROOT="$(git rev-parse --show-toplevel)"
+exec python3 "$ROOT/tools/who-data-gate.py" --message-file "$1" --strict --quiet

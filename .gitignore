@@ -1,0 +1,52 @@
+# Claude's working documents (inventory, decisions) — kept out of the repo
+notes/
+
+# Local Claude Code state
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build output (C++ core, wheels)
+build/
+build-*/
+dist/
+wheelhouse/
+_skbuild/
+*.so
+*.dylib
+compile_commands.json
+
+# WHO CC and sequence data must never be committed. Test fixtures that
+# need real data live outside this repo (see notes/DECISIONS.md).
+*.ace
+*.acd1
+*.tjz
+*.tal
+*.torg
+*.xlsx
+*.xls
+*.fas
+*.fasta
+*.fas.br
+hidb5*
+seqdb*
+*.parquet
+*.duckdb
+
+# Rendered output
+*.pdf
+*.png
+!docs/**/*.png
+
+# OS
+.DS_Store

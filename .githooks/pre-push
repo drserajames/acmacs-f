@@ -1,0 +1,16 @@
+#!/bin/sh
+# WHO-data gate: pre-push. Scans EVERY commit being pushed (contents and messages),
+# so a name added in one commit and removed in a later one is still caught.
+# stdin lines: <local ref> <local sha> <remote ref> <remote sha>
+set -e
+ROOT="$(git rev-parse --show-toplevel)"
+Z=0000000000000000000000000000000000000000
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$Z" ] && continue            # deleting a remote ref: nothing to scan
+    if [ "$remote_sha" = "$Z" ]; then
+        range="$local_sha"                          # new branch: its whole history
+    else
+        range="$remote_sha..$local_sha"
+    fi
+    python3 "$ROOT/tools/who-data-gate.py" --range "$range" --strict --quiet
+done

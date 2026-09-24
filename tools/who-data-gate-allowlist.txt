@@ -1,0 +1,122 @@
+# who-data-gate allowlist  (see THE RULE FOR THIS FILE below before adding anything)
+#
+# Lines are '#'-commented. Section headers switch mode:
+#   [allow-literal]  exact tokens (case-insensitive) that are genuine, NON-WHO
+#                    false positives and should pass everywhere (now and future).
+#   [allow-regex]    Python regexes; a matched token passes if it fullmatch()es one.
+#   [skip-path]      fnmatch globs of paths that are NOT scanned at all.
+#
+# For already-public tokens that merely need grandfathering, do NOT list them here —
+# they live (as hashes, no plaintext) in who-data-gate-baseline.txt. Regenerate that
+# with:  tools/who-data-gate.py --update-baseline
+#
+# THE RULE FOR THIS FILE. Entries are PERMANENT and apply everywhere, so only two
+# kinds of token belong here:
+#   (a) invented placeholders (EXAMPLE..., LOC, OTHER, LAB 0000-000, J/O residues), and
+#   (b) nomenclature that is published and can never become pre-publication - clade
+#       DESIGNATIONS, which are public by definition (WHO / nextclade /
+#       influenza-clade-nomenclature), listed individually so that a NEW clade token
+#       still fails the gate.
+# A real STRAIN NAME never belongs here, however long it has been published: this file
+# is not scoped to a path, so one line would pass that name everywhere, forever. Real
+# names that are genuinely already public in the tree go in who-data-gate-baseline.txt,
+# where they are stored as hashes and are scoped to the one file that contains them.
+#
+# Hex colour codes (#rrggbb) and 0x.. literals are masked automatically before the
+# rules run, so they need no entry here.
+
+[allow-literal]
+# (add genuine non-WHO code tokens here, e.g. an identifier that trips the AA rule)
+# Invented placeholder strain names used as examples in the gate's own code/docs:
+A/Somewhere/123/2021
+Somewhere/123/2021
+A/Location/123/2021
+Location/123/2021
+B/Place Name/7/17
+Place Name/7/17
+Name/7/17
+Place/7/17
+B/Some Place/7/17
+Some Place/7/17
+# Placeholder lab serum id formats used as examples in the gate's own docs/comments:
+CDC 2016-045
+CRICK 2019-021
+# Placeholder AA/clade examples in gate's own code/docs:
+K160T
+N145S
+
+# Published influenza clade DESIGNATIONS (H3N2 3C.*, H1N1pdm09 5a.*/2a.*, B/Vic 3a.*).
+# Public nomenclature, matched case-insensitively. Listed one by one on purpose: a
+# categorical clade regex here would disable the clade rule outright, whereas an
+# unlisted (i.e. newly designated) clade token still fails the gate.
+2a.1
+2a.2
+3a.1
+3a.2
+3C.1
+3C.2
+3C.2a
+3C.2a1
+3C.2a1a
+3C.2a1b
+3C.2a1b.1
+3C.2a1b.1a
+3C.2a1b.1b
+3C.2a1b.2
+3C.2a1b.2a
+3C.2a1b.2a.1
+3C.2a1b.2a.2
+3C.2a1b.2b
+3C.2a1b1a
+3C.2a1b1b
+3C.2a1b2a
+3C.2a1b2a2
+3C.2a1b2b
+3C.2a2
+3C.2a3
+3C.2a4
+3C.3
+3C.3a
+3C.3a1
+3C.3b
+5a.1
+5a.2
+
+[allow-regex]
+# (add categorical false-positive patterns here)
+# Intentional placeholder locations "LOC" and "OTHER" used in tal / section-map
+# tests - reserved synthetic names, never real strains:
+LOC/[0-9]+/(?:19|20)?[0-9]{2}
+OTHER/[0-9]+/(?:19|20)?[0-9]{2}
+# Reserved SYNTHETIC location namespace for docs/examples/fixtures: any location of the
+# form EXAMPLE… (single word; or B-initial "BEXAMPLE…" where an example must start
+# with B). Use these when writing new placeholder strain names — never invent
+# a plausible real city. Matches with or without an A/, B/ or A(H3N2)/ subtype prefix.
+(?:[AB](?:\([^)]*\))?/)?B?EXAMPLE[A-Z]*/[0-9]+/(?:19|20)?[0-9]{2}
+# The same namespace in the underscore forms tree leaves use (a space written as '_',
+# a '_' inside the isolate): every alphabetic part must itself start with EXAMPLE, so a
+# real place or isolate can't match. E.g. EXAMPLETOWN_EXAMPLEISLES/EXAMPLE_6/2026.
+(?:[AB](?:\([^)]*\))?/)?B?EXAMPLE[A-Z]*(?:_EXAMPLE[A-Z]*)*/(?:[0-9]+|EXAMPLE[A-Z0-9]*)(?:_[0-9]+)?/(?:19|20)?[0-9]{2}
+# Synthetic placeholder serum ids used in format docs/examples (LAB 0000-000 style):
+LAB [0-9]{4}-[0-9]{3}(?:,[0-9]{4}-[0-9]{3})*
+# Placeholder strain/location examples used in gate's own documentation (SOMEWHERE, etc.):
+A/Somewhere/123/2021
+SOMEWHERE/123/2021
+SOMEWHERE/123/2021_MDCK1_A1B2C3D4
+B/Place Name/7/17
+A/Location/123/2021
+B/Some Place/7/17
+# Synthetic AA substitutions for tests/examples. `J` and `O` are NOT amino-acid codes
+# (no sequence or transition can contain them), so this pattern can never mask real data.
+# Use these residues when a test needs an invented substitution.
+(?:J|O)[0-9]{2,3}[JO]
+
+# Homebrew Cellar paths (/usr/local/Cellar/<pkg>/<version>) appearing in compiler-emitted
+# comments and in compile_commands.json. Package name + version, categorically not a strain.
+Cellar/[A-Za-z0-9_+.-]+/[0-9][0-9A-Za-z._-]*
+# NCBI influenza FTP URL path segment (ftp.ncbi.nih.gov/genomes/INFLUENZA/updates/<date>)
+# in doc/gisaid-seqdb-tree.org — a URL, not a strain name.
+INFLUENZA/updates/[0-9]{4}
+
+[skip-path]
+# Vendored third-party is skipped by default (subprojects/**); add more if needed.
