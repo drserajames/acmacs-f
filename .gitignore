@@ -16,12 +16,13 @@ venv/
 .coverage
 htmlcov/
 
-# Build output (C++ core, wheels)
-build/
-build-*/
-dist/
-wheelhouse/
-_skbuild/
+# Build output (C++ core, wheels). Anchored to the repo root: an unanchored
+# `build/` also ignores af/tree/build/, a package (tests/test_gitignore.py).
+/build/
+/build-*/
+/dist/
+/wheelhouse/
+/_skbuild/
 *.so
 *.dylib
 compile_commands.json
