@@ -71,6 +71,8 @@ class PipelineSettings:
     # can move or sync to another machine without re-running. Omit it only for pipelines
     # that never move (their records then hold absolute paths).
     root: Path | None = None
+    # How many independent steps may run at once (1 = one after another).
+    max_parallel: int = 1
 
 
 @dataclass(frozen=True)
@@ -123,7 +125,11 @@ def build_pipeline(
             )
     runner = make_runner(config.runner, config_path)
     pipeline = Pipeline(
-        steps, state_dir=config.pipeline.state_dir, runner=runner, root=config.pipeline.root
+        steps,
+        state_dir=config.pipeline.state_dir,
+        runner=runner,
+        root=config.pipeline.root,
+        max_parallel=config.pipeline.max_parallel,
     )
     return pipeline, config
 
