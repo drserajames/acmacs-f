@@ -4,11 +4,13 @@
 
 with a config such as (paths relative to the config file)::
 
+    [paths]
+    store = "~/AC/eu/store"
+    work = "~/AC/eu/work"
+
     [tables]
     rules = "../acmacs-f-data/rules/tables"
-    store = "../store"                       # the af.store root (tables/ is inside it)
-    report = "../store-state/tables-report.txt"
-    published = "../store-state/tables-published.json"
+    run = "cdc/all"                          # work-area key: <work>/tables/cdc/all/state/
 
     [tables.cdc]
     tsv = "../fludata/CDC-Atlanta-WHO-CC/raw-data/CDC_titers_sept_2019_onwards.tsv"
@@ -18,8 +20,9 @@ Every run reads every input (a full re-read), so a rule that matched nothing is 
 Nothing is published if anything went wrong: format errors, broken tables, unmatched
 rules, a workbook duplicating a TSV test. Exit status 1 then.
 
-The run writes two files: ``report`` (counts, rule usage, the diff with its restart dates,
-errors) and ``published`` (every dataset ref published or reconfirmed). ``published`` is
+The run writes two files into its work-area state directory: ``tables-report.txt`` (counts,
+rule usage, the diff with its restart dates, errors) and ``tables-published.json`` (every
+dataset ref published or reconfirmed). The published list is
 the declared output of the pipeline step (:func:`make_step`), so any change to any group
 re-runs whatever depends on the tables.
 """
@@ -37,14 +40,14 @@ from pathlib import Path
 from typing import Any
 
 from af.pipeline.driver import Step, StepContext
-from af.store import ExternalInput, Provenance, Store
+from af.store import ExternalInput, PathsConfig, Provenance, Store, Work
 from af.util.artefacts import Artefact
 from af.util.config import load_config, parse_config
 
 from . import cdc, identity
 from .model import Table
 from .rules import Rules
-from .store import current_tables, previous_index, publish
+from .store import KIND, current_tables, previous_index, publish
 
 STEP = "tables-update"
 
@@ -59,21 +62,32 @@ class CDCInputs:
 @dataclass(frozen=True)
 class TablesSettings:
     rules: Path
-    store: Path
-    report: Path
-    published: Path
+    run: str  # work-area key for this run's state, e.g. "cdc/all" (one run publishes many groups)
     cdc: CDCInputs
 
 
 @dataclass(frozen=True)
 class TablesConfig:
+    paths: PathsConfig
     tables: TablesSettings
 
 
-def update(settings: TablesSettings, *, dry_run: bool = False) -> tuple[int, list[str]]:
+REPORT = "tables-report.txt"
+PUBLISHED = "tables-published.json"
+
+
+def state_dir(paths: PathsConfig, settings: TablesSettings) -> Path:
+    """Where the run's report and published list live: the work area, never the store."""
+    return Work.open(paths.work).dataset(KIND, settings.run).state
+
+
+def update(
+    settings: TablesSettings, paths: PathsConfig, *, dry_run: bool = False
+) -> tuple[int, list[str]]:
     started = dt.datetime.now(dt.UTC)
     rules = Rules(settings.rules)
-    store = Store.open(settings.store)
+    store = Store.open(paths.store)
+    state = state_dir(paths, settings)
     previous = previous_index(store)
     tables, report, errors = _read_all(settings, rules)
     errors.extend(identity.assign(tables, previous))
@@ -101,9 +115,8 @@ def update(settings: TablesSettings, *, dry_run: bool = False) -> tuple[int, lis
     )
     results = publish(store, tables, manifest, provenance)
     report.extend(f"{event:11s} {ref}" for ref, event in results)
-    settings.published.parent.mkdir(parents=True, exist_ok=True)
     published = [{"event": event, "ref": ref.to_json()} for ref, event in results]
-    settings.published.write_text(json.dumps(published, indent=1) + "\n", encoding="utf-8")
+    (state / PUBLISHED).write_text(json.dumps(published, indent=1) + "\n", encoding="utf-8")
     _check_round_trip(store, tables)
     return 0, report
 
@@ -186,27 +199,27 @@ def duplicates(tsv: list[Table], xlsx: list[Table]) -> list[str]:
     return out
 
 
-def make_step(parameters: Mapping[str, Any], *, base_dir: Path) -> Step:
+def make_step(parameters: Mapping[str, Any], *, base_dir: Path, paths: PathsConfig) -> Step:
     """The pipeline step. ``parameters`` is a ``[parameters.tables-update]`` table with the
     same keys as ``[tables]``; relative paths are resolved against ``base_dir`` (the
-    directory of the pipeline config). Inputs are named by role, so the step's record
-    does not depend on where the files live."""
+    directory of the pipeline config) and the roots come from the config's ``[paths]``.
+    Inputs are named by role, so the step's record does not depend on where files live."""
     settings = parse_config(dict(parameters), TablesSettings, base_dir=base_dir)
     inputs = {"rules": settings.rules, "cdc_tsv": settings.cdc.tsv}
     inputs.update({f"cdc_xlsx:{p.name}": p for p in settings.cdc.xlsx})
     inputs.update({f"cdc_season:{p.name}": p for p in settings.cdc.season})
+    state = state_dir(paths, settings)
 
     def action(_: StepContext) -> None:
-        status, report = update(settings)
-        settings.report.parent.mkdir(parents=True, exist_ok=True)
-        settings.report.write_text("\n".join(report) + "\n", encoding="utf-8")
+        status, report = update(settings, paths)
+        (state / REPORT).write_text("\n".join(report) + "\n", encoding="utf-8")
         if status:
-            raise RuntimeError(f"{STEP} failed; see {settings.report}")
+            raise RuntimeError(f"{STEP} failed; see {state / REPORT}")
 
     return Step(
         name=STEP,
         action=action,
-        outputs=[Artefact(settings.published, parse=lambda p: json.loads(p.read_text()))],
+        outputs=[Artefact(state / PUBLISHED, parse=lambda p: json.loads(p.read_text()))],
         inputs=inputs,
     )
 
@@ -220,13 +233,12 @@ def main(argv: list[str] | None = None) -> int:
         "-n", "--dry-run", action="store_true", help="read and report; write nothing"
     )
     args = parser.parse_args(argv)
-    settings = load_config(args.config, TablesConfig).tables
-    status, report = update(settings, dry_run=args.dry_run)
+    config = load_config(args.config, TablesConfig)
+    status, report = update(config.tables, config.paths, dry_run=args.dry_run)
     text = "\n".join(report) + "\n"
     print(text, end="")
     if not args.dry_run:
-        settings.report.parent.mkdir(parents=True, exist_ok=True)
-        settings.report.write_text(text, encoding="utf-8")
+        (state_dir(config.paths, config.tables) / REPORT).write_text(text, encoding="utf-8")
     return status
 
 
