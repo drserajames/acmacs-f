@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import math
 import random
 from pathlib import Path
@@ -425,3 +426,64 @@ def test_reference_passage_class_uses_the_af_rule() -> None:
     assert passage_class({"P": "SIAT1 (2026-01-02)"}) == "cell"
     assert passage_class({"P": "E3", "R": "NYMC X-1"}) == "reassortant"
     assert passage_class({"P": ""}) is None
+
+
+def _tree_doc(names: list[str], clades: list[str], sections: list[tuple[str, int, int]],
+              series: tuple[str, str] = ("2025-01", "2025-12")) -> dict[str, Any]:  # fmt: skip
+    leaves = [{"id": n, "name": n, "date": None, "clade": c, "shown": True, "order": i}
+              for i, (n, c) in enumerate(zip(names, clades, strict=True))]  # fmt: skip
+    return {"title": "t", "tree": {
+        "subtype": "x", "leaves": leaves,
+        "sections": [{"clade": c, "prefix": "", "first_leaf": names[a], "last_leaf": names[b],
+                      "n_leaves": b - a + 1} for c, a, b in sections],
+        "time_series": {"first": series[0], "last": series[1]}}}  # fmt: skip
+
+
+def test_tree_figures_identical_and_reversed() -> None:
+    names = [f"leaf{i}" for i in range(40)]
+    clades = ["P"] * 20 + ["Q"] * 20
+    ref = _tree_doc(names, clades, [("P", 0, 19), ("Q", 20, 39)])
+    same = trees.compare_figures(ref, _tree_doc(names, clades, [("P", 0, 19), ("Q", 20, 39)]))
+    assert same["jaccard"] == 1.0 and same["order_spearman"] == 1.0
+    assert same["sections"]["min_jaccard"] == 1.0 and same["time_series"]["same"]
+    flipped = _tree_doc(names[::-1], clades[::-1], [("Q", 0, 19), ("P", 20, 39)])
+    assert trees.compare_figures(ref, flipped)["order_spearman"] == -1.0
+
+
+def test_tree_section_shift_and_window_change_are_measured() -> None:
+    names = [f"leaf{i}" for i in range(40)]
+    clades = ["P"] * 20 + ["Q"] * 20
+    ref = _tree_doc(names, clades, [("P", 0, 19)])
+    moved = _tree_doc(names, clades, [("P", 10, 29)], series=("2025-02", "2026-01"))
+    res = trees.compare_figures(ref, moved)
+    assert res["sections"]["matched"]["P"]["jaccard"] == 10 / 30
+    assert not res["time_series"]["same"]
+    checks = {c["check"]: c["ok"] for c in tree_checks_for(res)}
+    assert checks["time series same"] is False
+
+
+def tree_checks_for(res: dict[str, Any]) -> list[dict[str, Any]]:
+    from af.report.compare.run import TreeLimits, tree_checks
+
+    return tree_checks(res, TreeLimits())
+
+
+def test_runner_compares_tree_slots(tmp_path: Path) -> None:
+    from af.report.compare.run import compare_report, markdown
+
+    names = [f"leaf{i}" for i in range(12)]
+    doc = _tree_doc(names, ["P"] * 12, [("P", 0, 11)])
+    (tmp_path / "tree.x.report.i7.json").write_text(json.dumps({**doc, "kind": "tree"}))
+    new_path = tmp_path / "new.json"
+    new_path.write_text(json.dumps({**doc, "kind": "tree"}))
+    record = {
+        "report": "r",
+        "built": "b",
+        "figures": [{"slot": "tree/x/report", "i7": str(new_path)}],
+    }
+    limits = parse_config({"adoption": {"status": "final", "adopted_by": "a reviewer",
+                                        "adopted": dt.date(2026, 9, 25)}},
+                          Limits, base_dir=tmp_path)  # fmt: skip
+    rows, failed = compare_report(record, tmp_path, limits, "loose")
+    assert failed == 0 and rows[0]["status"] == "ok"
+    assert "| tree/x/report | ok | 0 / 0 |" in markdown(record, rows, "l", "loose", limits.adoption)

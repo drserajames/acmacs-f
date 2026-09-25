@@ -240,3 +240,109 @@ def compare(ref: Tree, new: Tree, seed: int = 1) -> dict[str, Any]:
             "top_disagreements": [f"{a} -> {b}: {n}" for (a, b), n in disagree.most_common(5)],
         },
     }  # fmt: skip
+
+
+# ---- tree figures (I7) ----------------------------------------------------------------------
+
+
+def _figure_leaves(doc: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], int]:
+    """Drawn leaves keyed by spelling-normalised strain name; ambiguous keys dropped, counted."""
+    from af.report.compare.maps import spelling_key
+
+    drawn = [leaf for leaf in doc["tree"]["leaves"] if leaf["shown"]]
+    counts = Counter(spelling_key(strain_key(leaf["name"])) for leaf in drawn)
+    unique = {
+        spelling_key(strain_key(leaf["name"])): leaf
+        for leaf in drawn
+        if counts[spelling_key(strain_key(leaf["name"]))] == 1
+    }
+    return unique, sum(n for n in counts.values() if n > 1)
+
+
+def _spearman(x: list[float], y: list[float]) -> float:
+    """Rank correlation (no ties expected: positions are distinct)."""
+    n = len(x)
+    if n < 3:
+        return float("nan")
+
+    def ranks(v: list[float]) -> list[int]:
+        order = sorted(range(n), key=lambda i: v[i])
+        r = [0] * n
+        for rank, i in enumerate(order):
+            r[i] = rank
+        return r
+
+    rx, ry = ranks(x), ranks(y)
+    d2 = sum((a - b) ** 2 for a, b in zip(rx, ry, strict=True))
+    return 1 - 6 * d2 / (n * (n * n - 1))
+
+
+def compare_figures(ref: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """Same-science comparison of two tree-figure I7s: which leaves, their order, clades, sections.
+
+    Order is the rank correlation of the drawn position of every leaf both figures draw: 1 means
+    the same top-to-bottom order. Sections are matched by clade label; each is compared by the
+    leaves (drawn on both sides) that fall inside it.
+    """
+    ri, rdup = _figure_leaves(ref)
+    ni, ndup = _figure_leaves(new)
+    common = sorted(ri.keys() & ni.keys())
+    out: dict[str, Any] = {
+        "ref_drawn": len(ri), "new_drawn": len(ni), "common": len(common),
+        "ambiguous_dropped": {"ref": rdup, "new": ndup},
+        "jaccard": len(common) / max(1, len(ri.keys() | ni.keys())),
+        "only_ref_keys": sorted(ri[k]["name"] for k in ri.keys() - ni.keys()),
+        "only_new_keys": sorted(ni[k]["name"] for k in ni.keys() - ri.keys()),
+        "order_spearman": _spearman(
+            [float(ri[k]["order"]) for k in common], [float(ni[k]["order"]) for k in common]
+        ),
+    }  # fmt: skip
+    lr = [str(ri[k]["clade"]) for k in common]
+    ln = [str(ni[k]["clade"]) for k in common]
+    out["clade"] = {
+        "label_agreement": sum(a == b for a, b in zip(lr, ln, strict=True)) / max(1, len(common)),
+        "adjusted_rand": adjusted_rand(lr, ln),
+    }
+    out["sections"] = _compare_sections(ref, new, ri, ni, set(common))
+    rts, nts = ref["tree"]["time_series"], new["tree"]["time_series"]
+    out["time_series"] = {"ref": rts, "new": nts, "same": rts == nts}
+    return out
+
+
+def _section_members(
+    doc: dict[str, Any], index: dict[str, dict[str, Any]], common: set[str]
+) -> dict[str, set[str]]:
+    """Clade label -> the common leaves drawn between the section's first and last leaf."""
+    from af.report.compare.maps import spelling_key
+
+    position = {k: leaf["order"] for k, leaf in index.items() if k in common}
+    by_name = {
+        spelling_key(strain_key(leaf["name"])): leaf["order"]
+        for leaf in doc["tree"]["leaves"]
+        if leaf["shown"]
+    }
+    out: dict[str, set[str]] = {}
+    for section in doc["tree"]["sections"]:
+        first = by_name.get(spelling_key(section["first_leaf"]))
+        last = by_name.get(spelling_key(section["last_leaf"]))
+        if first is None or last is None:
+            continue
+        lo, hi = min(first, last), max(first, last)
+        members = {k for k, p in position.items() if lo <= p <= hi}
+        out.setdefault(section["clade"], set()).update(members)  # a split clade: union of parts
+    return out
+
+
+def _compare_sections(
+    ref: dict[str, Any], new: dict[str, Any], ri: dict[str, dict[str, Any]],
+    ni: dict[str, dict[str, Any]], common: set[str],
+) -> dict[str, Any]:  # fmt: skip
+    rs, ns = _section_members(ref, ri, common), _section_members(new, ni, common)
+    matched = {}
+    for label in sorted(rs.keys() & ns.keys()):
+        a, b = rs[label], ns[label]
+        matched[label] = {"ref": len(a), "new": len(b),
+                          "jaccard": len(a & b) / max(1, len(a | b))}  # fmt: skip
+    worst = min((v["jaccard"] for v in matched.values()), default=float("nan"))
+    return {"matched": matched, "only_ref": sorted(rs.keys() - ns.keys()),
+            "only_new": sorted(ns.keys() - rs.keys()), "min_jaccard": worst}  # fmt: skip
