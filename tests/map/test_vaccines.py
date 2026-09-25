@@ -138,3 +138,17 @@ def test_tie_broken_by_latest_table_before_passage_date() -> None:
     )
     report = select_vaccines([early_table, late_table], [VaccineRow(TIE2, "cell", "202202")])
     assert [m.antigen for m in report.marks] == [1]
+
+
+def test_choice_by_passage_and_date() -> None:
+    same = [
+        MapAntigen(0, "A(H1N1)/" + TV1, "E4/E2 (2021-05-03)", "", 9, True),
+        MapAntigen(1, "A(H1N1)/" + TV1, "E4/E2 (2022-08-04)", "", 20, True),
+    ]
+    rows = [VaccineRow(TV1, "egg", "202009")]
+    with pytest.raises(VaccineRuleError, match="matches 2"):
+        select_vaccines(same, rows, choose=[VaccineChoice(TV1, "egg", "E4/E2", "x")])
+    report = select_vaccines(
+        same, rows, choose=[VaccineChoice(TV1, "egg", "E4/E2 (2021-05-03)", "x")]
+    )
+    assert [m.antigen for m in report.marks] == [0]

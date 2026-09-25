@@ -95,8 +95,9 @@ class VaccineDisable:
 
 @dataclass(frozen=True)
 class VaccineChoice:
-    """Use the preparation whose passage (without its date) is exactly ``passage``, instead of the
-    automatic choice. Must match exactly one candidate."""
+    """Use the preparation whose passage is exactly ``passage``, instead of the automatic choice.
+    Must match exactly one candidate. If ``passage`` carries a date, e.g. ``E4/E2 (2021-05-03)``,
+    the date must match too; labs re-passage a vaccine and keep the same passage string."""
 
     name: str
     passage_class: PassageClass
@@ -182,7 +183,7 @@ def _choose(
 ) -> tuple[MapAntigen, str]:
     for rule in rules:
         if strain_name(rule.name) == strain_name(name) and rule.passage_class == cls:
-            hits = [ag for ag in cands if _DATE.sub("", ag.passage).strip() == rule.passage.strip()]
+            hits = [ag for ag in cands if _same_passage(ag.passage, rule.passage)]
             if len(hits) != 1:
                 raise VaccineRuleError(
                     f"vaccine choice {rule.reason!r}: passage {rule.passage!r} matches "
@@ -199,6 +200,12 @@ def _choose(
         ),
     )
     return best, "rule"
+
+
+def _same_passage(passage: str, wanted: str) -> bool:
+    if _DATE.search(wanted):
+        return " ".join(passage.split()) == " ".join(wanted.split())
+    return _DATE.sub("", passage).strip() == wanted.strip()
 
 
 def _require_used(kind: str, rules: Sequence[object], used: Collection[object]) -> None:
