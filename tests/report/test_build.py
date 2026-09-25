@@ -360,3 +360,12 @@ def test_vcm_layout_builds(tmp_path: Path) -> None:
     record = json.loads((tmp_path / "out" / "vcm-test.build.json").read_text())
     # cover, contents, 2 geo pages (4 months, 3 per page), 1 landscape map page
     assert record["output"]["pages"] == 5 and pdf.is_file()
+
+
+def test_build_record_says_which_af_built_it() -> None:
+    import af
+
+    record = build.af_source()
+    assert record["version"] == af.__version__
+    # In this checkout (editable install) the commit is known; from a wheel it would be null.
+    assert record["commit"] is None or len(record["commit"]) == 40

@@ -283,6 +283,36 @@ def check_output(tex: Path, slots: list[str]) -> int:
     return n
 
 
+def af_source() -> dict[str, Any]:
+    """Which af code built this: version, and the git commit of the source actually imported.
+
+    A report must say what produced it. When af runs from a git checkout (an editable install)
+    the commit and whether it had uncommitted changes are recorded; from an installed wheel there
+    is no checkout, and ``commit`` is null rather than guessed.
+    """
+    import subprocess
+
+    import af
+
+    source = Path(af.__file__).resolve().parent
+    record: dict[str, Any] = {"version": af.__version__, "source": str(source),
+                              "commit": None, "dirty": None}  # fmt: skip
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(source), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    try:
+        if Path(git("rev-parse", "--show-toplevel")).resolve() != source.parent:
+            return record  # af sits inside some other repository (e.g. a home-rooted one)
+        record["commit"] = git("rev-parse", "HEAD")
+        record["dirty"] = bool(git("status", "--porcelain", "--untracked-files=no"))
+    except (OSError, subprocess.CalledProcessError):
+        pass  # not a git checkout: commit stays null, which the record says plainly
+    return record
+
+
 def build_record(
     cfg: ReportConfig, config_path: Path, figs: dict[str, Resolved], use: StoreUse,
     final: Path, pages: int, passes: int, built_at: dt.datetime, manifest_path: Path | None,
@@ -290,6 +320,7 @@ def build_record(
     """Everything about this build beyond the store refs: slots, figure hashes, LaTeX."""
     return {
         "build_record_version": BUILD_RECORD_VERSION,
+        "af": af_source(),
         "report": cfg.report.id,
         "kind": cfg.report.kind,
         "built": built_at.isoformat(),
