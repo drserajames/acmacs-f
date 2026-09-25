@@ -65,7 +65,22 @@ class Expected:
 
 
 @dataclass(frozen=True)
+class Adoption:
+    """Who adopted this set of limits, when, and whether it is final.
+
+    Required, and printed at the top of every comparison, so a provisional set cannot quietly
+    become permanent: anyone reading a result sees its status without looking elsewhere.
+    """
+
+    status: str  # "provisional" or "final"
+    adopted_by: str
+    adopted: dt.date
+    review: str = ""  # what re-tests a provisional set, and when
+
+
+@dataclass(frozen=True)
 class Limits:
+    adoption: Adoption
     map: MapLimits = field(default_factory=MapLimits)
     tree: TreeLimits = field(default_factory=TreeLimits)
     geo: GeoLimits = field(default_factory=GeoLimits)
@@ -143,6 +158,10 @@ def compare_report(
     manifest: dict[str, Any], reference: Path, limits: Limits, how: str
 ) -> tuple[list[dict[str, Any]], int]:
     """Compare every figure in ``manifest``; return the rows and the number of failing slots."""
+    if limits.adoption.status not in ("provisional", "final"):
+        raise ValueError(f"adoption.status: {limits.adoption.status!r} not provisional|final")
+    if limits.adoption.status == "provisional" and not limits.adoption.review:
+        raise ValueError("adoption.review: a provisional set must say what re-tests it")
     known = {e.check for e in limits.expected}
     unknown = sorted(known - set(MAP_CHECKS))
     if unknown:
@@ -179,11 +198,18 @@ def _cell(check: dict[str, Any]) -> str:
 
 
 def markdown(
-    manifest: dict[str, Any], rows: list[dict[str, Any]], limits_name: str, how: str
-) -> str:
+    manifest: dict[str, Any], rows: list[dict[str, Any]], limits_name: str, how: str,
+    adoption: Adoption,
+) -> str:  # fmt: skip
+    status = (
+        f"**Limits {adoption.status.upper()}**: adopted by {adoption.adopted_by} on "
+        f"{adoption.adopted.isoformat()}"
+        + (f"; review: {adoption.review}" if adoption.review else "")
+    )
     lines = [
         f"# Same-science comparison: {manifest['report']}", "",
         f"Report built {manifest['built']}; limits `{limits_name}`; points matched by {how}.", "",
+        status, "",
         "| Slot | Status | " + " | ".join(MAP_CHECKS) + " |",
         "|---|---|" + "---|" * len(MAP_CHECKS),
     ]  # fmt: skip
@@ -214,9 +240,14 @@ def main(argv: list[str] | None = None) -> int:
     rows, failed = compare_report(manifest, args.reference, limits, args.match)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "COMPARISON.json").write_text(json.dumps(rows, indent=1))
-    (args.out / "COMPARISON.md").write_text(markdown(manifest, rows, args.limits.name, args.match))
+    report_md = markdown(manifest, rows, args.limits.name, args.match, limits.adoption)
+    (args.out / "COMPARISON.md").write_text(report_md)
     missing = sum(r["status"] == "no reference" for r in rows)
-    print(f"{len(rows)} figures, {failed} failing, {missing} without reference", file=sys.stderr)
+    print(
+        f"{len(rows)} figures, {failed} failing, {missing} without reference "
+        f"(limits {limits.adoption.status})",
+        file=sys.stderr,
+    )
     return 1 if failed else 0
 
 

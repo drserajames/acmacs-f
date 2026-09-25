@@ -17,10 +17,11 @@ from af.report.compare.run import (
     Limits,
     MapLimits,
     apply_expected,
+    compare_report,
     map_checks,
     slot_status,
 )
-from af.util.config import ConfigError, load_config
+from af.util.config import ConfigError, load_config, parse_config
 
 
 def _rotate(points: list[tuple[float, float]], degrees: float) -> list[tuple[float, float]]:
@@ -153,7 +154,7 @@ def test_reference_style_chain_and_colour_collisions_are_visible() -> None:
 
 
 def _checks(res: dict[str, Any]) -> list[dict[str, Any]]:
-    return map_checks(res, Limits(map=MapLimits(rotation_deg_max=1.0)).map)
+    return map_checks(res, MapLimits(rotation_deg_max=1.0))
 
 
 def test_expected_difference_is_reported_and_a_stale_one_fails() -> None:
@@ -209,7 +210,30 @@ def test_geo_counts_dot_differences_per_month() -> None:
 def test_expectation_without_approver_is_rejected(tmp_path: Path) -> None:
     limits = tmp_path / "limits.toml"
     limits.write_text(
+        '[adoption]\nstatus = "final"\nadopted_by = "a reviewer"\nadopted = 2026-09-25\n'
         '[[expected]]\nslot = "map/test/all"\ncheck = "rotation deg"\nreason = "hand rotation"\n'
     )
     with pytest.raises(ConfigError, match="approved_by"):
         load_config(limits, Limits)
+
+
+def test_limits_file_must_say_who_adopted_it() -> None:
+    with pytest.raises(ConfigError, match="adoption"):
+        parse_config({"map": {"p95_displacement_max": 0.5}}, Limits, base_dir=Path())
+
+
+def test_provisional_limits_must_name_their_review(tmp_path: Path) -> None:
+    limits = parse_config(
+        {
+            "adoption": {
+                "status": "provisional",
+                "adopted_by": "a reviewer",
+                "adopted": dt.date(2026, 9, 25),
+            }
+        },
+        Limits,
+        base_dir=tmp_path,
+    )
+    manifest = {"report": "r", "built": "", "figures": []}
+    with pytest.raises(ValueError, match="review"):
+        compare_report(manifest, tmp_path, limits, "name")
