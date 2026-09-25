@@ -110,7 +110,7 @@ def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
         vaccine_labels={"ag100": "Te/25-cell"},
         out_pdf=out,
         created=dt.datetime(2026, 9, 25, 12, 0, tzinfo=dt.UTC),
-        provenance={"inputs": {"chain": "synthetic"}},
+        provenance={"inputs": {"chain": {"name": "synthetic", "sha256": "0" * 64}}},
     )
     assert result.recent_hidden == 0
     doc = json.loads(result.i7.read_text())
@@ -126,6 +126,11 @@ def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
     }
     hidden = [a for a in doc["map"]["antigens"] if not a["shown"]]
     assert {a["hidden_reason"] for a in hidden} == {"no_coordinates", "override:rule-1"}
+    assert all(a["colour"] for a in doc["map"]["antigens"])  # never null
+    assert {s["colour"] for s in doc["map"]["sera"]} == {"transparent"}
+    by_id = {a["id"]: a for a in doc["map"]["antigens"]}
+    assert not by_id["ag-new"]["greyed"]  # unpainted: base grey, not the window rule
+    assert by_id["ag0"]["greyed"] and by_id["ag0"]["colour"] == "#c8c8c8"
     vac = [a for a in doc["map"]["antigens"] if a["vaccine"]]
     assert vac[0]["label"] == "Te/25-cell" and not vac[0]["greyed"]
 
@@ -143,7 +148,7 @@ def test_i7_refuses_naive_timestamp(tmp_path: Path) -> None:
             vaccine_labels={},
             out_pdf=tmp_path / "f.pdf",
             created=dt.datetime(2026, 9, 25, 12, 0),
-            provenance={},
+            provenance={"inputs": {"chain": {"sha256": "0" * 64}}},
         )
 
 
@@ -162,3 +167,20 @@ def test_vaccines_to_label_most_specific_list_wins() -> None:
     assert [m.antigen for m in vaccines_to_label(marks, subtype_list=sub, lab_list=lab)] == [2]
     with pytest.raises(ValueError, match="matches no marked vaccine"):
         vaccines_to_label(marks, subtype_list=[LabelRule(names[0], "egg")], lab_list=None)
+
+
+def test_provenance_needs_hashes(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="sha256"):
+        finish_map(
+            synthetic_points(),
+            chart="synthetic",
+            scheme=SCHEME,
+            window=Window("all", None),
+            title="t",
+            frame_size=14.0,
+            must_show_since=SINCE,
+            vaccine_labels={},
+            out_pdf=tmp_path / "f.pdf",
+            created=dt.datetime(2026, 9, 25, 12, 0, tzinfo=dt.UTC),
+            provenance={"inputs": {"chain": {"name": "no hash"}}},
+        )

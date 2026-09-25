@@ -19,6 +19,7 @@ from af.map.labels import Placed, place_labels
 from af.map.render import (
     DEFAULT_LOOK,
     Look,
+    check_provenance_inputs,
     draw_pdf,
     i7_document,
     legend_box,
@@ -64,6 +65,10 @@ def finish_map(
     ``FrameError`` rather than writing a map that hides one. Vaccines come next: shown if at all
     possible, but an old vaccine far from today's viruses may not fit (the I7 records
     ``in_viewport`` for each), then antigens in the window, sera, and everything else."""
+    # fail before drawing anything
+    if created.tzinfo is None:
+        raise ValueError("I7 'created' needs a time zone")
+    check_provenance_inputs(provenance.get("inputs"))
     scene = style_points(points, scheme, window, title=title, vaccines=vaccine_labels)
     furniture = (legend_box(scene, look), title_box(scene, look))
     xy = scene.xy()

@@ -139,13 +139,15 @@ def style_points(
         row = scheme.paint(p.labels) if p.kind == "antigen" else None
         shown = p.xy is not None and p.hide is None
         reason = None if shown else ("no_coordinates" if p.xy is None else f"override:{p.hide}")
+        # Greyed means the window rule changed the drawn colour: only painted antigens can be
+        # greyed. Unpainted ones are grey anyway (base grey), and vaccines keep their colour.
         greyed = False
         if p.kind == "antigen" and window.since is not None and p.id not in vaccines:
             if p.date is None:
-                greyed = True
                 undated += 1
+                greyed = row is not None
             else:
-                greyed = p.date < window.since
+                greyed = row is not None and p.date < window.since
         if shown and p.kind == "antigen":
             if legend_counts == "painted":
                 if row is not None:

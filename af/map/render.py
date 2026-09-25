@@ -184,6 +184,22 @@ def _draw_legend(ax: Any, scene: Scene, look: Look) -> None:
         )
 
 
+def drawn_fill(p: ScenePoint) -> str:
+    """The fill actually drawn (I7 never has a null colour): sera are outline-only."""
+    if p.kind == "serum":
+        return "transparent"
+    return GREY if (p.greyed or p.colour is None) else p.colour
+
+
+def check_provenance_inputs(inputs: Any) -> None:
+    """Every input a figure was made from is named with its content hash (design rule 5)."""
+    if not isinstance(inputs, dict) or not inputs:
+        raise ValueError("provenance needs 'inputs': {name: {'sha256': ..., ...}}")
+    for name, item in inputs.items():
+        if not isinstance(item, dict) or len(str(item.get("sha256", ""))) != 64:
+            raise ValueError(f"provenance input {name!r} has no sha256")
+
+
 def i7_document(
     scene: Scene,
     frame: Frame,
@@ -198,6 +214,7 @@ def i7_document(
     """The I7 JSON for a rendered map (eu-23's I7 draft v1). ``created`` must carry a time zone."""
     if created.tzinfo is None:
         raise ValueError("I7 'created' needs a time zone")
+    check_provenance_inputs(provenance.get("inputs"))
     digest = hashlib.sha256(pdf.read_bytes()).hexdigest()
     page = frame.page(scene.xy())
     inside = (page >= 0).all(axis=1) & (page <= 1).all(axis=1)
@@ -212,7 +229,7 @@ def i7_document(
             "shown": p.shown,
             "in_viewport": bool(inside[i]) if p.xy is not None else False,
             "clade": p.legend,
-            "colour": p.colour,
+            "colour": drawn_fill(p),
             "greyed": p.greyed,
             "vaccine": p.vaccine is not None,
             "reference": p.reference,
