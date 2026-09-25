@@ -11,7 +11,7 @@ from af.tables import cdc, identity
 from af.tables.model import Table
 from af.tables.rules import Rules
 
-from .conftest import write_rules
+from .synthetic_rules import write_rules
 
 
 def row(**kw: str) -> dict[str, str]:
