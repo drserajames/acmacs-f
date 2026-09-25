@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -44,6 +45,9 @@ from af.clades.coordinates import Position
 from af.clades.nomenclature import CladeSet, Subclade
 
 COLUMNS = ("subtype", "name", "parent", "mutations", "scope", "note")
+#: Columns a file may leave out. Without ``mutations`` every row takes its signature from
+#: the source it was carried over from (:func:`from_signatures`).
+OPTIONAL = ("mutations",)
 SCOPES = ("historical", "active")
 MUTATION = re.compile(r"^(?:(?P<nuc>nuc)\s*)?(?P<position>[0-9]+)(?P<state>[A-Z-])$", re.IGNORECASE)
 ROOT = {"", "-", "none", "root"}
@@ -100,7 +104,7 @@ def load_local_clades(path: Path) -> dict[str, list[LocalClade]]:
     with path.open(newline="") as stream:
         reader = csv.DictReader(stream, delimiter="\t")
         fields = reader.fieldnames or []
-        missing = [column for column in COLUMNS if column not in fields]
+        missing = [column for column in COLUMNS if column not in fields and column not in OPTIONAL]
         if missing:
             raise LocalCladeError(path, [f"missing column(s): {', '.join(missing)}"])
         unknown = sorted(set(fields) - set(COLUMNS))
@@ -118,13 +122,9 @@ def load_local_clades(path: Path) -> dict[str, list[LocalClade]]:
             if scope not in SCOPES:
                 problems.append(f"{where}: scope {scope!r} must be one of {', '.join(SCOPES)}")
                 continue
+            # empty means "from the source signature": resolved by from_signatures, and
+            # refused by extend if it never was
             mutations = parse_mutations(values["mutations"], problems, where)
-            if not mutations:
-                problems.append(
-                    f"{where}: local clade {values['name']!r} defines no mutations, so nothing "
-                    "could ever be assigned to it"
-                )
-                continue
             parent = None if values["parent"].lower() in ROOT else values["parent"]
             by_subtype.setdefault(values["subtype"], []).append(
                 LocalClade(
@@ -165,6 +165,13 @@ def extend(
     names = {entry.name for entry in local}
     for entry in local:
         where = f"line {entry.source_line}"
+        if not entry.mutations:
+            problems.append(
+                f"{where}: local clade {entry.name!r} defines no mutations, so nothing could "
+                "ever be assigned to it; give them, or read its signature from its source "
+                "(from_signatures)"
+            )
+            continue
         if entry.name in clade_set:
             problems.append(
                 f"{where}: local clade {entry.name!r} is already defined by the nomenclature "
@@ -196,11 +203,97 @@ def extend(
     )
 
 
-def extend_from_file(clade_set: CladeSet, path: Path) -> CladeSet:
-    """Load ``path`` and extend ``clade_set`` with this subtype's local clades."""
+def extend_from_file(
+    clade_set: CladeSet,
+    path: Path,
+    *,
+    signatures: Mapping[str, Sequence[str]] | None = None,
+) -> CladeSet:
+    """Load ``path`` and extend ``clade_set`` with this subtype's local clades.
+
+    ``signatures`` (name -> tokens, see :func:`from_signatures`) supplies the mutations of
+    rows that give none. The clade-set version then covers the signatures used as well as
+    the file, since a change to either changes what the local clades match.
+    """
     path = Path(path)
     local = load_local_clades(path).get(clade_set.subtype, [])
-    return extend(clade_set, local, version_suffix=content_version(path), source=path)
+    suffix = content_version(path)
+    if signatures is not None:
+        local = from_signatures(local, clade_set, signatures, source=path)
+        suffix = f"{suffix}.{signatures_version(local, signatures)}"
+    return extend(clade_set, local, version_suffix=suffix, source=path)
+
+
+def from_signatures(
+    local: Sequence[LocalClade],
+    clade_set: CladeSet,
+    signatures: Mapping[str, Sequence[str]],
+    *,
+    source: Path | str = "local.tsv",
+) -> list[LocalClade]:
+    """Give each row without mutations its own mutations, from a source signature.
+
+    This is how a local clade is carried over while its definition still lives elsewhere
+    (``acmacs-data``'s ``clades.json``, read by :func:`af.clades.importer.clades_json_signatures`):
+    the local file adds only what the source lacks — the parent, scope and reason — and the
+    source stays the one editable copy of the signature (design rule 6).
+
+    The old signatures are not per-branch: they repeat positions the parent already has. A
+    row's own mutations are therefore its signature minus its parent's cumulative
+    signature, which is also exactly what reproduces upstream's own children from theirs.
+
+    Refused, with every problem listed: a row whose name the source lacks; a row that also
+    gives its own mutations (two copies); a parent that is not a published clade (a local
+    parent has no cumulative signature to subtract); a signature that adds nothing to its
+    parent's, which would make the clade indistinguishable from it.
+    """
+    problems: list[str] = []
+    resolved: list[LocalClade] = []
+    for entry in local:
+        where = f"line {entry.source_line}"
+        if entry.mutations:
+            if entry.name in signatures:
+                problems.append(
+                    f"{where}: {entry.name!r} gives mutations here and has a source signature; "
+                    "keep one copy"
+                )
+            resolved.append(entry)
+            continue
+        if entry.name not in signatures:
+            problems.append(
+                f"{where}: {entry.name!r} gives no mutations and has no source signature"
+            )
+            continue
+        if (
+            entry.parent is None
+            or entry.parent not in clade_set
+            or clade_set.is_local(entry.parent)
+        ):
+            problems.append(
+                f"{where}: {entry.name!r} takes its signature from the source, so its parent "
+                f"must be a published clade, not {entry.parent!r}"
+            )
+            continue
+        signature = parse_mutations(" ".join(signatures[entry.name]), problems, where)
+        parent = clade_set.cumulative(entry.parent)
+        own = tuple(m for m in signature if parent.get((m.alphabet, m.position)) != m.state)
+        if not own:
+            problems.append(
+                f"{where}: {entry.name!r}'s source signature adds nothing to {entry.parent!r}'s"
+            )
+            continue
+        resolved.append(replace(entry, mutations=own))
+    if problems:
+        raise LocalCladeError(source, problems)
+    return resolved
+
+
+def signatures_version(local: Sequence[LocalClade], signatures: Mapping[str, Sequence[str]]) -> str:
+    """A short hash of the source signatures these rows used, and only those: an edit to an
+    unrelated clade in the source must not make every clade table look stale."""
+    used = {entry.name: list(signatures[entry.name]) for entry in local if entry.name in signatures}
+    text = json.dumps(used, sort_keys=True)
+    return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
 def _ancestry(subclades: Mapping[str, Subclade]) -> dict[str, tuple[str, ...]]:

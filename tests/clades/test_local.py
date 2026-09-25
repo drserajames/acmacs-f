@@ -97,8 +97,12 @@ def test_an_unknown_parent_is_fatal(tmp_path: Path) -> None:
 
 
 def test_a_local_clade_without_mutations_is_fatal(tmp_path: Path) -> None:
+    """Empty mutations load (they may come from a source signature), but a clade that
+    reaches the clade set still without any could never be assigned."""
+    path = write_local(tmp_path, f"{SUBTYPE}\tL.1\tP.1\t\tactive\t")
+    assert load_local_clades(path)[SUBTYPE][0].mutations == ()
     with pytest.raises(LocalCladeError, match="defines no mutations"):
-        load_local_clades(write_local(tmp_path, f"{SUBTYPE}\tL.1\tP.1\t\tactive\t"))
+        extend_from_file(synthetic(tmp_path), path)
 
 
 def test_an_unknown_scope_is_fatal(tmp_path: Path) -> None:
