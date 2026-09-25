@@ -14,8 +14,10 @@ and runs every check there, with no caches:
   ``$AF_DATA`` if set): the export lives in a temporary directory, where the tests'
   default ``../acmacs-f-data`` would not exist and they would silently skip.
 - The compiled optimiser (`af/map/_core*.so`) is not in git. It is copied from the
-  current environment into the export, so the map tests still run. Rebuild first
-  (`pip install -e .`) if you changed C++.
+  current environment into the export, so the map tests still run, but only if it was
+  built from the same C++ as HEAD: the check compares the `cpp/` sources of the checkout
+  the environment's af was installed from with HEAD's, and stops if they differ
+  (a stale binary silently tests old C++). Rebuild with `pip install -e .` here.
 
 Usage (from a checkout, with the dev environment's python):
 
@@ -29,6 +31,7 @@ commit (on your branch) first.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import site
@@ -54,6 +57,10 @@ def main() -> int:
             capture_output=True,
         )
         subprocess.run(["tar", "-x", "-C", str(export)], input=archive.stdout, check=True)
+        stale = stale_extension_reason(export)
+        if stale:
+            print(f"STOP: {stale}")
+            return 1
         copied = copy_compiled_extensions(export)
         print(f"checking committed HEAD {head} in {export}")
         if dirty:
@@ -97,6 +104,32 @@ def run(name: str, command: list[str], export: Path, af_data: str) -> bool:
     print(f"\n== {name}", flush=True)
     result = subprocess.run(command, cwd=export, env=env)
     return result.returncode == 0
+
+
+def stale_extension_reason(export: Path) -> str | None:
+    """Why the environment's compiled af would not match HEAD's C++, or None if it does."""
+    try:
+        import af
+    except ImportError:
+        return None  # no af installed: nothing to copy, the map tests will say so
+    installed_from = Path(af.__file__).resolve().parent.parent
+    if not (installed_from / "cpp").is_dir():
+        return None  # a non-editable install: cannot tell where it was built from
+    if tree_hash(installed_from / "cpp") != tree_hash(export / "cpp"):
+        return (
+            f"this environment's af (and its compiled optimiser) was installed from "
+            f"{installed_from}, whose cpp/ differs from HEAD's. Rebuild into this environment "
+            f"from this checkout (pip install -e .) and run the check again."
+        )
+    return None
+
+
+def tree_hash(directory: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(p for p in directory.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(directory).as_posix().encode() + b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def copy_compiled_extensions(export: Path) -> list[str]:
