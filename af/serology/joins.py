@@ -19,9 +19,10 @@ silently:
 Every flag is counted too, and the lab's own pairing (``exact`` or ``proxy``) is kept.
 
 Places come from the sequence store's isolates (I3), clades from the clade store's
-assignments (I4), both on the chosen ``(epi_isl, accession)``. An empty ``clade`` means the
-nomenclature names none; a matched sequence with no assignment row at all is a separate
-count, because it means the clade store is behind the sequence store.
+assignments (I4), both on the chosen ``(epi_isl, accession)``. The clade store writes a null
+clade where the nomenclature names none; here that becomes ``""``, so that ``None`` has one
+meaning downstream: the sequence has no assignment row at all (a separate count, because
+it means the clade store is behind the sequence store, or cannot align the sequence).
 """
 
 from __future__ import annotations
@@ -109,7 +110,10 @@ def link_sequences(
                     WHEN m.doubtful THEN 'doubtful' ELSE 'matched' END AS status,
                i.country, i.region, i.place,
                i.collection_date AS sequence_collection_date,
-               k.clade, k.method AS clade_method,
+               -- the clade store writes NULL where the nomenclature names no clade; here that
+               -- is '' so NULL keeps one meaning downstream: no assignment row at all
+               CASE WHEN k.epi_isl IS NOT NULL THEN coalesce(k.clade, '') END AS clade,
+               k.method AS clade_method,
                k.epi_isl IS NOT NULL AS has_clade_row
         FROM antigen_matches m
         JOIN antigens a ON a.table_id = m.table_id AND a.position = m.position

@@ -42,7 +42,7 @@ def _isolates_and_clades(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "assignments.parquet",
         """SELECT * FROM (VALUES
             ('EPI_ISL_1', 'ACC1', 'CLADE-X', 'tree'),
-            ('EPI_ISL_3', 'ACC3', '', 'tree')
+            ('EPI_ISL_3', 'ACC3', NULL, 'tree')
         ) AS v(epi_isl, accession, clade, method)""",
     )
     return isolates, clades
@@ -88,7 +88,9 @@ def test_every_antigen_gets_one_status(tmp_path: Path, syn: Any) -> None:
     assert counts.by_method == {"epi_isl": 2, "name": 2, "none": 1}  # NOWHERE: no candidate
     assert counts.by_flag["match.epi-name-differs"] == 1
     assert counts.by_flag["match.ambiguous"] == 1
-    assert counts.matched_with_empty_clade == 1  # ELSEWHERE/3: the nomenclature names none
+    # ELSEWHERE/3: the clade store's NULL (the nomenclature names none) becomes ''
+    assert counts.matched_with_empty_clade == 1
+    assert counts.matched_without_clade_row == 0
     rows = {
         position: (status, accession, clade, place)
         for position, status, accession, clade, place in con.execute(
