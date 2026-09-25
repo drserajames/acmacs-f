@@ -383,6 +383,35 @@ def clades_json_names(path: Path) -> dict[str, set[str]]:
     }
 
 
+def clades_json_signatures(path: Path) -> dict[str, dict[str, tuple[str, ...]]]:
+    """Each old ``clades.json`` entry's signature, per subtype, in ``local.tsv`` notation.
+
+    Amino acids as ``145S``, nucleotides as ``nuc1230A``. This is how carried-over local
+    clades get their mutations while ``acmacs-data`` is still the one editable copy
+    (:func:`af.clades.local.from_signatures`).
+    """
+    import json
+
+    with Path(path).open() as stream:
+        data = json.load(stream)
+    signatures: dict[str, dict[str, tuple[str, ...]]] = {}
+    for subtype, entries in data.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("N"):
+                continue
+            tokens = (entry.get("aa") or "").split()
+            tokens += [f"nuc{token}" for token in (entry.get("nuc") or "").split()]
+            known = signatures.setdefault(subtype, {})
+            if entry["N"] in known and known[entry["N"]] != tuple(tokens):
+                raise ImportError_(
+                    f"{path}: {subtype} defines {entry['N']!r} twice with different signatures"
+                )
+            known[entry["N"]] = tuple(tokens)
+    return signatures
+
+
 def dead_row_report(dead: Sequence[DeadRow]) -> str:
     """The dead rows grouped by subtype and table, for a human to act on."""
     if not dead:

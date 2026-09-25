@@ -1,10 +1,9 @@
 """The real ``clades/local.tsv`` against the pinned nomenclature and its source.
 
-Until switch-over, the local clades af carries are also defined in ``acmacs-data``'s
-``clades.json`` — as whole signatures without a parent — and that file stays the one ae
-edits. ``local.tsv`` adds the parent and stores each clade's own mutations: its signature
-minus the parent's cumulative signature. This test recomputes that subtraction, so an
-edit on either side fails here instead of the two copies quietly disagreeing.
+Until switch-over, a carried-over local clade's signature stays in ``acmacs-data``'s
+``clades.json`` — the one editable copy — and ``local.tsv`` adds only its parent, scope and
+reason. This checks the two still fit together: every row finds its signature, and every
+signature adds something to its parent's.
 
 Skips when acmacs-f-data, the nomenclature clones or acmacs-data are absent. No clade
 name appears in this file: the rows are read from the data.
@@ -12,58 +11,31 @@ name appears in this file: the rows are read from the data.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
+from af.clades.importer import clades_json_signatures
 from af.clades.local import extend_from_file, load_local_clades
 from af.clades.nomenclature import load_clade_set
 
 CLONES = Path.home() / "AC/eu/influenza-clade-nomenclature"
-ACMACS_DATA = Path.home() / "AC/eu/acmacs-data"
+SOURCE = Path.home() / "AC/eu/acmacs-data/clades.json"
 
 
-def local_file(af_data: Path) -> Path:
+def test_local_clades_load_with_their_source_signatures(af_data: Path) -> None:
     path = af_data / "clades" / "local.tsv"
-    if not path.is_file():
-        pytest.skip(f"no local clades at {path}")
-    if not CLONES.is_dir():
-        pytest.skip(f"nomenclature clones not found at {CLONES}")
-    return path
-
-
-def test_local_clades_load_onto_the_pinned_nomenclature(af_data: Path) -> None:
-    path = local_file(af_data)
-    for subtype, rows in load_local_clades(path).items():
-        extended = extend_from_file(load_clade_set(subtype, CLONES), path)
-        assert {row.name for row in rows} <= set(extended.local_names)
-
-
-def test_local_mutations_match_their_source_signature(af_data: Path) -> None:
-    path = local_file(af_data)
-    source = ACMACS_DATA / "clades.json"
-    if not source.is_file():
-        pytest.skip(f"{source} not found")
-    old = json.loads(source.read_text())
+    for required in (path, CLONES, SOURCE):
+        if not required.exists():
+            pytest.skip(f"{required} not found")
+    signatures = clades_json_signatures(SOURCE)
     checked = 0
     for subtype, rows in load_local_clades(path).items():
-        clade_set = load_clade_set(subtype, CLONES)
-        signatures = {
-            entry["N"]: entry["aa"].split()
-            for entry in old.get(subtype, [])
-            if isinstance(entry, dict) and "N" in entry and "aa" in entry
-        }
+        extended = extend_from_file(
+            load_clade_set(subtype, CLONES), path, signatures=signatures.get(subtype, {})
+        )
         for row in rows:
-            assert row.name in signatures, f"{row.name}: not in {source} any more"
-            assert row.parent is not None, f"{row.name}: a carried-over clade needs its parent"
-            parent = {
-                position: state
-                for (alphabet, position), state in clade_set.cumulative(row.parent).items()
-                if alphabet == "aa"
-            }
-            own = {t for t in signatures[row.name] if parent.get(int(t[:-1])) != t[-1]}
-            stored = {f"{m.position}{m.state}" for m in row.mutations}
-            assert stored == own, f"{row.name}: local.tsv {sorted(stored)}, source {sorted(own)}"
+            assert extended.is_local(row.name)
+            assert extended[row.name].mutations, f"{row.name}: no own mutations"
             checked += 1
     assert checked
