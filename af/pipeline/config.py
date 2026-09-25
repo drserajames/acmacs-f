@@ -53,6 +53,7 @@ class SlurmSettings:
     extra_args: list[str] = field(default_factory=list)
     max_parallel_tasks: int | None = None
     output_wait_seconds: float = 0.0
+    max_array_size: int | None = None  # the cluster's MaxArraySize (scontrol show config)
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,7 @@ def make_runner(settings: RunnerSettings, source: Path | str = "<config>") -> Ru
             extra_args=tuple(slurm.extra_args),
             max_parallel_tasks=slurm.max_parallel_tasks,
             output_wait_seconds=slurm.output_wait_seconds,
+            max_array_size=slurm.max_array_size,
         )
     raise ConfigError(source, [f"runner.kind: expected 'local' or 'slurm', got {settings.kind!r}"])
 

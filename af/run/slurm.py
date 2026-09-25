@@ -12,6 +12,19 @@ How success is established, without trusting any single signal:
 sbatch's own exit code is logged but not relied on: for an array it is the highest
 task exit code, which cannot say *which* task failed.
 
+If the driver is interrupted (Ctrl-C) or fails while waiting, every job it submitted
+is cancelled (``scancel --name``: each submission has a unique job name), so no
+orphaned job keeps writing into a directory the next run will use. A driver killed
+outright (SIGKILL, a dropped ssh session) cannot clean up. Run long pipelines
+inside tmux, or submit the driver itself as a SLURM job.
+
+Arrays longer than ``max_array_size`` (the cluster's MaxArraySize, often 1001) are
+split into several arrays, submitted together.
+
+Requirements on the cluster: ``work_dir``, each job's ``cwd``, log and outputs, and
+the Python interpreter must be on a filesystem the compute nodes share. Jobs inherit
+the submitting environment (sbatch's default ``--export=ALL``).
+
 No host, partition, account or path is built in. They come from the runner's fields,
 which come from config. ``work_dir`` holds the generated scripts and status files and
 must be on a filesystem the compute nodes can see.
@@ -58,7 +71,13 @@ class SlurmRunner:
     extra_args: tuple[str, ...] = ()
     max_parallel_tasks: int | None = None
     output_wait_seconds: float = 0.0
+    max_array_size: int | None = None
     sbatch: str = "sbatch"
+    scancel: str = "scancel"
+
+    def __post_init__(self) -> None:
+        if self.max_array_size is not None and self.max_array_size < 1:
+            raise ValueError("max_array_size must be at least 1")
 
     def run(self, job: Job) -> JobResult:
         return self.run_many([job])[0]
@@ -66,15 +85,20 @@ class SlurmRunner:
     def run_many(self, jobs: Sequence[Job]) -> list[JobResult]:
         """Submit one array per distinct resource request, wait for all, then check."""
         check_unique_names(jobs)
-        groups: dict[Resources, list[Job]] = {}
+        by_resources: dict[Resources, list[Job]] = {}
         for job in jobs:
-            groups.setdefault(job.resources, []).append(job)
-        with ThreadPoolExecutor(max_workers=max(1, len(groups))) as pool:
-            grouped = list(pool.map(self._submit_array, groups.values()))
+            by_resources.setdefault(job.resources, []).append(job)
+        arrays = [chunk for group in by_resources.values() for chunk in self._chunks(group)]
+        with ThreadPoolExecutor(max_workers=max(1, len(arrays))) as pool:
+            grouped = list(pool.map(self._submit_array, arrays))
         outcome_by_name = {
             outcome.job.name: outcome for outcomes in grouped for outcome in outcomes
         }
         return collect([outcome_by_name[job.name] for job in jobs])
+
+    def _chunks(self, jobs: list[Job]) -> list[list[Job]]:
+        size = self.max_array_size or len(jobs)
+        return [jobs[start : start + size] for start in range(0, len(jobs), size)]
 
     def _submit_array(self, jobs: list[Job]) -> list[JobResult | Failure]:
         batch = self.work_dir / f"batch-{uuid.uuid4().hex[:12]}"
@@ -93,6 +117,10 @@ class SlurmRunner:
             submitted = subprocess.run(argv, capture_output=True, text=True)
         except OSError as error:
             return [Failure(job, f"could not run sbatch: {error}") for job in jobs]
+        except BaseException:
+            # Interrupted or failed while waiting: don't leave the jobs running.
+            self._cancel(_job_name(jobs, batch))
+            raise
         (batch / "sbatch.out").write_text(submitted.stdout + submitted.stderr)
         log.info("sbatch exited %d for %s", submitted.returncode, batch.name)
         if submitted.returncode != 0 and not any(
@@ -117,7 +145,7 @@ class SlurmRunner:
             "--wait",
             "--parsable",
             f"--array={array}",
-            f"--job-name=af-{jobs[0].name}" if len(jobs) == 1 else f"--job-name=af-{batch.name}",
+            f"--job-name={_job_name(jobs, batch)}",
             f"--output={batch}/slurm-%A_%a.out",
             f"--cpus-per-task={resources.threads}",
         ]
@@ -131,6 +159,13 @@ class SlurmRunner:
             argv.append(f"--account={self.account}")
         return [*argv, *self.extra_args, str(script)]
 
+    def _cancel(self, job_name: str) -> None:
+        log.warning("cancelling SLURM jobs named %s", job_name)
+        try:
+            subprocess.run([self.scancel, f"--name={job_name}"], capture_output=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            log.error("could not cancel %s: %s; cancel it by hand", job_name, error)
+
     def _wait_for_files(self, batch: Path, jobs: list[Job]) -> None:
         """Give a lagging shared filesystem up to output_wait_seconds to show outputs."""
         deadline = time.monotonic() + self.output_wait_seconds
@@ -138,6 +173,12 @@ class SlurmRunner:
         expected += [artefact.path for job in jobs for artefact in job.outputs]
         while time.monotonic() < deadline and not all(path.exists() for path in expected):
             time.sleep(1)
+
+
+def _job_name(jobs: list[Job], batch: Path) -> str:
+    """Unique per submission (the batch id), so scancel --name hits exactly these jobs."""
+    first = jobs[0].name if len(jobs) == 1 else f"{jobs[0].name}+{len(jobs) - 1}"
+    return f"af-{first}-{batch.name.removeprefix('batch-')}"
 
 
 def _write_task_script(batch: Path, index: int, job: Job) -> None:

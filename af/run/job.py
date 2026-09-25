@@ -13,6 +13,7 @@ contract is the same for all of them:
 from __future__ import annotations
 
 import datetime
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +51,36 @@ class Job:
 
     def argv(self) -> list[str]:
         return [str(part) for part in self.command]
+
+    @classmethod
+    def python_module(
+        cls,
+        name: str,
+        module: str,
+        args: Sequence[str | Path],
+        *,
+        cwd: Path,
+        log: Path,
+        outputs: Sequence[Artefact],
+        resources: Resources | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> Job:
+        """A job that runs ``python -m module args`` with *this* interpreter.
+
+        This is how Python work (a chain step, a relax batch) runs on compute nodes:
+        the same interpreter, so the same af and dependencies, provided it sits on a
+        filesystem the nodes share. Pass thread counts in ``args`` as well as in
+        ``resources``: SLURM allocates the CPUs, but the program must be told to use them.
+        """
+        return cls(
+            name=name,
+            command=[sys.executable, "-m", module, *args],
+            cwd=cwd,
+            log=log,
+            outputs=outputs,
+            resources=resources or Resources(),
+            env=dict(env or {}),
+        )
 
 
 @dataclass(frozen=True)
