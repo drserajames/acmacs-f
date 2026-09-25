@@ -148,3 +148,45 @@ def test_order_is_outgroup_then_date_then_key(store: Store) -> None:
     sel = S.select(store, rules(S.Rule("f", "date_floor", "x", floor="2000-01-01", optional=True)))
     assert sel.keys == [OUTGROUP.key, ("EPI_ISL_3", "EPI3"), ("EPI_ISL_5", "EPI5"),
                         ("EPI_ISL_2", "EPI2"), ("EPI_ISL_4", "EPI4")]  # fmt: skip
+
+
+def overrides(path: Path, *rows: tuple[str, str, str]) -> Path:
+    path.write_text("# invented\nepi_isl\taccession\tgisaid_host\treason\n"
+                    + "".join(f"{e}\t{a}\tSwine\t{why}\n" for e, a, why in rows))  # fmt: skip
+    return path
+
+
+def test_a_host_override_lets_a_mislabelled_record_through(store: Store, tmp_path: Path) -> None:
+    ovr = overrides(tmp_path / "ovr.tsv", ("EPI_ISL_4", "EPI4", "name and lab say human"))
+    host = S.Rule("host", "host", "human only", allow=["Human"], file=ovr)
+    sel = S.select(store, rules(host))
+    assert ("EPI_ISL_4", "EPI4") in sel.keys
+    assert [(c.rule, c.removed, c.added, c.remaining) for c in sel.counts] == [("host", 0, 1, 4)]
+    assert sel.counts[0].source == str(ovr)
+
+
+def test_a_host_override_that_changes_nothing_is_an_error_unless_optional(
+    store: Store, tmp_path: Path
+) -> None:
+    ovr = overrides(tmp_path / "ovr.tsv",
+                    ("EPI_ISL_4", "EPI4", "mislabelled"),
+                    ("EPI_ISL_2", "EPI2", "already Human"),
+                    ("EPI_ISL_8", "EPI8", "not in the store yet"))  # fmt: skip
+    host = S.Rule("host", "host", "human only", allow=["Human"], file=ovr)
+    with pytest.raises(S.SelectionError, match=r"change nothing.*EPI_ISL_2.*EPI_ISL_8"):
+        S.select(store, rules(host))
+    sel = S.select(store, rules(S.Rule("host", "host", "human only", allow=["Human"],
+                                       file=ovr, optional=True)))  # fmt: skip
+    assert [(c.removed, c.added) for c in sel.counts] == [(0, 1)]
+
+
+def test_every_host_override_needs_a_reason(store: Store, tmp_path: Path) -> None:
+    ovr = overrides(tmp_path / "ovr.tsv", ("EPI_ISL_4", "EPI4", " "))
+    with pytest.raises(S.SelectionError, match="without a reason"):
+        S.select(store, rules(S.Rule("host", "host", "h", allow=["Human"], file=ovr)))
+
+
+def test_a_missing_host_override_file_is_an_error(store: Store, tmp_path: Path) -> None:
+    host = S.Rule("host", "host", "h", allow=["Human"], file=tmp_path / "absent.tsv")
+    with pytest.raises(S.SelectionError, match="override file"):
+        S.select(store, rules(host))
