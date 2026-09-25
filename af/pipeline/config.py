@@ -47,7 +47,7 @@ class LocalSettings:
 
 @dataclass(frozen=True)
 class SlurmSettings:
-    work_dir: Path
+    work_dir: Path | None = None  # None: the caller's default (make_runner's default_work_dir)
     partition: str | None = None
     account: str | None = None
     extra_args: list[str] = field(default_factory=list)
@@ -82,15 +82,24 @@ class PipelineConfig:
     parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
-def make_runner(settings: RunnerSettings, source: Path | str = "<config>") -> Runner:
+def make_runner(
+    settings: RunnerSettings,
+    source: Path | str = "<config>",
+    default_work_dir: Path | None = None,
+) -> Runner:
+    """`default_work_dir` lets a caller that owns a per-run directory (a chain's work
+    dataset) keep job files there, so one machine-wide runner config serves every run."""
     if settings.kind == "local":
         return LocalRunner(max_parallel=settings.local.max_parallel)
     if settings.kind == "slurm":
         if settings.slurm is None:
             raise ConfigError(source, ["runner.slurm: required when runner.kind = 'slurm'"])
         slurm = settings.slurm
+        work_dir = slurm.work_dir if slurm.work_dir is not None else default_work_dir
+        if work_dir is None:
+            raise ConfigError(source, ["runner.slurm.work_dir: required"])
         return SlurmRunner(
-            work_dir=slurm.work_dir,
+            work_dir=work_dir,
             partition=slurm.partition,
             account=slurm.account,
             extra_args=tuple(slurm.extra_args),
