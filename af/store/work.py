@@ -53,6 +53,12 @@ class PathsConfig:
 
     store: Path
     work: Path
+    nomenclature: Path | None = None
+    """The directory holding the influenza-clade-nomenclature clones (one per subtype).
+
+    One shared key, so trees, clades, geo and reports read the same clones rather than each
+    pinning the directory separately. Optional here; a consumer that needs it and doesn't
+    find it fails (e.g. a tree subtype with a clade_set)."""
 
 
 @dataclass(frozen=True)

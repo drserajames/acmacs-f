@@ -119,8 +119,6 @@ class SubtypeInputs:
     topology is not yet tested against a from-scratch build (notes/trees/CUT-NODE.md §3b)."""
     clade_set: str | None = None
     """The nomenclature's subtype name (a key of af.clades.nomenclature.HA_REPOSITORIES)."""
-    nomenclature: Path | None = None
-    """The directory holding the influenza-clade-nomenclature clones."""
     nomenclature_repository: str | None = None
     """The clone's directory name, when it is not the usual one for ``clade_set``."""
     clade_pin: str | None = None
@@ -129,8 +127,6 @@ class SubtypeInputs:
     purpose: str = "weekly"
 
     def __post_init__(self) -> None:
-        if (self.clade_set is None) != (self.nomenclature is None):
-            raise StageError("clade_set and nomenclature go together: give both or neither")
         if self.clade_set is None and (self.nomenclature_repository or self.clade_pin):
             raise StageError("nomenclature_repository and clade_pin need a clade_set")
         if self.incremental and self.previous is None:
@@ -157,6 +153,12 @@ class TreeRunConfig:
         unknown = sorted(set(self.inputs) - set(self.trees.subtypes))
         if unknown:
             raise StageError(f"[inputs.X] for subtype(s) with no [trees.subtypes.X]: {unknown}")
+        labelled = sorted(name for name, inputs in self.inputs.items() if inputs.clade_set)
+        if labelled and self.paths.nomenclature is None:
+            raise StageError(
+                f"[paths] nomenclature (the nomenclature clones) is required: "
+                f"subtype(s) {labelled} have a clade_set"
+            )
 
 
 def load_run_config(path: Path) -> TreeRunConfig:
@@ -332,6 +334,7 @@ def tree_steps(
     inputs: SubtypeInputs,
     layout: Layout,
     store_root: Path,
+    clones: Path | None = None,
     *,
     jobs_from: Path | None = None,
 ) -> list[Step]:
@@ -342,7 +345,7 @@ def tree_steps(
     which is what the job itself does.
     """
     sub = settings.for_subtype(subtype)
-    clades = clade_source(inputs)
+    clades = clade_source(inputs, clones)
     steps = [
         _build_step(subtype, settings, sub, inputs, layout),
         _asr_step(sub, settings.resources_for(subtype, ASR).threads, layout),
@@ -547,16 +550,19 @@ class CladeSource:
         return ExternalInput.of(self.subclades, version=self.commit)
 
 
-def clade_source(inputs: SubtypeInputs) -> CladeSource | None:
-    if inputs.clade_set is None or inputs.nomenclature is None:
+def clade_source(inputs: SubtypeInputs, clones: Path | None) -> CladeSource | None:
+    """``clones``: [paths] nomenclature, the directory holding the nomenclature clones."""
+    if inputs.clade_set is None:
         return None
+    if clones is None:
+        raise StageError(f"clade_set {inputs.clade_set!r} needs [paths] nomenclature")
     from af.clades.nomenclature import HA_REPOSITORIES, head_commit
 
     repository = inputs.nomenclature_repository or HA_REPOSITORIES.get(inputs.clade_set)
     if repository is None:
         known = ", ".join(sorted(HA_REPOSITORIES))
         raise StageError(f"clade_set {inputs.clade_set!r} is not one of: {known}")
-    clone = inputs.nomenclature / repository
+    clone = clones / repository
     commit = inputs.clade_pin or head_commit(clone)
     return CladeSource(subtype=inputs.clade_set, clone=clone, commit=commit)
 
@@ -725,7 +731,13 @@ def pipeline_for(
         inputs = _inputs(config, subtype)
         layout = layout_for(config.paths, subtype, inputs.purpose)
         steps += tree_steps(
-            subtype, config.trees, inputs, layout, config.paths.store, jobs_from=config_path
+            subtype,
+            config.trees,
+            inputs,
+            layout,
+            config.paths.store,
+            config.paths.nomenclature,
+            jobs_from=config_path,
         )
     root = trees_root(config.paths)
     return Pipeline(
@@ -779,7 +791,9 @@ def run_job(config_path: Path, subtype: str, stage: str) -> None:
     config = load_run_config(config_path)
     inputs = _inputs(config, subtype)
     layout = layout_for(config.paths, subtype, inputs.purpose)
-    steps = tree_steps(subtype, config.trees, inputs, layout, config.paths.store)
+    steps = tree_steps(
+        subtype, config.trees, inputs, layout, config.paths.store, config.paths.nomenclature
+    )
     wanted = step_name(subtype, stage)
     step = next((step for step in steps if step.name == wanted), None)
     if step is None or stage not in JOB_STAGES:
