@@ -149,6 +149,7 @@ def make_figure(
         "aa_label_filter": label_counts,
         "aa_label_placement": drawn.label_metrics,
         "strains": drawn.strains,
+        "continents_not_in_legend": drawn.continents_not_in_legend,
         "marked_rows": int(marked.sum()) if marked is not None else None,
         "overrides": {k: len(v) for k, v in asdict(config.overrides).items()},
     }

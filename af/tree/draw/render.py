@@ -122,6 +122,7 @@ class Drawn:
     placed: list  # place.Placed
     label_metrics: dict
     strains: list[dict]
+    continents_not_in_legend: dict[str, int]  # value -> rows drawn grey for it
 
 
 class _Page:
@@ -166,6 +167,17 @@ def _text_width(font: FontProperties):
 def clade_colour_scheme(spec: FigureSpec) -> dict[str, str]:
     names = sorted({h.clade for h in spec.hz})
     return {c: spec.clade_colours.get(c, PALETTE[k % len(PALETTE)]) for k, c in enumerate(names)}
+
+
+def continents_not_in_legend(spec: FigureSpec) -> dict[str, int]:
+    """Rows whose continent the legend does not know, by value ("" = none): they draw grey,
+    so a vocabulary mismatch upstream shows up as a count instead of silently."""
+    out: dict[str, int] = {}
+    for i in spec.layout.leaf_nodes:
+        value = spec.tree.continent[i] or ""
+        if value not in CONTINENT_COLOURS:
+            out[value] = out.get(value, 0) + 1
+    return out
 
 
 def row_colours(spec: FigureSpec) -> np.ndarray:
@@ -459,7 +471,7 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
 
     fig.savefig(pdf_path, metadata={"CreationDate": None, "Creator": "acmacs-f"})
     plt.close(fig)
-    return Drawn(placed, metrics, strain_report)
+    return Drawn(placed, metrics, strain_report, continents_not_in_legend(spec))
 
 
 def with_centre_column(g: Geometry, width: float = 14.0) -> Geometry:

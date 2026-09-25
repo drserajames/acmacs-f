@@ -83,3 +83,10 @@ def test_fixed_scale_for_side_by_side_figures(tmp_path):
     too_small = config(geometry=Geometry(row_capacity=10))
     with pytest.raises(ValueError, match="row_capacity"):
         make_figure(standard_tree(), PARENTS, too_small, tmp_path / "t.pdf", {})
+
+
+def test_unknown_continents_are_counted(tmp_path):
+    t = standard_tree()
+    t.continent[t.leaves()[0]] = "ATLANTIS"
+    report = make_figure(t, PARENTS, config(), tmp_path / "c.pdf", {})
+    assert report["continents_not_in_legend"] == {"ATLANTIS": 1}
