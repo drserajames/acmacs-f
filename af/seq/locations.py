@@ -21,6 +21,12 @@ Nothing is guessed. A location locationdb cannot resolve has no coordinates; one
 locationdb and GISAID disagree on the country has no coordinates either (locationdb's
 point would be in the wrong country); neither falls back to a country centroid. Each
 case carries a flag and is counted.
+
+Names are normalised with the location's hyphens made spaces (af.seq.names), but locationdb
+keeps them (a Japanese city is ``SAITAMA-C``, apart from the prefecture ``SAITAMA``). So a
+location locationdb does not know as written is looked up again with locationdb's own names
+normalised the same way, and taken only when that leads to one place; a form that leads to
+several stays unresolved and is counted (``LocationDb.hyphen_counts``).
 """
 
 from __future__ import annotations
@@ -70,6 +76,16 @@ class LocationDb:
         if not isinstance(continents, list):
             raise ValueError(f"{source}: no continents list")
         self._continents: list[str] = continents
+        # locationdb's names and replacements with hyphens made spaces, as names are
+        # normalised -> every name they lead to; only a single one is ever used.
+        self._spaced: dict[str, set[str]] = defaultdict(set)
+        for table in (self._replacements, self._names):
+            for key in table:
+                target = self._names.get(self._replacements.get(key, key))
+                if target is not None and "-" in key:
+                    self._spaced[_spaced(key)].add(target)
+        # per resolve() call: "hyphen-form" (resolved that way) or "hyphen-ambiguous"
+        self.hyphen_counts: Counter[str] = Counter()
 
     @classmethod
     def read(cls, path: Path) -> LocationDb:
@@ -78,6 +94,13 @@ class LocationDb:
 
     def resolve(self, location: str) -> LocationDbEntry | None:
         name = self._names.get(self._replacements.get(location, location))
+        if name is None and location in self._spaced:
+            targets = self._spaced[location]
+            if len(targets) == 1:
+                (name,) = targets
+                self.hyphen_counts["hyphen-form"] += 1
+            else:
+                self.hyphen_counts["hyphen-ambiguous"] += 1
         entry = self._locations.get(name) if name is not None else None
         if name is None or entry is None:
             return None
@@ -87,6 +110,11 @@ class LocationDb:
         return LocationDbEntry(
             name, float(latitude), float(longitude), str(country), str(division), continent
         )
+
+
+def _spaced(name: str) -> str:
+    """A locationdb name as af.seq.names normalises a location part."""
+    return name.replace("-", " ").strip()
 
 
 def _mapping(data: Mapping[str, Any], key: str, source: Path) -> dict[str, Any]:

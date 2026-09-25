@@ -21,10 +21,14 @@ LOCATIONDB = {
         "BORDERTOWN": [1.0, 2.0, "EXAMPLELAND", "EAST"],
         "LONELYTOWN": [3.0, 4.0, "NOWHERELAND", "WEST"],
         "QUIETTOWN": [6.0, 8.0, "EXAMPLELAND", "WEST"],
+        "HILLTOWN-C": [9.0, 9.5, "EXAMPLELAND", "NORTH"],
+        "TWIN-FORD": [2.0, 3.0, "EXAMPLELAND", "EAST"],
+        "TWIN FORD": [4.0, 5.0, "OTHERLAND", "WEST"],
     },
     "names": {
         "EXAMPLETOWN": "EXAMPLETOWN", "OTHERTOWN": "OTHERTOWN", "BORDERTOWN": "BORDERTOWN",
         "LONELYTOWN": "LONELYTOWN", "QUIETTOWN": "QUIETTOWN",
+        "HILLTOWN-C": "HILLTOWN-C", "TWIN-FORD": "TWIN-FORD", "TWIN FORD": "TWIN FORD",
     },
     "replacements": {"EXAMPLE TOWN": "EXAMPLETOWN"},
 }  # fmt: skip
@@ -66,6 +70,29 @@ class TestLocationDb:
             "EXAMPLETOWN", "EXAMPLELAND", "EXAMPLE-CONTINENT",
         )  # fmt: skip
         assert locationdb.resolve("NOT A PLACE") is None
+
+    def test_a_hyphenated_name_is_found_from_its_normalised_form(
+        self, locationdb: L.LocationDb
+    ) -> None:
+        entry = locationdb.resolve("HILLTOWN C")  # af.seq.names made the hyphen a space
+        assert entry is not None
+        assert (entry.name, entry.latitude) == ("HILLTOWN-C", 9.0)
+        assert locationdb.hyphen_counts == {"hyphen-form": 1}
+
+    def test_an_exact_name_wins_over_the_normalised_form(self, locationdb: L.LocationDb) -> None:
+        exact = locationdb.resolve("TWIN FORD")
+        assert exact is not None and exact.country == "OTHERLAND"  # not TWIN-FORD's
+        assert not locationdb.hyphen_counts
+
+    def test_a_form_leading_to_two_places_resolves_to_neither(self) -> None:
+        data = json.loads(json.dumps(LOCATIONDB))
+        data["locations"]["LAKE-SIDE"] = [1.0, 1.0, "EXAMPLELAND", "NORTH"]
+        data["names"]["LAKE-SIDE"] = "LAKE-SIDE"
+        data["replacements"]["-LAKE SIDE"] = "QUIETTOWN"  # normalises to LAKE SIDE too
+        db = L.LocationDb(data, Path("invented.json.xz"))
+        assert db.resolve("LAKE SIDE") is None
+        assert db.hyphen_counts == {"hyphen-ambiguous": 1}
+        assert db.resolve("LAKE-SIDE") is not None  # as written, still found
 
     def test_a_file_without_a_table_is_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "bad.json.xz"
