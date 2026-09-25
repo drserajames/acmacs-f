@@ -216,6 +216,7 @@ def i7_document(
             "greyed": p.greyed,
             "vaccine": p.vaccine is not None,
             "reference": p.reference,
+            "sequenced": p.sequenced,
         }
         if p.hidden_reason:
             d["hidden_reason"] = p.hidden_reason
@@ -236,6 +237,14 @@ def i7_document(
         "legend": [{"clade": t, "count": n} for t, _, n in scene.legend],
         "antigens": [point(i, p) for i, p in enumerate(scene.points) if p.kind == "antigen"],
         "sera": [point(i, p) for i, p in enumerate(scene.points) if p.kind == "serum"],
+    }
+    shown_ag = [p for p in scene.points if p.kind == "antigen" and p.shown]
+    map_block["colour_coverage"] = {
+        "shown_antigens": len(shown_ag),
+        "sequenced": sum(p.sequenced for p in shown_ag),
+        "painted": sum(p.colour is not None for p in shown_ag),
+        "sequenced_unpainted": scene.sequenced_unpainted,
+        "unsequenced": sum(not p.sequenced for p in shown_ag),
     }
     if orientation is not None:
         map_block["orientation"] = orientation
@@ -260,16 +269,19 @@ def write_i7(document: dict[str, Any], out_pdf: Path) -> Path:
     return target
 
 
-def recent_hidden(scene: Scene, frame: Frame, furniture: Sequence[Box]) -> int:
-    """Shown, non-greyed antigens that end up off the page or under furniture (should be 0)."""
+def recent_hidden(scene: Scene, frame: Frame, furniture: Sequence[Box], since: dt.date) -> int:
+    """Shown antigens isolated on or after ``since`` that end up off the page or under furniture
+    (should be 0)."""
     from af.map.viewport import hidden_mask
 
     page = frame.page(scene.xy())
     hidden = hidden_mask(page, tuple(furniture))
-    return int(
-        sum(
-            1
-            for i, p in enumerate(scene.points)
-            if p.kind == "antigen" and p.shown and not p.greyed and bool(hidden[i])
-        )
+    return sum(
+        1
+        for i, p in enumerate(scene.points)
+        if p.kind == "antigen"
+        and p.shown
+        and p.date is not None
+        and p.date >= since
+        and bool(hidden[i])
     )

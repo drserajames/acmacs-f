@@ -45,9 +45,13 @@ def synthetic_points(seed: int = 2) -> list[PointIn]:
                 labels=frozenset(group),
                 date=date,
                 passage_class="egg" if i % 7 == 0 else "cell",
+                sequenced=True,
             )
         )
     pts.append(PointIn("ag-noxy", "ag-noxy", "antigen", None, frozenset({"A"})))
+    # sequenced, but carries only a label the scheme has no row for: must be counted
+    pts.append(PointIn("ag-new", "ag-new", "antigen", (0.5, 0.5), frozenset({"C"}), sequenced=True))
+    pts.append(PointIn("ag-noseq", "ag-noseq", "antigen", (0.4, 0.4)))
     pts.append(
         PointIn("ag-hidden", "ag-hidden", "antigen", (0.0, 0.0), frozenset({"A"}), hide="rule-1")
     )
@@ -67,6 +71,7 @@ def test_style_paints_last_matching_row_and_greys_old() -> None:
     assert by_id["ag-hidden"].hidden_reason == "override:rule-1"
     assert [t for t, _, _ in scene.legend] == ["group B", "group A sub", "group A"]  # last first
     assert sum(n for _, _, n in scene.legend) == 120  # painted: shown antigens, each counted once
+    assert scene.sequenced_unpainted == 1
     matched = style_points(
         synthetic_points(), SCHEME, Window("12m", SINCE), title="t", legend_counts="matched"
     )
@@ -111,7 +116,14 @@ def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
     doc = json.loads(result.i7.read_text())
     assert doc["figure"]["sha256"] == hashlib.sha256(out.read_bytes()).hexdigest()
     assert doc["kind"] == "map" and doc["i7_version"] == 1
-    assert len(doc["map"]["antigens"]) == 122 and len(doc["map"]["sera"]) == 6  # complete list
+    assert len(doc["map"]["antigens"]) == 124 and len(doc["map"]["sera"]) == 6  # complete list
+    assert doc["map"]["colour_coverage"] == {
+        "shown_antigens": 122,
+        "sequenced": 121,
+        "painted": 120,
+        "sequenced_unpainted": 1,
+        "unsequenced": 1,
+    }
     hidden = [a for a in doc["map"]["antigens"] if not a["shown"]]
     assert {a["hidden_reason"] for a in hidden} == {"no_coordinates", "override:rule-1"}
     vac = [a for a in doc["map"]["antigens"] if a["vaccine"]]

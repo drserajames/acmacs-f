@@ -72,6 +72,7 @@ class PointIn:
     passage_class: str | None = None
     reference: bool = False
     serum_id: str | None = None
+    sequenced: bool = False  # has a sequence, so the colour scheme could paint it
     hide: str | None = None  # a named hide rule that selected this point
 
 
@@ -91,6 +92,7 @@ class ScenePoint:
     reference: bool
     serum_id: str | None
     vaccine: str | None = None  # label text if marked as a vaccine
+    sequenced: bool = False
 
 
 @dataclass
@@ -101,6 +103,9 @@ class Scene:
     points: list[ScenePoint]
     legend: list[tuple[str, str, int]]  # (row text, colour, count)
     undated_antigens: int = 0
+    # Shown antigens that are sequenced but that no scheme row paints: a gap in the colour scheme
+    # (a new clade, or a row that no longer matches), reported so it is never silent.
+    sequenced_unpainted: int = 0
     notes: list[str] = field(default_factory=list)
 
     def xy(self) -> Array:
@@ -163,9 +168,13 @@ def style_points(
                 date=p.date,
                 passage_class=p.passage_class,
                 reference=p.reference,
+                sequenced=p.sequenced,
                 serum_id=p.serum_id,
                 vaccine=vaccines.get(p.id),
             )
         )
     legend = [(row.legend, row.colour, counts[row.legend]) for row in reversed(scheme.rows)]
-    return Scene(title, window, scheme.name, out, legend, undated)
+    unpainted = sum(
+        1 for q in out if q.kind == "antigen" and q.shown and q.sequenced and q.colour is None
+    )
+    return Scene(title, window, scheme.name, out, legend, undated, unpainted)
