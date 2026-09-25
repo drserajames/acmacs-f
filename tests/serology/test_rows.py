@@ -87,3 +87,11 @@ def test_harvest_date_is_part_of_identity(syn: Any) -> None:
     assert a["identity_passage"] == "SIAT1 (2021-01-01)"
     assert (a["passage"], a["passage_date"]) == ("SIAT1", "2021-01-01")
     assert a["antigen_key"] == b["antigen_key"] != c["antigen_key"]
+
+
+def test_passage_class_is_stored_for_the_matcher(syn: Any) -> None:
+    antigen = {"name": syn.virus("Somewhere", 1), "passage": "E3", "passage_class": "egg"}
+    serum = {"name": syn.virus("Elsewhere", 2), "serum_id": "S-1", "passage_class": "cell"}
+    rows = rows_from_table(syn.table("t1", [antigen], [serum], [[["40"]]]), syn.rules)
+    assert rows.antigens[0]["passage_class"] == "egg"
+    assert rows.sera[0]["passage_class"] == "cell"
