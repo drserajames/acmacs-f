@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from af.map.labels import Placed
 from af.map.style import Scene, ScenePoint
 from af.map.viewport import Box, Frame
@@ -218,7 +220,7 @@ def i7_document(
     check_provenance_inputs(provenance.get("inputs"))
     digest = hashlib.sha256(pdf.read_bytes()).hexdigest()
     page = frame.page(scene.xy())
-    inside = (page >= 0).all(axis=1) & (page <= 1).all(axis=1)
+    inside = np.asarray((page >= 0).all(axis=1) & (page <= 1).all(axis=1), dtype=np.bool_)
 
     def point(i: int, p: ScenePoint) -> dict[str, Any]:
         d: dict[str, Any] = {

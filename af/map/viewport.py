@@ -18,6 +18,8 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from af.map.orient import rows_with_coordinates
+
 Array = NDArray[np.float64]
 Mask = NDArray[np.bool_]
 
@@ -95,7 +97,7 @@ def choose_frame(
     for p in priorities:
         if p.mask.shape != (len(xy),):
             raise ValueError(f"priority {p.name!r}: mask length {p.mask.shape} != {len(xy)} points")
-    ok = ~np.isnan(xy).any(axis=1)
+    ok = rows_with_coordinates(xy)
     if not ok.any():
         raise FrameError("no drawn point has coordinates")
     pts = xy[ok]

@@ -24,6 +24,16 @@ from numpy.typing import NDArray
 Array = NDArray[np.float64]
 
 
+def rows_with_coordinates(layout: Array) -> NDArray[np.bool_]:
+    """Which rows of a layout have coordinates.
+
+    Spelled out, rather than ``~np.isnan(x).any(axis=1)`` inline, because older numpy stubs type
+    that expression as possibly a scalar, so indexing with it fails type checking on the oldest
+    Python we support (CI, Python 3.11).
+    """
+    return np.asarray(~np.isnan(layout).any(axis=1), dtype=np.bool_)
+
+
 class OrientationError(ValueError):
     """The reference fit is not trustworthy enough to use (too few common points, ambiguous)."""
 
@@ -83,7 +93,7 @@ def procrustes(src: Array, dst: Array, *, reflection: bool = True, translation: 
     antigenic units and must keep their meaning. Rows with NaN on either side are ignored."""
     if src.shape != dst.shape or src.ndim != 2 or src.shape[1] != 2:
         raise ValueError(f"procrustes needs two (n, 2) arrays, got {src.shape} and {dst.shape}")
-    ok = ~(np.isnan(src).any(axis=1) | np.isnan(dst).any(axis=1))
+    ok = rows_with_coordinates(src) & rows_with_coordinates(dst)
     x, y = src[ok], dst[ok]
     if len(x) < 3:
         raise OrientationError(f"procrustes needs at least 3 common points, got {len(x)}")

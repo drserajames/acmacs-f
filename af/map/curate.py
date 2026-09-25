@@ -30,7 +30,7 @@ from typing import Protocol
 import numpy as np
 from numpy.typing import NDArray
 
-from af.map.orient import procrustes
+from af.map.orient import procrustes, rows_with_coordinates
 
 Array = NDArray[np.float64]
 Mask = NDArray[np.bool_]
@@ -116,7 +116,7 @@ def apply_move(
         if len(hits) != 1:
             raise CurationError(f"move {rule.name!r}: mover {want!r} matches {len(hits)} antigens")
         rows.append(hits[0])
-    has_xy = ~np.isnan(layout).any(axis=1)
+    has_xy = rows_with_coordinates(layout)
     movers = set(rows)
     group = [
         i
@@ -206,9 +206,9 @@ def continuity_layout(
     fit = procrustes(chain[pairs[:, 0]], previous_displayed[pairs[:, 1]])
     start = chain @ fit.matrix + fit.translation
     prev = previous_displayed[pairs[:, 1]]
-    known = ~np.isnan(prev).any(axis=1)
+    known = rows_with_coordinates(prev)
     start[pairs[known, 0]] = prev[known]
-    has_xy = ~np.isnan(chain).any(axis=1)
+    has_xy = rows_with_coordinates(chain)
     start[~has_xy] = np.nan
     out, stress = relax(start, has_xy)
     to_prev = procrustes(out[pairs[:, 0]], prev)
