@@ -107,6 +107,7 @@ FLAGS = {
 BOOLEAN = ("TRUE", "FALSE")
 PAIRING = {"exact": "exact", "isolate proxy": "proxy", "": ""}  # ag/sr_pairing_status
 EPI_ISL = re.compile(r"EPI_ISL_[0-9]+")
+MERGED_ISOLATES = "antigen merges two CDC isolate ids"
 HA_TYPES = {
     "VIC": "VICTORIA",
     "YAM": "YAMAGATA",
@@ -265,6 +266,7 @@ def _make_table(
     dropped_sera: set[tuple[str, ...]] = set()
     cells: dict[tuple[tuple[str, ...], tuple[str, ...]], list[str]] = {}
     ag_order: dict[tuple[str, ...], tuple[int, int]] = {}
+    isolates: dict[tuple[str, ...], set[str]] = {}
     sr_order: dict[tuple[str, ...], tuple[int, str]] = {}
     passages = PassageParser(rules.passage_tokens, LAB)
     for row in kept:
@@ -275,6 +277,7 @@ def _make_table(
             continue
         antigen, ag_key = _antigen(row, subtype, rules, passages, warnings)
         antigens.setdefault(ag_key, antigen)
+        isolates.setdefault(ag_key, set()).add(row["ag_isolate_id"])
         if (old := sera.setdefault(sr_key, serum)) is not serum and old.passage != serum.passage:
             warnings.append(
                 f"serum {serum.name} {serum.serum_id}: "
@@ -292,6 +295,14 @@ def _make_table(
             continue
         cells.setdefault((ag_key, sr_key), []).append(titre)
     dropped["sera: control"] = len(dropped_sera)
+    for key, ids in isolates.items():
+        if len(ids) > 1 and key in {a for a, _ in cells}:
+            # Sarah 25 Sep (Q13): keep merged, flag and count. Same name, passage, harvest
+            # date and CDC id, but CDC records two isolates.
+            warnings.append(
+                f"{MERGED_ISOLATES}: {antigens[key].name} {antigens[key].ae_passage()} "
+                f"CDC isolate ids {sorted(ids)}"
+            )
 
     # Keep an antigen or serum only if it has a reading left.
     live_ag = {a for a, _ in cells}
@@ -385,7 +396,10 @@ def _serum(
     )
     passage = passages.parse(row["sr_passage"])
     warnings.extend(passage.problems)
-    lot = row["sr_lot"].replace(", ", ",")
+    raw_lot, lot_rule = aliases.serum_lot(rules, row["sr_lot"], lab=LAB, ferret=row["sr_ferret"])
+    if lot_rule is not None:
+        warnings.append(f"serum lot {row['sr_lot']!r} restored as {raw_lot!r} by {lot_rule.where}")
+    lot = raw_lot.replace(", ", ",")
     boosted = row["sr_boosted"].upper()
     if boosted not in BOOLEAN:
         raise CDCFormatError(f"line {row['_line']}: sr_boosted = {row['sr_boosted']!r}")
@@ -409,6 +423,8 @@ def _serum(
     )
     if renamed:
         serum.source[aliases.SOURCE_KEY] = renamed
+    if lot_rule is not None:
+        serum.source[aliases.SERUM_ID_KEY] = lot_rule.where
     action = ""
     if (rule := rules.control_sera.find(row["sr_lot"], lab=LAB)) is not None and rule[
         "field"

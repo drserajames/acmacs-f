@@ -82,6 +82,11 @@ RULES: dict[str, list[str]] = {
         "LABX\texact\tH3N2\tA(H3N2)\t-" + META + "yes",
         "LABX\texact\tB_VIC\tB\tVICTORIA" + META + "yes",
     ],
+    "serum_ids": [
+        "lab\tkind\tpattern\tferret\tcanonical\tmin_titre\tmin_fraction"
+        "\tevidence\tadded_by\tadded_on\toptional",
+        "CDC\tregex\tNo Lot .*\tF0-TEST1\tT29-777\t40\t0.5" + META + "yes",
+    ],
     "lab_conventions": [
         "lab\tdate_order\tpassage_plus\tevidence\tadded_by\tadded_on\toptional",
         "CDC\tMDY\t" + META + "yes",

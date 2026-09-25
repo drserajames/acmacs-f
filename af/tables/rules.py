@@ -167,6 +167,11 @@ class Rules:
             scope=("lab",),
             required=("kind", "pattern", "subtype", "lineage"),
         )
+        self.serum_ids = RuleTable(
+            directory / "serum_ids.tsv",
+            scope=("lab",),
+            required=("kind", "pattern", "ferret", "canonical", "min_titre", "min_fraction"),
+        )
         self.season_files = RuleTable(
             directory / "season_files.tsv",
             scope=("lab",),
@@ -186,6 +191,7 @@ class Rules:
             self.season_files,
             self.name_rewrites,
             self.flu_types,
+            self.serum_ids,
         ]
 
     def usage_report(self) -> list[str]:

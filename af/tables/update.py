@@ -114,6 +114,9 @@ def update(
     tables, report, errors = _read_all(settings, rules)
     errors.extend(identity.assign(tables, previous))
     report.extend(rules.usage_report())
+    merged = [w for t in tables for w in t.warnings if w.startswith(cdc.MERGED_ISOLATES)]
+    report.append(f"flagged ({cdc.MERGED_ISOLATES}; kept merged, Q13): {len(merged)}")
+    report.extend(f"  {w}" for w in merged)
     errors.extend(f"rule never matched: {r.where}" for t in rules.tables() for r in t.unmatched())
     suffixed = [t.table_id for t in tables if t.date_suffix > 1]
     report.append(f"tables sharing a date (suffix .2+): {len(suffixed)} {suffixed}")
