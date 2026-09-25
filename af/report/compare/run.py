@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from af.report.compare import maps, trees
+from af.report.compare import geo, maps, trees
 from af.util.config import load_config
 
 
@@ -250,10 +250,11 @@ def compare_report(
     if limits.adoption.status == "provisional" and not limits.adoption.review:
         raise ValueError("adoption.review: a provisional set must say what re-tests it")
     known = {e.check for e in limits.expected}
-    unknown = sorted(known - set(MAP_CHECKS) - set(TREE_CHECKS))
+    unknown = sorted(known - set(MAP_CHECKS) - set(TREE_CHECKS) - set(GEO_CHECKS))
     if unknown:
         raise ValueError(
-            f"expected: unknown check names {unknown}; valid: {[*MAP_CHECKS, *TREE_CHECKS]}"
+            f"expected: unknown check names {unknown}; "
+            f"valid: {[*MAP_CHECKS, *TREE_CHECKS, *GEO_CHECKS]}"
         )
     used = {f["slot"] for f in manifest["figures"]}
     orphans = sorted(
@@ -286,6 +287,13 @@ def compare_report(
             rows.append({"slot": slot, "status": status, "checks": checks, "detail": res,
                          "excused": notes,
                          "flags": list(new["map"].get("flags", []))})  # fmt: skip
+        elif new["kind"] == "geo":
+            res = geo_month(json.loads(ref_path.read_text()), new)
+            checks = geo_checks(res, limits.geo)
+            apply_expected(slot, checks, limits.expected)
+            status = slot_status(checks)
+            failed += status == "FAIL"
+            rows.append({"slot": slot, "status": status, "geo_checks": checks, "detail": res})
         elif new["kind"] == "tree":
             res = trees.compare_figures(json.loads(ref_path.read_text()), new)
             checks = tree_checks(res, limits.tree)
@@ -296,6 +304,40 @@ def compare_report(
         else:
             rows.append({"slot": slot, "status": f"{new['kind']}: not compared on I7 yet"})
     return rows, failed
+
+
+GEO_CHECKS = ("dots by location, frac diff", "dots by clade, frac diff", "same month")
+
+
+def geo_month(ref: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """Compare two one-month geo I7s with compare.geo (which takes a periods list)."""
+
+    def periods(doc: dict[str, Any]) -> dict[str, Any]:
+        g = doc["geo"]
+        return {"periods": [{"period": g["month"], "locations": g["locations"]}]}
+
+    res = geo.compare(periods(ref), periods(new))
+    month = ref["geo"]["month"]
+    res["same_month"] = month == new["geo"]["month"]
+    res["month"] = res["per_month"].get(month)
+    return res
+
+
+def geo_checks(res: dict[str, Any], lim: GeoLimits) -> list[dict[str, Any]]:
+    m = res["month"] or {
+        "location": {"frac_diff": float("nan")},
+        "clade": {"frac_diff": float("nan")},
+    }
+    return [
+        _check(
+            "dots by location, frac diff",
+            m["location"]["frac_diff"],
+            "<=",
+            lim.location_frac_diff_max,
+        ),  # fmt: skip
+        _check("dots by clade, frac diff", m["clade"]["frac_diff"], "<=", lim.clade_frac_diff_max),
+        _check("same month", float(res["same_month"]), ">=", 1.0),  # a different month always fails
+    ]
 
 
 TREE_CHECKS = ("leaves jaccard", "order spearman", "clade ARI (tree)", "section min jaccard",
@@ -352,8 +394,9 @@ def markdown(
     one_sided: list[str] = []
     flagged: list[str] = []
     tree_rows = [row for row in rows if "tree_checks" in row]
+    geo_rows = [row for row in rows if "geo_checks" in row]
     for row in rows:
-        if "tree_checks" in row:
+        if "tree_checks" in row or "geo_checks" in row:
             continue
         if "checks" in row:
             a, s = row["detail"]["antigens"], row["detail"]["sera"]
@@ -388,6 +431,16 @@ def markdown(
             if sec["only_ref"] or sec["only_new"]:
                 notes.append(f"- {row['slot']}: sections only in ref {sec['only_ref']}, "
                              f"only in new {sec['only_new']}")  # fmt: skip
+    if geo_rows:
+        lines += ["", "| Geo slot | Status | dots ref / new | " + " | ".join(GEO_CHECKS) + " |",
+                  "|---|---|---|" + "---|" * len(GEO_CHECKS)]  # fmt: skip
+        for row in geo_rows:
+            m = row["detail"]["month"] or {"location": {"ref": 0, "new": 0}}
+            lines.append(f"| {row['slot']} | {row['status']} | {m['location']['ref']} / "
+                         f"{m['location']['new']} | "
+                         + " | ".join(_cell(c) for c in row["geo_checks"]) + " |")  # fmt: skip
+            notes += [f"- {row['slot']} / {c['check']}: {c['expected']}"
+                      for c in row["geo_checks"] if "expected" in c]  # fmt: skip
     if notes:
         lines += ["", "Named differences:", *notes]
     if flagged:

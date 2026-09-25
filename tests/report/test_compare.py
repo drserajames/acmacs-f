@@ -512,3 +512,31 @@ def test_reference_time_series_records_the_last_month_drawn() -> None:
 
     assert _drawn_months(("2024-10", "2026-10")) == {"first": "2024-10", "last": "2026-09"}
     assert _drawn_months(("2025-02", "2026-01")) == {"first": "2025-02", "last": "2025-12"}
+
+
+def _geo_i7(month: str, counts: dict[str, int]) -> dict[str, Any]:
+    return {
+        "kind": "geo",
+        "title": "g",
+        "geo": {
+            "subtype": "x",
+            "month": month,
+            "locations": [
+                {"name": loc, "points": [{"color": "#AA0000", "count": n}]}
+                for loc, n in counts.items()
+            ],
+        },
+    }
+
+
+def test_geo_month_comparison_and_checks() -> None:
+    from af.report.compare.run import GeoLimits, geo_checks, geo_month
+
+    ref = _geo_i7("2026-04", {"PLACE A": 3, "PLACE B": 1})
+    same = geo_checks(geo_month(ref, _geo_i7("2026-04", {"PLACE A": 3, "PLACE B": 1})),
+                      GeoLimits(location_frac_diff_max=0.05))  # fmt: skip
+    assert all(c["ok"] in (True, None) for c in same)
+    shifted = geo_month(ref, _geo_i7("2026-04", {"PLACE A": 3, "PLACE C": 1}))
+    assert shifted["month"]["location"]["frac_diff"] == 2 / 8
+    wrong_month = geo_checks(geo_month(ref, _geo_i7("2026-05", {"PLACE A": 3})), GeoLimits())
+    assert {c["check"]: c["ok"] for c in wrong_month}["same month"] is False
