@@ -171,7 +171,7 @@ def map_i7(
             viewport[0] <= p[0] <= viewport[0] + viewport[2]
             and viewport[1] <= p[1] <= viewport[1] + viewport[3]
         )
-        colour = (plot.get("F") or "").lower()
+        colour = (plot.get("F") or "transparent").lower()  # no fill = outline only
         attrs = entry.get("T", {})
         rec: dict[str, Any] = {
             "id": designation(entry), "name": entry["N"], "passage_class": passage_class(entry),

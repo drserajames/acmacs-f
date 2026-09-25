@@ -316,5 +316,5 @@ def test_i7_rejects_a_drawn_point_without_colour() -> None:
         "map": {"chart": "c", "window": {"name": "all"}, "viewport": [0, 0, 1, 1],
                 "clade_scheme": "s", "antigens": [point], "sera": [], "legend": []},
     }  # fmt: skip
-    with pytest.raises(I7Error, match="no colour"):
+    with pytest.raises(I7Error, match="drawn but colour is None"):
         validate(doc)
