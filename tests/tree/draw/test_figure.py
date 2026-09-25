@@ -1,0 +1,72 @@
+"""End to end: a synthetic tree to PDF + I7 + draw report."""
+
+import hashlib
+import json
+
+import pytest
+
+pytest.importorskip("numpy", reason="numpy not installed: af.tree.draw needs it (pyproject, WS1)")
+pytest.importorskip(
+    "matplotlib", reason="matplotlib not installed: the tree renderer needs it (pyproject, WS1)"
+)
+
+from tree.draw.synthetic import PARENTS, standard_tree  # noqa: E402
+
+from af.tree.draw.figure import FigureConfig, Overrides, make_figure  # noqa: E402
+from af.tree.draw.render import DashBar  # noqa: E402
+from af.tree.draw.sections import SectionOverrideError, SelectParams  # noqa: E402
+
+I7_KEYS = {"i7_version", "kind", "title", "placeholder", "figure", "provenance", "tree", "notes"}
+
+
+def config(**kw):
+    return FigureConfig(
+        title="TEST tree",
+        window_start="2024-10",
+        window_end="2026-10",
+        select=SelectParams(min_share=0.1),
+        dash_bars=[DashBar(2, {"K": "transparent", "N": "#e72f27"}, [("2N", "#e72f27")])],
+        strains=[("EPI_ISL_0000012", "leaf-0012")],
+        **kw,
+    )
+
+
+def test_figure_writes_pdf_i7_and_report(tmp_path):
+    pdf = tmp_path / "figure.pdf"
+    report = make_figure(standard_tree(), PARENTS, config(), pdf, {"tree": "sha256:0"})
+    assert pdf.stat().st_size > 1000
+    i7 = json.loads((tmp_path / "figure.i7.json").read_text())
+    assert set(i7) == I7_KEYS and i7["kind"] == "tree"
+    assert i7["figure"]["sha256"] == hashlib.sha256(pdf.read_bytes()).hexdigest()
+    tree = i7["tree"]
+    assert tree["time_series"] == {"first": "2024-10", "last": "2026-09"}
+    assert len(tree["leaves"]) == 50 and [x["order"] for x in tree["leaves"]][:3] == [0, 1, 2]
+    assert {s["clade"] for s in tree["sections"]} == {"X", "X.1", "X.1.1", "X.2"}
+    assert report["aa_label_placement"]["box_overlaps"] == 0
+    assert (tmp_path / "figure.draw.json").is_file()
+
+
+def test_same_input_same_pdf_bytes(tmp_path):
+    a, b = tmp_path / "a.pdf", tmp_path / "b.pdf"
+    make_figure(standard_tree(), PARENTS, config(), a, {})
+    make_figure(standard_tree(), PARENTS, config(), b, {})
+    assert a.read_bytes() == b.read_bytes()
+
+
+def test_centre_marks_and_overrides_are_counted(tmp_path):
+    cfg = config(
+        marked_ids=frozenset({"EPI_ISL_0000001", "EPI_ISL_0000030"}),
+        marked_name="LAB",
+        overrides=Overrides(hide_clades=frozenset({"X.2"})),
+    )
+    report = make_figure(standard_tree(), PARENTS, cfg, tmp_path / "m.pdf", {})
+    assert report["marked_rows"] == 2
+    assert "X.2" not in report["clades_shown"] and report["overrides"]["hide_clades"] == 1
+    i7 = json.loads((tmp_path / "m.i7.json").read_text())
+    assert sum(x["marked"] for x in i7["tree"]["leaves"]) == 2
+
+
+def test_override_naming_nothing_fails(tmp_path):
+    cfg = config(overrides=Overrides(hide_hz_starting_at=frozenset({"no-such-leaf"})))
+    with pytest.raises(SectionOverrideError):
+        make_figure(standard_tree(), PARENTS, cfg, tmp_path / "x.pdf", {})
