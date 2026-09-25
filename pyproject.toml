@@ -15,9 +15,19 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
-dependencies = []
+# Core runtime set, declared once for every workstream (ask workstream 1 to add to it).
+# Heavy, single-area libraries go in an extra instead, and CI installs every extra.
+dependencies = [
+  "numpy>=2",         # chart/optimiser arrays (I1), maps, tree figure
+  "pyarrow>=16",      # Parquet: sequence and serology stores
+  "duckdb>=1.1",      # queries over the Parquet stores (serology, stat)
+  "matplotlib>=3.8",  # every report path renders PDFs
+  "openpyxl>=3.1",    # lab xlsx tables (tables workstream)
+  "brotli>=1.1",      # brotli-compressed .ace charts and tables (chains, tables)
+]
 
 [project.optional-dependencies]
+geo = ["cartopy>=0.23"]  # geographic maps only; pulls in GEOS/PROJ wheels
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
 
 [project.urls]
@@ -55,8 +65,9 @@ extend-exclude = ["tools/who-data-gate.py"]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "PTH"]
 
 [tool.mypy]
-# Lenient to start; tighten per package as code settles.
-python_version = "3.11"
+# Lenient to start; tighten per package as code settles. No python_version: mypy checks
+# against the interpreter running it. Pinning 3.11 broke on numpy >= 2.5's stubs, which
+# use 3.12 syntax; the Python 3.11 CI job still catches 3.12-only code in af itself.
 files = ["af", "tests"]
 ignore_missing_imports = true
 check_untyped_defs = true

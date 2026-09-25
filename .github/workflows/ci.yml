@@ -31,15 +31,24 @@ jobs:
       # Builds the C++ optimiser too once cpp/optimiser/ exists (alglib is fetched
       # and hash-checked by cpp/CMakeLists.txt); until then this is pure Python.
       - name: Install
-        run: python -m pip install -v -e '.[dev]'
+        run: python -m pip install -v -e '.[dev,geo]'   # every extra, so no test skips for want of one
       - name: Ruff
         run: |
           python -m ruff check .
           python -m ruff format --check .
       - name: Mypy
         run: python -m mypy
+      # A test that skips because an import is missing (pytest.importorskip) would leave
+      # CI green without running it: fail on those. Skips for the private data repo or a
+      # SLURM cluster are expected here and allowed.
       - name: Pytest
-        run: python -m pytest
+        run: |
+          set -o pipefail   # GitHub's default bash has no pipefail: tee would hide a pytest failure
+          python -m pytest -rs | tee pytest.log
+          if grep -E "^SKIPPED .*could not import" pytest.log; then
+            echo "::error::tests skipped for a missing import; add the dependency to pyproject.toml"
+            exit 1
+          fi
 
   who-data-gate:
     # The logs of a public repo are public: --redact reports findings by location and
