@@ -73,8 +73,12 @@ def make_figure(
     ``flags`` (leaf id -> reasons, from the tree store) are counted, never acted on: whether a
     flagged leaf is drawn is a hide rule's decision, not the flag's.
     """
-    hide = HideRules(config.hide.min_edge, config.hide.names | config.overrides.hide_leaves)
-    layout = compute_layout(tree, hide)
+    hide = HideRules(
+        config.hide.min_edge,
+        config.hide.names | config.overrides.hide_leaves,
+        config.hide.flag_reasons,
+    )
+    layout = compute_layout(tree, hide, flags)
     ts = compute_timeseries(
         [tree.date[i] for i in layout.leaf_nodes],
         [tree.date_precision[i] for i in layout.leaf_nodes],
