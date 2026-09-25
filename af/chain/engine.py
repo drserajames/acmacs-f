@@ -183,7 +183,7 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
         Step(
             name="step-0000",
             action=_action(functools.partial(_first_step, cfg, mapper=mapper), d0),
-            inputs=[Path(first_source)],
+            inputs={"source": Path(first_source)},
             outputs=[
                 Artefact(p, parse=_ace if p.suffix == ".ace" else _json) for p in first_outputs
             ],
@@ -208,7 +208,7 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
                     ),
                     d,
                 ),
-                inputs=[previous, table.path],
+                inputs={"previous": previous, "table": table.path},
                 outputs=[Artefact(p, parse=_ace) for p in outputs]
                 + [Artefact(d / STEP_RECORD, parse=_json)],
                 parameters={**common, "index": index, "table_id": table.table_id},
@@ -242,7 +242,9 @@ def run_chain(
     optimiser = optimiser or default_optimiser()
     root = Path(store_root) / cfg.name
     steps = chain_steps(cfg, root, Mapper(optimiser, split))
-    pipeline = Pipeline(steps, state_dir=root / "state", runner=runner or LocalRunner())
+    # Inputs are named and outputs recorded relative to the chain root, so a store or a tables
+    # checkout moved to another root (a sync to o or the HPC) re-runs nothing.
+    pipeline = Pipeline(steps, state_dir=root / "state", runner=runner or LocalRunner(), root=root)
     targets = None if until_step is None else [steps[until_step].name]
     outcomes = pipeline.run(targets)
     results = [

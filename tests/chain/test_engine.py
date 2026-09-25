@@ -172,3 +172,11 @@ def test_command_line(tables, tmp_path):
     assert doc["complete"] and len(doc["steps"]) == 4
     assert (tmp_path / "store" / GROUP / "review" / "index.html").exists()
     assert main([str(tmp_path / "chain.toml"), str(tmp_path / "run.toml"), "--review"]) == 0
+
+
+def test_moved_store_and_tables_rerun_nothing(tables, tmp_path):
+    run(config(tables), tmp_path / "s")
+    shutil.move(tmp_path / "s", tmp_path / "moved-store")
+    shutil.move(tables, tmp_path / "moved-tables")
+    again = run(config(tmp_path / "moved-tables"), tmp_path / "moved-store")
+    assert reused(again) == [True] * 4
