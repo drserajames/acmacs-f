@@ -11,6 +11,9 @@ import pytest
 
 from af.report import build, placeholder
 from af.report.config import load
+from af.report.provenance import ProvenanceError
+from af.store import Provenance, Store, StoreError, StoreRef, read_manifest
+from af.util.artefacts import sha256_path
 from af.util.config import ConfigError
 
 T0 = dt.datetime(2026, 9, 1, 12, tzinfo=dt.UTC)
@@ -54,7 +57,7 @@ def _setup(tmp: Path, allow: bool = True) -> tuple[Path, Path]:
 def test_builds_and_writes_manifest(tmp_path: Path) -> None:
     cfg, root = _setup(tmp_path)
     pdf = build.build(cfg, root, tmp_path / "out")
-    record = json.loads((tmp_path / "out" / "test-report.manifest.json").read_text())
+    record = json.loads((tmp_path / "out" / "test-report.build.json").read_text())
     assert pdf.is_file()
     assert record["output"]["pages"] == 4  # cover, contents, tree, one map page
     assert record["placeholders"] == 3 and len(record["figures"]) == 3
@@ -72,7 +75,7 @@ def test_every_missing_figure_is_listed(tmp_path: Path) -> None:
 def test_placeholders_refused_unless_allowed(tmp_path: Path) -> None:
     cfg, root = _setup(tmp_path, allow=False)
     with pytest.raises(build.BuildError, match="placeholder"):
-        build.resolve_all(load(cfg), root)
+        build.build(cfg, root, tmp_path / "out")
 
 
 def test_pdf_changed_behind_its_i7_is_fatal(tmp_path: Path) -> None:
@@ -151,3 +154,99 @@ def test_latex_failure_is_fatal_and_leaves_no_pdf(
     with pytest.raises(build.BuildError, match="pass 1 failed"):
         build.build(cfg, root, tmp_path / "out")
     assert not (tmp_path / "out" / "test-report.pdf").exists()
+
+
+# ---- store provenance -------------------------------------------------------------------
+
+
+def _publish(store: Store, kind: str, dataset: str, text: str) -> StoreRef:
+    started = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
+    with store.build(kind, dataset) as version:
+        (version.path / "data.txt").write_text(text)
+        return version.publish(Provenance("test", (), {}, started, started))
+
+
+def _real_figure(
+    root: Path, slot: str, refs: list[StoreRef], created: dt.datetime, version: str
+) -> None:
+    """A minimal non-placeholder figure (an empty map) naming ``refs`` in its provenance."""
+    directory = root / slot / version
+    directory.mkdir(parents=True, exist_ok=True)
+    pdf = directory / "figure.pdf"
+    placeholder.write_pdf(pdf, ["real"], 400, 400)
+    doc = {
+        "i7_version": 1, "kind": "map", "title": slot, "placeholder": False,
+        "figure": {"pdf": pdf.name, "sha256": sha256_path(pdf), "pages": 1},
+        "provenance": {"producer": "test", "created": created.isoformat(),
+                       "store_refs": [ref.to_json() for ref in refs]},
+        "map": {"chart": "c", "window": {"name": "all"}, "viewport": [0, 0, 1, 1],
+                "clade_scheme": "s", "antigens": [], "sera": [], "legend": []},
+    }  # fmt: skip
+    (directory / "figure.i7.json").write_text(json.dumps(doc))
+
+
+def _store_setup(tmp: Path) -> tuple[Path, Path, Store, StoreRef, StoreRef]:
+    cfg, root = _setup(tmp, allow=False)
+    store = Store.create(tmp / "store")
+    tree = _publish(store, "trees", "a/report", "tree v1")
+    chain = _publish(store, "chains", "labx/m", "chain v1")
+    later = T0 + dt.timedelta(hours=1)
+    _real_figure(root, "tree/a/x", [tree], later, "v1")
+    for slot in ("map/m1/all", "map/m2/all"):
+        _real_figure(root, slot, [chain, tree], later, "v1")
+    return cfg, root, store, tree, chain
+
+
+@needs_latex
+def test_report_manifest_records_store_refs(tmp_path: Path) -> None:
+    cfg, root, store, tree, chain = _store_setup(tmp_path)
+    manifest = tmp_path / "data" / "reports" / "test-report" / "manifest.json"
+    build.build(cfg, root, tmp_path / "out", store_root=store.root, manifest_path=manifest)
+    assert sorted(read_manifest(manifest), key=lambda r: r.kind) == [chain, tree]
+    record = json.loads((tmp_path / "out" / "test-report.build.json").read_text())
+    assert record["store"]["used_by"]["chains/labx/m"] == ["map/m1/all", "map/m2/all"]
+
+
+def test_refs_need_a_store_and_a_manifest_path(tmp_path: Path) -> None:
+    cfg, root, *_ = _store_setup(tmp_path)
+    with pytest.raises(build.BuildError, match="--store and --manifest"):
+        build.build(cfg, root, tmp_path / "out")
+
+
+def test_stale_figure_is_refused_unless_pinned(tmp_path: Path) -> None:
+    cfg, root, store, _, _ = _store_setup(tmp_path)
+    _publish(store, "chains", "labx/m", "chain v2")  # CURRENT moves on; the maps are now stale
+    manifest = tmp_path / "manifest.json"
+    with pytest.raises(ProvenanceError, match="stale: map/m1/all, map/m2/all"):
+        build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                               manifest, deep=False)  # fmt: skip
+    cfg.write_text(cfg.read_text().replace(
+        "[figures]", '[figures]\npins = { "map/m1/all" = "v1", "map/m2/all" = "v1" }'))  # fmt: skip
+    build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                           manifest, deep=False)  # fmt: skip
+
+
+def test_two_versions_of_one_dataset_is_an_error(tmp_path: Path) -> None:
+    cfg, root, store, tree, chain = _store_setup(tmp_path)
+    newer = _publish(store, "chains", "labx/m", "chain v2")
+    _real_figure(root, "map/m2/all", [newer, tree], T0 + dt.timedelta(hours=2), "v2")
+    with pytest.raises(ProvenanceError, match="different versions of the same dataset"):
+        build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                               tmp_path / "m.json", deep=False)  # fmt: skip
+
+
+def test_ref_missing_from_the_store_is_an_error(tmp_path: Path) -> None:
+    cfg, root, *_ = _store_setup(tmp_path)
+    other = Store.create(tmp_path / "other")  # a store that has never seen these versions
+    with pytest.raises((ProvenanceError, StoreError)):
+        build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), other.root,
+                               tmp_path / "m.json", deep=False)  # fmt: skip
+
+
+def test_stand_in_figure_needs_bring_up_mode(tmp_path: Path) -> None:
+    cfg, root = _setup(tmp_path, allow=False)
+    for slot in load(cfg).all_slots():
+        _real_figure(root, slot, [], T0 + dt.timedelta(hours=1), "standin")
+    with pytest.raises(build.BuildError, match="3 not drawn from the store"):
+        build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), None, None,
+                               deep=False)  # fmt: skip
