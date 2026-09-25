@@ -2,6 +2,7 @@ import datetime
 
 import pytest
 
+from af.geo.colours import UNCOLOURED
 from af.geo.records import Month, geo_counts, months, to_i7
 from af.report.compare import geo as compare_geo
 from af.serology.query import Preparation
@@ -51,8 +52,8 @@ def test_one_dot_per_preparation_and_nothing_dropped_silently() -> None:
     ]
     result = geo_counts(preps, Month(2021, 1), Month(2021, 3), place)
     assert result.dots == {
-        ("A(H3N2)", Month(2021, 1), "Alpha"): 2,
-        ("A(H3N2)", Month(2021, 2), "Beta"): 1,
+        ("A(H3N2)", Month(2021, 1), "Alpha", UNCOLOURED): 2,
+        ("A(H3N2)", Month(2021, 2), "Beta", UNCOLOURED): 1,
     }
     assert [str(m) for m in result.months] == ["2021-01", "2021-02", "2021-03"]
     assert result.undated == {"A(H3N2)": 1}
@@ -65,7 +66,7 @@ def test_i7_lists_every_month_and_compares_equal_to_itself() -> None:
     doc = to_i7(geo_counts(preps, Month(2021, 1), Month(2021, 2), place), "A(H3N2)")
     assert [p["period"] for p in doc["periods"]] == ["2021-01", "2021-02"]
     assert doc["periods"][0]["locations"] == [
-        {"name": "Alpha", "points": [{"color": "unassigned", "count": 2}]}
+        {"name": "Alpha", "points": [{"color": "transparent", "count": 2}]}
     ]
     assert doc["periods"][1]["locations"] == []
     result = compare_geo.compare(doc, doc)
