@@ -18,13 +18,20 @@ learnt, and SLURM is already handled by :mod:`af.run`.
 
 To force a re-run after changing a step's code, give the step a ``code_version``
 parameter and bump it.
+
+**Records are keyed by role, not by absolute path**, so moving a tree (a checkout, a
+store synced to the HPC or the production server under another root) does not re-run
+anything whose content is unchanged. A role is either a name the step gives an input
+(``inputs={"table": path}``), or a path made relative to the pipeline's ``root``.
+Absolute paths are kept in the record only for people reading it. Without a ``root``,
+unnamed inputs and outputs fall back to absolute paths, and then a move re-runs them.
 """
 
 from __future__ import annotations
 
 import datetime
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,22 +47,63 @@ class StepInputMissing(FileNotFoundError):
         self.path = path
 
 
+RECORD_FORMAT = 2
+"""Bumped when the record layout changes. A record in another format is not trusted."""
+
+Inputs = Mapping[str, Path] | Sequence[Path]
+
+
 @dataclass(frozen=True)
 class Fingerprint:
-    """What a step run depends on: input hashes and canonical parameters."""
+    """What a step run depends on: input hashes by role, and canonical parameters."""
 
     inputs: dict[str, str]
     parameters: dict[str, Any]
+    paths: dict[str, str]
 
 
-def fingerprint(step: str, inputs: Iterable[Path], parameters: Mapping[str, Any]) -> Fingerprint:
-    """Hash every input now. A missing input is fatal (design rule 4)."""
+def role_of(path: Path, root: Path | None) -> str:
+    """A path's role: relative to ``root`` when it lies under it, else the absolute path."""
+    if root is not None:
+        try:
+            return path.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            pass
+    return str(path)
+
+
+def input_roles(step: str, inputs: Inputs, root: Path | None) -> dict[str, Path]:
+    """Role -> path for a step's inputs. Named inputs keep their names."""
+    if isinstance(inputs, Mapping):
+        return dict(inputs)
+    return _unique_roles(step, "input", [(role_of(path, root), path) for path in inputs])
+
+
+def output_roles(step: str, outputs: Sequence[Artefact], root: Path | None) -> dict[str, Path]:
+    pairs = [(role_of(artefact.path, root), artefact.path) for artefact in outputs]
+    return _unique_roles(step, "output", pairs)
+
+
+def _unique_roles(step: str, what: str, pairs: list[tuple[str, Path]]) -> dict[str, Path]:
+    roles: dict[str, Path] = {}
+    for role, path in pairs:
+        if role in roles:
+            raise ValueError(f"step {step!r}: two {what}s share the role {role!r}")
+        roles[role] = path
+    return roles
+
+
+def fingerprint(
+    step: str, inputs: Mapping[str, Path], parameters: Mapping[str, Any]
+) -> Fingerprint:
+    """Hash every input now, by role. A missing input is fatal (design rule 4)."""
     hashes: dict[str, str] = {}
-    for path in inputs:
+    for role, path in inputs.items():
         if not path.exists():
             raise StepInputMissing(step, path)
-        hashes[str(path)] = sha256_path(path)
-    return Fingerprint(inputs=hashes, parameters=canonical(parameters))
+        hashes[role] = sha256_path(path)
+    paths = {role: str(path) for role, path in inputs.items()}
+    return Fingerprint(inputs=hashes, parameters=canonical(parameters), paths=paths)
 
 
 def canonical(parameters: Mapping[str, Any]) -> dict[str, Any]:
@@ -73,13 +121,15 @@ def record_path(state_dir: Path, step: str) -> Path:
 
 
 def check_up_to_date(
-    state_dir: Path, step: str, current: Fingerprint, outputs: Sequence[Artefact]
+    state_dir: Path, step: str, current: Fingerprint, outputs: Mapping[str, Path]
 ) -> tuple[bool, str]:
-    """Return (up_to_date, reason). The reason is for the log."""
+    """Return (up_to_date, reason). ``outputs`` maps role -> where the output is now."""
     path = record_path(state_dir, step)
     if not path.exists():
         return False, "no previous run recorded"
     record = json.loads(path.read_text())
+    if record.get("format") != RECORD_FORMAT:
+        return False, "record written by an older af (different format)"
     changed = _changed_keys(record["inputs"], current.inputs)
     if changed:
         return False, f"inputs changed: {', '.join(changed)}"
@@ -87,15 +137,14 @@ def check_up_to_date(
     if changed:
         return False, f"parameters changed: {', '.join(changed)}"
     recorded_outputs: dict[str, str] = record["outputs"]
-    declared = sorted(str(artefact.path) for artefact in outputs)
-    if declared != sorted(recorded_outputs):
+    if sorted(outputs) != sorted(recorded_outputs):
         return False, "declared outputs changed"
-    for name, sha256 in recorded_outputs.items():
-        output = Path(name)
+    for role, sha256 in recorded_outputs.items():
+        output = outputs[role]
         if not output.exists():
-            return False, f"output missing: {name}"
+            return False, f"output missing: {role}"
         if sha256_path(output) != sha256:
-            return False, f"output modified since last run: {name}"
+            return False, f"output modified since last run: {role}"
     return True, "inputs, parameters and outputs unchanged"
 
 
@@ -103,18 +152,23 @@ def save_record(
     state_dir: Path,
     step: str,
     current: Fingerprint,
-    outputs: Sequence[CheckedArtefact],
+    outputs: Mapping[str, CheckedArtefact],
     started: datetime.datetime,
     finished: datetime.datetime,
 ) -> Path:
-    """Record a successful run. Written to a temporary file and renamed."""
+    """Record a successful run, keyed by role. Written to a temporary file and renamed."""
     state_dir.mkdir(parents=True, exist_ok=True)
     record = {
+        "format": RECORD_FORMAT,
         "step": step,
         "af_version": af.__version__,
         "inputs": current.inputs,
         "parameters": current.parameters,
-        "outputs": {str(output.path): output.sha256 for output in outputs},
+        "outputs": {role: output.sha256 for role, output in outputs.items()},
+        "paths": {
+            "inputs": current.paths,
+            "outputs": {role: str(output.path) for role, output in outputs.items()},
+        },
         "started": started.isoformat(),
         "finished": finished.isoformat(),
     }
