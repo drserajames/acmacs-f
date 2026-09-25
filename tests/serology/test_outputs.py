@@ -54,8 +54,8 @@ def _sequences(store: Store, tmp_path: Path) -> None:
             f"TO '{sequences.as_posix()}' (FORMAT parquet)"
         )
         with store.build("sequences", dataset) as builder:
-            builder.link(isolates, "isolates/pull=test/part-0.parquet")
-            builder.link(sequences, "sequences/pull=test/part-0.parquet")
+            builder.copy(isolates, "isolates/pull=test/part-0.parquet")
+            builder.copy(sequences, "sequences/pull=test/part-0.parquet")
             builder.publish(_provenance("sequences-test"))
 
 
@@ -66,7 +66,7 @@ def _clades(store: Store, tmp_path: Path) -> None:
             AS v(epi_isl, accession, clade, method)) TO '{source.as_posix()}' (FORMAT parquet)"""
     )
     with store.build("clades", "h3") as builder:
-        builder.link(source, "assignments.parquet")
+        builder.copy(source, "assignments.parquet")
         builder.publish(_provenance("clades-test"))
 
 

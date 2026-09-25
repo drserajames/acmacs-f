@@ -287,3 +287,40 @@ def test_clades_kind(store: Store) -> None:
         clades = build.publish(provenance(sequences, step="assign-clades"))
     assert [ref.dataset for ref in store.list_datasets("sequences")] == ["h3"]
     assert store.list_datasets("clades") == [clades]
+
+
+def test_link_refuses_a_file_from_outside_the_store(store: Store, tmp_path: Path) -> None:
+    """A hard link shares permissions: publishing would make the outside original read-only."""
+    outside = tmp_path / "preserved.nwk"
+    outside.write_text("(a,b);")
+    with store.build("trees", "h3/report") as build:
+        with pytest.raises(StoreError, match="outside it. Use copy"):
+            build.link(outside, "tree.nwk")
+        build.copy(outside, "tree.nwk")
+        ref = build.publish(provenance())
+    assert os.access(outside, os.W_OK), "the original stays writable"
+    assert Path(outside).stat().st_ino != (store.version_dir(ref) / "tree.nwk").stat().st_ino
+    outside.write_text("changed")  # and independent of the published copy
+    assert (store.version_dir(ref) / "tree.nwk").read_text() == "(a,b);"
+
+
+def test_link_from_an_earlier_version_still_hard_links(store: Store) -> None:
+    first = publish(store, "trees", "h3/report", {"tree.nwk": "(a,b);", "notes.txt": "1"})
+    with store.build("trees", "h3/report") as build:
+        build.link(store.version_dir(first) / "tree.nwk", "tree.nwk")
+        (build.path / "notes.txt").write_text("2")
+        second = build.publish(provenance())
+    linked = store.version_dir(second) / "tree.nwk"
+    assert linked.stat().st_nlink == 2
+    assert linked.stat().st_ino == (store.version_dir(first) / "tree.nwk").stat().st_ino
+
+
+def test_copy_of_a_directory(store: Store, tmp_path: Path) -> None:
+    outside = tmp_path / "states"
+    (outside / "sub").mkdir(parents=True)
+    (outside / "sub" / "a.tsv").write_text("x")
+    with store.build("trees", "h3/report") as build:
+        build.copy(outside, "states")
+        ref = build.publish(provenance())
+    assert (store.version_dir(ref) / "states" / "sub" / "a.tsv").read_text() == "x"
+    assert os.access(outside / "sub" / "a.tsv", os.W_OK)

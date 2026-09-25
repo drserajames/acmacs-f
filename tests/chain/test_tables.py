@@ -2,6 +2,7 @@
 
 import datetime
 import json
+import os
 
 import pytest
 
@@ -171,9 +172,11 @@ def test_publish_versions_share_unchanged_steps(tmp_path):
     assert (v1 / "review" / "index.html").exists() and (
         v1 / "steps" / "0002" / "chosen.ace"
     ).exists()
-    assert (v1 / "steps" / "0000" / "chosen.ace").stat().st_ino == (
-        chain / "steps" / "0000" / "chosen.ace"
-    ).stat().st_ino
+    # The version is a copy, not a hard link to the working area: publishing makes a version
+    # read-only, and a shared inode would make the working files read-only too.
+    working = chain / "steps" / "0000" / "chosen.ace"
+    assert (v1 / "steps" / "0000" / "chosen.ace").stat().st_ino != working.stat().st_ino
+    assert os.access(working, os.W_OK)
 
     publish(tmp_path / "store", [make_table(k, titre_shift=1 if k == 2 else 0) for k in range(3)])
     second = run_and_publish()  # the working area stays writable after a publish

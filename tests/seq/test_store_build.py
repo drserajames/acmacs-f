@@ -285,7 +285,7 @@ def _dataset_ref(store: Store, source: Path, key: str = "nextclade/example/h3/t1
     except StoreError:
         pass
     with store.build("raw", key) as builder:
-        builder.link(source, "dataset")
+        builder.copy(source, "dataset")
         now = datetime.datetime.now(datetime.UTC)
         return builder.publish(Provenance("test", (), {}, now, now))
 
