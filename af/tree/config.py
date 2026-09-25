@@ -29,6 +29,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import cast
 
+from af.run import Resources
 from af.tree.asr import DEFAULT_BACKEND, available_backends
 from af.tree.build.cmaple import SEARCH_TYPES, CmapleSettings
 from af.tree.clock import ClockSettings
@@ -39,6 +40,11 @@ from af.util.config import load_config
 
 class TreeConfigError(ValueError):
     """The tree config is not usable as written."""
+
+
+JOB_STAGES = ("build", "asr", "populate")
+"""The stages that run as a job each (under SLURM, one allocation per stage per subtype).
+Publish and clades are short store writes and run in the driver."""
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,10 @@ class SubtypeSettings:
     comparison with a tree that kept them."""
     report_cutoff: str | None = None
     """ISO date. Leaves collected wholly before it are kept only if titrated (task 5.5)."""
+    resources: dict[str, Resources] = field(default_factory=dict)
+    """Per stage (``build``, ``asr``, ``populate``): what its job asks the scheduler for. The three
+    subtypes differ several-fold in size, so wall-times and memory are set per subtype. A stage
+    with no entry gets ``TreeSettings.threads`` and no memory or time limit."""
     exclude_reasons: list[str] = field(default_factory=list)
     """Further exclusions this round opts into, by reason (Sarah: "further exclusions in the
     round"). Empty means report only, which is the default everywhere."""
@@ -105,6 +115,11 @@ class SubtypeSettings:
             problems.append("outgroup is empty; the build cannot root the tree without one")
         if self.long_branch_threshold is not None and self.long_branch_threshold <= 0:
             problems.append("long_branch_threshold must be positive")
+        unknown = sorted(set(self.resources) - set(JOB_STAGES))
+        if unknown:
+            problems.append(f"resources for unknown stage(s) {unknown}; stages: {JOB_STAGES}")
+        if any(r.threads < 1 for r in self.resources.values()):
+            problems.append("resources: threads must be at least 1")
         if self.long_branch_threshold is not None and not (self.long_branch_reason or "").strip():
             problems.append("long_branch_threshold needs a long_branch_reason (design rule 11)")
         if problems:
@@ -195,10 +210,16 @@ class TreeSettings:
             long_branch_reason=f"[long_branch.{settings.branch_scale}] {row.reason}",
         )
 
+    def resources_for(self, subtype: str, stage: str) -> Resources:
+        """What ``stage``'s job for ``subtype`` asks for. An unknown stage is an error."""
+        if stage not in JOB_STAGES:
+            raise TreeConfigError(f"{stage!r} does not run as a job; job stages: {JOB_STAGES}")
+        configured = self.for_subtype(subtype).resources.get(stage)
+        return configured if configured is not None else Resources(threads=self.threads)
+
     def cmaple_for(self, subtype: str) -> CmapleSettings:
-        """CMAPLE settings with this run's thread count applied."""
-        self.for_subtype(subtype)  # validates the subtype exists before building a command
-        return replace(self.cmaple, threads=self.threads)
+        """CMAPLE settings with the build job's thread count, so it uses what it was given."""
+        return replace(self.cmaple, threads=self.resources_for(subtype, "build").threads)
 
 
 def load_tree_config(path: Path) -> TreeSettings:
@@ -207,6 +228,7 @@ def load_tree_config(path: Path) -> TreeSettings:
 
 
 __all__ = [
+    "JOB_STAGES",
     "LongBranchSetting",
     "SubtypeSettings",
     "TreeConfigError",

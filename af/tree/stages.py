@@ -1,8 +1,10 @@
 """The tree stages as :mod:`af.pipeline` steps: build -> asr -> populate -> publish (task 5.12).
 
-One pipeline per subtype, kept in the work area at ``<work>/trees/<subtype>/``::
+One pipeline for every subtype, rooted at ``<work>/trees/``. Its steps are named
+``<subtype>.<stage>`` (``h3.build``), so the subtypes are independent and run side by side up to
+``max_parallel``. Records live in ``<work>/trees/state/``, and each subtype writes under
+``<work>/trees/<subtype>/``::
 
-    state/                     af.pipeline records, one per step
     build/tree.nwk             the finished tree (rooted, collapsed, ladderized)
     build/alignment.fasta      exactly the sequences in that tree
     build/build.json           the build's counts, and what the pre-build filter dropped
@@ -11,8 +13,18 @@ One pipeline per subtype, kept in the work area at ``<work>/trees/<subtype>/``::
     populate/<purpose>/        the I6 files (af.tree.io.i6), ready to publish
     publish/published.json     the store ref the publish step wrote
 
+**Jobs (task 5.6).** build, asr and populate each run as one job, ``python -m af.tree.stages --job
+<stage> --subtype <s> <config>``, through the configured runner: locally a subprocess, under SLURM
+one allocation with the stage's own resources (``[trees.subtypes.<s>.resources.<stage>]``). CMAPLE
+runs inside the build job's allocation, so it gets the threads that job asked for. ASR is its own
+job because its cost is unrelated to the build's and differs by backend. Publish and clades are
+short writes to the store and run in the driver. The job finds the tree tools in the interpreter's
+own ``bin/`` (the conda/micromamba env), which is prepended to its ``PATH``: a driver started as
+``env/bin/python`` without activating the env would otherwise send jobs to nodes that cannot see
+``cmaple``. Ctrl-C, SIGTERM and SIGHUP cancel the jobs in flight (af.pipeline, af.run).
+
 **Why the step records survive a sync.** Every input is *named* (``inputs={"alignment": p}``),
-and every output lies under the pipeline's ``root`` (the subtype's work directory), so records are
+and every output lies under the pipeline's ``root`` (``<work>/trees/``), so records are
 keyed by role and by relative path, never by where the files happen to live. A work area synced to
 the HPC or to ``o`` under another root is up to date there too; only a change of content re-runs.
 
@@ -34,10 +46,10 @@ import dataclasses
 import datetime
 import json
 import logging
+import os
 import sys
-import time
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -45,7 +57,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from af.pipeline import Pipeline, Step, StepContext, StepOutcome
-from af.run import LocalRunner, Runner
+from af.pipeline.config import RunnerSettings, make_runner
+from af.run import Job, LocalRunner, Runner
 from af.store import Store, StoreRef
 from af.store.ref import ExternalInput
 from af.store.store import Provenance
@@ -54,7 +67,7 @@ from af.tree.asr import get_backend
 from af.tree.asr.base import AncestralStates
 from af.tree.build import build, prune_starting_tree
 from af.tree.clock import apply_flags, find_outliers
-from af.tree.config import SubtypeSettings, TreeSettings
+from af.tree.config import JOB_STAGES, SubtypeSettings, TreeSettings
 from af.tree.io import i6, newick
 from af.tree.io.fasta import read_alignment, write_alignment
 from af.tree.model import Tree
@@ -74,6 +87,8 @@ BUILD, ASR, POPULATE, PUBLISH, CLADES = "build", "asr", "populate", "publish", "
 STAGES = (BUILD, ASR, POPULATE, PUBLISH, CLADES)
 """``clades`` runs only when the config names a clade set: it publishes ``clades/<subtype>`` from
 the tree version (workstream 4's af.clades.from_tree), reading the clades populate assigned."""
+
+STATE_DIR = "state"
 
 CODE_VERSION = 1
 """Bump when a stage's code changes what it writes, so existing records stop counting."""
@@ -129,8 +144,16 @@ class TreeRunConfig:
     paths: PathsConfig
     trees: TreeSettings
     inputs: dict[str, SubtypeInputs]
+    runner: RunnerSettings = field(default_factory=lambda: RunnerSettings(kind="local"))
+    max_parallel: int = 1
+    """How many steps may run at once. Steps of one subtype depend on each other, so in practice
+    this is how many subtypes build side by side."""
 
     def __post_init__(self) -> None:
+        if STATE_DIR in self.inputs:
+            raise StageError(f"a subtype cannot be called {STATE_DIR!r}: the records live there")
+        if self.max_parallel < 1:
+            raise StageError("max_parallel must be at least 1")
         unknown = sorted(set(self.inputs) - set(self.trees.subtypes))
         if unknown:
             raise StageError(f"[inputs.X] for subtype(s) with no [trees.subtypes.X]: {unknown}")
@@ -265,10 +288,6 @@ class Layout:
     root: Path
     purpose: str
 
-    @property
-    def state(self) -> Path:
-        return self.root / "state"
-
     def stage(self, name: str) -> Path:
         return self.root / name
 
@@ -313,19 +332,75 @@ def tree_steps(
     inputs: SubtypeInputs,
     layout: Layout,
     store_root: Path,
+    *,
+    jobs_from: Path | None = None,
 ) -> list[Step]:
-    """The steps for one subtype, in order. Each names its inputs by role."""
+    """The steps for one subtype, in order, named ``<subtype>.<stage>``. Inputs named by role.
+
+    ``jobs_from``: the config file. When given, build, asr and populate run as jobs through the
+    pipeline's runner (:func:`_as_job`); when None, every step does its work in this process,
+    which is what the job itself does.
+    """
     sub = settings.for_subtype(subtype)
     clades = clade_source(inputs)
     steps = [
         _build_step(subtype, settings, sub, inputs, layout),
-        _asr_step(sub, settings.threads, layout),
+        _asr_step(sub, settings.resources_for(subtype, ASR).threads, layout),
         _populate_step(subtype, sub, inputs, clades, layout),
         _publish_step(subtype, inputs, clades, layout, store_root),
     ]
     if clades is not None:
         steps.append(_clades_step(clades, layout, store_root))
-    return steps
+    if jobs_from is not None:
+        steps = [
+            _as_job(step, subtype, settings, layout, jobs_from) if step.name in JOB_STAGES else step
+            for step in steps
+        ]
+    return [
+        dataclasses.replace(
+            step,
+            name=step_name(subtype, step.name),
+            after=[step_name(subtype, name) for name in step.after],
+        )
+        for step in steps
+    ]
+
+
+def step_name(subtype: str, stage: str) -> str:
+    return f"{subtype}.{stage}"
+
+
+def _as_job(step: Step, subtype: str, settings: TreeSettings, layout: Layout, config: Path) -> Step:
+    """The same step, its work done by ``python -m af.tree.stages --job`` through the runner.
+
+    The job's outputs are the step's, so the runner checks them before the step can succeed, and
+    the job runs with the interpreter (and so the af) that is running this driver.
+    """
+    stage = step.name
+
+    def submit(context: StepContext) -> None:
+        directory = layout.stage(stage)
+        directory.mkdir(parents=True, exist_ok=True)
+        job = Job.python_module(
+            f"tree-{subtype}-{stage}",
+            __name__,
+            ["--job", stage, "--subtype", subtype, config],
+            cwd=directory,
+            log=directory / "job.log",
+            outputs=step.outputs,
+            resources=settings.resources_for(subtype, stage),
+            env={"PATH": tool_path()},
+        )
+        context.runner.run(job)
+
+    return dataclasses.replace(step, action=submit)
+
+
+def tool_path() -> str:
+    """``PATH`` for a job: this interpreter's ``bin/`` first, where the env keeps the tree tools."""
+    here = str(Path(sys.executable).parent)
+    inherited = os.environ.get("PATH", "")
+    return here if not inherited else f"{here}{os.pathsep}{inherited}"
 
 
 def _build_step(
@@ -342,10 +417,14 @@ def _build_step(
     rule = sub.long_branch_rule() if sub.drop_long_branches else None
     parameters = {
         "code_version": CODE_VERSION,
-        # Not the executable's path: it differs between the laptop, the HPC and o, and a path is
-        # not a reason to rebuild. The version CMAPLE reports is in build.json. After upgrading
-        # CMAPLE, re-run deliberately (--force build).
-        "cmaple": {k: v for k, v in dataclasses.asdict(cmaple).items() if k != "executable"},
+        # Not the executable's path or the thread count: both differ between the laptop, the HPC
+        # and o, and neither is a reason to rebuild. The version CMAPLE reports is in build.json.
+        # After upgrading CMAPLE, re-run deliberately (--force build).
+        "cmaple": {
+            k: v
+            for k, v in dataclasses.asdict(cmaple).items()
+            if k not in ("executable", "threads")
+        },
         "outgroup": sub.outgroup,
         "collapse_tolerance": sub.collapse_tolerance,
         "long_branch_threshold": None if rule is None else rule.threshold,
@@ -425,7 +504,8 @@ def _asr_step(sub: SubtypeSettings, threads: int, layout: Layout) -> Step:
         name=ASR,
         action=action,
         inputs={"tree": layout.tree, "alignment": layout.alignment},
-        parameters={"code_version": CODE_VERSION, "backend": sub.asr_backend, "threads": threads},
+        # Threads are not a parameter: the laptop and o differ, and it is not a reason to re-run.
+        parameters={"code_version": CODE_VERSION, "backend": sub.asr_backend},
         outputs=[
             Artefact(layout.ancestral, parse=_parse_parquet),
             Artefact(layout.asr_meta, parse=_parse_json),
@@ -628,35 +708,83 @@ def _clades_step(clades: CladeSource, layout: Layout, store_root: Path) -> Step:
 # Running
 
 
-def subtype_pipeline(config: TreeRunConfig, subtype: str, runner: Runner | None = None) -> Pipeline:
+def trees_root(paths: PathsConfig) -> Path:
+    """``<work>/trees``. The work area must exist: a typo must not start afresh and re-run all."""
+    return Work.open(paths.work).root / KIND
+
+
+def pipeline_for(
+    config_path: Path,
+    config: TreeRunConfig,
+    subtypes: Sequence[str],
+    runner: Runner | None = None,
+) -> Pipeline:
+    """One pipeline over ``subtypes``; build, asr and populate run as jobs."""
+    steps: list[Step] = []
+    for subtype in subtypes:
+        inputs = _inputs(config, subtype)
+        layout = layout_for(config.paths, subtype, inputs.purpose)
+        steps += tree_steps(
+            subtype, config.trees, inputs, layout, config.paths.store, jobs_from=config_path
+        )
+    root = trees_root(config.paths)
+    return Pipeline(
+        steps,
+        state_dir=root / STATE_DIR,
+        runner=runner or make_runner(config.runner, config_path),
+        root=root,
+        max_parallel=config.max_parallel,
+    )
+
+
+def _inputs(config: TreeRunConfig, subtype: str) -> SubtypeInputs:
     try:
-        inputs = config.inputs[subtype]
+        return config.inputs[subtype]
     except KeyError:
         raise StageError(
             f"no [inputs.{subtype}] in the config; it names: {', '.join(sorted(config.inputs))}"
         ) from None
-    layout = layout_for(config.paths, subtype, inputs.purpose)
-    steps = tree_steps(subtype, config.trees, inputs, layout, config.paths.store)
-    return Pipeline(steps, state_dir=layout.state, runner=runner or LocalRunner(), root=layout.root)
 
 
 def run(
-    config: TreeRunConfig,
+    config_path: Path,
     subtypes: Sequence[str] | None = None,
     *,
-    targets: Sequence[str] | None = None,
+    until: str | None = None,
     force: Collection[str] = (),
     runner: Runner | None = None,
 ) -> dict[str, list[StepOutcome]]:
-    """Run what is out of date, subtype by subtype. The first failure stops the run."""
+    """Run what is out of date, for every subtype at once. ``until`` and ``force`` name stages.
+
+    The first failure stops the run; subtypes that finished keep their records.
+    """
+    config = load_run_config(config_path)
     chosen = list(subtypes) if subtypes else sorted(config.inputs)
-    outcomes: dict[str, list[StepOutcome]] = {}
-    for subtype in chosen:
-        started = time.monotonic()
-        log.info("%s:", subtype)
-        outcomes[subtype] = subtype_pipeline(config, subtype, runner).run(targets, force=force)
-        log.info("%s: stages done in %.0fs", subtype, time.monotonic() - started)
+    pipeline = pipeline_for(Path(config_path), config, chosen, runner)
+    targets = None if until is None else [step_name(s, until) for s in chosen]
+    forced = [step_name(s, stage) for s in chosen for stage in force]
+    forced = [name for name in forced if name in pipeline.steps]
+    outcomes: dict[str, list[StepOutcome]] = {subtype: [] for subtype in chosen}
+    for outcome in pipeline.run(targets, force=forced):
+        subtype, _, stage = outcome.name.partition(".")
+        outcomes[subtype].append(dataclasses.replace(outcome, name=stage))
     return outcomes
+
+
+def run_job(config_path: Path, subtype: str, stage: str) -> None:
+    """One stage's work, in this process: what a job does on its node.
+
+    Tools the stage calls (CMAPLE) run as local subprocesses, inside the job's allocation.
+    """
+    config = load_run_config(config_path)
+    inputs = _inputs(config, subtype)
+    layout = layout_for(config.paths, subtype, inputs.purpose)
+    steps = tree_steps(subtype, config.trees, inputs, layout, config.paths.store)
+    wanted = step_name(subtype, stage)
+    step = next((step for step in steps if step.name == wanted), None)
+    if step is None or stage not in JOB_STAGES:
+        raise StageError(f"{stage!r} is not a job stage; job stages: {JOB_STAGES}")
+    step.action(StepContext(step=step, runner=LocalRunner()))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -665,11 +793,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--subtype", action="append", help="default: every [inputs.X]")
     parser.add_argument("--until", choices=STAGES, help="stop after this stage")
     parser.add_argument("--force", action="append", default=[], choices=STAGES)
+    parser.add_argument("--job", choices=JOB_STAGES, help="internal: do one stage's work here")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    config = load_run_config(args.config)
-    targets = [args.until] if args.until else None
-    run(config, args.subtype, targets=targets, force=args.force)  # the driver logs each outcome
+    if args.job:
+        if not args.subtype or len(args.subtype) != 1:
+            parser.error("--job needs exactly one --subtype")
+        run_job(args.config, args.subtype[0], args.job)
+        return 0
+    run(args.config, args.subtype, until=args.until, force=args.force)  # the driver logs outcomes
     return 0
 
 
