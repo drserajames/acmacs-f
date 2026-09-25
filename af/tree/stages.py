@@ -39,14 +39,14 @@ import time
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from af.pipeline import Pipeline, Step, StepContext, StepOutcome
 from af.run import LocalRunner, Runner
-from af.store import Store
+from af.store import Store, StoreRef
 from af.store.ref import ExternalInput
 from af.store.store import Provenance
 from af.store.work import PathsConfig, Work
@@ -58,17 +58,22 @@ from af.tree.config import SubtypeSettings, TreeSettings
 from af.tree.io import i6, newick
 from af.tree.io.fasta import read_alignment, write_alignment
 from af.tree.model import Tree
-from af.tree.populate import CladeAssigner, LeafRecord, af_clades_assigner, leaf_key, populate
+from af.tree.populate import LeafRecord, af_clades_assigner, leaf_key, populate
 from af.tree.prebuild import ExclusionPlan, ExclusionRule
 from af.tree.prebuild import plan as prebuild_plan
 from af.util.artefacts import Artefact
 from af.util.config import load_config
 
+if TYPE_CHECKING:
+    from af.clades.nomenclature import CladeSet
+
 log = logging.getLogger(__name__)
 
 KIND = "trees"
-BUILD, ASR, POPULATE, PUBLISH = "build", "asr", "populate", "publish"
-STAGES = (BUILD, ASR, POPULATE, PUBLISH)
+BUILD, ASR, POPULATE, PUBLISH, CLADES = "build", "asr", "populate", "publish", "clades"
+STAGES = (BUILD, ASR, POPULATE, PUBLISH, CLADES)
+"""``clades`` runs only when the config names a clade set: it publishes ``clades/<subtype>`` from
+the tree version (workstream 4's af.clades.from_tree), reading the clades populate assigned."""
 
 CODE_VERSION = 1
 """Bump when a stage's code changes what it writes, so existing records stop counting."""
@@ -101,11 +106,18 @@ class SubtypeInputs:
     """The nomenclature's subtype name (a key of af.clades.nomenclature.HA_REPOSITORIES)."""
     nomenclature: Path | None = None
     """The directory holding the influenza-clade-nomenclature clones."""
+    nomenclature_repository: str | None = None
+    """The clone's directory name, when it is not the usual one for ``clade_set``."""
+    clade_pin: str | None = None
+    """The nomenclature commit to use. Checked against the clone, never assumed. Absent: the
+    clone's current commit, read when the pipeline is set up."""
     purpose: str = "weekly"
 
     def __post_init__(self) -> None:
         if (self.clade_set is None) != (self.nomenclature is None):
             raise StageError("clade_set and nomenclature go together: give both or neither")
+        if self.clade_set is None and (self.nomenclature_repository or self.clade_pin):
+            raise StageError("nomenclature_repository and clade_pin need a clade_set")
         if self.incremental and self.previous is None:
             raise StageError("incremental = true needs a previous tree to start from")
 
@@ -302,14 +314,18 @@ def tree_steps(
     layout: Layout,
     store_root: Path,
 ) -> list[Step]:
-    """The four steps for one subtype, in order. Each names its inputs by role."""
+    """The steps for one subtype, in order. Each names its inputs by role."""
     sub = settings.for_subtype(subtype)
-    return [
+    clades = clade_source(inputs)
+    steps = [
         _build_step(subtype, settings, sub, inputs, layout),
         _asr_step(sub, settings.threads, layout),
-        _populate_step(subtype, sub, inputs, layout),
-        _publish_step(subtype, inputs, layout, store_root),
+        _populate_step(subtype, sub, inputs, clades, layout),
+        _publish_step(subtype, inputs, clades, layout, store_root),
     ]
+    if clades is not None:
+        steps.append(_clades_step(clades, layout, store_root))
+    return steps
 
 
 def _build_step(
@@ -417,21 +433,60 @@ def _asr_step(sub: SubtypeSettings, threads: int, layout: Layout) -> Step:
     )
 
 
-def _clades_input(inputs: SubtypeInputs) -> Path | None:
-    """The nomenclature directory populate reads, so a nomenclature change re-runs it."""
+@dataclass(frozen=True)
+class CladeSource:
+    """The clade set a run uses, fixed to one commit when the pipeline is set up.
+
+    The commit is a step *parameter* of populate, not only an input hash, because a pin can move
+    without the subclade files changing, and the clades step refuses a tree whose clades were
+    assigned at another version (af.clades.from_tree). Changing the pin therefore re-runs populate,
+    publish and clades, in that order.
+    """
+
+    subtype: str
+    clone: Path
+    commit: str
+
+    @property
+    def subclades(self) -> Path:
+        return self.clone / "subclades"
+
+    @property
+    def version(self) -> str:
+        """As af.clades.nomenclature writes it, and as tree.json records it."""
+        return f"{self.clone.name}@{self.commit}"
+
+    def load(self) -> CladeSet:
+        from af.clades.nomenclature import Pin, load_clade_set
+
+        pin = Pin(subtype=self.subtype, repository=self.clone.name, commit=self.commit)
+        return load_clade_set(self.subtype, self.clone.parent, pin, repository=self.clone.name)
+
+    def provenance(self) -> ExternalInput:
+        """The same record on the tree version and on the clades version: path, hash, commit."""
+        return ExternalInput.of(self.subclades, version=self.commit)
+
+
+def clade_source(inputs: SubtypeInputs) -> CladeSource | None:
     if inputs.clade_set is None or inputs.nomenclature is None:
         return None
-    from af.clades.nomenclature import HA_REPOSITORIES
+    from af.clades.nomenclature import HA_REPOSITORIES, head_commit
 
-    repository = HA_REPOSITORIES.get(inputs.clade_set)
+    repository = inputs.nomenclature_repository or HA_REPOSITORIES.get(inputs.clade_set)
     if repository is None:
         known = ", ".join(sorted(HA_REPOSITORIES))
         raise StageError(f"clade_set {inputs.clade_set!r} is not one of: {known}")
-    return inputs.nomenclature / repository / "subclades"
+    clone = inputs.nomenclature / repository
+    commit = inputs.clade_pin or head_commit(clone)
+    return CladeSource(subtype=inputs.clade_set, clone=clone, commit=commit)
 
 
 def _populate_step(
-    subtype: str, sub: SubtypeSettings, inputs: SubtypeInputs, layout: Layout
+    subtype: str,
+    sub: SubtypeSettings,
+    inputs: SubtypeInputs,
+    clades: CladeSource | None,
+    layout: Layout,
 ) -> Step:
     named = {
         "tree": layout.tree,
@@ -441,16 +496,15 @@ def _populate_step(
         "build_meta": layout.build_meta,
         "leaves": inputs.leaves,
     }
-    clades = _clades_input(inputs)
     if clades is not None:
-        named["clades"] = clades
+        named["clades"] = clades.subclades
     clock = sub.clock_settings()
     parameters = {
         "code_version": CODE_VERSION,
         "purpose": inputs.purpose,
         "branch_scale": sub.branch_scale,
         "outgroup": sub.outgroup,
-        "clade_set": inputs.clade_set,
+        "clade_set_version": None if clades is None else clades.version,
         "clock": _recordable(dataclasses.asdict(clock)),
     }
 
@@ -472,7 +526,7 @@ def _populate_step(
             read_states(layout.stage(ASR)),
             branch_scale=sub.scale,
             backend=get_backend(sub.asr_backend),
-            assign_clades=_assigner(inputs),
+            assign_clades=None if clades is None else af_clades_assigner(clades.load()),
             continent_of=lambda record: record.region,
             outgroup=sub.outgroup,
             excluded=excluded,
@@ -499,24 +553,19 @@ def _recordable(settings: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _assigner(inputs: SubtypeInputs) -> CladeAssigner | None:
-    if inputs.clade_set is None or inputs.nomenclature is None:
-        return None
-    from af.clades.nomenclature import load_clade_set
-
-    return af_clades_assigner(load_clade_set(inputs.clade_set, inputs.nomenclature))
-
-
-def _publish_step(subtype: str, inputs: SubtypeInputs, layout: Layout, store_root: Path) -> Step:
-    external = {"alignment": inputs.alignment, "leaves": inputs.leaves}
-    clades = _clades_input(inputs)
-    if clades is not None:
-        external["clades"] = clades
-
+def _publish_step(
+    subtype: str,
+    inputs: SubtypeInputs,
+    clades: CladeSource | None,
+    layout: Layout,
+    store_root: Path,
+) -> Step:
     def action(_: StepContext) -> None:
         started = datetime.datetime.now(datetime.UTC)
         store = Store.open(store_root)
-        provenance_inputs = tuple(ExternalInput.of(path) for path in external.values())
+        provenance_inputs = [ExternalInput.of(inputs.alignment), ExternalInput.of(inputs.leaves)]
+        if clades is not None:
+            provenance_inputs.append(clades.provenance())
         with store.build(KIND, f"{subtype}/{inputs.purpose}") as builder:
             builder.link(layout.i6, ".")
             meta = i6.read_metadata(layout.i6)
@@ -527,7 +576,7 @@ def _publish_step(subtype: str, inputs: SubtypeInputs, layout: Layout, store_roo
             }
             provenance = Provenance(
                 step=f"{KIND}.{PUBLISH}",
-                inputs=provenance_inputs,
+                inputs=tuple(provenance_inputs),
                 parameters={"subtype": subtype, "purpose": inputs.purpose},
                 started=started,
                 finished=datetime.datetime.now(datetime.UTC),
@@ -544,6 +593,34 @@ def _publish_step(subtype: str, inputs: SubtypeInputs, layout: Layout, store_roo
         # The I6 directory is not itself a declared output, so the driver cannot infer this.
         after=[POPULATE],
         outputs=[Artefact(layout.published, parse=_parse_json)],
+    )
+
+
+def _clades_step(clades: CladeSource, layout: Layout, store_root: Path) -> Step:
+    written = layout.stage(CLADES) / PUBLISHED_FILE
+
+    def action(_: StepContext) -> None:
+        from af.clades.from_tree import publish_from_tree
+
+        started = datetime.datetime.now(datetime.UTC)
+        tree = StoreRef.from_json(json.loads(layout.published.read_text()))
+        ref = publish_from_tree(
+            Store.open(store_root),
+            tree,
+            clades.subtype,
+            clades.load(),
+            nomenclature=[clades.provenance()],
+            started=started,
+        )
+        written.parent.mkdir(parents=True, exist_ok=True)
+        written.write_text(json.dumps(ref.to_json(), indent=1, sort_keys=True) + "\n")
+
+    return Step(
+        name=CLADES,
+        action=action,
+        inputs={"tree_ref": layout.published, "clades": clades.subclades},
+        parameters={"code_version": CODE_VERSION, "clade_set_version": clades.version},
+        outputs=[Artefact(written, parse=_parse_json)],
     )
 
 

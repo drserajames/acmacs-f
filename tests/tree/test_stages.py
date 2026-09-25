@@ -11,6 +11,7 @@ import dataclasses
 import json
 import shutil
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,8 +22,11 @@ from af.store.work import Work
 from af.tree import stages
 from af.tree.io import i6
 from af.tree.io.fasta import write_alignment
+from tests.clades.synthetic import build_clone, commit_command, write_clade
 
 from .tree_fixtures import KEYS, LEAF_SEQ, records
+
+TREE_STEPS = ("build", "asr", "populate", "publish")
 
 NEWICK = (
     f"({KEYS['o']}:0.1,(({KEYS['a']}:0.2,{KEYS['b']}:0.3):0.05,"
@@ -80,7 +84,7 @@ def statuses(config_path: Path) -> dict[str, str]:
 
 def test_the_stages_run_in_order_and_publish_an_i6_version(tmp_path: Path) -> None:
     config = make_project(tmp_path / "p")
-    assert statuses(config) == dict.fromkeys(stages.STAGES, "ran")
+    assert statuses(config) == dict.fromkeys(TREE_STEPS, "ran")
 
     store = Store.open(tmp_path / "p" / "store")
     ref = store.current("trees", "h3/weekly")
@@ -95,7 +99,7 @@ def test_the_stages_run_in_order_and_publish_an_i6_version(tmp_path: Path) -> No
 def test_nothing_re_runs_when_nothing_changed(tmp_path: Path) -> None:
     config = make_project(tmp_path / "p")
     statuses(config)
-    assert statuses(config) == dict.fromkeys(stages.STAGES, "skipped")
+    assert statuses(config) == dict.fromkeys(TREE_STEPS, "skipped")
 
 
 def test_a_moved_work_area_is_still_up_to_date(tmp_path: Path) -> None:
@@ -109,7 +113,7 @@ def test_a_moved_work_area_is_still_up_to_date(tmp_path: Path) -> None:
     moved = str(tmp_path / "server" / "cmaple-stub")
     server.write_text(server.read_text().replace(str(tmp_path / "laptop" / "cmaple-stub"), moved))
     assert moved in server.read_text()
-    assert statuses(server) == dict.fromkeys(stages.STAGES, "skipped")
+    assert statuses(server) == dict.fromkeys(TREE_STEPS, "skipped")
 
 
 def test_leaf_metadata_re_runs_populate_but_not_the_build(tmp_path: Path) -> None:
@@ -184,3 +188,70 @@ def test_inputs_for_an_unconfigured_subtype_are_refused(tmp_path: Path) -> None:
     config.write_text(text + 'leaves = "leaves.parquet"\n')
     with pytest.raises(Exception, match="h1"):
         stages.load_run_config(config)
+
+
+def with_clades(config: Path, pin: str | None = None) -> None:
+    """Point the config at a synthetic nomenclature clone (tests/clades/synthetic.py)."""
+    build_clone(config.parent / "clones")
+    text = config.read_text() + (
+        'clade_set = "A(H3N2)"\nnomenclature = "clones"\nnomenclature_repository = "synthetic_HA"\n'
+    )
+    if pin is not None:
+        text += f'clade_pin = "{pin}"\n'
+    config.write_text(text)
+
+
+def test_the_clades_step_publishes_clades_from_the_tree_version(tmp_path: Path) -> None:
+    config = make_project(tmp_path / "p")
+    with_clades(config)
+    assert statuses(config) == dict.fromkeys((*TREE_STEPS, "clades"), "ran")
+    store = Store.open(tmp_path / "p" / "store")
+    tree_meta = i6.read_metadata(store.version_dir(store.current("trees", "h3/weekly")))
+    assert tree_meta["clade_set_version"].startswith("synthetic_HA@")
+    assert store.current("clades", "h3") is not None
+
+
+def test_a_pin_move_re_runs_populate_publish_and_clades_in_order(tmp_path: Path) -> None:
+    """WS4's guard refuses a tree labelled at another pin; the pipeline must never reach it.
+
+    The new commit changes no subclade file, so only the pin (a parameter) says anything moved.
+    """
+    config = make_project(tmp_path / "p")
+    with_clades(config)
+    statuses(config)
+    clone = tmp_path / "p" / "clones" / "synthetic_HA"
+    (clone / "README.md").write_text("a commit that changes no clade\n")
+    subprocess.run(["git", "-C", str(clone), "add", "README.md"], check=True)
+    subprocess.run(commit_command(clone, "readme"), check=True)
+    outcomes = stages.run(stages.load_run_config(config))["h3"]
+    assert [(o.name, o.status) for o in outcomes] == [
+        ("build", "skipped"),
+        ("asr", "skipped"),
+        ("populate", "ran"),
+        ("publish", "ran"),
+        ("clades", "ran"),
+    ]
+    assert "parameters changed: clade_set_version" in outcomes[2].reason
+
+
+def test_a_pin_the_clone_is_not_at_is_refused(tmp_path: Path) -> None:
+    config = make_project(tmp_path / "p")
+    with_clades(config, pin="0000000")
+    with pytest.raises(Exception, match="not the pinned"):
+        stages.run(stages.load_run_config(config))
+
+
+def test_a_new_clade_file_re_runs_populate(tmp_path: Path) -> None:
+    config = make_project(tmp_path / "p")
+    with_clades(config)
+    statuses(config)
+    clone = tmp_path / "p" / "clones" / "synthetic_HA"
+    write_clade(
+        clone / "subclades",
+        "P.9",
+        "name: P.9\nparent: P\ndefining_mutations:\n- locus: HA1\n  position: 20\n  state: Y\n",
+    )
+    subprocess.run(["git", "-C", str(clone), "add", "."], check=True)
+    subprocess.run(commit_command(clone, "P.9"), check=True)
+    ran = {o.name for o in stages.run(stages.load_run_config(config))["h3"] if o.status == "ran"}
+    assert ran == {"populate", "publish", "clades"}
