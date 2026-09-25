@@ -79,6 +79,16 @@ class CollectionDate:
     def overlaps(self, other: CollectionDate) -> bool:
         return self.first <= other.last and other.first <= self.last
 
+    @property
+    def midpoint(self) -> datetime.date:
+        """The middle of the interval, for a consumer that needs one number.
+
+        A root-to-tip regression has to put a year-only record somewhere; the middle of
+        what the record actually says beats 1 January, which is a date nobody stated and
+        which biases every such point in the same direction.
+        """
+        return self.first + (self.last - self.first) / 2
+
 
 def parse(text: str) -> CollectionDate:
     """Read ``YYYY-MM-DD``, ``YYYY-MM`` or ``YYYY``. Anything else raises.

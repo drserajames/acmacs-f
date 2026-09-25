@@ -121,3 +121,15 @@ def test_precision_is_carried_not_inferred() -> None:
 def test_dates_are_hashable_and_comparable() -> None:
     assert len({parse("2024"), parse("2024"), parse("2024-01")}) == 2
     assert isinstance(parse("2024"), CollectionDate)
+
+
+class TestMidpoint:
+    def test_a_full_day_is_its_own_midpoint(self) -> None:
+        assert parse("2024-03-17").midpoint == datetime.date(2024, 3, 17)
+
+    def test_year_only_sits_mid_year_not_on_1_january(self) -> None:
+        """1 January is a date nobody stated, and it biases every such point one way."""
+        assert parse("2024").midpoint == datetime.date(2024, 7, 1)
+
+    def test_month_only_sits_mid_month(self) -> None:
+        assert parse("2024-03").midpoint == datetime.date(2024, 3, 16)
