@@ -50,6 +50,10 @@ def test_figure_writes_pdf_i7_and_report(tmp_path):
         ("B", "X.1.1", "leaf-010", 10),
         ("C", "X", "leaf-020", 25),
     ]
+    orders = [(x["first_order"], x["last_order"]) for x in tree["sections"]]
+    assert orders == [(0, 9), (10, 19), (20, 44)]
+    by_order = {leaf["order"]: leaf["name"] for leaf in tree["leaves"] if leaf["shown"]}
+    assert all(by_order[x["first_order"]] == x["first_leaf"] for x in tree["sections"])
     names = {leaf["name"] for leaf in tree["leaves"]}
     assert all(x["first_leaf"] in names and x["last_leaf"] in names for x in tree["sections"])
     assert report["aa_label_placement"]["box_overlaps"] == 0

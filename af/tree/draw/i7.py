@@ -66,6 +66,9 @@ def tree_block(
             "first_leaf": str(tree.name[layout.leaf_nodes[band.first]]),
             "last_leaf": str(tree.name[layout.leaf_nodes[band.last]]),
             "n_leaves": band.last - band.first + 1,
+            # drawn positions: a strain drawn twice (two passages) makes a name ambiguous
+            "first_order": band.first,
+            "last_order": band.last,
         }
         for band in hz
     ]
