@@ -5,7 +5,6 @@ Names are invented and assembled at run time, so no strain-shaped text is commit
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -20,7 +19,7 @@ def virus(place: str, number: int, year: int = 2021, prefix: str = "A(H3N2)") ->
 
 
 def designation_identity(
-    name: str, reassortant: str, annotations: Sequence[str], fourth: str
+    name: str, reassortant: str, annotations: list[str], fourth: str
 ) -> tuple[Any, ...] | None:
     """A stand-in for workstream 7's rules, for tests only: DISTINCT or empty -> None."""
     if "DISTINCT" in annotations or not fourth:

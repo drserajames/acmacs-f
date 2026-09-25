@@ -4,7 +4,7 @@ Layout of one store version (the directory ``af.store`` publishes)::
 
     partitions/<group>/<year>/{tables,antigens,sera,titres}.parquet
     partitions.json     partition -> {table_id: content_hash}, plus the identity-rules version
-    report.json         counts: tables, rows, readings, rows without identity, rebuilt/reused
+    report.json         counts: tables, rows, readings, rows without identity
 
 Why partitions by table group and year: a changed table rewrites only its own partition,
 and every other partition is hard-linked from the previous version, so a new version costs
@@ -64,6 +64,16 @@ class BuildReport:
     rebuilt: list[str] = field(default_factory=list)
     reused: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
+
+    def content_counts(self) -> dict[str, Any]:
+        """The counts that depend only on the tables and rules, not on how it was built."""
+        return {
+            "tables": self.tables,
+            "antigens": self.antigens,
+            "sera": self.sera,
+            "readings": self.readings,
+            "without_identity": dict(self.without_identity),
+        }
 
 
 def partition_of(table: Table) -> str:
@@ -125,7 +135,9 @@ def build(
             "counts": all_counts,
         },
     )
-    _write_json(out_dir / REPORT_FILE, report.__dict__)
+    # Only what the content determines goes into the version, so identical tables always
+    # give an identical version; which partitions were rebuilt is in the returned report.
+    _write_json(out_dir / REPORT_FILE, report.content_counts())
     return report
 
 
