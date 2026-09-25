@@ -17,6 +17,15 @@ from dataclasses import dataclass, field
 
 from .rules import RuleTable
 
+CLASSES = ("egg", "cell", "original")  # in precedence order; anything else is "unknown"
+
+
+def class_of(classes: list[str]) -> str:
+    """One class for a whole passage history (eu-e0's rule, used to choose among a name's
+    sequences): "egg" if any step is egg, else "cell" if any is cell, else "original" if
+    any is an original specimen, else "unknown" (no passage, or one that could not be read)."""
+    return next((c for c in CLASSES if c in classes), "unknown")
+
 
 @dataclass
 class Passage:
@@ -33,12 +42,35 @@ class PassageParser:
     def __init__(self, tokens: RuleTable, lab: str):
         self.tokens = tokens
         self.lab = lab
+        in_scope = [r for r in tokens.rules if tokens.in_scope(r, lab=lab)]
+        self.canonical_classes = {r["canonical"].upper(): r["class"] for r in in_scope}
+        self.canonical_step = re.compile(
+            "("
+            + "|".join(map(re.escape, sorted(self.canonical_classes, key=len, reverse=True)))
+            + r")(\d+|\?)?(\([^()]*\))?",
+            re.IGNORECASE,
+        )
         names = sorted(
             {r["pattern"] for r in tokens.rules if tokens.in_scope(r, lab=lab)},
             key=len,
             reverse=True,
         )
         self.step = re.compile("(" + "|".join(map(re.escape, names)) + r")(\d+|X)?", re.IGNORECASE)
+
+    def passage_class(self, canonical: str) -> str:
+        """The class (see ``class_of``) of a passage already written canonically. Readers
+        call this on the text they store, so every lab's tables get the same answer from the
+        same rules, whichever way the text was assembled."""
+        classes = []
+        for segment in canonical.split("/"):
+            pos = 0
+            while pos < len(segment):
+                m = self.canonical_step.match(segment, pos)
+                if m is None:
+                    return "unknown"  # kept as written because it did not parse
+                classes.append(self.canonical_classes[m[1].upper()])
+                pos = m.end()
+        return class_of(classes)
 
     def parse(self, raw: str) -> Passage:
         text = raw.strip()

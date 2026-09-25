@@ -365,6 +365,7 @@ def _antigen(
         name=name.name,
         raw_name=row["ag_strain_name"],
         passage=passage.text,
+        passage_class=passages.passage_class(passage.text),
         passage_date=harvest,
         date=_iso_date(row["ag_collection_date"], "ag_collection_date")
         if row["ag_collection_date"]
@@ -413,6 +414,7 @@ def _serum(
         raw_name=row["sr_strain_name"],
         serum_id=f"CDC {lot}",
         passage=passage.text,
+        passage_class=passages.passage_class(passage.text),
         passage_date=harvest,
         reassortant=name.reassortant,
         annotations=name.annotations + (["BOOSTED"] if boosted == "TRUE" else []),

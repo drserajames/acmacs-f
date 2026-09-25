@@ -60,7 +60,7 @@ def read_all(fixture: Path, rules_dir: Path, *, drop_flagged: bool = True) -> li
 def test_tables_match_the_golden_record(fixture: Path, rules_dir: Path, expected: dict) -> None:
     got = {
         t.table_id: {
-            "content_hash": t.content_hash(),
+            "content_hash": t.content_hash_as(expected.get("format", "af-table-1")),
             "map_hash": t.map_hash(),
             "antigens": len(t.antigens),
             "sera": len(t.sera),

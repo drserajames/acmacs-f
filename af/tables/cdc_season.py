@@ -213,6 +213,7 @@ def _antigen(
         name=name.name,
         raw_name=row["virus_strain"],
         passage=passage.text,
+        passage_class=passages.passage_class(passage.text),
         date=dt.date.fromisoformat(row["virus_collection_date"]).isoformat()
         if row["virus_collection_date"]
         else None,
@@ -246,6 +247,7 @@ def _serum(
         raw_name=row["serum_strain"],
         serum_id=f"CDC {lot}",
         passage=passage.text,
+        passage_class=passages.passage_class(passage.text),
         reassortant=name.reassortant,
         annotations=name.annotations,
         lineage=lineage,
