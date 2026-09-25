@@ -64,9 +64,18 @@ def build_job(
     starting_tree: Path | None = None,
     name: str = "cmaple",
 ) -> tuple[Job, Path]:
-    """The CMAPLE job, and the treefile it must produce."""
-    out_dir = Path(out_dir)
+    """The CMAPLE job, and the treefile it must produce.
+
+    Every path in the command is made absolute, because the job's working directory is ``out_dir``:
+    a relative path given by the caller would be resolved again inside it and point nowhere. The
+    job's own log is ``cmaple.stdout.log``, not ``cmaple.log``: the latter is CMAPLE's own
+    ``<prefix>.log`` and must not be opened by two writers.
+    """
+    out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    alignment = Path(alignment).resolve()
+    if starting_tree is not None:
+        starting_tree = Path(starting_tree).resolve()
     prefix = out_dir / "cmaple"
     treefile = prefix.with_suffix(".treefile")
 
@@ -99,7 +108,7 @@ def build_job(
         name=name,
         command=command,
         cwd=out_dir,
-        log=out_dir / "cmaple.log",
+        log=out_dir / "cmaple.stdout.log",
         outputs=[Artefact(treefile, parse=_parse_tree)],
         resources=Resources(threads=settings.threads),
     )
