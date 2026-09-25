@@ -42,7 +42,7 @@ def test_layout_rows_follow_preorder_and_inodes_sit_midway():
     assert lay.node_y[0] == pytest.approx((lay.node_y[first_child] + lay.node_y[last_child]) / 2)
 
 
-def test_hide_rules_are_counted_and_year_precision_is_not_the_day():
+def test_year_only_leaf_is_drawn_without_a_bar_and_keyed_on_precision():
     t = build(
         inner(
             leaf(1, "X", date="2025-01-01", precision="year"),
@@ -52,8 +52,14 @@ def test_hide_rules_are_counted_and_year_precision_is_not_the_day():
         )
     )
     lay = compute_layout(t, HideRules(names=frozenset({"leaf-004"})))
-    assert lay.hidden == {"year-precision date": 1, "long branch": 0, "named override": 1}
-    assert [t.name[i] for i in lay.leaf_nodes] == ["leaf-002", "leaf-003"]
+    assert lay.hidden == {"long branch": 0, "named override": 1}
+    assert [t.name[i] for i in lay.leaf_nodes] == ["leaf-001", "leaf-002", "leaf-003"]
+    rows = lay.leaf_nodes
+    ts = compute(
+        [t.date[i] for i in rows], [t.date_precision[i] for i in rows], "2024-10", "2026-10"
+    )
+    assert ts.column.tolist()[:2] == [-1, 3]  # year-only: no bar; a real 1 January: January
+    assert ts.counts["year-only date (no bar)"] == 1
 
 
 def test_named_hide_that_matches_nothing_is_an_error():
@@ -120,7 +126,10 @@ def test_hz_letters_old_nested_band_stays_inside_parent():
     lay = compute_layout(t)
     member = clade_membership([t.clade[i] for i in lay.leaf_nodes], PARENTS)
     sel = select_clades(member, PARENTS, lay.n_rows, SelectParams(min_share=0.1))
-    ts = compute([t.date[i] for i in lay.leaf_nodes], "2024-10", "2026-10")
+    rows = lay.leaf_nodes
+    ts = compute(
+        [t.date[i] for i in rows], [t.date_precision[i] for i in rows], "2024-10", "2026-10"
+    )
     hz = hz_partition(sel, PARENTS, ts.in_window)
     # X.1.1 (in window) cuts X.1; X.2 (collected 2023) stays inside X's letter
     assert [(h.letter, h.clade, h.first, h.last) for h in hz] == [

@@ -66,14 +66,13 @@ def make_figure(
     inputs: Mapping[str, str],
 ) -> dict[str, Any]:
     """Render ``pdf`` and write its I7 and draw report; return the draw report."""
-    hide = HideRules(
-        config.hide.year_precision,
-        config.hide.min_edge,
-        config.hide.names | config.overrides.hide_leaves,
-    )
+    hide = HideRules(config.hide.min_edge, config.hide.names | config.overrides.hide_leaves)
     layout = compute_layout(tree, hide)
     ts = compute_timeseries(
-        [tree.date[i] for i in layout.leaf_nodes], config.window_start, config.window_end
+        [tree.date[i] for i in layout.leaf_nodes],
+        [tree.date_precision[i] for i in layout.leaf_nodes],
+        config.window_start,
+        config.window_end,
     )
     member = clade_membership([tree.clade[i] for i in layout.leaf_nodes], parents)
     selection = select_clades(

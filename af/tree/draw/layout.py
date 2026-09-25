@@ -27,14 +27,14 @@ class HideRuleError(ValueError):
 class HideRules:
     """What is not drawn. Everything here is counted in :class:`Layout.hidden`.
 
-    ``year_precision``: leaves whose collection date is known only to the year cannot be placed
-    in the month matrix, so they are not drawn (they stay in the tree store).
+    Year-only dates are not a hide rule: such a leaf is drawn, and only its month-matrix bar is
+    left out (:mod:`.timeseries`), because a year-only date stored as 1 January would put it in
+    the wrong month.
     ``min_edge``: a node whose branch is at least this long is hidden with its whole subtree
     (long-branch outliers); ``None`` switches the rule off.
     ``names``: hand overrides by leaf name, each must match a leaf.
     """
 
-    year_precision: bool = True
     min_edge: float | None = None
     names: frozenset[str] = frozenset()
 
@@ -66,7 +66,7 @@ def shown_leaves(tree: DrawTree, rules: HideRules) -> tuple[np.ndarray, dict[str
     """Per node, whether it is a drawn leaf; plus counts per rule (first matching rule wins)."""
     n = len(tree)
     leaf = np.array([tree.is_leaf(i) for i in range(n)])
-    counts = {"year-precision date": 0, "long branch": 0, "named override": 0}
+    counts = {"long branch": 0, "named override": 0}
     names = {tree.name[i] for i in range(n) if leaf[i]}
     missing = sorted(set(rules.names) - names)
     if missing:
@@ -77,9 +77,7 @@ def shown_leaves(tree: DrawTree, rules: HideRules) -> tuple[np.ndarray, dict[str
             under_long[i] = under_long[tree.parent[i]] or tree.edge[i] >= rules.min_edge
     shown = leaf.copy()
     for i in np.flatnonzero(leaf).tolist():
-        if rules.year_precision and tree.date_precision[i] == "year":
-            counts["year-precision date"] += 1
-        elif under_long[i]:
+        if under_long[i]:
             counts["long branch"] += 1
         elif tree.name[i] in rules.names:
             counts["named override"] += 1
