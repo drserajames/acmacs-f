@@ -165,3 +165,52 @@ def test_lab_submitters_need_a_reason(tmp_path: Path) -> None:
         M.read_lab_submitters(path)
     path.write_text("lab\tsubmitting_lab\treason\nLAB-A\tExample Centre A\tits GISAID name\n")
     assert M.read_lab_submitters(path) == {"lab-a": frozenset({"Example Centre A"})}
+
+
+class TestLabNumber:
+    LAB = "Example National Centre"
+
+    def idx(self, *cands: M.Candidate, scope: str = "province") -> M.SequenceIndex:
+        idx = index(*cands)
+        idx.submitters = {"lab-n": frozenset({self.LAB})}
+        idx.number_rules = {"lab-n": M.NumberRule("lab-n", scope)}
+        return idx
+
+    def dep(self, n: int, name: str, seq: str = "a", lab: str = LAB) -> M.Candidate:
+        return M.Candidate(f"EPI_ISL_{n}", f"EPI{n}", "h3", name, "MDCK1", M.CELL, seq, lab)
+
+    ANTIGEN = "A(H3N2)/EXAMPLEPROV EXAMPLESPELLING/31/2024"
+
+    def test_another_district_spelling_matches_by_number_and_is_flagged(self) -> None:
+        own = self.dep(1, "A/EXAMPLEPROV EXAMPLEOTHER/31/2024")
+        match = self.idx(own).match(self.ANTIGEN, M.CELL, lab="lab-n")
+        assert (match.method, match.chosen) == ("number", own)
+        assert match.flags == (M.LAB_NUMBER,) and not match.doubtful
+
+    def test_only_the_labs_own_deposits_and_only_that_lab(self) -> None:
+        other = self.dep(1, "A/EXAMPLEPROV EXAMPLEOTHER/31/2024", lab="Someone Else")
+        assert self.idx(other).match(self.ANTIGEN, M.CELL, lab="lab-n").chosen is None
+        own = self.dep(2, "A/EXAMPLEPROV EXAMPLEOTHER/31/2024")
+        assert self.idx(own).match(self.ANTIGEN, M.CELL, lab="lab-x").chosen is None
+
+    def test_another_province_is_not_a_match_unless_the_scope_is_national(self) -> None:
+        far = self.dep(1, "A/EXAMPLEFAR EXAMPLEWHERE/31/2024")
+        assert self.idx(far).match(self.ANTIGEN, M.CELL, lab="lab-n").chosen is None
+        match = self.idx(far, scope="national").match(self.ANTIGEN, M.CELL, lab="lab-n")
+        assert match.chosen == far
+
+    def test_a_key_with_two_districts_is_flagged_and_not_taken(self) -> None:
+        a = self.dep(1, "A/EXAMPLEPROV EXAMPLEDISTA/31/2024", "a")
+        b = self.dep(2, "A/EXAMPLEPROV EXAMPLEDISTB/31/2024", "b")
+        match = self.idx(a, b).match(self.ANTIGEN, M.CELL, lab="lab-n")
+        assert match.chosen is None and M.LAB_NUMBER_COLLISION in match.flags
+
+    def test_a_name_match_is_never_replaced(self) -> None:
+        exact = self.dep(1, "A/EXAMPLEPROV EXAMPLESPELLING/31/2024", "a", lab="Someone Else")
+        own = self.dep(2, "A/EXAMPLEPROV EXAMPLEOTHER/31/2024", "b")
+        match = self.idx(exact, own).match(self.ANTIGEN, M.CELL, lab="lab-n")
+        assert (match.method, match.chosen) == ("name", exact)
+
+    def test_a_bad_scope_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="scope"):
+            M.NumberRule("lab-n", "planet").key("X", "1", "2024")
