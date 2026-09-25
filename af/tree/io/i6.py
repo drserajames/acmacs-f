@@ -70,6 +70,7 @@ NODE_SCHEMA = pa.schema(
         ("nuc_subs", _list_of_str),
         ("flags", _list_of_str),  # reported, not excluded (DECISIONS 25 Sep): e.g. clock_outlier
         ("titrated", pa.bool_()),  # leaf has titres (null: not evaluated)
+        ("titrated_by", _list_of_str),  # centres (Table.lab) whose tables hold the antigen
     ]
 )
 NODE_COLUMNS = tuple(NODE_SCHEMA.names)
@@ -123,6 +124,7 @@ def node_table(populated: PopulatedTree) -> pa.Table:
         rows["nuc_subs"].append(populated.nuc_subs.get(node.node_id, []))
         rows["flags"].append(populated.flags.get(node.node_id, []))
         rows["titrated"].append(populated.titrated.get(key) if key else None)
+        rows["titrated_by"].append(populated.titrated_by.get(key, []) if key else [])
     return pa.table(rows, schema=NODE_SCHEMA)
 
 
@@ -149,6 +151,7 @@ def metadata(populated: PopulatedTree, purpose: str) -> dict[str, Any]:
             "reconstructs_gaps": populated.gaps_reconstructed,
         },
         "clade_set_version": populated.clade_set_version,
+        "clade_parents": dict(sorted(populated.clade_parents.items())),
         "counts": dict(sorted(populated.counts.items())),
     }
 

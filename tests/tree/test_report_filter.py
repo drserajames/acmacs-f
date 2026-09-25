@@ -5,11 +5,11 @@ from __future__ import annotations
 import datetime
 
 import pytest
-from tree.tree_fixtures import KEYS, built, records, states_for
 
 from af.tables.model import Antigen, Table
-from af.tree.populate import CladeCall, populate
+from af.tree.populate import CladeCall, CladeResult, populate
 from af.tree.report_filter import TitratedIndex, collected_before, report_tree
+from tree.tree_fixtures import KEYS, built, records, states_for
 
 CUTOFF = datetime.date(2023, 6, 1)
 
@@ -47,7 +47,8 @@ def full(assign: bool = False):
     tree, ids = built()
 
     def engine(nodes):
-        return "v1", {n.node_id: CladeCall("J" if n.is_leaf else "J.2") for n in nodes}
+        calls = {n.node_id: CladeCall("J" if n.is_leaf else "J.2") for n in nodes}
+        return CladeResult("v1", calls, {"J": None, "J.2": "J"})
 
     return populate(
         tree,
@@ -75,6 +76,8 @@ def test_untitrated_old_leaves_go_and_the_rest_stay() -> None:
     assert result.counts["kept_titrated_before_cutoff"] == 2
     assert result.counts["titrated_by_epi_isl"] == 1 and result.counts["titrated_by_name"] == 1
     assert result.titrated[KEYS["a"]] and not result.titrated[KEYS["d"]]
+    assert result.titrated_by[KEYS["c"]] == ["EXAMPLELAB"] and result.titrated_by[KEYS["d"]] == []
+    assert result.counts["titrated_leaves_EXAMPLELAB"] == 2
     # the input is untouched
     assert len(list(populated.tree.leaves())) == 5
 
@@ -96,6 +99,7 @@ def test_clades_are_carried_without_rerunning_the_engine() -> None:
     x = next(child for child in result.tree.root.children if not child.is_leaf)
     assert result.clades[x.id_hex].clade == "J.2"
     assert result.clade_set_version == "v1"
+    assert result.clade_parents == {"J": None, "J.2": "J"}
     assert result.counts["leaves_without_clade"] == 0
 
 

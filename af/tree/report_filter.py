@@ -20,20 +20,31 @@ Until workstream 10's serology store exists this reads the tables store (prompt 
 from __future__ import annotations
 
 import datetime
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from af.tables.model import Table
 from af.tree.asr.base import AncestralStates, Backend
-from af.tree.populate import CladeAssigner, CladeCall, LeafRecord, PopulatedTree, populate
+from af.tree.populate import (
+    CladeAssigner,
+    CladeCall,
+    CladeResult,
+    LeafRecord,
+    PopulatedTree,
+    populate,
+)
 
 
 @dataclass(frozen=True)
 class TitratedIndex:
-    """Which sequences have titres: EPI_ISL ids and normalised names of tabled antigens."""
+    """Which sequences have titres, and from which centres (``Table.lab``, never a fixed list).
 
-    epi_isl: frozenset[str]
-    names: frozenset[str]
+    Keyed by EPI_ISL and by normalised name; each value is the set of labs whose tables hold
+    that antigen. The per-centre sets are what the centre-marked report figure needs.
+    """
+
+    epi_isl: Mapping[str, frozenset[str]]
+    names: Mapping[str, frozenset[str]]
     name_key: Callable[[str], str]
     tables: int = 0
     antigens: int = 0
@@ -46,19 +57,25 @@ class TitratedIndex:
         epi_fields: Sequence[str] = (),
     ) -> TitratedIndex:
         """Index every antigen of every table. ``epi_fields`` name ``Antigen.source`` keys."""
-        epi: set[str] = set()
-        names: set[str] = set()
+        epi: dict[str, set[str]] = {}
+        names: dict[str, set[str]] = {}
         n_tables = n_antigens = 0
         for table in tables:
             n_tables += 1
             for antigen in table.antigens:
                 n_antigens += 1
-                names.add(name_key(antigen.name))
+                names.setdefault(name_key(antigen.name), set()).add(table.lab)
                 for field_name in epi_fields:
                     value = str(antigen.source.get(field_name) or "").strip()
                     if value:
-                        epi.add(value)
-        return cls(frozenset(epi), frozenset(names), name_key, n_tables, n_antigens)
+                        epi.setdefault(value, set()).add(table.lab)
+        return cls(
+            {key: frozenset(labs) for key, labs in epi.items()},
+            {key: frozenset(labs) for key, labs in names.items()},
+            name_key,
+            n_tables,
+            n_antigens,
+        )
 
     def match(self, record: LeafRecord) -> str | None:
         """How the leaf matched ("epi_isl" or "name"), or None if it has no titres."""
@@ -67,6 +84,13 @@ class TitratedIndex:
         if self.name_key(record.name) in self.names:
             return "name"
         return None
+
+    def labs(self, record: LeafRecord) -> list[str]:
+        """Every centre whose tables hold this sequence's antigen, by either key, sorted."""
+        found = self.epi_isl.get(record.epi_isl, frozenset()) | self.names.get(
+            self.name_key(record.name), frozenset()
+        )
+        return sorted(found)
 
 
 def collected_before(record: LeafRecord, cutoff: datetime.date) -> bool | None:
@@ -140,10 +164,11 @@ def report_tree(
         parameters=populated.states.parameters,
     )
 
-    def carried(_nodes: Sequence[object]) -> tuple[str, dict[str, CladeCall]]:
-        return populated.clade_set_version or "", {
+    def carried(_nodes: Sequence[object]) -> CladeResult:
+        calls = {
             node.id_hex: old_call[id(node)] for node in tree.preorder() if id(node) in old_call
         }
+        return CladeResult(populated.clade_set_version or "", calls, populated.clade_parents)
 
     engine = assign_clades or (carried if populated.clades else None)
     result = populate(
@@ -160,6 +185,9 @@ def report_tree(
     if continent_of is None:
         result.continents = {key: populated.continents.get(key) for key in keep}
     result.titrated = {key: how[key] is not None for key in keep}
+    result.titrated_by = {key: titrated.labs(populated.leaves[key]) for key in keep}
+    for lab in sorted({lab for labs in result.titrated_by.values() for lab in labs}):
+        result.counts[f"titrated_leaves_{lab}"] = sum(lab in v for v in result.titrated_by.values())
     result.counts.update(counts)
     result.counts["report_cutoff"] = cutoff.isoformat()
     result.counts["titrated_leaves"] = sum(result.titrated.values())

@@ -6,15 +6,22 @@ The tree is described in ``tree_fixtures.py``.
 from __future__ import annotations
 
 import datetime
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-from tree.tree_fixtures import KEYS, GapBlind, built, records, states_for
 
 from af.store import Provenance, Store
 from af.tree.io import i6, newick
-from af.tree.populate import CladeCall, CladeInput, PopulateError, nucleotide_changes, populate
+from af.tree.populate import (
+    CladeCall,
+    CladeInput,
+    CladeResult,
+    PopulateError,
+    nucleotide_changes,
+    populate,
+)
+from tree.tree_fixtures import KEYS, GapBlind, built, records, states_for
 
 
 def test_changes_ignore_gaps_and_ambiguities() -> None:
@@ -72,9 +79,10 @@ def test_clades_come_from_the_injected_engine_with_gap_capability_marked() -> No
     tree, ids = built()
     seen: list[CladeInput] = []
 
-    def engine(nodes: Sequence[CladeInput]) -> tuple[str, Mapping[str, CladeCall]]:
+    def engine(nodes: Sequence[CladeInput]) -> CladeResult:
         seen.extend(nodes)
-        return "nomenclature@abc1234", {n.node_id: CladeCall("J.2", support=2) for n in nodes}
+        calls = {n.node_id: CladeCall("J.2", support=2) for n in nodes}
+        return CladeResult("nomenclature@abc1234", calls, {"J": None, "J.2": "J"})
 
     result = populate(
         tree, "h3", records(), states_for(ids), assign_clades=engine, backend=GapBlind()
@@ -83,14 +91,15 @@ def test_clades_come_from_the_injected_engine_with_gap_capability_marked() -> No
     assert all(n.gaps_reconstructed for n in seen if n.is_leaf)
     assert not any(n.gaps_reconstructed for n in seen if not n.is_leaf)
     assert result.clade_set_version == "nomenclature@abc1234"
+    assert result.clade_parents["J.2"] == "J"
     assert result.counts["leaves_without_clade"] == 0
 
 
 def test_a_node_the_clade_engine_skipped_is_an_error() -> None:
     tree, ids = built()
 
-    def engine(nodes: Sequence[CladeInput]) -> tuple[str, Mapping[str, CladeCall]]:
-        return "v", {n.node_id: CladeCall("J") for n in nodes[1:]}
+    def engine(nodes: Sequence[CladeInput]) -> CladeResult:
+        return CladeResult("v", {n.node_id: CladeCall("J") for n in nodes[1:]})
 
     with pytest.raises(PopulateError, match="no call for 1 nodes"):
         populate(tree, "h3", records(), states_for(ids), assign_clades=engine)
@@ -124,7 +133,9 @@ def test_i6_nodes_are_preorder_and_carry_the_draw_columns(tmp_path: Path) -> Non
     row_y = table["node_id"].to_pylist().index(f"{ids['y']:016x}")
     assert table["aa_subs"][row_y].as_py() == ["K2E"]
     assert table["n_leaves"][0].as_py() == 5
+    assert table["titrated_by"][row_y].as_py() == []
     meta = i6.read_metadata(tmp_path)
+    assert meta["counts"]["continents"] == {"EUROPE": 5}
     assert meta["branch_scale"] == "mutations" and meta["alignment_length"] == 9
     assert len(i6.read_ancestral(tmp_path)) == meta["internal_nodes"]
 
@@ -157,3 +168,13 @@ def test_a_gap_blind_backend_reports_no_substitution_into_a_deletion() -> None:
     tree, ids = built()
     blind = populate(tree, "h3", records(), states_for(ids), backend=GapBlind())
     assert blind.aa_subs[d.node_id] == []
+
+
+def test_a_clade_outside_the_hierarchy_is_an_error() -> None:
+    tree, ids = built()
+
+    def engine(nodes: Sequence[CladeInput]) -> CladeResult:
+        return CladeResult("v", {n.node_id: CladeCall("K") for n in nodes}, {"J": None})
+
+    with pytest.raises(PopulateError, match="not in the clade set's hierarchy"):
+        populate(tree, "h3", records(), states_for(ids), assign_clades=engine)

@@ -92,8 +92,21 @@ class CladeCall:
     inherited: bool = False
 
 
-CladeAssigner = Callable[[Sequence[CladeInput]], tuple[str, Mapping[str, CladeCall]]]
-"""Nodes in, (clade-set version, calls keyed by node id) out. See :func:`af_clades_assigner`."""
+@dataclass(frozen=True)
+class CladeResult:
+    """What the clade engine returns: calls by node id, and the clade set that made them.
+
+    ``parents`` (clade -> parent clade) travels with the calls so a consumer resolves ancestry
+    against the same nomenclature pin that assigned the labels, never a different one.
+    """
+
+    version: str
+    calls: Mapping[str, CladeCall]
+    parents: Mapping[str, str | None] = field(default_factory=dict)
+
+
+CladeAssigner = Callable[[Sequence[CladeInput]], CladeResult]
+"""Nodes in, calls keyed by node id out. See :func:`af_clades_assigner`."""
 
 
 @dataclass
@@ -113,9 +126,11 @@ class PopulatedTree:
     nuc_subs: dict[int, list[str]]
     clades: dict[str, CladeCall] = field(default_factory=dict)
     clade_set_version: str | None = None
+    clade_parents: dict[str, str | None] = field(default_factory=dict)
     continents: dict[str, str | None] = field(default_factory=dict)
     flags: dict[int, list[str]] = field(default_factory=dict)
     titrated: dict[str, bool] = field(default_factory=dict)
+    titrated_by: dict[str, list[str]] = field(default_factory=dict)
     counts: dict[str, Any] = field(default_factory=dict)
     gaps_reconstructed: bool = True
 
@@ -294,6 +309,11 @@ def populate(
             key: continent_of(record) for key, record in populated.leaves.items()
         }
         counts["leaves_without_continent"] = sum(v is None for v in populated.continents.values())
+        # Every value counted, so one outside the figure's legend vocabulary is visible.
+        tally: dict[str, int] = {}
+        for value in populated.continents.values():
+            tally[value or ""] = tally.get(value or "", 0) + 1
+        counts["continents"] = dict(sorted(tally.items()))
 
     if assign_clades is not None:
         inputs = [
@@ -306,7 +326,8 @@ def populate(
             )
             for node in tree.preorder()
         ]
-        version, calls = assign_clades(inputs)
+        clade_result = assign_clades(inputs)
+        version, calls = clade_result.version, clade_result.calls
         unassigned = [item.node_id for item in inputs if item.node_id not in calls]
         if unassigned:
             raise PopulateError(
@@ -315,6 +336,11 @@ def populate(
             )
         populated.clades = {item.node_id: calls[item.node_id] for item in inputs}
         populated.clade_set_version = version
+        populated.clade_parents = dict(clade_result.parents)
+        named = {call.clade for call in populated.clades.values() if call.clade}
+        if populated.clade_parents and named - set(populated.clade_parents):
+            unknown = sorted(named - set(populated.clade_parents))
+            raise PopulateError(f"clades not in the clade set's hierarchy: {unknown[:5]}")
         leaf_calls = [populated.clades[node.id_hex] for node in tree.leaves()]
         counts["leaves_without_clade"] = sum(call.clade is None for call in leaf_calls)
         counts["clade_set_version"] = version
@@ -345,7 +371,7 @@ def af_clades_assigner(clade_set: Any, *, require_gap_support: bool = True) -> C
     assign = importlib.import_module("af.clades.assign")
     sequence = importlib.import_module("af.clades.sequence")
 
-    def run(inputs: Sequence[CladeInput]) -> tuple[str, Mapping[str, CladeCall]]:
+    def run(inputs: Sequence[CladeInput]) -> CladeResult:
         nodes = [
             assign.Node(
                 name=item.node_id,
@@ -364,7 +390,8 @@ def af_clades_assigner(clade_set: Any, *, require_gap_support: bool = True) -> C
             name: CladeCall(a.clade, a.support, a.unobservable, a.inherited)
             for name, a in result.assignments.items()
         }
-        return str(result.clade_set_version), calls
+        parents = {clade.name: clade.parent for clade in clade_set}
+        return CladeResult(str(result.clade_set_version), calls, parents)
 
     return run
 
@@ -375,6 +402,7 @@ __all__ = [
     "CladeAssigner",
     "CladeCall",
     "CladeInput",
+    "CladeResult",
     "LeafRecord",
     "PopulateError",
     "PopulatedTree",
