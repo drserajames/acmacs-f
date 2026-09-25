@@ -6,47 +6,14 @@ SLURM_ARRAY_TASK_ID, runs the batch script, and exits with the highest task stat
 It can also simulate a task killed by SLURM before it records its status.
 """
 
+import json
 import shutil
-import stat
-import sys
 from pathlib import Path
 
 import pytest
 
 from af.run import Job, JobFailed, LocalRunner, Resources, Runner, SlurmRunner
 from af.util.artefacts import Artefact
-
-FAKE_SBATCH = """\
-#!{python}
-# Fake sbatch: run array tasks locally. KILL_TASKS lists task ids to "kill" before they run.
-import os, subprocess, sys
-args = sys.argv[1:]
-with open(os.path.join(os.path.dirname(sys.argv[0]), "sbatch-calls.txt"), "a") as log:
-    log.write(" ".join(args) + "\\n")
-script = args[-1]
-array = next(a.split("=", 1)[1] for a in args if a.startswith("--array="))
-last = int(array.split("%")[0].split("-")[1])
-killed = {{int(x) for x in os.environ.get("KILL_TASKS", "").split(",") if x}}
-worst = 0
-for task in range(last + 1):
-    if task in killed:
-        worst = max(worst, 1)
-        continue
-    env = {{**os.environ, "SLURM_ARRAY_TASK_ID": str(task)}}
-    rc = subprocess.run(["/bin/sh", script], env=env).returncode
-    worst = max(worst, rc)
-print("12345")
-sys.exit(worst)
-"""
-
-
-@pytest.fixture
-def fake_sbatch(tmp_path: Path) -> Path:
-    path = tmp_path / "bin" / "sbatch"
-    path.parent.mkdir()
-    path.write_text(FAKE_SBATCH.format(python=sys.executable))
-    path.chmod(path.stat().st_mode | stat.S_IEXEC)
-    return path
 
 
 @pytest.fixture(params=["local", "slurm"])
@@ -211,11 +178,65 @@ def test_slurm_arguments(fake_sbatch: Path, tmp_path: Path) -> None:
         "--partition=part",
         "--account=acct",
         "--qos=example",
-        "--job-name=af-big",
     ]:
         assert option in big_call.split(), option
     assert "--array=0-1%5" in small_call.split()
     assert "--mem" not in small_call and "--time" not in small_call
+    names = [next(a for a in call.split() if a.startswith("--job-name=")) for call in calls]
+    assert names[0] != names[1], "each submission has its own job name, for scancel --name"
+    assert any(name.startswith("--job-name=af-big-") for name in names)
+    assert any(name.startswith("--job-name=af-small1+1-") for name in names)
+
+
+def test_slurm_splits_arrays_at_max_array_size(fake_sbatch: Path, tmp_path: Path) -> None:
+    runner = SlurmRunner(work_dir=tmp_path / "slurm", sbatch=str(fake_sbatch), max_array_size=2)
+    jobs = [shell_job(tmp_path, f"j{i}", f"echo {i} > {i}.txt", [f"{i}.txt"]) for i in range(5)]
+    results = runner.run_many(jobs)
+    assert [result.job.name for result in results] == ["j0", "j1", "j2", "j3", "j4"]
+    calls = (fake_sbatch.parent / "sbatch-calls.txt").read_text().splitlines()
+    arrays = sorted(next(a for a in c.split() if a.startswith("--array=")) for c in calls)
+    assert arrays == ["--array=0-0", "--array=0-1", "--array=0-1"]
+
+
+def test_slurm_interrupt_cancels_submitted_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C while sbatch --wait blocks must scancel, or the jobs run on unwatched."""
+    scancel = tmp_path / "scancel"
+    scancel.write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/scancel-calls.txt\n')
+    scancel.chmod(0o755)
+    import af.run.slurm as slurm_module
+
+    real_run = slurm_module.subprocess.run
+
+    def fake_run(argv: list[str], **kwargs: object) -> object:
+        if argv[0] == "sbatch":
+            raise KeyboardInterrupt
+        return real_run(argv, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(slurm_module.subprocess, "run", fake_run)
+    runner = SlurmRunner(work_dir=tmp_path / "slurm", scancel=str(scancel))
+    with pytest.raises(KeyboardInterrupt):
+        runner.run(shell_job(tmp_path, "long", "sleep 1000", ["x.txt"]))
+    cancelled = (tmp_path / "scancel-calls.txt").read_text().split()
+    assert len(cancelled) == 1 and cancelled[0].startswith("--name=af-long-")
+    batch = next((tmp_path / "slurm").iterdir())
+    assert cancelled[0] == f"--name=af-long-{batch.name.removeprefix('batch-')}"
+
+
+def test_python_module_job(runner: Runner, tmp_path: Path) -> None:
+    """Python work runs as `python -m module` with this interpreter, on any runner."""
+    out = tmp_path / "probe.json"
+    job = Job.python_module(
+        "probe",
+        "af.run.smoke",
+        ["--child", str(out)],
+        cwd=tmp_path,
+        log=tmp_path / "probe.log",
+        outputs=[Artefact(out)],
+    )
+    runner.run(job)
+    assert json.loads(out.read_text())["af_version"]
 
 
 @pytest.mark.slurm

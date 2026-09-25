@@ -49,6 +49,47 @@ never failed, so a public machine runs the rest.
 
 Tests marked `slurm` need a real SLURM cluster and are skipped elsewhere.
 
+## Running on SLURM
+
+Every external tool and every heavy Python step goes through `af.run`, which has a local
+runner and a SLURM runner behind the same call. Which one is used comes from config:
+
+```toml
+[runner]
+kind = "slurm"
+
+[runner.slurm]
+work_dir = "/shared/scratch/af/slurm"   # batch scripts and status files; nodes must see it
+partition = "..."                       # optional
+account = "..."                         # optional
+extra_args = ["--qos=..."]              # optional, passed to sbatch
+max_parallel_tasks = 50                 # optional throttle for arrays (%N)
+max_array_size = 1000                   # the cluster's MaxArraySize (scontrol show config)
+output_wait_seconds = 30                # shared-filesystem lag allowance
+```
+
+Before relying on a new cluster, run the smoke test from a login node. It submits real jobs
+(success, failure, missing output, a job array, a Python job on a node, and optionally a
+time-limit kill) and checks af reports each one correctly:
+
+```sh
+python -m af.run.smoke --work-dir /shared/scratch/af-smoke [--partition P] [--account A] \
+    [--extra-arg=--qos=Q] [--max-array-size N] [--with-timeout]
+```
+
+It prints a PASS/FAIL table and writes `smoke-report.json` into the work directory.
+
+What the cluster must provide:
+
+- **A shared filesystem** for the conda env / venv (jobs run the submitting interpreter),
+  the work directory, the store and the work area.
+- **`sbatch --wait`** (SLURM ≥ 17). Jobs inherit the submitting environment (`--export=ALL`).
+- **A driver that outlives the jobs.** `run()` blocks until the jobs finish. Ctrl-C or an
+  error cancels the submitted jobs (`scancel --name`), but a killed driver can't. Run long
+  pipelines in tmux, or submit the driver itself as a SLURM job.
+- **Threads are passed twice.** A job's `Resources(threads=N)` sets `--cpus-per-task`; the
+  program must also be told N in its arguments.
+
 ## Layout
 
 | Package | What it holds |
