@@ -562,3 +562,43 @@ def test_identical_layout_marks_displacement_not_tested() -> None:
         _map(a, ["X"] * 30), _map([(x + (i == 0), y) for i, (x, y) in enumerate(a)], ["X"] * 30)
     )
     assert not moved["procrustes"]["identical_layout"]
+
+
+def test_section_bounds_use_recorded_positions_or_the_best_span() -> None:
+    names = [f"leaf{i}" for i in range(30)]
+    ref = _tree_doc(names, ["P"] * 30, [("P", 20, 29)])
+    ref["tree"]["leaves"][5]["name"] = "leaf20"  # the first bound's name is drawn twice (5 and 20)
+    res = trees.compare_figures(ref, _tree_doc(names, ["P"] * 30, [("P", 20, 29)]))
+    assert res["sections"]["matched"]["P"]["jaccard"] > 0.99  # the 10-leaf span, not 5..29
+    ref["tree"]["sections"][0].update(first_order=20, last_order=29)
+    res = trees.compare_figures(ref, _tree_doc(names, ["P"] * 30, [("P", 20, 29)]))
+    assert res["sections"]["matched"]["P"]["jaccard"] > 0.99
+
+
+def test_canonical_mapping_takes_the_deepest_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    import af.clades.labels as labels
+
+    canonical = {"OLD.PARENT": "A", "A": "A", "A.1": "A.1", "local.x": "A.1"}
+    depth = {"A": 1, "A.1": 2}
+
+    def fake(labels_in: Any, clade_set: Any, allow_unmapped: bool = False) -> Any:
+        given = [x for x in labels_in if x is not None]
+        return SimpleNamespace(
+            clade=lambda x: canonical[x],
+            unmapped={x: "unknown" for x in given if x not in canonical},
+            counts=lambda: {"subclade": len(given)},
+        )
+
+    monkeypatch.setattr(labels, "canonical_labels", fake)
+    clade_set = SimpleNamespace(depth=lambda c: depth[c])
+    names = [f"leaf{i}" for i in range(12)]
+    ref = _tree_doc(names, ["OLD.PARENT"] * 12, [])
+    for leaf in ref["tree"]["leaves"][:6]:
+        leaf["clade_tags"] = ["A", "A.1", "OLD.PARENT"]  # last tag coarser than an earlier one
+    new = _tree_doc(names, ["A.1"] * 6 + ["local.x"] * 3 + ["mystery"] * 3, [])
+    res = trees.compare_figures(ref, new, clade_set)
+    assert res["clade"]["canonical"]["unmapped"] == {"mystery": "unknown"}
+    # ref: 6 x A.1 (deepest of its tags), 6 x A; new: 9 x A.1, 3 x unmapped:mystery
+    assert res["clade"]["label_agreement"] == 6 / 12

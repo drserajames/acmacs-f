@@ -115,6 +115,44 @@ class Excused:
 
 
 @dataclass(frozen=True)
+class CladesConfig:
+    """Where to read clade definitions for mapping tree-figure labels to canonical names.
+
+    The PIN is not configured: it is taken from the af tree figure being compared
+    (provenance.inputs.clade_set, "<repository>@<commit>"), so the comparison cannot use a
+    different nomenclature from the tree it compares.
+    """
+
+    clones: Path  # the pinned upstream nomenclature clones
+    local: Path  # acmacs-f-data clades/local.tsv (local sub-groups under their upstream parent)
+    clades_json: Path  # acmacs-data clades.json: the local groups' signatures, until switch-over
+    subtypes: dict[str, str]  # tree I7 subtype -> clade-set subtype, e.g. h3 = "A(H3N2)"
+
+
+def clade_set_for(tree_doc: dict[str, Any], cfg: CladesConfig, cache: dict[str, Any]) -> Any:
+    """The clade set a tree figure was labelled with: its recorded pin plus the local layer."""
+    from af.clades.importer import clades_json_signatures
+    from af.clades.local import extend_from_file
+    from af.clades.nomenclature import Pin, load_clade_set
+
+    subtype = tree_doc["tree"]["subtype"]
+    if subtype not in cfg.subtypes:
+        raise ValueError(f"clades config: no clade-set subtype for tree subtype {subtype!r}")
+    recorded = tree_doc["provenance"].get("inputs", {}).get("clade_set")
+    if not recorded or "@" not in recorded:
+        raise ValueError(f"tree figure ({subtype}) records no clade_set '<repository>@<commit>'")
+    pin_text = recorded.split("+local", 1)[0]  # the local layer is added here, from local.tsv
+    if pin_text in cache:
+        return cache[pin_text]
+    name = cfg.subtypes[subtype]
+    repository, commit = pin_text.rsplit("@", 1)
+    clade_set = load_clade_set(name, cfg.clones, Pin(name, repository, commit))
+    signatures = clades_json_signatures(cfg.clades_json).get(name, {})
+    cache[pin_text] = extend_from_file(clade_set, cfg.local, signatures=signatures)
+    return cache[pin_text]
+
+
+@dataclass(frozen=True)
 class Limits:
     adoption: Adoption
     map: MapLimits = field(default_factory=MapLimits)
@@ -249,8 +287,9 @@ def excuse_points(
 
 
 def compare_report(
-    record: dict[str, Any], reference: Path, limits: Limits, how: str
-) -> tuple[list[dict[str, Any]], int]:
+    record: dict[str, Any], reference: Path, limits: Limits, how: str,
+    clades: CladesConfig | None = None,
+) -> tuple[list[dict[str, Any]], int]:  # fmt: skip
     """Compare every figure in a build ``record``; return the rows and the number failing."""
     manifest = record
     if limits.adoption.status not in ("provisional", "final"):
@@ -276,6 +315,7 @@ def compare_report(
     ]
     rows: list[dict[str, Any]] = []
     failed = 0
+    clade_cache: dict[str, Any] = {}
     for fig in manifest["figures"]:
         slot = fig["slot"]
         new = json.loads(Path(fig["i7"]).read_text())
@@ -303,7 +343,8 @@ def compare_report(
             failed += status == "FAIL"
             rows.append({"slot": slot, "status": status, "geo_checks": checks, "detail": res})
         elif new["kind"] == "tree":
-            res = trees.compare_figures(json.loads(ref_path.read_text()), new)
+            clade_set = clade_set_for(new, clades, clade_cache) if clades else None
+            res = trees.compare_figures(json.loads(ref_path.read_text()), new, clade_set)
             checks = tree_checks(res, limits.tree)
             apply_expected(slot, checks, limits.expected)
             status = slot_status(checks)
@@ -503,10 +544,15 @@ def main(argv: list[str] | None = None) -> int:
         help="loose (default): name spelling-normalised + passage class; see maps.spelling_key",
     )  # fmt: skip
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--clades", type=Path,
+        help="clades config (TOML): map tree clade labels to canonical names before comparing",
+    )  # fmt: skip
     args = parser.parse_args(argv)
     limits = load_config(args.limits, Limits)
+    clades = load_config(args.clades, CladesConfig) if args.clades else None
     manifest = json.loads(args.record.read_text())
-    rows, failed = compare_report(manifest, args.reference, limits, args.match)
+    rows, failed = compare_report(manifest, args.reference, limits, args.match, clades)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "COMPARISON.json").write_text(json.dumps(rows, indent=1))
     report_md = markdown(manifest, rows, args.limits.name, args.match, limits.adoption)

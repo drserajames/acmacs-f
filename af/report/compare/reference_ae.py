@@ -243,8 +243,11 @@ def tjz_leaves(tjz: Path) -> list[dict[str, Any]]:
         if children:
             stack.extend(reversed(children))
         else:
-            clades = node.get("L") or [None]
-            out.append({"id": node["n"], "date": node.get("d"), "clade": clades[-1]})
+            tags = list(node.get("L") or [])
+            # "clade" stays the last tag (ae's own display choice); "clade_tags" keeps every tag,
+            # because the last is sometimes a legacy name coarser than an earlier canonical one.
+            out.append({"id": node["n"], "date": node.get("d"),
+                        "clade": tags[-1] if tags else None, "clade_tags": tags})  # fmt: skip
     return out
 
 
@@ -273,7 +276,8 @@ def tree_i7(
         position = order.get(leaf["id"])
         leaves.append({
             "id": leaf["id"], "name": strain_name(leaf["id"]), "date": leaf["date"],
-            "clade": leaf["clade"], "shown": position is not None, "order": position,
+            "clade": leaf["clade"], "clade_tags": leaf["clade_tags"],
+            "shown": position is not None, "order": position,
         })  # fmt: skip
     unknown = set(order) - {leaf["id"] for leaf in leaves}
     if unknown:
@@ -284,6 +288,8 @@ def tree_i7(
         sections.append({
             "clade": section["label"], "prefix": section["prefix"],
             "first_leaf": strain_name(section["first"]), "last_leaf": strain_name(section["last"]),
+            # Drawn positions: a strain name can be drawn twice, so names alone can be ambiguous.
+            "first_order": first, "last_order": last,
             "n_leaves": (last - first + 1) if first is not None and last is not None else None,
         })  # fmt: skip
     series = parse_time_series(tal)
