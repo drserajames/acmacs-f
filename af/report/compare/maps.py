@@ -9,7 +9,8 @@ says which one it is:
 - clade grouping: adjusted Rand index, which ignores what the clades are called;
 - geometry: per-point displacement after a Procrustes fit (rotation, reflection and
   translation, no scaling, because map units are log2 fold). The rotation and reflection are
-  reported separately, since a reader sees a turned map as different;
+  reported separately, since a reader sees a turned map as different. Orientation comes from
+  the bulk (points moved more than 1 unit left out; see :func:`bulk_orientation`);
 - relationships: the change in clade-to-clade centroid distances. This catches a whole clade
   moving, which a point percentile misses when the clade is small.
 
@@ -92,6 +93,23 @@ def procrustes(a: Sequence[XY], b: Sequence[XY]) -> Fit:
         theta, dist = theta_r, dist_r
     rmsd = math.sqrt(sum(d * d for d in dist) / len(dist))
     return Fit(dist, rmsd, math.degrees(theta), reflected)
+
+
+BULK_MOVE_MAX = 1.0  # units: points moved further than this are left out of the orientation fit
+
+
+def bulk_orientation(a: Sequence[XY], b: Sequence[XY], fit: Fit) -> Fit:
+    """Orientation of the bulk of the map: refit without the points the full fit moved > 1 unit.
+
+    A least-squares fit over every point rotates to compromise with the points that genuinely
+    moved (a refused guard, a dropped hand move), so a map with 9% of its points moved can read as
+    turned 4.7 degrees when its bulk is not turned at all. The reader sees the bulk. If fewer than
+    half the points are within the cut, the full fit is used (there is no stable bulk to orient by).
+    """
+    keep = [i for i, dist in enumerate(fit.distances) if dist <= BULK_MOVE_MAX]
+    if len(keep) < max(3, len(a) // 2):
+        return fit
+    return procrustes([a[i] for i in keep], [b[i] for i in keep])
 
 
 def adjusted_rand(x: Sequence[str], y: Sequence[str]) -> float:
@@ -210,11 +228,15 @@ def compare(ref: dict[str, Any], new: dict[str, Any], how: str = "name") -> dict
     }  # fmt: skip
     pairs = ag_pairs + sr_pairs
     if len(pairs) >= 3:
-        fit = procrustes([tuple(p[1]["xy"]) for p in pairs], [tuple(p[2]["xy"]) for p in pairs])
+        a_xy = [tuple(p[1]["xy"]) for p in pairs]
+        b_xy = [tuple(p[2]["xy"]) for p in pairs]
+        fit = procrustes(a_xy, b_xy)
+        bulk = bulk_orientation(a_xy, b_xy, fit)
         d, n_ag = fit.distances, len(ag_pairs)
         out["procrustes"] = {
             "points": len(d), "rmsd": fit.rmsd,
-            "rotation_deg": fit.rotation_deg, "reflected": fit.reflected,
+            "rotation_deg": bulk.rotation_deg, "reflected": bulk.reflected,
+            "rotation_deg_all_points": fit.rotation_deg,
             "median": _percentile(d, 50), "p95": _percentile(d, 95), "max": max(d),
             "frac_gt_1": sum(x > 1 for x in d) / len(d),
             "frac_gt_2": sum(x > 2 for x in d) / len(d),

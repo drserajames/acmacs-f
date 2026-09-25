@@ -393,3 +393,13 @@ def test_map_flags_are_printed(tmp_path: Path) -> None:
     )  # fmt: skip
     text = markdown({"report": "r", "built": "b"}, [row], "l.toml", "name", limits.adoption)
     assert "- map/x/all: move refused: guard 4.5 u > cap 4.0 u" in text
+
+
+def test_orientation_is_of_the_bulk_not_pulled_by_moved_points() -> None:
+    a = _cloud(200, 11)
+    b = list(a)
+    for i in range(20):  # 10% of points move 6 units: a real change in the map
+        b[i] = (b[i][0] + 6.0, b[i][1] + 2.0)
+    res = maps.compare(_map(a, ["X"] * 200), _map(b, ["X"] * 200))["procrustes"]
+    assert abs(res["rotation_deg"]) < 1e-6  # the bulk is not turned at all
+    assert abs(res["rotation_deg_all_points"]) > abs(res["rotation_deg"])
