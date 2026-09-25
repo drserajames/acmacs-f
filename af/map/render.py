@@ -265,6 +265,8 @@ def i7_document(
         "painted": sum(p.colour is not None for p in shown_ag),
         "sequenced_unpainted": scene.sequenced_unpainted,
         "unsequenced": sum(not p.sequenced for p in shown_ag),
+        "vaccines_recoloured_from_cell": scene.vaccines_recoloured,
+        "vaccines_without_cell_preparation": list(scene.vaccines_without_cell),
     }
     if flags:
         # Short notes about what happened while the map was made: a curation rule that refused,
