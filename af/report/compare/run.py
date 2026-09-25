@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from af.report.compare import maps
+from af.report.compare import maps, trees
 from af.util.config import load_config
 
 
@@ -45,8 +45,12 @@ class MapLimits:
 
 @dataclass(frozen=True)
 class TreeLimits:
-    rf_normalised_max: float | None = None
+    rf_normalised_max: float | None = None  # tree store vs tree store (compare.trees.compare)
     clade_ari_min: float | None = None
+    # tree figures (I7), reported and not gated until limits are agreed:
+    leaves_jaccard_min: float | None = None
+    order_spearman_min: float | None = None
+    section_jaccard_min: float | None = None
 
 
 @dataclass(frozen=True)
@@ -246,9 +250,11 @@ def compare_report(
     if limits.adoption.status == "provisional" and not limits.adoption.review:
         raise ValueError("adoption.review: a provisional set must say what re-tests it")
     known = {e.check for e in limits.expected}
-    unknown = sorted(known - set(MAP_CHECKS))
+    unknown = sorted(known - set(MAP_CHECKS) - set(TREE_CHECKS))
     if unknown:
-        raise ValueError(f"expected: unknown check names {unknown}; valid: {list(MAP_CHECKS)}")
+        raise ValueError(
+            f"expected: unknown check names {unknown}; valid: {[*MAP_CHECKS, *TREE_CHECKS]}"
+        )
     used = {f["slot"] for f in manifest["figures"]}
     orphans = sorted(
         ({e.slot for e in limits.expected} | {s for e in limits.excused for s in e.slots}) - used
@@ -280,9 +286,33 @@ def compare_report(
             rows.append({"slot": slot, "status": status, "checks": checks, "detail": res,
                          "excused": notes,
                          "flags": list(new["map"].get("flags", []))})  # fmt: skip
+        elif new["kind"] == "tree":
+            res = trees.compare_figures(json.loads(ref_path.read_text()), new)
+            checks = tree_checks(res, limits.tree)
+            apply_expected(slot, checks, limits.expected)
+            status = slot_status(checks)
+            failed += status == "FAIL"
+            rows.append({"slot": slot, "status": status, "tree_checks": checks, "detail": res})
         else:
             rows.append({"slot": slot, "status": f"{new['kind']}: not compared on I7 yet"})
     return rows, failed
+
+
+TREE_CHECKS = ("leaves jaccard", "order spearman", "clade ARI (tree)", "section min jaccard",
+               "time series same")  # fmt: skip
+
+
+def tree_checks(res: dict[str, Any], lim: TreeLimits) -> list[dict[str, Any]]:
+    return [
+        _check("leaves jaccard", res["jaccard"], ">=", lim.leaves_jaccard_min),
+        _check("order spearman", res["order_spearman"], ">=", lim.order_spearman_min),
+        _check("clade ARI (tree)", res["clade"]["adjusted_rand"], ">=", lim.clade_ari_min),
+        _check(
+            "section min jaccard", res["sections"]["min_jaccard"], ">=", lim.section_jaccard_min
+        ),  # fmt: skip
+        # A different time-series window is always a difference worth failing on.
+        _check("time series same", float(res["time_series"]["same"]), ">=", 1.0),
+    ]
 
 
 def _cell(check: dict[str, Any]) -> str:
@@ -312,7 +342,10 @@ def markdown(
     notes: list[str] = []
     one_sided: list[str] = []
     flagged: list[str] = []
+    tree_rows = [row for row in rows if "tree_checks" in row]
     for row in rows:
+        if "tree_checks" in row:
+            continue
         if "checks" in row:
             a, s = row["detail"]["antigens"], row["detail"]["sera"]
             counts = (
@@ -328,6 +361,20 @@ def markdown(
             flagged += [f"- {row['slot']}: {flag}" for flag in row.get("flags", [])]
         else:
             lines.append(f"| {row['slot']} | {row['status']} | | | |" + " |" * len(MAP_CHECKS))
+    if tree_rows:
+        header = "| Tree slot | Status | leaves only ref / only new | " + " | ".join(TREE_CHECKS)
+        lines += ["", header + " |", "|---|---|---|" + "---|" * len(TREE_CHECKS)]
+        for row in tree_rows:
+            d = row["detail"]
+            lines.append(f"| {row['slot']} | {row['status']} | {len(d['only_ref_keys'])} / "
+                         f"{len(d['only_new_keys'])} | "
+                         + " | ".join(_cell(c) for c in row["tree_checks"]) + " |")  # fmt: skip
+            notes += [f"- {row['slot']} / {c['check']}: {c['expected']}"
+                      for c in row["tree_checks"] if "expected" in c]  # fmt: skip
+            sec = d["sections"]
+            if sec["only_ref"] or sec["only_new"]:
+                notes.append(f"- {row['slot']}: sections only in ref {sec['only_ref']}, "
+                             f"only in new {sec['only_new']}")  # fmt: skip
     if notes:
         lines += ["", "Named differences:", *notes]
     if flagged:

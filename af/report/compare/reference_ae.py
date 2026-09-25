@@ -1,4 +1,4 @@
-"""Convert a shipped (ae-built) report's maps into I7 documents: the comparison's reference side.
+"""Convert a shipped (ae-built) report's maps and trees into I7 documents: the reference side.
 
 A tool, run by hand against a read-only round folder (or a frozen snapshot of one). It needs
 ae's compiled ``ae_backend`` only to bake a named semantic style into per-point colours
@@ -31,8 +31,10 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import lzma
 import math
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -229,14 +231,113 @@ def map_i7(
     }
 
 
+def tjz_leaves(tjz: Path) -> list[dict[str, Any]]:
+    """Every leaf of an ae tree file: its name (with ae's hash suffix), date and finest clade."""
+    raw = tjz.read_bytes()
+    doc = json.loads(lzma.decompress(raw) if raw[:6] == b"\xfd7zXZ\x00" else raw)
+    out: list[dict[str, Any]] = []
+    stack = [doc["tree"]]
+    while stack:  # iterative: trees are deeper than Python's stack
+        node = stack.pop()
+        children = node.get("t")
+        if children:
+            stack.extend(reversed(children))
+        else:
+            clades = node.get("L") or [None]
+            out.append({"id": node["n"], "date": node.get("d"), "clade": clades[-1]})
+    return out
+
+
+def tree_i7(
+    tjz: Path, tal: Path, pdf: Path, subtype: str, tal_draw: Path, work: Path
+) -> dict[str, Any]:
+    """The I7 document for one shipped tree figure: which leaves it draws, in which order.
+
+    The leaf list is tal-draw's own (``<tree> <out>.names``), through ae's ``make_tree``, which is
+    the same code path the report's ``tree/0do`` runs, so the hides, the date filter and the
+    ladderized order are what the figure shows. Verified on the Sep 2026 round: re-rendering
+    with these settings gives the shipped PDFs pixel for pixel (H1, H3; B/Vic differs only by a
+    title). Sections and the time-series window come from ae's ``.tal`` readers.
+    """
+    from ae.report.trees import make_tree  # the reference tool only; see module docstring
+    from ae.tal.section_maps import parse_time_series, sections_for
+
+    names_file = work / f"{tjz.stem}.names"
+    make_tree(tjz, tal, names_file, tal_draw=str(tal_draw))
+    drawn = names_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    order = {name: i for i, name in enumerate(drawn)}
+    if len(order) != len(drawn):
+        raise ValueError(f"{tjz}: tal-draw listed a leaf twice")
+    leaves = []
+    for leaf in tjz_leaves(tjz):
+        position = order.get(leaf["id"])
+        leaves.append({
+            "id": leaf["id"], "name": strain_name(leaf["id"]), "date": leaf["date"],
+            "clade": leaf["clade"], "shown": position is not None, "order": position,
+        })  # fmt: skip
+    unknown = set(order) - {leaf["id"] for leaf in leaves}
+    if unknown:
+        raise ValueError(f"{tjz}: tal-draw drew {len(unknown)} leaves the tree file does not have")
+    sections = []
+    for section in sections_for(tal, str(tjz)):
+        first, last = order.get(section["first"]), order.get(section["last"])
+        sections.append({
+            "clade": section["label"], "prefix": section["prefix"],
+            "first_leaf": strain_name(section["first"]), "last_leaf": strain_name(section["last"]),
+            "n_leaves": (last - first + 1) if first is not None and last is not None else None,
+        })  # fmt: skip
+    series = parse_time_series(tal)
+    return {
+        "i7_version": I7_VERSION,
+        "kind": "tree",
+        "title": f"{subtype} phylogenetic tree (shipped)",
+        "placeholder": False,
+        "figure": {"pdf": str(pdf), "sha256": sha256_path(pdf), "pages": 1},
+        "provenance": {
+            "producer": "af.report.compare.reference_ae",
+            "created": dt.datetime.fromtimestamp(pdf.stat().st_mtime, dt.UTC).isoformat(),
+            "tree": str(tjz),
+            "tree_sha256": sha256_path(tjz),
+            "tal": str(tal),
+            "tal_sha256": sha256_path(tal),
+            "tal_draw": str(tal_draw),
+            "tal_draw_sha256": sha256_path(tal_draw),
+        },  # fmt: skip
+        "tree": {
+            "subtype": subtype,
+            "leaves": leaves,
+            "sections": sections,
+            "time_series": {"first": series[0], "last": series[1]} if series else None,
+        },
+    }
+
+
+def strain_name(leaf_id: str) -> str:
+    """ae leaf id without its ``_<passage>_<hash>`` suffix."""
+    from af.report.compare.trees import strain_key
+
+    return strain_key(leaf_id)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Shipped ae maps -> I7 reference documents.")
+    parser = argparse.ArgumentParser(description="Shipped ae maps and trees -> I7 references.")
     parser.add_argument("round_dir", type=Path)
     parser.add_argument("out_dir", type=Path)
-    parser.add_argument("maps", nargs="+", metavar="FOLDER:VARIANT")
+    parser.add_argument("maps", nargs="*", metavar="FOLDER:VARIANT")
     parser.add_argument("--chart", default="styled.ace")
     parser.add_argument("--projection", type=int, default=0, help="calibration only")
+    parser.add_argument(
+        "--tree", action="append", default=[], metavar="SLOT=SUBTYPE,TREE,TAL,PDF",
+        help="a tree figure, paths relative to round_dir; e.g. "
+        "tree/h3/report=h3,tree/h3.asr.after-2021.tjz,tree/h3.after-2021.tal,"
+        "tree/h3.asr.after-2021.pdf",
+    )  # fmt: skip
+    parser.add_argument("--tal-draw", type=Path, help="ae's tal-draw binary (required with --tree)")
     args = parser.parse_args(argv)
+    if not args.maps and not args.tree:
+        parser.error("nothing to extract: give FOLDER:VARIANT maps and/or --tree")
+    if args.tree and (args.tal_draw is None or not args.tal_draw.is_file()):
+        parser.error("--tree needs --tal-draw pointing at the tal-draw binary")
     args.out_dir.mkdir(parents=True, exist_ok=True)
     for item in args.maps:
         folder, sep, variant = item.partition(":")
@@ -252,6 +353,20 @@ def main(argv: list[str] | None = None) -> int:
             drawn = sum(p["shown"] and p["in_viewport"] for p in doc["map"]["antigens"])
             print(f"{out.name}: {len(doc['map']['antigens'])} antigens, {drawn} drawn in frame",
                   file=sys.stderr)  # fmt: skip
+    for item in args.tree:
+        slot, sep, spec = item.partition("=")
+        parts = spec.split(",")
+        if not sep or len(parts) != 4:
+            parser.error(f"{item!r}: expected SLOT=SUBTYPE,TREE,TAL,PDF")
+        subtype, tree, tal, pdf = parts
+        with tempfile.TemporaryDirectory() as work:
+            doc = tree_i7(args.round_dir / tree, args.round_dir / tal, args.round_dir / pdf,
+                          subtype, args.tal_draw, Path(work))  # fmt: skip
+        out = args.out_dir / f"{slot.replace('/', '.')}.i7.json"
+        out.write_text(json.dumps(doc))
+        leaves = doc["tree"]["leaves"]
+        print(f"{out.name}: {len(leaves)} leaves, {sum(x['shown'] for x in leaves)} drawn, "
+              f"{len(doc['tree']['sections'])} sections", file=sys.stderr)  # fmt: skip
     return 0
 
 
