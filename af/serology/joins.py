@@ -46,20 +46,33 @@ STATUSES = ("matched", "ambiguous", "not_in_store", "no_link")
 
 @dataclass
 class LinkCounts:
+    clades_joined: bool = True
     by_status: dict[str, int] = field(default_factory=dict)
     by_status_and_pairing: dict[tuple[str, str], int] = field(default_factory=dict)
     matched_without_clade_row: int = 0
     matched_with_empty_clade: int = 0
 
 
-def link_sequences(con: Any, isolates: Sequence[Path], clades: Sequence[Path]) -> LinkCounts:
-    """Define the view ``antigen_sequences`` (one row per antigen link) and count it."""
+def link_sequences(con: Any, isolates: Sequence[Path], clades: Sequence[Path] | None) -> LinkCounts:
+    """Define the view ``antigen_sequences`` (one row per antigen link) and count it.
+
+    ``clades=None`` joins sequences and places only, deliberately (for example before the
+    clade store exists); the clade columns are then empty and the counts say so. An empty
+    list is still an error: it means clade files were expected and none were found.
+    """
     if not isolates:
         raise StoreError("no sequence isolates given: cannot join antigens to sequences")
-    if not clades:
+    if clades is not None and not clades:
         raise StoreError("no clade assignments given: cannot join antigens to clades")
     con.execute(f"CREATE OR REPLACE VIEW isolates AS SELECT * FROM {_parquet(isolates)}")
-    con.execute(f"CREATE OR REPLACE VIEW clade_rows AS SELECT * FROM {_parquet(clades)}")
+    if clades is None:
+        con.execute(
+            "CREATE OR REPLACE VIEW clade_rows AS SELECT NULL::VARCHAR AS epi_isl, "
+            "NULL::VARCHAR AS accession, NULL::VARCHAR AS clade, NULL::VARCHAR AS method "
+            "WHERE false"
+        )
+    else:
+        con.execute(f"CREATE OR REPLACE VIEW clade_rows AS SELECT * FROM {_parquet(clades)}")
     _refuse_duplicate_clade_rows(con)
     con.execute(
         """
@@ -84,7 +97,9 @@ def link_sequences(con: Any, isolates: Sequence[Path], clades: Sequence[Path]) -
         LEFT JOIN clade_rows k ON k.epi_isl = i.epi_isl AND k.accession = i.accession
         """
     )
-    return _counts(con)
+    counts = _counts(con)
+    counts.clades_joined = clades is not None
+    return counts
 
 
 def _refuse_duplicate_clade_rows(con: Any) -> None:

@@ -96,25 +96,44 @@ def test_missing_inputs_and_duplicate_clade_rows_are_refused(
         link_sequences(con, [isolates], [doubled])
 
 
+def test_sequences_only_when_clades_are_deliberately_left_out(
+    con: duckdb.DuckDBPyConnection, tmp_path: Path
+) -> None:
+    isolates, _ = _inputs(con, tmp_path)
+    counts = link_sequences(con, [isolates], None)
+    assert not counts.clades_joined
+    assert counts.by_status["matched"] == 4
+    assert counts.matched_without_clade_row == 4
+    place = con.execute(
+        "SELECT place FROM antigen_sequences WHERE table_id = 't1' AND position = 0"
+    ).fetchone()
+    assert place == ("PLACE-A",)
+
+
 def test_preparation_sequences_agree_or_conflict(tmp_path: Path, syn: Any) -> None:
-    """One preparation in two tables naming one sequence gets it; naming two gets none."""
-    same = {"name": syn.virus("Somewhere", 1), "passage": "MDCK1", "date": "2021-01-05"}
-    split = {"name": syn.virus("Somewhere", 2), "passage": "SIAT1", "date": "2021-01-06"}
+    """One preparation in two tables naming one sequence gets it; naming two gets none.
+
+    The links come from the tables' own epi_isl / sequence_pairing fields, through the
+    antigen_links view that query.connect defines.
+    """
+
+    def antigen(number: int, passage: str, epi: str, pairing: str) -> dict[str, Any]:
+        name = syn.virus("Somewhere", number)
+        return {"name": name, "passage": passage, "date": "2021-01-05", "epi_isl": epi,
+                "sequence_pairing": pairing}  # fmt: skip
+
     serum = {"name": syn.virus("Elsewhere", 3), "serum_id": "S-1"}
+    t1 = [antigen(1, "MDCK1", "EPI_ISL_1", "proxy"), antigen(2, "SIAT1", "EPI_ISL_2", "exact")]
+    t2 = [antigen(1, "MDCK1", "EPI_ISL_1", "exact"), antigen(2, "SIAT1", "EPI_ISL_4", "exact")]
     tables = [
-        syn.table("t1", [same, split], [serum], [[["80"]], [["40"]]]),
-        syn.table("t2", [same, split], [serum], [[["160"]], [["40"]]], date="2021-03-05"),
+        syn.table("t1", t1, [serum], [[["80"]], [["40"]]]),
+        syn.table("t2", t2, [serum], [[["160"]], [["40"]]], date="2021-03-05"),
     ]
     build(tables, tmp_path / "v1", syn.rules)
     con = query.connect(tmp_path / "v1")
-    con.execute(
-        """CREATE VIEW antigen_links AS SELECT * FROM (VALUES
-            ('t1', 0, 'EPI_ISL_1', 'proxy'), ('t2', 0, 'EPI_ISL_1', 'exact'),
-            ('t1', 1, 'EPI_ISL_2', 'exact'), ('t2', 1, 'EPI_ISL_4', 'exact')
-        ) AS v(table_id, position, epi_isl, pairing)"""
-    )
     isolates, clades = _inputs(con, tmp_path)
-    link_sequences(con, [isolates], [clades])
+    counts = link_sequences(con, [isolates], [clades])
+    assert counts.by_status["matched"] == 4
     got = {key[1]: value for key, value in preparation_sequences(con).items()}
     agreed = got[syn.virus("Somewhere", 1)]
     assert (agreed.accession, agreed.clade, agreed.pairing) == ("ACC1", "CLADE-X", "exact")
