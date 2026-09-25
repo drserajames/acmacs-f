@@ -318,3 +318,17 @@ def test_i7_rejects_a_drawn_point_without_colour() -> None:
     }  # fmt: skip
     with pytest.raises(I7Error, match="drawn but colour is None"):
         validate(doc)
+
+
+def test_amendments_are_printed_with_the_status(tmp_path: Path) -> None:
+    from af.report.compare.run import markdown
+
+    limits = parse_config(
+        {"adoption": {"status": "provisional", "adopted_by": "a reviewer",
+                      "adopted": dt.date(2026, 9, 25), "review": "later",
+                      "amendments": [{"date": dt.date(2026, 9, 26), "by": "a reviewer",
+                                      "change": "tree limit withdrawn"}]}},
+        Limits, base_dir=tmp_path,
+    )  # fmt: skip
+    text = markdown({"report": "r", "built": "b"}, [], "l.toml", "name", limits.adoption)
+    assert "amended 2026-09-26 by a reviewer: tree limit withdrawn" in text
