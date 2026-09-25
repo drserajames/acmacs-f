@@ -145,7 +145,7 @@ def map_checks(res: dict[str, Any], lim: MapLimits) -> list[dict[str, Any]]:
     p, c = res.get("procrustes", {}), res.get("clade_centroids", {})
     rotation = abs(p["rotation_deg"]) if "rotation_deg" in p else nan
     reflected = float(p["reflected"]) if "reflected" in p else nan
-    return [
+    checks = [
         _check("antigens jaccard", a["jaccard"], ">=", lim.antigens_jaccard_min),
         _check("sera jaccard", s["jaccard"], ">=", lim.sera_jaccard_min),
         _check("clade ARI", a["clade"]["adjusted_rand"], ">=", lim.clade_ari_min),
@@ -157,6 +157,14 @@ def map_checks(res: dict[str, Any], lim: MapLimits) -> list[dict[str, Any]]:
         _check("reflected", reflected, "<=", 0.0 if lim.rotation_deg_max is not None else None),
         _check("RMSD (not gated)", p.get("rmsd", nan), "<=", None),
     ]
+    if p.get("identical_layout"):
+        for check in checks:
+            if check["check"] in DISPLACEMENT_CHECKS:
+                check.update(ok=None, not_tested="identical layout on both sides")
+    return checks
+
+
+DISPLACEMENT_CHECKS = ("p95 displacement", "frac moved > 1", "clade centroid max diff")
 
 
 def apply_expected(slot: str, checks: list[dict[str, Any]], expected: list[Expected]) -> None:
@@ -367,6 +375,8 @@ def tree_checks(res: dict[str, Any], lim: TreeLimits) -> list[dict[str, Any]]:
 
 
 def _cell(check: dict[str, Any]) -> str:
+    if check.get("not_tested"):
+        return "n/t"
     mark = {False: " ✗", "expected": " (expected)", "stale": " STALE"}.get(check["ok"], "")
     return f"{check['value']:.3f}{mark}"
 
@@ -443,6 +453,17 @@ def markdown(
                       for c in row["geo_checks"] if "expected" in c]  # fmt: skip
     if notes:
         lines += ["", "Named differences:", *notes]
+    untested = [
+        r["slot"] for r in rows if r.get("detail", {}).get("procrustes", {}).get("identical_layout")
+    ]
+    if untested:
+        note = (
+            f"**Displacement not tested (n/t) on {len(untested)} map figure(s):** af's layout is "
+            "the reference's own, the same up to rotation and translation, so p95, fraction "
+            "moved and clade centroids would compare a map with itself. Points shown, clades, "
+            "greying and orientation are still tested."
+        )
+        lines += ["", note]
     if flagged:
         lines += ["", "Flagged by the map step for review (the figure carries these):", *flagged]
     if one_sided:

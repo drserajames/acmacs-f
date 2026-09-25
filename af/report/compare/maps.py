@@ -22,7 +22,6 @@ and counted, never merged.
 from __future__ import annotations
 
 import math
-import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -36,14 +35,16 @@ MATCH_MODES = ("id", "name", "loose")
 
 
 def spelling_key(name: str) -> str:
-    """Name with everything but letters and digits removed, upper case.
+    """Name with punctuation and spacing removed, upper case; letters of every script kept.
 
     af keeps each lab's spelling of a location (DECISIONS 24 Sep: no locdb rewrites), where ae
     rewrote names, so the same virus is COTE D'IVOIRE on one side and COTE DIVOIRE on the other,
-    or LASERENA and LA SERENA. Two different strains that differ only in punctuation or spacing
-    would collide; they are then dropped as ambiguous and counted, never merged.
+    or LASERENA and LA SERENA. Letters and digits of any script stay: some CNIC places are known
+    only by their Chinese name, and deleting those characters would merge distinct places.
+    Two different strains that differ only in punctuation or spacing would collide; they are
+    then dropped as ambiguous and counted, never merged.
     """
-    return re.sub(r"[^0-9A-Z]", "", name.upper())
+    return "".join(ch for ch in name.upper() if ch.isalnum())
 
 
 def point_key(point: Point, how: str) -> str:
@@ -128,6 +129,10 @@ def procrustes(a: Sequence[XY], b: Sequence[XY]) -> Fit:
     return Fit(dist, rmsd, math.degrees(theta), reflected)
 
 
+# Largest single displacement (units) below which two layouts count as the same up to rotation and
+# translation. Measured on the Sep 2026 stand-ins: coordinates written to ~4 decimals leave
+# max 7.7e-5; a genuinely recomputed layout moved at least one point 9.8e-3. 1e-3 sits between.
+IDENTICAL_MAX = 1e-3
 BULK_MOVE_MAX = 1.0  # units: points moved further than this are left out of the orientation fit
 
 
@@ -282,6 +287,9 @@ def compare(ref: dict[str, Any], new: dict[str, Any], how: str = "name") -> dict
                 for i in sorted(range(len(d)), key=lambda i: -d[i]) if d[i] > 2
             ][:50],
             "rmsd_antigens": math.sqrt(sum(x * x for x in d[:n_ag]) / n_ag) if n_ag else None,
+            # The same layout on both sides (e.g. a stand-in built from the reference's own chart):
+            # displacement then compares a map with itself and tests nothing.
+            "identical_layout": max(d) < IDENTICAL_MAX,
         }  # fmt: skip
         out["clade_centroids"] = clade_centroids(ag_pairs)
     return out
