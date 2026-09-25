@@ -6,23 +6,33 @@ the same refs gets the same figures. Where a dot is drawn, and which region an a
 counts under, both come from the sequence workstream's location lookup, keyed by the
 location part of the strain name: one vocabulary (GISAID's regions) for geo and stat.
 
-Colours need clade assignments; until the clade store exists, ``colour=None`` draws every
-dot uncoloured, deliberately.
+Colours: ``colouring`` gives, per subtype, a colour scheme with its clade set and groups
+(:mod:`af.clades.colours`). Each antigen is matched to its sequence
+(:mod:`af.serology.joins`, the sequence workstream's matcher), the clade comes from the clade
+store, and the aligned sequence from the sequence store, so groups defined by substitutions
+are tested on the virus's own sequence. Without ``colouring`` every dot is uncoloured, on
+purpose; a subtype missing from it is uncoloured too, and the report says so.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from af.geo.colours import DotStyle
+from af.clades.colours import ColourScheme
+from af.clades.groups import GroupSet
+from af.clades.nomenclature import CladeSet
+from af.clades.sequence import AlignedSequence, GapSupport
+from af.geo.colours import UNCOLOURED, ColourCounts, DotStyle, dot_styles
 from af.geo.records import Month, geo_counts, to_i7
 from af.geo.render import render_geo
 from af.seq import locations
+from af.seq.matching import read_passage_rules
 from af.serology import query
+from af.serology.joins import LinkCounts, link_from_store, preparation_sequences
 from af.serology.query import Preparation
 from af.stat.counts import stat_counts
 from af.stat.output import Previous, write_stat
@@ -34,6 +44,15 @@ SEQUENCE_DATASETS = ("h1", "h3", "bvic", "byam")
 GEO_PREFIX = {"A(H1N1)": "h1", "A(H3N2)": "h3", "B": "b"}
 
 
+@dataclass(frozen=True)
+class SubtypeColouring:
+    """How one subtype's dots are coloured: a scheme and the clade set (and groups) it uses."""
+
+    scheme: ColourScheme
+    clade_set: CladeSet
+    group_set: GroupSet | None = None
+
+
 @dataclass
 class OutputsReport:
     serology: StoreRef
@@ -43,6 +62,9 @@ class OutputsReport:
     geo_not_counted: dict[str, Any] = field(default_factory=dict)  # undated / no location
     stat_unknown_region: dict[str, int] = field(default_factory=dict)
     lookup: dict[str, object] = field(default_factory=dict)
+    links: LinkCounts | None = None  # antigen -> sequence matching, when colouring
+    colours: dict[str, ColourCounts] = field(default_factory=dict)  # subtype -> counts
+    uncoloured_subtypes: list[str] = field(default_factory=list)
 
 
 def make_geo_and_stat(
@@ -54,7 +76,8 @@ def make_geo_and_stat(
     out_dir: Path,
     *,
     previous_stat: Previous | None = None,
-    colour: Callable[[Preparation], DotStyle] | None = None,
+    colouring: Mapping[str, SubtypeColouring] | None = None,
+    passage_rules: Path | None = None,
     split_by_lineage: tuple[str, ...] = ("B",),
 ) -> OutputsReport:
     """Write ``geo/<st>-records.json``, ``geo/<st>-YYYY-MM.pdf`` and ``stat/`` for a window."""
@@ -64,7 +87,12 @@ def make_geo_and_stat(
     preps, uses = query.preparations(con), query.serum_uses(con)
     report = OutputsReport(serology=serology, lookup=lookup.counts.to_json())
 
-    geo = geo_counts(preps, first, last, locations.name_location, style_of=colour)
+    style_of = None
+    if colouring is not None:
+        if passage_rules is None:
+            raise ValueError("colouring needs passage_rules (the matcher's passage classes)")
+        style_of = _styles(store, con, preps, colouring, passage_rules, report)
+    geo = geo_counts(preps, first, last, locations.name_location, style_of=style_of)
     geo_dir = out_dir / "geo"
     geo_dir.mkdir(parents=True, exist_ok=True)
     for subtype in sorted({s for s, _, _, _ in geo.dots}):
@@ -93,3 +121,54 @@ def make_geo_and_stat(
     report.files += write_stat(counts, first, last, out_dir / "stat", previous_stat)
     report.stat_unknown_region = dict(counts.unknown_continent)
     return report
+
+
+def _styles(
+    store: Store,
+    con: Any,
+    preps: list[Preparation],
+    colouring: Mapping[str, SubtypeColouring],
+    passage_rules: Path,
+    report: OutputsReport,
+) -> Any:
+    """Match antigens to sequences and clades, and give each preparation its dot style."""
+    report.links = link_from_store(con, store, read_passage_rules(passage_rules), with_clades=True)
+    links = preparation_sequences(con)
+    aligned = _aligned_sequences(store, con)
+    styles = {}
+    for subtype, setting in colouring.items():
+        styles[subtype], report.colours[subtype] = dot_styles(
+            links, aligned.get_pair, setting.scheme, setting.clade_set, setting.group_set
+        )
+    report.uncoloured_subtypes = sorted({p.subtype for p in preps} - set(colouring))
+
+    def style(prep: Preparation) -> DotStyle:
+        found = styles.get(prep.subtype)
+        return found(prep) if found is not None else UNCOLOURED
+
+    return style
+
+
+class _Aligned(dict[tuple[str, str], AlignedSequence]):
+    def get_pair(self, epi_isl: str, accession: str) -> AlignedSequence | None:
+        return self.get((epi_isl, accession))
+
+
+def _aligned_sequences(store: Store, con: Any) -> _Aligned:
+    """Aligned amino acids of every sequence an antigen matched, from the sequence store.
+
+    Nextclade alignments of observed sequences: a gap there is a deletion.
+    """
+    paths = [
+        path.as_posix()
+        for ref in store.list_datasets("sequences")
+        for path in sorted((store.resolve(ref) / "sequences").glob("*/*.parquet"))
+    ]
+    rows = con.execute(
+        "SELECT s.epi_isl, s.accession, s.aa_aligned FROM read_parquet(?) s "
+        "JOIN (SELECT DISTINCT epi_isl, accession FROM antigen_sequences "
+        "      WHERE status = 'matched') m USING (epi_isl, accession) "
+        "WHERE s.aa_aligned IS NOT NULL",
+        [paths],
+    ).fetchall()
+    return _Aligned({(e, a): AlignedSequence(aa, gaps=GapSupport.OBSERVED) for e, a, aa in rows})
