@@ -333,7 +333,7 @@ def build_map(
     store: Store | None,
     out_root: Path,
     vaccine_table: Sequence[Any],
-    defaults: Sequence[VaccineDisable],
+    vaccine_defaults: dict[str, tuple[VaccineDisable, ...]],
     created: dt.datetime,
 ) -> MapResult:
     """Build every window of one map. Raises :class:`BuildError` with the folder named."""
@@ -422,7 +422,12 @@ def build_map(
         )
         for i, a in enumerate(chart.antigens)
     ]
-    disable: list[VaccineDisable] = list(defaults)
+    # Subtype defaults are chosen by the chart's OWN subtype, never guessed from the folder name:
+    # folder naming is a local convention, and af must not depend on one (design rule 10).
+    subtype = chart.info.get("V", "")
+    disable: list[VaccineDisable] = list(vaccine_defaults.get(subtype, ()))
+    if vaccine_defaults and subtype not in vaccine_defaults:
+        decisions["vaccine_defaults"] = f"no subtype defaults for {subtype!r}"
     for d in cfg.vaccine_disable:
         disable.append(VaccineDisable(d.name, _passage(d.passage), d.reason, d.optional))
     choose = [
@@ -551,14 +556,13 @@ def build(
         raise BuildError(f"no such map(s) in the config: {', '.join(missing)}")
     results = []
     for cfg in wanted:
-        subtype_defaults = vaccine_defaults.get(_subtype_of(cfg, config), ())
         result = build_map(
             cfg,
             config,
             store=store,
             out_root=out_root,
             vaccine_table=vaccine_list,
-            defaults=subtype_defaults,
+            vaccine_defaults=vaccine_defaults,
             created=created,
         )
         results.append(result)
@@ -567,11 +571,6 @@ def build(
         for f in result.flags:
             log(f"    flag: {f}")
     return results
-
-
-def _subtype_of(cfg: MapConfig, config: MapsConfig) -> str:
-    """The subtype a map's vaccine defaults come from, taken from the chart when it is read."""
-    return cfg.folder.split("-")[0]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
