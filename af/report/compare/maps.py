@@ -4,7 +4,8 @@
 groupings, and the same antigenic relationships. Each is measured separately, so a failure
 says which one it is:
 
-- points shown: Jaccard of the points drawn inside the frame;
+- points shown: Jaccard of the points in the map (shown, with coordinates). Points inside the
+  frame on one side only are listed separately: the frame is presentation, not content;
 - clade grouping: adjusted Rand index, which ignores what the clades are called;
 - geometry: per-point displacement after a Procrustes fit (rotation, reflection and
   translation, no scaling, because map units are log2 fold). The rotation and reflection are
@@ -37,8 +38,10 @@ def point_key(point: Point, how: str) -> str:
     return f"{point['name']}|{point['passage_class']}"
 
 
-def visible(point: Point) -> bool:
-    return bool(point["shown"] and point["in_viewport"] and point["xy"])
+def drawn(point: Point) -> bool:
+    """In the map: shown and has coordinates. Whether it falls inside the frame is presentation,
+    compared separately, so a frame that cuts a point off is not reported as a missing virus."""
+    return bool(point["shown"] and point["xy"])
 
 
 def index_points(points: Sequence[Point], how: str) -> tuple[dict[str, Point], int]:
@@ -121,9 +124,10 @@ def _coloured(point: Point) -> bool:
 
 
 def _group(ref: list[Point], new: list[Point], how: str, clades: bool) -> dict[str, Any]:
-    ri, rdup = index_points([p for p in ref if visible(p)], how)
-    ni, ndup = index_points([p for p in new if visible(p)], how)
+    ri, rdup = index_points([p for p in ref if drawn(p)], how)
+    ni, ndup = index_points([p for p in new if drawn(p)], how)
     common = sorted(ri.keys() & ni.keys())
+    in_frame = {k: (bool(ri[k]["in_viewport"]), bool(ni[k]["in_viewport"])) for k in common}
     out: dict[str, Any] = {
         "ref_shown": len(ri), "new_shown": len(ni), "common": len(common),
         "only_ref": len(ri.keys() - ni.keys()), "only_new": len(ni.keys() - ri.keys()),
@@ -132,6 +136,9 @@ def _group(ref: list[Point], new: list[Point], how: str, clades: bool) -> dict[s
         # Full lists: every one-sided point must be listed somewhere a person reads.
         "only_ref_keys": sorted(ri.keys() - ni.keys()),
         "only_new_keys": sorted(ni.keys() - ri.keys()),
+        # Frame: drawn on both sides, inside the frame on one side only.
+        "in_frame_only_ref_keys": sorted(k for k, (r, n) in in_frame.items() if r and not n),
+        "in_frame_only_new_keys": sorted(k for k, (r, n) in in_frame.items() if n and not r),
     }  # fmt: skip
     if clades:
         coloured = [k for k in common if _coloured(ri[k]) and _coloured(ni[k])]

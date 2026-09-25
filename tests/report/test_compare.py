@@ -367,3 +367,12 @@ def test_one_sided_points_are_listed_even_when_the_slot_passes(tmp_path: Path) -
     text = markdown({"report": "r", "built": "b"}, [row], "l.toml", "name", limits.adoption)
     assert row["status"] == "ok"  # Jaccard 0.995 passes the limit ...
     assert "antigens only in new (1)" in text  # ... but the point is still listed
+
+
+def test_a_point_outside_one_frame_is_a_frame_difference_not_a_missing_virus() -> None:
+    pts = [(float(i), float(i % 3)) for i in range(10)]
+    ref, new = _map(pts, ["X"] * 10), _map(pts, ["X"] * 10)
+    ref["map"]["antigens"][4]["in_viewport"] = False  # the reference frame cuts it off
+    res = maps.compare(ref, new)["antigens"]
+    assert res["jaccard"] == 1.0 and res["only_new"] == 0
+    assert res["in_frame_only_new_keys"] == [maps.point_key(new["map"]["antigens"][4], "name")]

@@ -217,7 +217,7 @@ def excuse_points(
                 kept = []
                 for point in points:
                     key = maps.point_key(point, how)
-                    if key in keys and maps.visible(point):
+                    if key in keys and maps.drawn(point):
                         seen[side].add(key)
                     if key not in keys:
                         kept.append(point)
@@ -301,15 +301,19 @@ def markdown(
         f"Report built {manifest['built']}; limits `{limits_name}`; points matched by {how}.", "",
         status, *changes, "",
         "| Slot | Status | antigens only ref / only new | sera only ref / only new | "
+        "antigens in frame only ref / only new | "
         + " | ".join(MAP_CHECKS) + " |",
-        "|---|---|---|---|" + "---|" * len(MAP_CHECKS),
+        "|---|---|---|---|---|" + "---|" * len(MAP_CHECKS),
     ]  # fmt: skip
     notes: list[str] = []
     one_sided: list[str] = []
     for row in rows:
         if "checks" in row:
             a, s = row["detail"]["antigens"], row["detail"]["sera"]
-            counts = f"{a['only_ref']} / {a['only_new']} | {s['only_ref']} / {s['only_new']}"
+            counts = (
+                f"{a['only_ref']} / {a['only_new']} | {s['only_ref']} / {s['only_new']} | "
+                f"{len(a['in_frame_only_ref_keys'])} / {len(a['in_frame_only_new_keys'])}"
+            )
             lines.append(f"| {row['slot']} | {row['status']} | {counts} | "
                          + " | ".join(_cell(c) for c in row["checks"]) + " |")  # fmt: skip
             one_sided += _one_sided(row["slot"], a, s)
@@ -317,7 +321,7 @@ def markdown(
                       for c in row["checks"] if "expected" in c]  # fmt: skip
             notes += [f"- {row['slot']}: {n['note']}" for n in row.get("excused", [])]
         else:
-            lines.append(f"| {row['slot']} | {row['status']} | | |" + " |" * len(MAP_CHECKS))
+            lines.append(f"| {row['slot']} | {row['status']} | | | |" + " |" * len(MAP_CHECKS))
     if notes:
         lines += ["", "Named differences:", *notes]
     if one_sided:
@@ -330,15 +334,20 @@ def _one_sided(slot: str, antigens: dict[str, Any], sera: dict[str, Any]) -> lis
     out = []
     for group, g in (("antigens", antigens), ("sera", sera)):
         for side in ("ref", "new"):
-            keys = g[f"only_{side}_keys"]
-            if keys:
-                shown = ", ".join(keys[:ONE_SIDED_LISTED])
-                more = (
-                    f" … and {len(keys) - ONE_SIDED_LISTED} more"
-                    if len(keys) > ONE_SIDED_LISTED
-                    else ""
-                )
-                out.append(f"- {slot} {group} only in {side} ({len(keys)}): {shown}{more}")
+            kinds = (
+                (f"only_{side}_keys", f"only in {side}"),
+                (f"in_frame_only_{side}_keys", f"inside the frame only in {side}"),
+            )
+            for field_name, what in kinds:
+                keys = g.get(field_name, [])
+                if keys:
+                    listed = ", ".join(keys[:ONE_SIDED_LISTED])
+                    more = (
+                        f" … and {len(keys) - ONE_SIDED_LISTED} more"
+                        if len(keys) > ONE_SIDED_LISTED
+                        else ""
+                    )
+                    out.append(f"- {slot} {group} {what} ({len(keys)}): {listed}{more}")
     return out
 
 
