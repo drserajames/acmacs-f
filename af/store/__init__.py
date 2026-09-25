@@ -1,4 +1,4 @@
-"""Store layout: raw, sequences, tables, trees, chains, serology; snapshots and report manifests.
+"""Store layout: raw, sequences, clades, tables, trees, chains, serology; snapshots, manifests.
 
 Generated data lives in one store root outside git (path from config). Each kind holds
 datasets; each dataset holds immutable, content-addressed versions, a CURRENT pointer,
