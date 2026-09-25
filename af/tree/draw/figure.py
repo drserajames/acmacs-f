@@ -8,10 +8,12 @@ hierarchy, and a :class:`FigureConfig`. Output: the PDF, its I7 JSON and a draw 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from af.store import StoreRef
 
 from .aa_labels import LabelParams, select_labels
 from .defaults import load_defaults
@@ -68,6 +70,7 @@ def make_figure(
     pdf: Path,
     inputs: Mapping[str, str],
     flags: Mapping[str, list[str]] | None = None,
+    store_refs: Sequence[StoreRef] = (),
 ) -> dict[str, Any]:
     """Render ``pdf`` and write its I7 and draw report; return the draw report.
 
@@ -125,7 +128,13 @@ def make_figure(
         geometry=geometry,
     )
     drawn = render(spec, pdf)
-    write_i7(pdf, config.title, tree_block(tree, layout, hz, ts, config.marked_ids), inputs)
+    write_i7(
+        pdf,
+        config.title,
+        tree_block(tree, layout, hz, ts, config.marked_ids),
+        inputs,
+        store_refs=store_refs,
+    )
 
     names = {i: tree.leaf_id[i] for i in layout.leaf_nodes}
     report = {

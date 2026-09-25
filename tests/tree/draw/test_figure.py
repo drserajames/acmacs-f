@@ -139,3 +139,14 @@ def test_clade_names_in_one_column_do_not_overlap():
     assert xa == xb and yb - ya >= 10  # the second name slid past the first
     assert texts[2][1] == 100.0  # another column is unaffected
     plt.close(fig)
+
+
+def test_store_refs_are_recorded_in_the_i7(tmp_path):
+    from af.store import StoreRef
+
+    ref = StoreRef("trees", "t1/report", "0123456789abcdef", "0123456789abcdef" + "0" * 48)
+    make_figure(standard_tree(), PARENTS, config(), tmp_path / "r.pdf", {}, store_refs=[ref])
+    i7 = json.loads((tmp_path / "r.i7.json").read_text())
+    assert i7["provenance"]["store_refs"] == [ref.to_json()]
+    make_figure(standard_tree(), PARENTS, config(), tmp_path / "n.pdf", {})
+    assert "store_refs" not in json.loads((tmp_path / "n.i7.json").read_text())["provenance"]
