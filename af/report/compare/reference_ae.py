@@ -36,6 +36,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from af.map.vaccines import passage_class as af_passage_class
 from af.report.i7 import I7_VERSION
 from af.util.artefacts import sha256_path
 
@@ -126,10 +127,14 @@ def absolute_viewport(xy: list[list[float] | None], v: list[float] | None) -> li
     return [cx - rx / 2, cy - ry / 2, rx, ry]
 
 
-def passage_class(entry: dict[str, Any]) -> str:
-    if entry.get("R"):
-        return "reassortant"
-    return {"c": "cell", "e": "egg"}.get(entry.get("T", {}).get("p", ""), "unknown")
+def passage_class(entry: dict[str, Any]) -> str | None:
+    """af's rule (:func:`af.map.vaccines.passage_class`), applied to the shipped chart's passage.
+
+    Not ae's ``T.p`` attribute: af classes a passage as egg if ANY step was in eggs (DECISIONS
+    25 Sep), ae by the last step only. With one rule on both sides, a preparation keys the same
+    in the comparison. ``None`` means "not a passage" (specimen ids, blanks), as af records it.
+    """
+    return af_passage_class(entry.get("P", ""), entry.get("R", ""))
 
 
 def designation(entry: dict[str, Any]) -> str:
