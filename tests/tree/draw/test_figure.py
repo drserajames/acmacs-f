@@ -43,7 +43,15 @@ def test_figure_writes_pdf_i7_and_report(tmp_path):
     tree = i7["tree"]
     assert tree["time_series"] == {"first": "2024-10", "last": "2026-09"}
     assert len(tree["leaves"]) == 50 and [x["order"] for x in tree["leaves"]][:3] == [0, 1, 2]
-    assert {s["clade"] for s in tree["sections"]} == {"X", "X.1", "X.1.1", "X.2"}
+    # sections = the lettered bands, named by strain name (as the reference extractor writes)
+    sections = [(x["prefix"], x["clade"], x["first_leaf"], x["n_leaves"]) for x in tree["sections"]]
+    assert sections == [
+        ("A", "X.1", "leaf-000", 10),
+        ("B", "X.1.1", "leaf-010", 10),
+        ("C", "X", "leaf-020", 25),
+    ]
+    names = {leaf["name"] for leaf in tree["leaves"]}
+    assert all(x["first_leaf"] in names and x["last_leaf"] in names for x in tree["sections"])
     assert report["aa_label_placement"]["box_overlaps"] == 0
     assert (tmp_path / "figure.draw.json").is_file()
 

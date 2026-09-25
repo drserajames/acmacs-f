@@ -124,7 +124,7 @@ def make_figure(
         geometry=geometry,
     )
     drawn = render(spec, pdf)
-    write_i7(pdf, config.title, tree_block(tree, layout, selection, ts, config.marked_ids), inputs)
+    write_i7(pdf, config.title, tree_block(tree, layout, hz, ts, config.marked_ids), inputs)
 
     names = {i: tree.leaf_id[i] for i in layout.leaf_nodes}
     report = {
