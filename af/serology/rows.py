@@ -21,15 +21,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 from af.serology.titre import parse_reading
 from af.tables.model import Table
 
-AntigenIdentity = Callable[[str, str, Sequence[str], str], "tuple[Any, ...] | None"]
-SerumIdentity = Callable[[str, str, Sequence[str], str], "tuple[Any, ...] | None"]
+# Annotations are passed as the table's list; af.chart.identity accepts a list or a tuple.
+AntigenIdentity = Callable[[str, str, list[str], str], "tuple[Any, ...] | None"]
+SerumIdentity = Callable[[str, str, list[str], str], "tuple[Any, ...] | None"]
 
 
 @dataclass(frozen=True)
