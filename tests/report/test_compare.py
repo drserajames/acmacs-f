@@ -376,3 +376,20 @@ def test_a_point_outside_one_frame_is_a_frame_difference_not_a_missing_virus() -
     res = maps.compare(ref, new)["antigens"]
     assert res["jaccard"] == 1.0 and res["only_new"] == 0
     assert res["in_frame_only_new_keys"] == [maps.point_key(new["map"]["antigens"][4], "name")]
+
+
+def test_map_flags_are_printed(tmp_path: Path) -> None:
+    from af.report.compare.run import markdown
+
+    pts = [(float(i), float(i % 3)) for i in range(10)]
+    res = maps.compare(_map(pts, ["X"] * 10), _map(pts, ["X"] * 10))
+    checks = map_checks(res, MapLimits())
+    row = {"slot": "map/x/all", "status": "ok", "checks": checks, "detail": res,
+           "flags": ["move refused: guard 4.5 u > cap 4.0 u"]}  # fmt: skip
+    limits = parse_config(
+        {"adoption": {"status": "final", "adopted_by": "a reviewer",
+                      "adopted": dt.date(2026, 9, 25)}},
+        Limits, base_dir=tmp_path,
+    )  # fmt: skip
+    text = markdown({"report": "r", "built": "b"}, [row], "l.toml", "name", limits.adoption)
+    assert "- map/x/all: move refused: guard 4.5 u > cap 4.0 u" in text

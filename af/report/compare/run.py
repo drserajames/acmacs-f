@@ -275,7 +275,8 @@ def compare_report(
             status = "FAIL" if any(n["stale"] for n in notes) else slot_status(checks)
             failed += status == "FAIL"
             rows.append({"slot": slot, "status": status, "checks": checks, "detail": res,
-                         "excused": notes})  # fmt: skip
+                         "excused": notes,
+                         "flags": list(new["map"].get("flags", []))})  # fmt: skip
         else:
             rows.append({"slot": slot, "status": f"{new['kind']}: not compared on I7 yet"})
     return rows, failed
@@ -307,6 +308,7 @@ def markdown(
     ]  # fmt: skip
     notes: list[str] = []
     one_sided: list[str] = []
+    flagged: list[str] = []
     for row in rows:
         if "checks" in row:
             a, s = row["detail"]["antigens"], row["detail"]["sera"]
@@ -320,10 +322,13 @@ def markdown(
             notes += [f"- {row['slot']} / {c['check']}: {c['expected']}"
                       for c in row["checks"] if "expected" in c]  # fmt: skip
             notes += [f"- {row['slot']}: {n['note']}" for n in row.get("excused", [])]
+            flagged += [f"- {row['slot']}: {flag}" for flag in row.get("flags", [])]
         else:
             lines.append(f"| {row['slot']} | {row['status']} | | | |" + " |" * len(MAP_CHECKS))
     if notes:
         lines += ["", "Named differences:", *notes]
+    if flagged:
+        lines += ["", "Flagged by the map step for review (the figure carries these):", *flagged]
     if one_sided:
         lines += ["", "Points on one side only (after excused points):", *one_sided]
     return "\n".join(lines) + "\n"
