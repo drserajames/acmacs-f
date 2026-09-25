@@ -127,6 +127,20 @@ class Orientation:
         }
 
 
+def drawn_pairs(pairs: NDArray[np.intp], reference_shown: NDArray[np.bool_]) -> NDArray[np.intp]:
+    """Keep only pairs whose reference point was actually DRAWN on the reference map.
+
+    Orientation is presentation, so it should follow what a reader can compare. A point the
+    reference map hid still has coordinates, and including it turns the visible part of the new
+    map against the old one. Measured on the Sep 2026 round: the only chart with hidden points in
+    its previous map (242 of 2636) fits 7.3 degrees differently, and the drawn-only fit is the
+    better one (RMSD 1.04 against 1.55). Every other chart is unaffected.
+    """
+    if reference_shown.ndim != 1:
+        raise ValueError("reference_shown must be a 1-D mask over the reference's points")
+    return pairs[reference_shown[pairs[:, 1]]]
+
+
 def orient(
     raw: Array,
     reference_displayed: Array,
@@ -140,7 +154,10 @@ def orient(
     """Orient ``raw`` (this map's layout) to ``reference_displayed`` (the reference map as drawn).
 
     ``pairs`` holds (row in raw, row in reference) for points that are the same virus or serum;
-    matching is the caller's job (chart identity keys). Fails, rather than guessing, when fewer
+    matching is the caller's job (chart identity keys). Pass them through :func:`drawn_pairs`
+    first: a point the reference map did not draw should not decide how this map is turned.
+
+    Fails, rather than guessing, when fewer
     than ``min_common`` pairs have coordinates, or when the best fit with a reflection and the
     best without differ in RMSD by less than ``min_reflection_margin``: cross-lab references
     measured on the Sep 2026 round flip chirality with small changes to the matching, and a

@@ -7,6 +7,7 @@ from af.map.orient import (
     OrientationError,
     RotationOverride,
     decompose,
+    drawn_pairs,
     orient,
     procrustes,
     rotation,
@@ -101,3 +102,19 @@ def test_orient_refuses_ambiguous_chirality() -> None:
         min_common=10,
         min_reflection_margin=0.5,
     )
+
+
+def test_drawn_pairs_keeps_only_points_the_reference_drew() -> None:
+    raw = cloud(20)
+    ref = raw @ rotation(15.0)
+    shown = np.ones(20, bool)
+    shown[:5] = False  # the reference map hid these
+    kept = drawn_pairs(pairs(20), shown)
+    assert len(kept) == 15
+    assert kept[:, 1].min() == 5
+    # a hidden group that sits elsewhere must not turn the fit
+    ref[:5] = ref[:5] @ rotation(90.0) + [30.0, 30.0]
+    on_all = procrustes(raw[pairs(20)[:, 0]], ref[pairs(20)[:, 1]])
+    on_drawn = procrustes(raw[kept[:, 0]], ref[kept[:, 1]])
+    assert on_drawn.degrees == pytest.approx(15.0)
+    assert abs(on_all.degrees - 15.0) > 1.0
