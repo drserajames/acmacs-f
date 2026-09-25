@@ -113,3 +113,17 @@ def test_hide_by_flag_reason_is_opt_in_and_counted(tmp_path):
     wrong = config(hide=HideRules(flag_reasons=frozenset({"no_such_flag"})))
     with pytest.raises(HideRuleError):
         make_figure(standard_tree(), PARENTS, wrong, tmp_path / "w.pdf", {}, flags)
+
+
+def test_clade_names_in_one_column_do_not_overlap():
+    import matplotlib.pyplot as plt
+
+    from af.tree.draw.render import _place_clade_names
+
+    fig, ax = plt.subplots()
+    _place_clade_names(ax, [(10.0, 100.0, "X.1.1"), (10.0, 101.0, "X.1.2"), (20.0, 100.0, "X")])
+    texts = sorted((t.get_position() for t in ax.texts), key=lambda p: (p[0], p[1]))
+    (xa, ya), (xb, yb) = texts[0], texts[1]
+    assert xa == xb and yb - ya >= 10  # the second name slid past the first
+    assert texts[2][1] == 100.0  # another column is unaffected
+    plt.close(fig)
