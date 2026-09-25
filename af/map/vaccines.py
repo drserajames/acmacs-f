@@ -86,11 +86,18 @@ class MapAntigen:
 
 @dataclass(frozen=True)
 class VaccineDisable:
-    """Do not mark this vaccine (e.g. superseded ones a lab no longer wants drawn)."""
+    """Do not mark this vaccine (e.g. superseded ones a lab no longer wants drawn).
+
+    ``optional``: a rule that may legitimately match nothing here. A subtype-wide default (say,
+    "never mark these superseded H1 vaccines") applies to every lab, and not every lab has tested
+    every one of them, so it is optional. A rule written for one chart is not: if it stops
+    matching, something changed and a person should look (design rule 1).
+    """
 
     name: str
     passage: PassageClass | Literal["any"]
     reason: str
+    optional: bool = False
 
 
 @dataclass(frozen=True)
@@ -103,6 +110,7 @@ class VaccineChoice:
     passage_class: PassageClass
     passage: str
     reason: str
+    optional: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,6 +128,7 @@ class VaccineReport:
     rows_without_antigen: list[tuple[str, str]] = field(default_factory=list)
     disabled: list[tuple[str, str, str]] = field(default_factory=list)
     unclassified_passages: int = 0
+    unused_optional_rules: list[str] = field(default_factory=list)
 
 
 def select_vaccines(
@@ -135,7 +144,9 @@ def select_vaccines(
     the one in the latest table, then the latest passage date. On the Sep 2026 round this
     reproduces ae's picks except where a person chose otherwise. Rows the
     chart has no antigen for are counted, not errors: a lab need not have tested every vaccine.
-    Disable and choose rules that match nothing are errors.
+    A disable or choose rule that matches nothing is an error unless it is marked ``optional``;
+    unused optional rules are counted in ``VaccineReport.unused_optional_rules`` so they are
+    reported rather than silent.
     """
     by_name: dict[str, list[MapAntigen]] = {}
     report = VaccineReport()
@@ -162,8 +173,15 @@ def select_vaccines(
                 continue
             pick, chosen_by = _choose(cands, choose, row.name, cls, used_choose)
             report.marks.append(VaccineMark(row, cls, pick.index, len(cands), chosen_by))
-    _require_used("disable", disable, used_disable)
-    _require_used("choose", choose, used_choose)
+    report.unused_optional_rules = [
+        f"disable {r.name} ({r.passage})" for r in disable if r.optional and r not in used_disable
+    ] + [
+        f"choose {r.name} ({r.passage_class})"
+        for r in choose
+        if r.optional and r not in used_choose
+    ]
+    _require_used("disable", [r for r in disable if not r.optional], used_disable)
+    _require_used("choose", [r for r in choose if not r.optional], used_choose)
     return report
 
 

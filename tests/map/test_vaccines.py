@@ -93,6 +93,25 @@ def test_disable_and_choose_rules() -> None:
     assert marks[(TV1, "cell")].chosen_by == "the reference preparation"
 
 
+def test_optional_rules_may_match_nothing_but_are_reported() -> None:
+    report = select_vaccines(
+        ANTIGENS,
+        ROWS,
+        disable=[VaccineDisable(GH1, "any", "subtype default", optional=True)],
+        choose=[VaccineChoice(GH1, "cell", "MDCK1", "subtype default", optional=True)],
+    )
+    assert report.unused_optional_rules == [
+        f"disable {GH1} (any)",
+        f"choose {GH1} (cell)",
+    ]
+    # an optional rule that DOES match still applies
+    applied = select_vaccines(
+        ANTIGENS, ROWS, disable=[VaccineDisable(OT7, "any", "subtype default", optional=True)]
+    )
+    assert applied.unused_optional_rules == []
+    assert (OT7, "egg", "subtype default") in applied.disabled
+
+
 def test_dead_rules_are_errors() -> None:
     with pytest.raises(VaccineRuleError, match="disable"):
         select_vaccines(ANTIGENS, ROWS, disable=[VaccineDisable(GH1, "any", "x")])
