@@ -1,27 +1,33 @@
 """Run a chain from the command line.
 
-    python -m af.chain <chain.toml> <run.toml>          run or resume, then write the review page
+    python -m af.chain <chain.toml> <run.toml>          run or resume, review page, publish
     python -m af.chain <chain.toml> <run.toml> --review  only rebuild the review page
 
 `chain.toml` says what the chain is (tables, map options, seed; `af.chain.config`).
 `run.toml` says where and how it runs, so the same chain runs on a laptop, the HPC or `o`:
 
-    store_root = "/path/to/store/chains"
+    dataset = "labx/h3-hi-turkey-labx/main"   # chains/<dataset> in the work area and the store
     optimiser = "core"            # "core" (af.map.optimise) or "stub"
     threads = 0                   # per process; 0 = all cores
+    publish = true                # publish the finished chain to the store
+
+    [paths]                       # af.store.PathsConfig
+    store = "~/AC/eu/store"       # published versions (tables are read from here too)
+    work = "~/AC/eu/work"         # resumable state: <work>/chains/<dataset>/
 
     [runner]                      # af.pipeline runner settings
     kind = "slurm"                # or "local"
     [runner.slurm]
     work_dir = "/scratch/af-jobs"
 
-    publish_store = "/path/to/store"   # optional: publish the finished chain ...
-    publish_as = "labx/h3-hi-turkey-labx/main"  # ... as chains/<publish_as> (af.store)
-
     [split]                       # optional: run each map's starts as array jobs
     chunks = 20
     threads = 4
-    work_dir = "/scratch/af-starts"
+
+The chain's working directory is `<work>/chains/<dataset>/`: `state/` (pipeline records),
+`steps/`, `review/`, `chain.json`, `inputs/` (tables as charts, by map hash) and `tmp/`
+(the split jobs' files). The work area must already exist (af.store.Work.open never
+creates one), so a mistyped path fails instead of re-running every step.
 """
 
 from __future__ import annotations
@@ -38,25 +44,25 @@ from af.chain.engine import SplitStarts, run_chain
 from af.chain.publish import publish_chain
 from af.chain.review import build_review
 from af.pipeline.config import RunnerSettings, make_runner
+from af.store.work import PathsConfig, Work
 from af.util.config import load_config
 
 
 @dataclass(frozen=True)
 class SplitSettings:
     chunks: int
-    work_dir: Path
     threads: int = 1
 
 
 @dataclass(frozen=True)
 class RunSettings:
-    store_root: Path
+    dataset: str
     optimiser: str
+    paths: PathsConfig
     threads: int = 0
+    publish: bool = True
     runner: RunnerSettings = field(default_factory=lambda: RunnerSettings(kind="local"))
     split: SplitSettings | None = None
-    publish_store: Path | None = None  # af store root; publish as chains/<publish_as>
-    publish_as: str | None = None  # e.g. "labx/h3-hi-turkey-labx/main"
 
 
 def main(argv: list[str]) -> int:
@@ -68,31 +74,32 @@ def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
     run = load_config(args.run, RunSettings)
-    cfg = load_chain_config(args.chain, inputs_dir=run.store_root / "inputs")
-    root = run.store_root / cfg.name
+    work = Work.open(run.paths.work).dataset("chains", run.dataset)
+    cfg = load_chain_config(args.chain, inputs_dir=work.root / "inputs")
     if not args.review:
         split = None
         if run.split is not None:
-            split = SplitStarts(run.split.chunks, run.split.work_dir / cfg.name, run.split.threads)
+            split = SplitStarts(run.split.chunks, work.tmp, run.split.threads)
         results = run_chain(
             cfg,
-            run.store_root,
+            work.root.parent,
             optimiser=optimiser_by_key(run.optimiser, threads=run.threads),
             runner=make_runner(run.runner, args.run),
             split=split,
+            root=work.root,
         )
         remade = sum(1 for r in results if not r.reused)
         logging.info(
             "%s: %d steps, %d remade, %d reused",
-            cfg.name,
+            run.dataset,
             len(results),
             remade,
             len(results) - remade,
         )
-    page = build_review(root)
+    page = build_review(work.root)
     logging.info("review page: %s", page)
-    if run.publish_store is not None and run.publish_as is not None and not args.review:
-        ref = publish_chain(run.publish_store, run.publish_as, root)
+    if run.publish and not args.review:
+        ref = publish_chain(run.paths.store, run.dataset, work.root)
         logging.info("published %s", ref)
     return 0
 

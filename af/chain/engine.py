@@ -234,13 +234,16 @@ def run_chain(
     runner: Runner | None = None,
     until_step: int | None = None,
     split: SplitStarts | None = None,
+    root: Path | None = None,
 ) -> list[StepResult]:
     """Run or resume a chain into `store_root/<name>/`; returns every step, skipped or remade.
 
     `runner` runs the start chunks when `split` is given (af.run LocalRunner or SlurmRunner).
     """
     optimiser = optimiser or default_optimiser()
-    root = Path(store_root) / cfg.name
+    # `root` is the chain's own directory (af.store.Work: <work>/chains/<dataset>); without
+    # it, <store_root>/<name>. Pipeline state goes in <root>/state (DatasetWork.state).
+    root = Path(root) if root is not None else Path(store_root) / cfg.name
     steps = chain_steps(cfg, root, Mapper(optimiser, split))
     # Inputs are named and outputs recorded relative to the chain root, so a store or a tables
     # checkout moved to another root (a sync to o or the HPC) re-runs nothing.
