@@ -87,6 +87,10 @@ What the cluster must provide:
 - **A driver that outlives the jobs.** `run()` blocks until the jobs finish. Ctrl-C or an
   error cancels the submitted jobs (`scancel --name`), but a killed driver can't. Run long
   pipelines in tmux, or submit the driver itself as a SLURM job.
+- **The interpreter's `af` is the code that runs.** Python jobs (`Job.python_module`, the smoke
+  test) run `python -m …` with the submitting interpreter, so install the checked-out code into
+  it (`pip install -e .` in that env). An env whose editable install points at another
+  checkout runs that checkout's `af` on the nodes.
 - **Threads are passed twice.** A job's `Resources(threads=N)` sets `--cpus-per-task`; the
   program must also be told N in its arguments.
 
