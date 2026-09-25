@@ -73,11 +73,13 @@ class AC21Inputs:
     """One folder of a lab's dated workbooks (AC Excel 2.1, or NIID's layout). ``start``
     bounds what is read: a workbook is read when the YYYYMMDD in its file name is on or after
     it, and its test date must then equal that file-name date (checked), so the bound is on
-    the test date."""
+    the test date. ``exclude`` names workbooks in the folder not to read at all (e.g. one
+    whose file name has no usable date); each must exist, so a stale entry is an error."""
 
     lab: str
     dir: Path
     start: str  # ISO date
+    exclude: list[str] = field(default_factory=list)  # file names
 
 
 @dataclass(frozen=True)
@@ -181,6 +183,8 @@ def _add_workbooks(
     report.append(
         f"read {len(files)} {inputs.lab} workbooks in {inputs.dir} -> {len(result.tables)} tables"
     )
+    if inputs.exclude:
+        report.append(f"  excluded by config: {', '.join(inputs.exclude)}")
     report.extend(f"skipped: {s}" for s in result.skipped_tests)
     if result.dropped:
         report.append(
@@ -207,9 +211,11 @@ def _dated_files(inputs: AC21Inputs) -> list[Path]:
     if not inputs.dir.is_dir():
         raise FileNotFoundError(f"workbook folder missing: {inputs.dir}")
     start = dt.date.fromisoformat(inputs.start).isoformat()
+    if missing := [n for n in inputs.exclude if not (inputs.dir / n).is_file()]:
+        raise FileNotFoundError(f"{inputs.dir}: excluded workbooks not found: {missing}")
     out = []
     for path in sorted(inputs.dir.glob("*.xlsx")):
-        if path.name.startswith("~$"):
+        if path.name.startswith("~$") or path.name in inputs.exclude:
             continue
         day = _file_date(path)
         if day is None:
