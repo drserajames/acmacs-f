@@ -151,6 +151,8 @@ def test_reads_a_sheet(tmp_path, rules):
         "AX41/HCK1",
         "HCK1",
     ]
+    assert [a.passage_class for a in t.antigens] == ["cell", "egg", "cell", "cell", "cell"]
+    assert [s.passage_class for s in t.sera] == ["cell", "egg", "cell"]
     # sera: ids as ae wrote them, the cell/egg word as the passage, the lab as an annotation
     assert [(s.name, s.serum_id, s.passage, s.reassortant, s.annotations) for s in t.sera] == [
         ("A(H3N2)/EXAMPLECITY/1/2029", "LABN CELL NO.101", "MDCK?", "", []),
