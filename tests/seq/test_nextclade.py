@@ -75,6 +75,10 @@ LIMITS = nc.QcThresholds(max_unknown_aa=1, max_deleted_aa=2)
 
 
 class TestReduce:
+    def test_a_dataset_without_clade_columns_gives_none(self, tmp_path: Path) -> None:
+        write_output(tmp_path, [tsv_row("s1")], {"s1": "A" * 30})
+        assert (one(tmp_path).clade, one(tmp_path).subclade) == (None, None)
+
     def test_mature_slice_and_terminal_stop_dropped(self, tmp_path: Path) -> None:
         record = one(tmp_path)
         assert record.nucleotides == "ACGTACGTACGTACGTACGTA"  # 7..27, SigPep and stop gone

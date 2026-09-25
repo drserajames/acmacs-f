@@ -20,6 +20,7 @@ key is (EPI_ISL, segment accession) — EPI_ISL alone is not unique.
 
 from __future__ import annotations
 
+import datetime
 import re
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -58,6 +59,13 @@ REQUIRED_COLUMNS = (
 #: "none embargoed": all 202 embargoed isolates of the definitive set are in the 10 of 60
 #: workbooks that have it, each with a date, and no other row has a value (25 Sep 2026).
 EMBARGO_COLUMN = "Publishing_Embargo_Until"
+#: In every one of the 63 workbooks under gisaid-extractor/out (25 Sep 2026), but not
+#: required: it is not needed to place, date or align a record.
+UPDATE_COLUMN = "Update_Date"
+
+#: No influenza virus was sampled before this (the oldest sequenced are from 1918), and a
+#: bare year read as an Excel serial day lands before it for any year below 3652.
+EXCEL_SERIAL_BEFORE = datetime.date(1910, 1, 1)
 
 _XL_DATE = 3  # xlrd.XL_CELL_DATE
 _FIELD = re.compile(r"_\|_|\|")
@@ -88,6 +96,7 @@ class SequenceRecord:
     submitting_lab: str
     submission_date: str
     embargoed_until: str
+    update_date: str = ""  # GISAID leaves it blank on records never updated
     problems: tuple[str, ...] = ()
 
     @property
@@ -106,6 +115,7 @@ class PullCounts:
     defline_date_differs: int = 0
     defline_date_conflicts: int = 0
     unreadable_date: int = 0
+    excel_serial_date: int = 0
     name_problems: Counter[str] = field(default_factory=Counter)
     #: N, i.e. "not known". Counted apart from R/Y/W…, which state a real ambiguity;
     #: Nextclade's QC treats the two differently and so must any threshold of ours.
@@ -121,6 +131,7 @@ class PullCounts:
             "defline_date_differs": self.defline_date_differs,
             "defline_date_conflicts": self.defline_date_conflicts,
             "unreadable_date": self.unreadable_date,
+            "excel_serial_date": self.excel_serial_date,
             "name_problems": dict(self.name_problems),
             "unknown_bases": self.unknown_bases,
             "ambiguous_bases": self.ambiguous_bases,
@@ -193,18 +204,31 @@ def parse_defline(defline: str) -> tuple[str, dict[str, str]]:
 
 
 def read_fasta(path: Path) -> Iterator[tuple[str, str]]:
-    """Yield ``(defline, sequence)`` for a plain FASTA."""
+    """Yield ``(defline, sequence)`` for a plain FASTA, or a brotli one (``.br``).
+
+    gisaid-extractor keeps each pull's FASTA as ``.fas.br``, and the store keeps that file
+    as delivered, so it is read without writing a decompressed copy anywhere.
+    """
+    if path.suffix == ".br":
+        import brotli
+
+        lines: Iterable[str] = brotli.decompress(path.read_bytes()).decode().splitlines()
+    else:
+        lines = path.read_text().splitlines()
+    yield from _fasta_records(lines)
+
+
+def _fasta_records(lines: Iterable[str]) -> Iterator[tuple[str, str]]:
     defline: str | None = None
     chunks: list[str] = []
-    with path.open() as handle:
-        for line in handle:
-            line = line.rstrip("\r\n")
-            if line.startswith(">"):
-                if defline is not None:
-                    yield defline, "".join(chunks)
-                defline, chunks = line[1:], []
-            elif defline is not None:
-                chunks.append(line.strip())
+    for line in lines:
+        line = line.rstrip("\r\n")
+        if line.startswith(">"):
+            if defline is not None:
+                yield defline, "".join(chunks)
+            defline, chunks = line[1:], []
+        elif defline is not None:
+            chunks.append(line.strip())
     if defline is not None:
         yield defline, "".join(chunks)
 
@@ -259,6 +283,12 @@ def join(
             problems.append("date.unreadable")
         else:
             counts.date_precision[collection_date.precision.value] += 1
+            if collection_date.first < EXCEL_SERIAL_BEFORE:
+                # A bare year typed into an Excel date cell and shown as a date: 2024 is
+                # serial day 2024, 1905-07-16. Flagged and kept as stated until the
+                # reading rule is decided (QUESTIONS Q22); never silently reinterpreted.
+                counts.excel_serial_date += 1
+                problems.append("date.excel-serial")
             if fields.get(DEFLINE_DATE_KEY, "").strip() != str(collection_date):
                 # Expected for every partial date: the defline says 1 January where the
                 # workbook says a month or a year. Counted, not a problem.
@@ -291,6 +321,7 @@ def join(
                 submitting_lab=fields.get(SUBMITTING_LAB_KEY, "").strip(),
                 submission_date=row["Submission_Date"].strip(),
                 embargoed_until=row.get(EMBARGO_COLUMN, "").strip(),
+                update_date=row.get(UPDATE_COLUMN, "").strip(),
                 problems=tuple(problems),
             )
         )

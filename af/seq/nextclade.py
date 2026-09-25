@@ -358,6 +358,10 @@ class Aligned:
     unknown_aa: int
     premature_stop: bool
     qc_status: str
+    #: Nextclade's calls, kept for the clades workstream's fallback (sequences not on a
+    #: tree); they depend on the dataset release, which provenance names.
+    clade: str | None = None
+    subclade: str | None = None
 
 
 def read_alignment(out_dir: Path, reference: Reference) -> Iterator[Aligned]:
@@ -414,6 +418,8 @@ def _reduce(
         unknown_aa=amino_acids.count("X") if amino_acids else 0,
         premature_stop="*" in amino_acids if amino_acids else False,
         qc_status=row.get("qc.overallStatus", ""),
+        clade=row.get("clade") or None,
+        subclade=row.get("subclade") or None,
     )
 
 
