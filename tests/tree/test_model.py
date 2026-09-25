@@ -122,3 +122,21 @@ def tree_leaves(node):  # noqa: ANN001, ANN201 - test helper
         if current.is_leaf:
             yield current
         stack.extend(current.children)
+
+
+def test_prune_counts_leaves_not_emptied_internal_nodes() -> None:
+    """Regression: dropping a whole clade counted its internal nodes as leaves too.
+
+    On a real H1 tree that overstated 13,930 removed leaves as 15,933 — the kind of quiet
+    miscount that would go straight into a provenance count and be believed.
+    """
+    tree = tree_of("(((a:1,b:1):1,(c:1,d:1):1):1,(e:1,f:1):1);")
+    assert tree.prune(["e", "f"]) == 4
+
+
+def test_prune_to_a_single_clade_leaves_a_usable_tree() -> None:
+    tree = tree_of("(((a:1,b:1):1,(c:1,d:1):1):1,(e:1,f:1):1);")
+    tree.prune(["a", "b"])
+    tree.assign_ids()
+    assert sorted(leaf.name or "" for leaf in tree.leaves()) == ["a", "b"]
+    assert all(len(node.children) != 1 for node in tree.internal())

@@ -252,12 +252,19 @@ class Tree:
             raise TreeError(
                 f"{len(missing)} leaves to keep are not in the tree, e.g. {sorted(missing)[:3]}"
             )
+        # Which nodes are leaves is decided before anything is removed: an internal node whose
+        # children all go becomes childless, and counting it as a removed leaf overstates the
+        # count (it did, by 2,003 on a real H1 tree). It is removed, but it is not a leaf.
+        originally_leaves = {id(leaf) for leaf in self.leaves()}
         removed = 0
         for node in list(self.postorder()):
-            if node.is_leaf and node.name not in wanted and node.parent is not None:
-                node.parent.children.remove(node)
-                removed += 1
-            elif not node.is_leaf and not node.children and node.parent is not None:
+            if node.parent is None:
+                continue
+            if id(node) in originally_leaves:
+                if node.name not in wanted:
+                    node.parent.children.remove(node)
+                    removed += 1
+            elif not node.children:
                 node.parent.children.remove(node)
         self.remove_unary()
         self._by_id = {}
