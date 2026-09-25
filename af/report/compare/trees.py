@@ -4,11 +4,13 @@ Leaves are matched by strain name. ae leaf names end in ``_<passage>_<hash>``, a
 leaf per identical sequence where af keeps every isolate. So only leaves present on both sides
 are compared, with each tree restricted to them.
 
-Topology: normalised Robinson-Foulds distance over the non-trivial splits of the restricted
-trees, unrooted, polytomies kept. Each split is hashed as the XOR of random 64-bit leaf keys, so a
-100k-leaf tree needs no per-split leaf sets; a split and its complement are one split (the
-smaller of ``h`` and ``h ^ total``). Clades: the finest clade per leaf, compared by label and
-by adjusted Rand index.
+Topology: normalised Robinson-Foulds distance and reference-split recovery over the
+non-trivial splits of the restricted trees (unrooted, polytomies kept), reported by the size of
+each split's smaller side (see :func:`split_agreement` for why). Each split is hashed as the
+XOR of random 64-bit leaf keys, so a 100k-leaf tree needs no per-split leaf sets; a split and
+its complement are one split (the smaller of ``h`` and ``h ^ total``).
+
+Clades: the finest clade per leaf, compared by label and by adjusted Rand index.
 """
 
 from __future__ import annotations
@@ -71,7 +73,10 @@ def _unique_keys(tree: Tree) -> tuple[dict[int, str], int]:
     return keep, sum(k for k in counts.values() if k > 1)
 
 
-def _splits(tree: Tree, keep: dict[int, str], leaf_hash: dict[str, int], total: int) -> set[int]:
+def _splits(
+    tree: Tree, keep: dict[int, str], leaf_hash: dict[str, int], total: int
+) -> dict[int, int]:
+    """Split hash -> size of its smaller side, for every non-trivial split."""
     n = len(tree.parent)
     h = [0] * n
     count = [0] * n
@@ -84,8 +89,33 @@ def _splits(tree: Tree, keep: dict[int, str], leaf_hash: dict[str, int], total: 
         count[p] += count[node]
     n_leaves = count[0]
     return {
-        min(h[node], h[node] ^ total) for node in range(1, n) if 2 <= count[node] <= n_leaves - 2
+        min(h[node], h[node] ^ total): min(count[node], n_leaves - count[node])
+        for node in range(1, n)
+        if 2 <= count[node] <= n_leaves - 2
     }
+
+
+SPLIT_SIZES = (2, 10, 100, 1000)
+
+
+def split_agreement(rs: dict[int, int], ns: dict[int, int], min_size: int) -> dict[str, Any]:
+    """RF and recovery over splits whose smaller side has at least ``min_size`` leaves.
+
+    Why by size: two CMAPLE runs on identical input differ only by seed, yet disagree on 13-22%
+    of all splits, while large clades are stable (WS5, 25 Sep 2026: B/Vic splits above 1,000
+    leaves identical). Fine topology is not reproducible, so a threshold is only meaningful for
+    large splits. ``ref_recovered`` is the fraction of the reference's splits present in the
+    new tree. Unlike RF, it does not count against a new tree for resolving a polytomy the
+    reference left collapsed (ae trees collapse many zero-length branches).
+    """
+    r = {h for h, size in rs.items() if size >= min_size}
+    n = {h for h, size in ns.items() if size >= min_size}
+    rf = len(r ^ n)
+    return {
+        "ref": len(r), "new": len(n), "shared": len(r & n), "rf": rf,
+        "rf_normalised": rf / max(1, len(r) + len(n)),
+        "ref_recovered": len(r & n) / len(r) if r else float("nan"),
+    }  # fmt: skip
 
 
 def compare(ref: Tree, new: Tree, seed: int = 1) -> dict[str, Any]:
@@ -101,7 +131,7 @@ def compare(ref: Tree, new: Tree, seed: int = 1) -> dict[str, Any]:
     nkeep = {n: k for n, k in nk.items() if k in common}
     rs = _splits(ref, rkeep, leaf_hash, total)
     ns = _splits(new, nkeep, leaf_hash, total)
-    rf = len(rs ^ ns)
+    by_size = {f">={m}": split_agreement(rs, ns, m) for m in SPLIT_SIZES}
 
     def finest(tree: Tree, node: int) -> str:
         clades = tree.leaf_clades.get(node) or [""]
@@ -116,8 +146,9 @@ def compare(ref: Tree, new: Tree, seed: int = 1) -> dict[str, Any]:
         "ref_leaves": len(ref.leaf_name), "new_leaves": len(new.leaf_name),
         "duplicate_names_dropped": {"ref": rdup, "new": ndup},
         "common_leaves": len(common),
-        "splits": {"ref": len(rs), "new": len(ns), "shared": len(rs & ns)},
-        "rf": rf, "rf_normalised": rf / max(1, len(rs) + len(ns)),
+        "tip_sets_identical": set(rk.values()) == set(nk.values()) and not rdup and not ndup,
+        "splits_by_size": by_size,
+        "rf_normalised": by_size[">=2"]["rf_normalised"],
         "clade": {
             "label_agreement": sum(a == b for a, b in zip(lr, ln, strict=True)) / max(1, len(keys)),
             "adjusted_rand": adjusted_rand(lr, ln),

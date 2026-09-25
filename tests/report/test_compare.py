@@ -117,7 +117,8 @@ def _random_tree(names: list[str], seed: int) -> trees.Tree:
 def test_rf_is_zero_for_the_same_tree_and_high_for_a_random_one() -> None:
     names = [f"TEST/{i}/2025" for i in range(200)]
     t1 = _random_tree(names, 1)
-    assert trees.compare(t1, _random_tree(names, 1))["rf"] == 0
+    same = trees.compare(t1, _random_tree(names, 1))
+    assert same["splits_by_size"][">=2"]["rf"] == 0 and same["tip_sets_identical"]
     assert trees.compare(t1, _random_tree(names, 2))["rf_normalised"] > 0.9
 
 
@@ -126,7 +127,7 @@ def test_leaves_match_through_the_ae_hash_suffix() -> None:
     res = trees.compare(
         _random_tree(names, 3), _random_tree([n + "_OR_0A1B2C3D" for n in names], 3)
     )
-    assert res["common_leaves"] == 50 and res["rf"] == 0
+    assert res["common_leaves"] == 50 and res["rf_normalised"] == 0
 
 
 def test_tree_rejects_child_before_parent() -> None:
@@ -237,3 +238,32 @@ def test_provisional_limits_must_name_their_review(tmp_path: Path) -> None:
     manifest = {"report": "r", "built": "", "figures": []}
     with pytest.raises(ValueError, match="review"):
         compare_report(manifest, tmp_path, limits, "name")
+
+
+def test_resolving_a_polytomy_keeps_reference_recovery_at_one() -> None:
+    """A new tree that resolves a star the reference left collapsed recovers every ref split."""
+    star = trees.Tree()
+    root = star.add(-1)
+    left, right = star.add(root), star.add(root)
+    names = [f"TEST/{i}/2025" for i in range(8)]
+    for i, name in enumerate(names):
+        leaf = star.add(left if i < 4 else right)
+        star.leaf_name[leaf] = name
+        star.leaf_clades[leaf] = ["C"]
+    resolved = _random_tree(names[:4], 7)  # a resolved left half, re-rooted under a new root
+    full = trees.Tree()
+    top = full.add(-1)
+    offset = full.add(top)
+    mapped: dict[int, int] = {}
+    for node, parent in enumerate(resolved.parent):
+        mapped[node] = full.add(offset if parent < 0 else mapped[parent])
+    for node, name in resolved.leaf_name.items():
+        full.leaf_name[mapped[node]] = name
+        full.leaf_clades[mapped[node]] = ["C"]
+    right_node = full.add(top)
+    for name in names[4:]:
+        leaf = full.add(right_node)
+        full.leaf_name[leaf] = name
+        full.leaf_clades[leaf] = ["C"]
+    res = trees.compare(star, full)["splits_by_size"][">=2"]
+    assert res["ref_recovered"] == 1.0 and res["rf"] > 0
