@@ -540,3 +540,25 @@ def test_geo_month_comparison_and_checks() -> None:
     assert shifted["month"]["location"]["frac_diff"] == 2 / 8
     wrong_month = geo_checks(geo_month(ref, _geo_i7("2026-05", {"PLACE A": 3})), GeoLimits())
     assert {c["check"]: c["ok"] for c in wrong_month}["same month"] is False
+
+
+def test_spelling_key_keeps_non_latin_letters() -> None:
+    # Two distinct places known only by their Chinese names must not collapse to one key.
+    assert maps.spelling_key("\u6c5f\u82cf\u5e02 ONE") != maps.spelling_key(
+        "\u6d59\u6c5f\u7701 ONE"
+    )
+    assert maps.spelling_key("PORT-TOWN ONE") == maps.spelling_key("PORT TOWN ONE") == "PORTTOWNONE"
+
+
+def test_identical_layout_marks_displacement_not_tested() -> None:
+    a = _cloud(30, 21)
+    res = maps.compare(_map(a, ["X"] * 30), _map(_rotate(a, 5), ["X"] * 30))
+    assert res["procrustes"]["identical_layout"]
+    lim = MapLimits(p95_displacement_max=0.5, rotation_deg_max=1.0)
+    checks = {c["check"]: c for c in map_checks(res, lim)}
+    assert checks["p95 displacement"]["ok"] is None and checks["p95 displacement"]["not_tested"]
+    assert checks["rotation deg"]["ok"] is False  # orientation is still tested
+    moved = maps.compare(
+        _map(a, ["X"] * 30), _map([(x + (i == 0), y) for i, (x, y) in enumerate(a)], ["X"] * 30)
+    )
+    assert not moved["procrustes"]["identical_layout"]
