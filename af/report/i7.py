@@ -67,6 +67,9 @@ def validate(doc: dict[str, Any], where: str = "I7") -> None:
         for group in ("antigens", "sera"):
             for i, point in enumerate(body[group]):
                 _need(point, REQUIRED_POINT, f"{where}.map.{group}[{i}]")
+                if point["shown"] and point["in_viewport"] and not point["colour"]:
+                    # A drawn point always has a fill; a null one means the producer lost it.
+                    raise I7Error(f"{where}.map.{group}[{i}]: drawn but no colour")
     elif kind == "tree":
         _need(body, REQUIRED_TREE, f"{where}.tree")
         for i, leaf in enumerate(body["leaves"]):
