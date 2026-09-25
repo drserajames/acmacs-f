@@ -109,3 +109,23 @@ def test_store_exclusion_must_match(tmp_path):
     publish(tmp_path / "store", [make_table(0)])
     with pytest.raises(ChainConfigError):
         tables_from_store(tmp_path / "store", DATASET, tmp_path / "inputs", {"no-such-table"})
+
+
+def test_table_warnings_reach_the_review_without_rerunning(tmp_path):
+    from af.chain.review import build_review
+
+    opts = MapOptions(scratch_starts=3, incremental_starts=2, grid_test=False)
+
+    def run():
+        _, tables = tables_from_store(tmp_path / "store", DATASET, tmp_path / "inputs")
+        cfg = ChainConfig("h9-hi-turkey-testlab", tables, opts, seed=1)
+        return [r.reused for r in run_chain(cfg, tmp_path / "chains", optimiser=StubOptimiser())]
+
+    publish(tmp_path / "store", [make_table(k) for k in range(3)])
+    run()
+    tables = [make_table(k) for k in range(3)]
+    tables[1].warnings = ["name 'TEST-101': example problem"]
+    publish(tmp_path / "store", tables)
+    assert run() == [True, True, True]  # warnings are not map content
+    page = build_review(tmp_path / "chains" / "h9-hi-turkey-testlab").read_text()
+    assert "1 table warnings" in page and "example problem" in page

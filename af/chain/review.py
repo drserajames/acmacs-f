@@ -43,6 +43,7 @@ def build_review(chain_root: Path, thresholds: Thresholds = THRESHOLDS) -> Path:
     oriented_prev: np.ndarray | None = None
     prev_chart: Chart | None = None
     key = ""
+    warnings = {t["table_id"]: t.get("warnings", []) for t in doc["config"]["tables"]}
     for s in doc["steps"]:
         d = chain_root / s["directory"]
         names = ("merge.ace", "incremental.ace", "scratch.ace", "chosen.ace", "step.json")
@@ -50,6 +51,9 @@ def build_review(chain_root: Path, thresholds: Thresholds = THRESHOLDS) -> Path:
         record_text = (d / "step.json").read_text()
         record = json.loads(record_text)
         record["flags"] = flags(record["diagnostics"], thresholds)  # in memory only
+        record["table_warnings"] = warnings.get(s["table_id"], [])  # current, not from the step
+        if record["table_warnings"]:
+            record["flags"].append(f"{len(record['table_warnings'])} table warnings")
         key = _sha(key, sha256_path(d / "chosen.ace"), _sha(record_text))
         thumb = out / "thumbs" / f"{s['index']:04d}-{key[:16]}.png"
         chart = read_chart(d / "chosen.ace")
@@ -253,6 +257,7 @@ def _step_row(s: dict, r: dict, thumb: Path) -> str:
                 [f"{_e(x['serum'])} — {x['slack']:.2f}" for x in d.get("column_basis_slack", [])],
             ),
             _details("disconnected", [_e(x) for x in d.get("disconnected", [])]),
+            _details("table warnings", [_e(x) for x in r["table_warnings"]]),
         ]
     )
     flag_html = "".join(f'<span class="flag">{_e(f)}</span>' for f in step_flags)
