@@ -88,6 +88,8 @@ ANTIGEN_COLUMNS = {
     "lineage": "VARCHAR",
     "lab_ids": "VARCHAR[]",
     "reference": "BOOLEAN",
+    "epi_isl": "VARCHAR",
+    "sequence_pairing": "VARCHAR",
     "identity": "VARCHAR",
     "antigen_key": "VARCHAR",
 }
@@ -102,6 +104,8 @@ SERUM_COLUMNS = {
     "serum_id": "VARCHAR",
     "species": "VARCHAR",
     "lineage": "VARCHAR",
+    "epi_isl": "VARCHAR",
+    "sequence_pairing": "VARCHAR",
     "identity": "VARCHAR",
     "serum_key": "VARCHAR",
 }
@@ -154,6 +158,8 @@ def rows_from_table(table: Table, rules: IdentityRules) -> TableRows:
                 "lineage": antigen.lineage,
                 "lab_ids": list(antigen.lab_ids),
                 "reference": antigen.reference,
+                "epi_isl": antigen.epi_isl,
+                "sequence_pairing": antigen.sequence_pairing,
                 "identity": _identity_text(identity),
                 "antigen_key": _key(identity, table_id, "a", position),
             }
@@ -174,6 +180,8 @@ def rows_from_table(table: Table, rules: IdentityRules) -> TableRows:
                 "serum_id": serum.serum_id,
                 "species": serum.species,
                 "lineage": serum.lineage,
+                "epi_isl": serum.epi_isl,
+                "sequence_pairing": serum.sequence_pairing,
                 "identity": _identity_text(identity),
                 "serum_key": _key(identity, table_id, "s", position),
             }
