@@ -254,7 +254,18 @@ class VersionBuilder:
         Hard links when the filesystem allows, else copies. Use it for files unchanged
         since an earlier version, or for cache entries. Linked files are read-only, and
         must be replaced, never edited in place.
+
+        ``source`` must be inside this store. A hard link shares its permissions with the
+        original, and publishing makes a version read-only, so linking a file from outside
+        the store would silently make the original read-only (it did, to preserved tree
+        data). Use :meth:`copy` for anything from outside.
         """
+        store_root = self.store.root.resolve()
+        if not source.resolve().is_relative_to(store_root):
+            raise StoreError(
+                f"link() only takes files already in the store ({store_root}); "
+                f"{source} is outside it. Use copy(): linking would make the original read-only"
+            )
         target = self.path / relative
         if source.is_dir():
             for file in sorted(path for path in source.rglob("*") if path.is_file()):
@@ -264,6 +275,19 @@ class VersionBuilder:
         try:
             os.link(source, target)
         except OSError:
+            shutil.copy2(source, target)
+        return target
+
+    def copy(self, source: Path, relative: str) -> Path:
+        """Put a copy of ``source`` (a file, or a directory tree) at ``relative``.
+
+        For files from outside the store: the original stays independent and writable.
+        """
+        target = self.path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, target, symlinks=False, dirs_exist_ok=True)
+        else:
             shutil.copy2(source, target)
         return target
 

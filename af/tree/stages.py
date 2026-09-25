@@ -653,7 +653,7 @@ def _publish_step(
         if clades is not None:
             provenance_inputs.append(clades.provenance())
         with store.build(KIND, f"{subtype}/{inputs.purpose}") as builder:
-            builder.link(layout.i6, ".")
+            builder.copy(layout.i6, ".")  # from the work area: copy, never link (store.link)
             meta = i6.read_metadata(layout.i6)
             summary = {
                 "leaves": meta["leaves"],
