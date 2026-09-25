@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import dataclasses
+import os
+import subprocess
+import sys
+import tempfile
 from typing import Any
 
 import numpy as np
@@ -371,7 +375,8 @@ def test_grid_test_finds_and_resolves_a_trapped_point():
     resolved = opt.resolve_trapped(problem, trapped.layout)
     assert resolved.moved >= 1
     assert resolved.projection.stress == pytest.approx(best.stress, rel=1e-4)
-    assert all(r.diagnosis != "trapped" for r in resolved.last_grid)
+    # no trapped point is left with a move that would lower the stress
+    assert not any(r.diagnosis == "trapped" and r.stress_diff < 0.0 for r in resolved.last_grid)
 
 
 def test_grid_test_reports_hemisphering():
@@ -447,3 +452,42 @@ def test_column_bases_helper():
     )
     np.testing.assert_array_equal(opt.column_bases(value, kind), [5.0, 3.0])
     np.testing.assert_array_equal(opt.column_bases(value, kind, minimum=4.0), [5.0, 4.0])
+
+
+# ---------------------------------------------------------------------------------------
+# exceptions across pybind11 modules
+
+_MATPLOTLIB_FIRST = """
+import matplotlib._path  # a pybind11 module, loaded before af.map._core
+import numpy as np
+import pytest
+from af.map import optimise as opt
+from af.map.optimise import MapProblem
+
+value = np.zeros((3, 2))
+kind = np.ones((3, 2), dtype=np.int8)
+disconnected = np.zeros(5, dtype=bool)
+with pytest.raises(ValueError, match="gradient_multipliers"):
+    MapProblem(value, kind, np.full(2, 4.0), disconnected, dodgy_is_regular=False,
+               gradient_multipliers=np.full(5, 2.0))
+disconnected[:3] = True
+problem = MapProblem(value, kind, np.full(2, 4.0), disconnected, dodgy_is_regular=False)
+with pytest.raises(ValueError, match="fewer than 3 connected"):
+    opt.relax(problem, n_starts=1, seed=1)
+with pytest.raises(TypeError):
+    opt._core.start_seed("not a number", 0)
+print("ok")
+"""
+
+
+def test_exception_types_survive_matplotlib_loaded_first():
+    """A pybind11 module loaded before _core (matplotlib's) once turned every C++ error into
+    "RuntimeError: Caught an unknown exception!". Run in a fresh interpreter so the import
+    order is certain whatever other tests have imported."""
+    env = dict(os.environ, MPLBACKEND="Agg")
+    env.setdefault("MPLCONFIGDIR", tempfile.mkdtemp())
+    result = subprocess.run(
+        [sys.executable, "-c", _MATPLOTLIB_FIRST], capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.strip() == "ok"

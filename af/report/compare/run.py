@@ -65,6 +65,15 @@ class Expected:
 
 
 @dataclass(frozen=True)
+class Amendment:
+    """One change to an adopted set of limits: a limit added, changed or withdrawn."""
+
+    date: dt.date
+    by: str
+    change: str
+
+
+@dataclass(frozen=True)
 class Adoption:
     """Who adopted this set of limits, when, and whether it is final.
 
@@ -76,6 +85,7 @@ class Adoption:
     adopted_by: str
     adopted: dt.date
     review: str = ""  # what re-tests a provisional set, and when
+    amendments: list[Amendment] = field(default_factory=list)  # printed with the status
 
 
 @dataclass(frozen=True)
@@ -206,10 +216,11 @@ def markdown(
         f"{adoption.adopted.isoformat()}"
         + (f"; review: {adoption.review}" if adoption.review else "")
     )
+    changes = [f"- amended {a.date.isoformat()} by {a.by}: {a.change}" for a in adoption.amendments]
     lines = [
         f"# Same-science comparison: {manifest['report']}", "",
         f"Report built {manifest['built']}; limits `{limits_name}`; points matched by {how}.", "",
-        status, "",
+        status, *changes, "",
         "| Slot | Status | " + " | ".join(MAP_CHECKS) + " |",
         "|---|---|" + "---|" * len(MAP_CHECKS),
     ]  # fmt: skip

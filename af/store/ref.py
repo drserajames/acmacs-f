@@ -15,7 +15,7 @@ from typing import Any
 
 from af.util.artefacts import sha256_path
 
-KINDS = ("raw", "sequences", "tables", "trees", "chains", "serology")
+KINDS = ("raw", "sequences", "clades", "tables", "trees", "chains", "serology")
 """The store's top-level directories: one per af stage that writes into the store.
 
 ``raw`` holds inputs af cannot regenerate (e.g. GISAID pulls): never deleted, always

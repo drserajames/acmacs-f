@@ -277,3 +277,13 @@ def test_store_ref_validation() -> None:
         StoreRef.from_json({**good, "extra": 1})
     with pytest.raises(StoreError, match="prefix"):
         StoreRef.from_json({**good, "manifest_sha256": "b" * 64})
+
+
+def test_clades_kind(store: Store) -> None:
+    """Clade assignments are their own kind, beside (not inside) the sequences they label."""
+    sequences = publish(store, "sequences", "h3", {"part.parquet": "rows"})
+    with store.build("clades", "h3") as build:
+        (build.path / "assignments.parquet").write_text("clades")
+        clades = build.publish(provenance(sequences, step="assign-clades"))
+    assert [ref.dataset for ref in store.list_datasets("sequences")] == ["h3"]
+    assert store.list_datasets("clades") == [clades]

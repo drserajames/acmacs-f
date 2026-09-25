@@ -15,6 +15,9 @@
     [runner.slurm]
     work_dir = "/scratch/af-jobs"
 
+    publish_store = "/path/to/store"   # optional: publish the finished chain ...
+    publish_as = "labx/h3-hi-turkey-labx/main"  # ... as chains/<publish_as> (af.store)
+
     [split]                       # optional: run each map's starts as array jobs
     chunks = 20
     threads = 4
@@ -32,6 +35,7 @@ from pathlib import Path
 from af.chain.backend import optimiser_by_key
 from af.chain.config import load_chain_config
 from af.chain.engine import SplitStarts, run_chain
+from af.chain.publish import publish_chain
 from af.chain.review import build_review
 from af.pipeline.config import RunnerSettings, make_runner
 from af.util.config import load_config
@@ -51,6 +55,8 @@ class RunSettings:
     threads: int = 0
     runner: RunnerSettings = field(default_factory=lambda: RunnerSettings(kind="local"))
     split: SplitSettings | None = None
+    publish_store: Path | None = None  # af store root; publish as chains/<publish_as>
+    publish_as: str | None = None  # e.g. "labx/h3-hi-turkey-labx/main"
 
 
 def main(argv: list[str]) -> int:
@@ -85,6 +91,9 @@ def main(argv: list[str]) -> int:
         )
     page = build_review(root)
     logging.info("review page: %s", page)
+    if run.publish_store is not None and run.publish_as is not None and not args.review:
+        ref = publish_chain(run.publish_store, run.publish_as, root)
+        logging.info("published %s", ref)
     return 0
 
 

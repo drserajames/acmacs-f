@@ -296,7 +296,8 @@ class TrappedResolution:
     projection: Projection
     rounds: int  # grid tests run
     moved: int  # point moves applied in total
-    last_grid: list[GridResult]  # the final grid test (no trapped points unless rounds ran out)
+    last_grid: list[GridResult]  # the final grid test: no trapped points, unless rounds ran out
+    # or the trapped points left all have a worse position (stress_diff > 0) and were not moved
 
 
 def resolve_trapped(
@@ -312,7 +313,10 @@ def resolve_trapped(
     point is trapped or ``max_rounds`` grid tests have run (ae ``chart-relax-grid``: 20).
 
     As in ae, every point whose better position lowers the stress is moved, including
-    hemisphering ones, but only trapped points keep the loop going.
+    hemisphering ones, but only trapped points keep the loop going. A point is trapped when
+    its move changes the stress by more than 0.25 either way; one whose move would *raise*
+    the stress is reported but never moved. ae then repeats the loop on an unchanged map
+    until the rounds run out; here a round that moves nothing ends the loop.
     """
     _require_positive("max_rounds", max_rounds)
     # The layout is taken as given (normally the best projection of a relax), as ae does.
@@ -325,10 +329,12 @@ def resolve_trapped(
         if not any(result.diagnosis == "trapped" for result in grid):
             return TrappedResolution(current, round_no, moved, grid)
         new_layout = current.layout.copy()
-        for result in grid:
-            if result.position is not None and result.stress_diff < 0.0:
-                new_layout[result.point] = result.position
-                moved += 1
+        moves = [r for r in grid if r.position is not None and r.stress_diff < 0.0]
+        if not moves:
+            return TrappedResolution(current, round_no, moved, grid)
+        for result in moves:
+            new_layout[result.point] = result.position
+        moved += len(moves)
         current = optimise(problem, new_layout, method=method, precision="fine")
     return TrappedResolution(current, max_rounds, moved, grid)
 

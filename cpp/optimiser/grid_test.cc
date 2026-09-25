@@ -106,13 +106,11 @@ namespace af::map
                 result.position.assign(row().begin(), row().end());
                 result.distance = distance(original, result.position);
                 result.stress_diff = minimised.stress - layout_stress;
-                // ae calls the point trapped when |stress_diff| > 0.25, so a rough minimisation
-                // that ends *worse* by 0.25 also counts as trapped (and is then never applied,
-                // because only improvements are). Only an improvement is a trap here.
-                if (result.stress_diff < -stress_threshold)
-                    result.diagnosis = Diagnosis::trapped;
-                else if (std::abs(result.stress_diff) <= stress_threshold)
-                    result.diagnosis = Diagnosis::hemisphering;
+                // As ae: trapped when the stress changes by more than 0.25 either way. A point
+                // whose better cell ends in a *worse* map can still plausibly sit in either
+                // place, so it is reported (Sarah, 25 Sep 2026); only moves that lower the
+                // stress are applied (resolve_trapped).
+                result.diagnosis = std::abs(result.stress_diff) > stress_threshold ? Diagnosis::trapped : Diagnosis::hemisphering;
             }
             else if (!hemisphering_cell.empty()) {
                 auto minimised = move_and_minimise(hemisphering_cell, Precision::rough);

@@ -88,6 +88,7 @@ class TableRef:
     path: Path
     date: datetime.date
     suffix: int  # 1 for the first table of a date
+    warnings: tuple[str, ...] = ()  # the table's own warnings (tables store); not map content
 
 
 @dataclass
@@ -189,6 +190,7 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
                 "path": str(t.path),
                 "date": t.date.isoformat(),
                 "suffix": t.suffix,
+                "warnings": list(t.warnings),
             }
             for t in cfg.tables
         ],

@@ -102,14 +102,15 @@ def tables_from_store(
         if table_id in exclude:
             continue
         path = inputs_dir / f"{table_id}.{entry['map_hash'][:16]}.ace"
+        text = (version / "tables" / f"{table_id}.json").read_text(encoding="utf-8")
+        table = Table.from_json(json.loads(text))  # verifies the content hash
+        if table.map_hash() != entry["map_hash"]:
+            raise ChainConfigError(f"{table_id}: map hash differs from the store's index")
         if not path.exists():
-            text = (version / "tables" / f"{table_id}.json").read_text(encoding="utf-8")
-            table = Table.from_json(json.loads(text))  # verifies the content hash
-            if table.map_hash() != entry["map_hash"]:
-                raise ChainConfigError(f"{table_id}: map hash differs from the store's index")
             write_chart(table_chart(table), path)
         date = datetime.date.fromisoformat(entry["date"])
-        refs.append(TableRef(table_id, path, date, int(entry["date_suffix"])))
+        suffix = int(entry["date_suffix"])
+        refs.append(TableRef(table_id, path, date, suffix, tuple(table.warnings)))
     if not refs:
         raise ChainConfigError(f"no tables in {dataset}")
     return ref, sorted(refs, key=lambda t: (t.date, t.suffix))
