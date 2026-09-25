@@ -1,0 +1,99 @@
+# CI for acmacs-f: build, lint, type-check, test, and the WHO-data gate.
+#
+# Runs on Linux x86_64 and macOS arm64. Tests that need the private data repo
+# (the af_data fixture) skip here, as do tests needing a real SLURM cluster.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.11" }   # Linux x86_64, oldest supported Python
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: macos-14, python: "3.13" }        # macOS arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # Builds the C++ optimiser too once cpp/optimiser/ exists (alglib is fetched
+      # and hash-checked by cpp/CMakeLists.txt); until then this is pure Python.
+      - name: Install
+        run: python -m pip install -v -e '.[dev]'
+      - name: Ruff
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+      - name: Mypy
+        run: python -m mypy
+      - name: Pytest
+        run: python -m pytest
+
+  who-data-gate:
+    # The logs of a public repo are public: --redact reports findings by location and
+    # rule only, never the matched value. No --strict: that needs the private strain
+    # list, which CI does not have (and --strict fails on its absence by design), so the
+    # name-list check is skipped here and the structural rules still run. The hooks on
+    # developers' machines run --strict. Adapted from ae's who-data-gate.yml.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # --range needs the history
+      - name: Scan tracked file contents at the tip
+        run: python3 tools/who-data-gate.py --all --quiet --redact
+      # The tip scan cannot see data one commit added and a later one removed; it still
+      # ships in the history. --range scans each commit's blobs and message.
+      - name: Scan every commit in this push / PR (files and messages)
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -eu
+          if [ "$EVENT" = "pull_request" ]; then
+            git fetch --quiet origin "$BASE_REF"
+            RANGE="origin/$BASE_REF..$PR_HEAD"
+          elif [ -n "$BEFORE" ] \
+               && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            RANGE="$BEFORE..$AFTER"
+          else
+            # New branch, force-push whose old tip is gone, or first push: what is not
+            # already on the default branch.
+            git fetch --quiet origin "$DEFAULT_BRANCH"
+            RANGE="origin/$DEFAULT_BRANCH..$AFTER"
+          fi
+          echo "Scanning every commit in: $RANGE"
+          python3 tools/who-data-gate.py --range "$RANGE" --redact
+
+  conda-env:
+    # environment.yml must solve on both platforms; a dry run, nothing is installed.
+    name: conda env (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          init-shell: none
+      - name: Solve environment.yml
+        run: micromamba create --dry-run --yes --name solve-check --file environment.yml

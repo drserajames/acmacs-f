@@ -1,0 +1,63 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "acmacs-f"
+dynamic = ["version"]
+description = "Phylogenetic trees and antigenic maps for influenza vaccine strain selection"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Sarah James" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+
+[project.urls]
+Repository = "https://github.com/drserajames/acmacs-f"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+wheel.packages = ["af"]
+# Build in a per-interpreter directory so editable installs rebuild the C++ core
+# incrementally once it exists.
+build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "af/__init__.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# importlib mode: test files in different directories may share a basename
+# without every tests/ directory needing an __init__.py.
+addopts = ["--import-mode=importlib", "-ra"]
+# tests/ on sys.path so tests can import shared helpers from conftest.
+pythonpath = ["tests"]
+markers = [
+  "slurm: needs a real SLURM cluster (sbatch/srun on PATH); skipped otherwise",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Copied verbatim from ae (MIT); kept byte-identical so updates from ae diff cleanly.
+extend-exclude = ["tools/who-data-gate.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "PTH"]
+
+[tool.mypy]
+# Lenient to start; tighten per package as code settles.
+python_version = "3.11"
+files = ["af", "tests"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
