@@ -65,6 +65,8 @@ class LeafRecord:
     collection_date_last: datetime.date | None = None
     country: str | None = None
     region: str | None = None
+    embargoed: bool | None = None
+    """GISAID publishing embargo: usable in WHO reports, not in publications. None: not recorded."""
 
     @property
     def key(self) -> str:
