@@ -270,3 +270,9 @@ def test_rename_refused_when_titres_disagree(tmp_path):
     res = read(tmp_path, _typo_rows(["5", "20", "5", "40"]))  # 1 of 4 reads >= 40
     assert any("renamed by strain_aliases.tsv:2" in e for e in res.errors)
     assert any("1/4 cells read >= 40" in e for e in res.errors)
+
+
+def test_rule_locations_name_the_real_file_line(rules_dir):
+    path = rules_dir / "titre_tokens.tsv"
+    path.write_text("# a comment\n\n" + path.read_text())
+    assert [r.where for r in Rules(rules_dir).titre_tokens.rules][:1] == ["titre_tokens.tsv:4"]
