@@ -149,6 +149,7 @@ def metadata(populated: PopulatedTree, purpose: str) -> dict[str, Any]:
             "version": states.backend_version,
             "parameters": dict(states.parameters),
             "reconstructs_gaps": populated.gaps_reconstructed,
+            "gap_blind_override": populated.counts.get("gap_blind_override"),
         },
         "clade_set_version": populated.clade_set_version,
         "clade_parents": dict(sorted(populated.clade_parents.items())),

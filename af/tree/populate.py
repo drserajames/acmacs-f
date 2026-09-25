@@ -26,7 +26,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from af.tree.asr.base import AncestralStates, Backend, translate
+from af.tree.asr.base import AncestralStates, Backend, check_gap_capability, translate
 from af.tree.model import Node, Tree, TreeError
 
 BranchScale = Literal["ml", "mutations"]
@@ -103,6 +103,8 @@ class CladeResult:
     version: str
     calls: Mapping[str, CladeCall]
     parents: Mapping[str, str | None] = field(default_factory=dict)
+    deletion_defined_positions: tuple[int, ...] = ()
+    """Positions whose defining state is a deletion. A gap-blind backend cannot see these."""
 
 
 CladeAssigner = Callable[[Sequence[CladeInput]], CladeResult]
@@ -163,6 +165,7 @@ def populate(
     assign_clades: CladeAssigner | None = None,
     continent_of: Callable[[LeafRecord], str | None] | None = None,
     outgroup: str | None = None,
+    allow_gap_blind: bool = False,
 ) -> PopulatedTree:
     """Attach everything I6 carries to a finished tree (see the module docstring).
 
@@ -337,6 +340,12 @@ def populate(
         populated.clades = {item.node_id: calls[item.node_id] for item in inputs}
         populated.clade_set_version = version
         populated.clade_parents = dict(clade_result.parents)
+        # DECISIONS, 25 Sep 2026: a backend that cannot represent a deletion must not quietly
+        # label a subtype whose clades are defined by one. B/Vic has six; H3 and H1 have none.
+        if backend is not None and not allow_gap_blind:
+            check_gap_capability(backend, clade_result.deletion_defined_positions)
+        elif clade_result.deletion_defined_positions and not gaps_reconstructed:
+            counts["gap_blind_override"] = len(clade_result.deletion_defined_positions)
         named = {call.clade for call in populated.clades.values() if call.clade}
         if populated.clade_parents and named - set(populated.clade_parents):
             unknown = sorted(named - set(populated.clade_parents))
@@ -391,7 +400,17 @@ def af_clades_assigner(clade_set: Any, *, require_gap_support: bool = True) -> C
             for name, a in result.assignments.items()
         }
         parents = {clade.name: clade.parent for clade in clade_set}
-        return CladeResult(str(result.clade_set_version), calls, parents)
+        deletions = tuple(
+            sorted(
+                {
+                    position.position
+                    for clade in clade_set
+                    for position in clade.mutations
+                    if position.state == "-"
+                }
+            )
+        )
+        return CladeResult(str(result.clade_set_version), calls, parents, deletions)
 
     return run
 

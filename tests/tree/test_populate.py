@@ -12,8 +12,10 @@ from pathlib import Path
 import pytest
 
 from af.store import Provenance, Store
+from af.tree.asr.base import GapCapabilityError
 from af.tree.io import i6, newick
 from af.tree.populate import (
+    CladeAssigner,
     CladeCall,
     CladeInput,
     CladeResult,
@@ -178,3 +180,55 @@ def test_a_clade_outside_the_hierarchy_is_an_error() -> None:
 
     with pytest.raises(PopulateError, match="not in the clade set's hierarchy"):
         populate(tree, "h3", records(), states_for(ids), assign_clades=engine)
+
+
+def _deletion_engine(positions: tuple[int, ...]) -> CladeAssigner:
+    """A clade engine whose clade set defines a clade by a deletion (as B/Vic's does)."""
+
+    def engine(nodes: Sequence[CladeInput]) -> CladeResult:
+        calls = {node.node_id: CladeCall("C.5") for node in nodes}
+        return CladeResult("v", calls, {"C.5": None}, positions)
+
+    return engine
+
+
+def test_a_gap_blind_backend_is_refused_where_deletions_define_clades() -> None:
+    """DECISIONS 25 Sep: raxml-fed B/Vic must not be labelled quietly."""
+    tree, ids = built()
+    with pytest.raises(GapCapabilityError, match="cannot reconstruct deletions"):
+        populate(
+            tree,
+            "bvic",
+            records(),
+            states_for(ids),
+            backend=GapBlind(),
+            assign_clades=_deletion_engine((163, 164)),
+        )
+
+
+def test_the_gap_blind_refusal_can_be_overridden_and_is_then_counted() -> None:
+    tree, ids = built()
+    result = populate(
+        tree,
+        "bvic",
+        records(),
+        states_for(ids),
+        backend=GapBlind(),
+        assign_clades=_deletion_engine((163, 164)),
+        allow_gap_blind=True,
+    )
+    assert result.counts["gap_blind_override"] == 2
+
+
+def test_a_gap_blind_backend_is_fine_where_no_clade_needs_a_deletion() -> None:
+    """H3 has no deletion-defined clade, so the same backend is allowed there."""
+    tree, ids = built()
+    result = populate(
+        tree,
+        "h3",
+        records(),
+        states_for(ids),
+        backend=GapBlind(),
+        assign_clades=_deletion_engine(()),
+    )
+    assert "gap_blind_override" not in result.counts
