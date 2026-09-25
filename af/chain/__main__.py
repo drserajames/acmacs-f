@@ -61,8 +61,8 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
-    cfg = load_chain_config(args.chain)
     run = load_config(args.run, RunSettings)
+    cfg = load_chain_config(args.chain, inputs_dir=run.store_root / "inputs")
     root = run.store_root / cfg.name
     if not args.review:
         split = None

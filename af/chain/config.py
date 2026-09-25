@@ -59,8 +59,13 @@ class MapOptions:
 
 @dataclass(frozen=True)
 class TableSelection:
-    directory: Path
-    group: str
+    """Either a tables-store dataset (`store` + `dataset`, the normal case) or a directory
+    of `.ace` tables (`directory` + `group`, for comparisons with ae-era tables)."""
+
+    store: Path | None = None  # tables store root
+    dataset: str | None = None  # e.g. "labx/h3-hi-turkey-labx"
+    directory: Path | None = None
+    group: str | None = None
     date_from: str | None = None  # ISO date, inclusive
     date_to: str | None = None
     exclude: list[str] = field(default_factory=list)  # table ids; each must match a table
@@ -94,6 +99,7 @@ class ChainConfig:
     options: MapOptions = field(default_factory=MapOptions)
     seed: int = 0
     first_map: Path | None = None
+    tables_source: dict[str, str] | None = None  # the store ref the tables came from
 
     def __post_init__(self) -> None:
         if not self.tables:
@@ -106,13 +112,27 @@ class ChainConfig:
             raise ChainConfigError(f"{self.name}: tables are not in (date, suffix) order")
 
 
-def load_chain_config(path: Path) -> ChainConfig:
+def load_chain_config(path: Path, inputs_dir: Path | None = None) -> ChainConfig:
+    """`inputs_dir` receives the chart files made from store tables (the chain's own area)."""
     s = load_config(path, ChainSettings)
     t = s.tables
-    tables = tables_from_directory(
-        t.directory, t.group, _date(t.date_from), _date(t.date_to), set(t.exclude)
-    )
-    return ChainConfig(s.name, tables, s.options, s.seed, s.first_map)
+    start, end = _date(t.date_from), _date(t.date_to)
+    if t.store is not None and t.dataset is not None and t.directory is None:
+        from af.chain.tables import tables_from_store
+
+        if inputs_dir is None:
+            raise ChainConfigError(f"{path}: store tables need an inputs directory")
+        ref, tables = tables_from_store(t.store, t.dataset, inputs_dir, set(t.exclude))
+        tables = [
+            x
+            for x in tables
+            if (start is None or x.date >= start) and (end is None or x.date <= end)
+        ]
+        return ChainConfig(s.name, tables, s.options, s.seed, s.first_map, ref.to_json())
+    if t.directory is not None and t.group is not None and t.store is None:
+        tables = tables_from_directory(t.directory, t.group, start, end, set(t.exclude))
+        return ChainConfig(s.name, tables, s.options, s.seed, s.first_map)
+    raise ChainConfigError(f"{path}: [tables] needs either store + dataset or directory + group")
 
 
 def _date(text: str | None) -> datetime.date | None:
@@ -161,6 +181,7 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
         "name": cfg.name,
         "seed": cfg.seed,
         "first_map": None if cfg.first_map is None else str(cfg.first_map),
+        "tables_source": cfg.tables_source,
         "options": asdict(cfg.options),
         "tables": [
             {
