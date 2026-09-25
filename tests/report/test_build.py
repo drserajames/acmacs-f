@@ -41,7 +41,7 @@ slots = ["map/m1", "map/m2"]
 windows = [{ name = "all", title = "all" }]
 """
 
-needs_latex = pytest.mark.skipif(shutil.which(build.LATEX) is None, reason="no pdflatex")
+needs_latex = pytest.mark.tool(build.LATEX)
 
 
 def _setup(tmp: Path, allow: bool = True) -> tuple[Path, Path]:

@@ -11,7 +11,6 @@ each backend finishes in seconds.
 from __future__ import annotations
 
 import random
-import shutil
 
 import pytest
 
@@ -20,9 +19,9 @@ from af.tree.io import fasta, newick
 from af.tree.model import Tree
 
 BACKENDS = [
-    pytest.param("treetime", "treetime", id="treetime"),
-    pytest.param("iqtree", "iqtree3", id="iqtree"),
-    pytest.param("raxml", "raxml-ng", id="raxml-ng"),
+    pytest.param("treetime", "treetime", id="treetime", marks=pytest.mark.tool("treetime")),
+    pytest.param("iqtree", "iqtree3", id="iqtree", marks=pytest.mark.tool("iqtree3")),
+    pytest.param("raxml", "raxml-ng", id="raxml-ng", marks=pytest.mark.tool("raxml-ng")),
 ]
 
 
@@ -66,8 +65,6 @@ def synthetic(n_leaves: int = 24, length: int = 300, seed: int = 7) -> tuple[Tre
 
 @pytest.mark.parametrize(("backend_name", "executable"), BACKENDS)
 def test_backend_reconstructs_every_internal_node(backend_name, executable, tmp_path) -> None:
-    if shutil.which(executable) is None:
-        pytest.skip(f"{executable} is not installed")
     tree, sequences = synthetic()
     alignment = tmp_path / "aln.fasta"
     fasta.write_alignment(alignment, sequences)
@@ -87,8 +84,6 @@ def test_backend_reconstructs_every_internal_node(backend_name, executable, tmp_
 @pytest.mark.parametrize(("backend_name", "executable"), BACKENDS)
 def test_backend_leaves_the_branch_lengths_alone(backend_name, executable, tmp_path) -> None:
     """af never lets a backend re-optimise lengths: they come from CMAPLE."""
-    if shutil.which(executable) is None:
-        pytest.skip(f"{executable} is not installed")
     tree, sequences = synthetic()
     before = [node.branch_length for node in tree.preorder()]
     alignment = tmp_path / "aln.fasta"
@@ -97,10 +92,9 @@ def test_backend_leaves_the_branch_lengths_alone(backend_name, executable, tmp_p
     assert [node.branch_length for node in tree.preorder()] == before
 
 
+@pytest.mark.tool("treetime")
 def test_treetime_reconstructs_a_deletion(tmp_path) -> None:
     """The property B/Vic's clades depend on, and the reason TreeTime is the default."""
-    if shutil.which("treetime") is None:
-        pytest.skip("treetime is not installed")
     tree, sequences = synthetic(n_leaves=16, length=120)
     # Give half the leaves a clean 3-codon deletion, as B/Vic's C lineage has.
     deleted = sorted(sequences)[:8]

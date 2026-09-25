@@ -91,18 +91,42 @@ jobs:
           echo "Scanning every commit in: $RANGE"
           python3 tools/who-data-gate.py --range "$RANGE" --redact
 
-  conda-env:
-    # environment.yml must solve on both platforms; a dry run, nothing is installed.
-    name: conda env (${{ matrix.os }})
+  tools:
+    # The tests of external tools (CMAPLE, IQ-TREE, RAxML-NG, TreeTime, Nextclade, pdflatex:
+    # every test marked @pytest.mark.tool), run in the conda environment users install from
+    # environment.yml, plus LaTeX for the report tests. --require-tools turns "tool not
+    # installed" from a skip into a failure: a green run means each tool test really ran
+    # (Sarah, Q26). Installing the environment also proves it solves on both platforms.
+    name: tool tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14]
+    defaults:
+      run:
+        shell: bash -el {0}   # login shell, so the micromamba environment is active
     steps:
       - uses: actions/checkout@v4
       - uses: mamba-org/setup-micromamba@v2
         with:
-          init-shell: none
-      - name: Solve environment.yml
-        run: micromamba create --dry-run --yes --name solve-check --file environment.yml
+          environment-file: environment.yml
+          cache-environment: true
+      # LaTeX for the report tests: Ubuntu's TeX Live on Linux. conda-forge's texlive-core
+      # is unusable (no pdflatex.fmt; and it cannot be solved with environment.yml), and a
+      # full TeX on the macOS runner is slow, so macOS skips pdflatex explicitly (below).
+      - name: LaTeX (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends texlive-latex-extra
+      # Apple clang on macOS: conda-forge's clang cannot link with recent Xcode linkers
+      # (`-lto_library` rejected); Apple clang gives bit-identical optimiser results.
+      - name: Install af into the environment
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then export CC=/usr/bin/clang CXX=/usr/bin/clang++; fi
+          python -m pip install -v -e '.[dev,geo]'
+      - name: Tool tests (fail if a tool is missing)
+        run: |
+          set -o pipefail
+          skip=""
+          if [ "$RUNNER_OS" = macOS ]; then skip="--skip-tool pdflatex"; fi
+          python -m pytest -m tool --require-tools $skip -rs | tee tools.log
