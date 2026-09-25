@@ -3,10 +3,10 @@
 // For each point, scan a grid over the area around its titrated partners and evaluate
 // that point's own stress contribution at every cell. If a cell is better, move the point
 // there and re-minimise the whole map roughly:
-//   - trapped:      the map's stress drops by more than 0.25;
+//   - trapped:      the map's stress changes by more than 0.25 (either way, as ae);
 //   - hemisphering: the point has another position more than 1 unit away where the map's
 //                   stress is within 0.25 of the current one (the position is ambiguous).
-// Follows ae grid-test.cc; one deliberate difference is noted in grid_test.cc.
+// Follows ae grid-test.cc.
 
 #pragma once
 

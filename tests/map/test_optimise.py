@@ -371,7 +371,8 @@ def test_grid_test_finds_and_resolves_a_trapped_point():
     resolved = opt.resolve_trapped(problem, trapped.layout)
     assert resolved.moved >= 1
     assert resolved.projection.stress == pytest.approx(best.stress, rel=1e-4)
-    assert all(r.diagnosis != "trapped" for r in resolved.last_grid)
+    # no trapped point is left with a move that would lower the stress
+    assert not any(r.diagnosis == "trapped" and r.stress_diff < 0.0 for r in resolved.last_grid)
 
 
 def test_grid_test_reports_hemisphering():
