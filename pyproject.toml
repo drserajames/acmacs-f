@@ -50,8 +50,11 @@ testpaths = ["tests"]
 # importlib mode: test files in different directories may share a basename
 # without every tests/ directory needing an __init__.py.
 addopts = ["--import-mode=importlib", "-ra"]
-# tests/ on sys.path so tests can import shared helpers from conftest.
-pythonpath = ["tests"]
+# The repo root on sys.path, so `tests` is a package: every tests/ directory has an
+# __init__.py, and helpers are imported relatively (`from .synthetic import x`) or as
+# `tests.<...>`. A top-level name like `synthetic` would be one file under two module
+# names, which mypy rejects on a clean checkout (CLAUDE.md, "Tests").
+pythonpath = ["."]
 markers = [
   "slurm: needs a real SLURM cluster (sbatch/srun on PATH); skipped otherwise",
 ]
@@ -65,11 +68,18 @@ extend-exclude = ["tools/who-data-gate.py"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "PTH"]
 
+[tool.ruff.lint.isort]
+# Explicit, so import sorting never depends on what the environment happens to contain.
+known-first-party = ["af", "tests"]
+
 [tool.mypy]
 # Lenient to start; tighten per package as code settles. No python_version: mypy checks
 # against the interpreter running it. Pinning 3.11 broke on numpy >= 2.5's stubs, which
 # use 3.12 syntax; the Python 3.11 CI job still catches 3.12-only code in af itself.
 files = ["af", "tests"]
+# Module names from the package structure (tests/ has __init__.py throughout), so each
+# file has exactly one name.
+explicit_package_bases = true
 ignore_missing_imports = true
 check_untyped_defs = true
 warn_unused_ignores = true
