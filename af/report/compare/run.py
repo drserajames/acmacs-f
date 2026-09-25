@@ -299,7 +299,7 @@ def compare_report(
 
 
 TREE_CHECKS = ("leaves jaccard", "order spearman", "clade ARI (tree)", "section min jaccard",
-               "time series same")  # fmt: skip
+               "time series same", "sections resolved")  # fmt: skip
 
 
 def tree_checks(res: dict[str, Any], lim: TreeLimits) -> list[dict[str, Any]]:
@@ -312,6 +312,15 @@ def tree_checks(res: dict[str, Any], lim: TreeLimits) -> list[dict[str, Any]]:
         ),  # fmt: skip
         # A different time-series window is always a difference worth failing on.
         _check("time series same", float(res["time_series"]["same"]), ">=", 1.0),
+        # A section whose bounds are not drawn leaves is a producer bug: always a failure.
+        _check(
+            "sections resolved",
+            float(
+                not (res["sections"]["unresolved"]["ref"] or res["sections"]["unresolved"]["new"])
+            ),
+            ">=",
+            1.0,
+        ),  # fmt: skip
     ]
 
 
@@ -372,6 +381,10 @@ def markdown(
             notes += [f"- {row['slot']} / {c['check']}: {c['expected']}"
                       for c in row["tree_checks"] if "expected" in c]  # fmt: skip
             sec = d["sections"]
+            for side in ("ref", "new"):
+                if sec["unresolved"][side]:
+                    notes.append(f"- {row['slot']}: {side} sections whose bounds are not drawn "
+                                 f"leaves: {sec['unresolved'][side]}")  # fmt: skip
             if sec["only_ref"] or sec["only_new"]:
                 notes.append(f"- {row['slot']}: sections only in ref {sec['only_ref']}, "
                              f"only in new {sec['only_new']}")  # fmt: skip

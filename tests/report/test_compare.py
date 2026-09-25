@@ -487,3 +487,28 @@ def test_runner_compares_tree_slots(tmp_path: Path) -> None:
     rows, failed = compare_report(record, tmp_path, limits, "loose")
     assert failed == 0 and rows[0]["status"] == "ok"
     assert "| tree/x/report | ok | 0 / 0 |" in markdown(record, rows, "l", "loose", limits.adoption)
+
+
+def test_section_bounds_with_an_ae_hash_suffix_resolve() -> None:
+    names = [f"leaf{i}" for i in range(20)]
+    ref = _tree_doc(names, ["P"] * 20, [("P", 0, 9)])
+    ref["tree"]["sections"][0]["first_leaf"] = "leaf0_OR_0A1B2C3D"
+    res = trees.compare_figures(ref, _tree_doc(names, ["P"] * 20, [("P", 0, 9)]))
+    assert res["sections"]["matched"]["P"]["jaccard"] == 1.0
+    assert res["sections"]["unresolved"] == {"ref": [], "new": []}
+
+
+def test_unresolved_section_is_reported_and_fails() -> None:
+    names = [f"leaf{i}" for i in range(20)]
+    new = _tree_doc(names, ["P"] * 20, [("P", 0, 9)])
+    new["tree"]["sections"][0]["last_leaf"] = "not drawn"
+    res = trees.compare_figures(_tree_doc(names, ["P"] * 20, [("P", 0, 9)]), new)
+    assert len(res["sections"]["unresolved"]["new"]) == 1
+    assert {c["check"]: c["ok"] for c in tree_checks_for(res)}["sections resolved"] is False
+
+
+def test_reference_time_series_records_the_last_month_drawn() -> None:
+    from af.report.compare.reference_ae import _drawn_months
+
+    assert _drawn_months(("2024-10", "2026-10")) == {"first": "2024-10", "last": "2026-09"}
+    assert _drawn_months(("2025-02", "2026-01")) == {"first": "2025-02", "last": "2025-12"}

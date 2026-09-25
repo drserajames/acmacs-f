@@ -311,8 +311,12 @@ def compare_figures(ref: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
 
 def _section_members(
     doc: dict[str, Any], index: dict[str, dict[str, Any]], common: set[str]
-) -> dict[str, set[str]]:
-    """Clade label -> the common leaves drawn between the section's first and last leaf."""
+) -> tuple[dict[str, set[str]], list[str]]:
+    """Clade label -> the common leaves drawn between the section's first and last leaf.
+
+    Section bounds are matched like leaves (ae hash suffix removed, spelling-normalised). A
+    section whose bounds are not drawn leaves is returned as unresolved, never skipped silently.
+    """
     from af.report.compare.maps import spelling_key
 
     position = {k: leaf["order"] for k, leaf in index.items() if k in common}
@@ -322,22 +326,29 @@ def _section_members(
         if leaf["shown"]
     }
     out: dict[str, set[str]] = {}
+    unresolved: list[str] = []
     for section in doc["tree"]["sections"]:
-        first = by_name.get(spelling_key(section["first_leaf"]))
-        last = by_name.get(spelling_key(section["last_leaf"]))
+        first = by_name.get(spelling_key(strain_key(section["first_leaf"])))
+        last = by_name.get(spelling_key(strain_key(section["last_leaf"])))
         if first is None or last is None:
+            unresolved.append(
+                f"{section['clade']} ({section['first_leaf']} .. {section['last_leaf']})"
+            )
             continue
         lo, hi = min(first, last), max(first, last)
         members = {k for k, p in position.items() if lo <= p <= hi}
         out.setdefault(section["clade"], set()).update(members)  # a split clade: union of parts
-    return out
+    return out, unresolved
 
 
 def _compare_sections(
     ref: dict[str, Any], new: dict[str, Any], ri: dict[str, dict[str, Any]],
     ni: dict[str, dict[str, Any]], common: set[str],
 ) -> dict[str, Any]:  # fmt: skip
-    rs, ns = _section_members(ref, ri, common), _section_members(new, ni, common)
+    (rs, r_unresolved), (ns, n_unresolved) = (
+        _section_members(ref, ri, common),
+        _section_members(new, ni, common),
+    )
     matched = {}
     for label in sorted(rs.keys() & ns.keys()):
         a, b = rs[label], ns[label]
@@ -345,4 +356,5 @@ def _compare_sections(
                           "jaccard": len(a & b) / max(1, len(a | b))}  # fmt: skip
     worst = min((v["jaccard"] for v in matched.values()), default=float("nan"))
     return {"matched": matched, "only_ref": sorted(rs.keys() - ns.keys()),
-            "only_new": sorted(ns.keys() - rs.keys()), "min_jaccard": worst}  # fmt: skip
+            "only_new": sorted(ns.keys() - rs.keys()), "min_jaccard": worst,
+            "unresolved": {"ref": r_unresolved, "new": n_unresolved}}  # fmt: skip
