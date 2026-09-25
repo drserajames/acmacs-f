@@ -17,6 +17,7 @@ namespace af::map
     {
         std::size_t dimensions{2};
         std::size_t n_starts{1};
+        std::size_t first_start{0};                   // index of the first start (splitting a run into jobs)
         std::uint64_t seed{0};
         Method method{Method::cg};
         Precision precision{Precision::fine};
@@ -37,14 +38,21 @@ namespace af::map
         int termination;
     };
 
-    // Maps from scratch: every point placed at random. Sorted by stress (then start index).
+    // Maps from scratch: every point placed at random. Runs starts first_start ..
+    // first_start + n_starts - 1, each seeded by its global index, so a run split into jobs
+    // gives exactly the starts of one run. Sorted by stress (then start index).
     std::vector<Projection> relax(const Problem& problem, const RelaxOptions& options);
 
     // Maps from an existing layout (the chain's incremental step): points whose row is NaN
-    // (and that are not disconnected) are placed at random, every movable point is then
-    // minimised. As ae relax_incremental: all starts at rough precision, then the best five
-    // again at `options.precision` if that is fine.
+    // (and that are not disconnected) are placed at random, then every movable point is
+    // minimised at `options.precision`. ae relax_incremental minimises every start roughly and
+    // then the best five finely; the second stage is refine(), run by the caller on the best
+    // starts of the whole run so that splitting the run into jobs cannot change the result.
     std::vector<Projection> relax_incremental(const Problem& problem, std::span<const double> start_layout, const RelaxOptions& options);
+
+    // Minimises each projection further (in parallel), keeping its start seed and index and
+    // adding to its iteration count. Returned in the order given.
+    std::vector<Projection> refine(const Problem& problem, std::vector<Projection> projections, Method method, Precision precision, int threads);
 
     // Minimises one given layout (no randomisation): ae Projection::relax.
     Projection optimise(const Problem& problem, std::span<const double> layout, std::size_t dimensions, Method method, Precision precision);

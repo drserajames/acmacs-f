@@ -43,6 +43,7 @@ def relax(
     *,
     dimensions: int,
     n_starts: int,
+    first_start: int = 0,
     seed: int,
     method: str = "cg",
     precision: str = "fine",
@@ -55,10 +56,19 @@ def relax_incremental(
     start_layout: npt.NDArray[np.float64],
     *,
     n_starts: int,
+    first_start: int = 0,
     seed: int,
     method: str = "cg",
-    precision: str = "fine",
+    precision: str = "rough",
     keep: int = 0,
+    threads: int = 0,
+) -> list[dict[str, Any]]: ...
+def refine(
+    problem: Problem,
+    layouts: list[npt.NDArray[np.float64]],
+    *,
+    method: str = "cg",
+    precision: str = "fine",
     threads: int = 0,
 ) -> list[dict[str, Any]]: ...
 def optimise(

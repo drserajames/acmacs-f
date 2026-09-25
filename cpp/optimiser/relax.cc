@@ -18,7 +18,6 @@ namespace af::map
     {
         constexpr double nan = std::numeric_limits<double>::quiet_NaN();
         constexpr std::size_t annealing_start_dimensions = 5;
-        constexpr std::size_t incremental_refined = 5; // ae relax_incremental re-relaxes the best five
 
         bool row_is_nan(std::span<const double> layout, std::size_t dimensions, std::size_t point)
         {
@@ -143,7 +142,8 @@ namespace af::map
 
         std::vector<Projection> projections(options.n_starts);
         for_each_start(options.n_starts, options.threads, [&](std::size_t i) {
-            const auto seed = start_seed(options.seed, i);
+            const auto index = options.first_start + i;
+            const auto seed = start_seed(options.seed, index);
             SplitMix64 rng{seed};
             std::vector<double> layout(problem.n_points() * start_dimensions);
             for (std::size_t point = 0; point < problem.n_points(); ++point)
@@ -157,7 +157,7 @@ namespace af::map
             }
             result = minimise(stress, layout, options.dimensions, problem.disconnected, options.method, options.precision);
             iterations += result.iterations;
-            projections[i] = Projection{std::move(layout), options.dimensions, result.stress, iterations, seed, i, result.termination};
+            projections[i] = Projection{std::move(layout), options.dimensions, result.stress, iterations, seed, index, result.termination};
         });
 
         sort_by_stress(projections);
@@ -198,7 +198,8 @@ namespace af::map
 
         std::vector<Projection> projections(options.n_starts);
         for_each_start(options.n_starts, options.threads, [&](std::size_t i) {
-            const auto seed = start_seed(options.seed, i);
+            const auto index = options.first_start + i;
+            const auto seed = start_seed(options.seed, index);
             SplitMix64 rng{seed};
             std::vector<double> layout(start_layout.begin(), start_layout.end());
             for (std::size_t point = 0; point < problem.n_points(); ++point) {
@@ -207,22 +208,30 @@ namespace af::map
             }
             for (const auto point : to_randomise)
                 randomise_point(layout, dimensions, point, rng, diameter);
-            const auto result = minimise(stress, layout, dimensions, problem.disconnected, options.method, Precision::rough);
-            projections[i] = Projection{std::move(layout), dimensions, result.stress, result.iterations, seed, i, result.termination};
+            const auto result = minimise(stress, layout, dimensions, problem.disconnected, options.method, options.precision);
+            projections[i] = Projection{std::move(layout), dimensions, result.stress, result.iterations, seed, index, result.termination};
         });
         sort_by_stress(projections);
-
-        if (options.precision == Precision::fine) {
-            const std::size_t n_refined = std::min(incremental_refined, projections.size());
-            for_each_start(n_refined, options.threads, [&](std::size_t i) {
-                const auto result = minimise(stress, projections[i].layout, dimensions, problem.disconnected, options.method, Precision::fine);
-                projections[i].stress = result.stress;
-                projections[i].iterations += result.iterations;
-                projections[i].termination = result.termination;
-            });
-            sort_by_stress(projections);
-        }
         keep_best(projections, options.keep);
+        return projections;
+    }
+
+    std::vector<Projection> refine(const Problem& problem, std::vector<Projection> projections, Method method, Precision precision, int threads)
+    {
+        problem.validate();
+        require_enough_connected(problem);
+        const Stress stress{table_distances(problem), problem.n_points(), problem.unmovable};
+        for (const auto& projection : projections) {
+            if (projection.layout.size() != problem.n_points() * projection.dimensions)
+                throw std::invalid_argument{"refine: a layout does not have n_points rows of its dimensions"};
+        }
+        for_each_start(projections.size(), threads, [&](std::size_t i) {
+            auto& projection = projections[i];
+            const auto result = minimise(stress, projection.layout, projection.dimensions, problem.disconnected, method, precision);
+            projection.stress = result.stress;
+            projection.iterations += result.iterations;
+            projection.termination = result.termination;
+        });
         return projections;
     }
 

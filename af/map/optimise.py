@@ -14,6 +14,8 @@ between threads, so its seeded runs were not reproducible.
 
 from __future__ import annotations
 
+import dataclasses
+import math
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Literal
@@ -135,11 +137,15 @@ class GridResult:
     stress_diff: float
 
 
+INCREMENTAL_REFINED = 5  # ae relax_incremental minimises its best five starts again, finely
+
+
 def relax(
     problem: MapProblem,
     *,
     n_starts: int,
     seed: int,
+    first_start: int = 0,
     dimensions: int = 2,
     start_layout: FloatArray | None = None,
     method: Method = "cg",
@@ -152,11 +158,18 @@ def relax(
 
     Without ``start_layout`` every point starts at random (a chain's *scratch* map).
     With it, only the NaN rows are placed at random and the whole map is then minimised
-    (a chain's *incremental* map): every start is minimised roughly and the best five
-    again at ``precision``, as ae ``relax_incremental`` does.
+    (a chain's *incremental* map): every start is minimised roughly and, if ``precision``
+    is fine, the best five again finely (:func:`refine`), as ae ``relax_incremental`` does.
+
+    ``first_start`` runs starts ``first_start .. first_start + n_starts - 1``, each with the
+    seed it has in a single run, so a run can be split into jobs. For an incremental map
+    split into jobs, run each job with ``precision="rough"``, combine the projections, and
+    call :func:`refine` once on the combination: refining each job's own best five would
+    make the result depend on how the run was split.
     """
     _require_positive("n_starts", n_starts)
     _require_seed(seed)
+    _require_non_negative("first_start", first_start)
     keep_n = 0 if keep is None else _require_positive("keep", keep)
     core = problem._core_problem
     if start_layout is None:
@@ -165,6 +178,7 @@ def relax(
             core,
             dimensions=dimensions,
             n_starts=n_starts,
+            first_start=first_start,
             seed=seed,
             method=method,
             precision=precision,
@@ -172,26 +186,73 @@ def relax(
             keep=keep_n,
             threads=threads,
         )
+        projections = [_projection(entry) for entry in raw]
     else:
         if dimension_annealing:
             raise ValueError("dimension_annealing applies only to maps from scratch")
         layout = _layout(problem, start_layout)
         if layout.shape[1] != dimensions:
             raise ValueError(f"start_layout has {layout.shape[1]} dimensions, not {dimensions}")
+        rough = precision == "fine"
         raw = _core.relax_incremental(
             core,
             layout,
             n_starts=n_starts,
+            first_start=first_start,
             seed=seed,
             method=method,
-            precision=precision,
-            keep=keep_n,
+            precision="rough" if rough else precision,
+            keep=0 if rough else keep_n,
             threads=threads,
         )
-    return RelaxResult(
-        projections=[_projection(entry) for entry in raw],
-        column_bases=np.array(core.column_bases),
+        projections = [_projection(entry) for entry in raw]
+        if rough:
+            projections = refine(problem, projections, method=method, threads=threads)
+            if keep_n:
+                projections = projections[:keep_n]
+    return RelaxResult(projections=projections, column_bases=np.array(core.column_bases))
+
+
+def refine(
+    problem: MapProblem,
+    projections: list[Projection],
+    *,
+    n_best: int = INCREMENTAL_REFINED,
+    method: Method = "cg",
+    threads: int = 0,
+) -> list[Projection]:
+    """Minimise the ``n_best`` lowest-stress projections again at fine precision and
+    return all of them, re-sorted. The second stage of an incremental relax; run it once
+    on the projections of all jobs when a run is split. Each projection keeps its start
+    seed and index, so the order (stress, then start index) is the same however the starts
+    were grouped."""
+    _require_positive("n_best", n_best)
+    ordered = sort_projections(projections)
+    best, rest = ordered[:n_best], ordered[n_best:]
+    raw = _core.refine(
+        problem._core_problem,
+        [_layout(problem, p.layout) for p in best],
+        method=method,
+        precision="fine",
+        threads=threads,
     )
+    refined = [
+        dataclasses.replace(
+            before,
+            layout=np.asarray(after["layout"]),
+            stress=float(after["stress"]),
+            n_iterations=before.n_iterations + int(after["n_iterations"]),
+            termination=int(after["termination"]),
+        )
+        for before, after in zip(best, raw, strict=True)
+    ]
+    return sort_projections(refined + rest)
+
+
+def sort_projections(projections: list[Projection]) -> list[Projection]:
+    """Stress ascending, NaN stress last, ties by start index: the core's order, so
+    projections combined from several jobs sort exactly as one run's would."""
+    return sorted(projections, key=lambda p: (math.isnan(p.stress), p.stress, p.start_index))
 
 
 def optimise(
@@ -324,6 +385,12 @@ def _optional_float(array: FloatArray | None) -> FloatArray | None:
 def _require_positive(name: str, value: int) -> int:
     if not isinstance(value, (int, np.integer)) or isinstance(value, bool) or value < 1:
         raise ValueError(f"{name} must be a positive integer, not {value!r}")
+    return int(value)
+
+
+def _require_non_negative(name: str, value: int) -> int:
+    if not isinstance(value, (int, np.integer)) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer, not {value!r}")
     return int(value)
 
 

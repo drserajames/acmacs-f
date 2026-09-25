@@ -275,6 +275,67 @@ def test_incremental_relax_is_seeded_and_thread_independent():
         np.testing.assert_array_equal(x.layout, y.layout)
 
 
+def combine(results: list[opt.RelaxResult]) -> list[opt.Projection]:
+    return opt.sort_projections([p for r in results for p in r.projections])
+
+
+def assert_same_projections(a: list[opt.Projection], b: list[opt.Projection]) -> None:
+    assert [p.start_index for p in a] == [p.start_index for p in b]
+    for x, y in zip(a, b, strict=True):
+        np.testing.assert_array_equal(x.layout, y.layout)
+        assert x.stress == y.stress and x.start_seed == y.start_seed
+
+
+def test_scratch_run_split_into_jobs_equals_one_run():
+    problem, _ = synthetic_table(noise=0.8, seed=5)
+    whole = opt.relax(problem, n_starts=12, seed=31)
+    parts = [
+        opt.relax(problem, n_starts=n, first_start=f, seed=31) for f, n in ((0, 5), (5, 4), (9, 3))
+    ]
+    assert_same_projections(whole.projections, combine(parts))
+    assert sorted(p.start_index for p in whole.projections) == list(range(12))
+
+
+def test_incremental_run_split_into_jobs_equals_one_run():
+    """Jobs run rough only; refine() on the combination gives the single run's result."""
+    problem, _ = synthetic_table(n_antigens=25, n_sera=6, noise=0.5, seed=14)
+    start = opt.relax(problem, n_starts=4, seed=1).best.layout
+    start[[2, 3, 26]] = np.nan
+    whole = opt.relax(problem, n_starts=12, seed=8, start_layout=start)
+    parts = [
+        opt.relax(problem, n_starts=n, first_start=f, seed=8, start_layout=start, precision="rough")
+        for f, n in ((0, 7), (7, 5))
+    ]
+    assert_same_projections(whole.projections, opt.refine(problem, combine(parts)))
+
+
+def test_refine_keeps_start_identity_and_only_touches_the_best():
+    problem, _ = synthetic_table(n_antigens=20, n_sera=6, noise=0.5, seed=15)
+    start = opt.relax(problem, n_starts=4, seed=1).best.layout
+    start[[0, 21]] = np.nan
+    rough = opt.relax(
+        problem, n_starts=10, seed=3, start_layout=start, precision="rough"
+    ).projections
+    refined = opt.refine(problem, rough, n_best=3)
+    by_index = {p.start_index: p for p in rough}
+    for p in refined:
+        before = by_index[p.start_index]
+        assert p.start_seed == before.start_seed
+        assert p.stress <= before.stress + 1e-12
+    untouched = {p.start_index for p in rough[3:]}
+    for p in refined:
+        if p.start_index in untouched:
+            np.testing.assert_array_equal(p.layout, by_index[p.start_index].layout)
+    stresses = [p.stress for p in refined]
+    assert stresses == sorted(stresses)
+
+
+def test_first_start_is_checked():
+    problem, _ = synthetic_table(n_antigens=6, n_sera=3)
+    with pytest.raises(ValueError, match="first_start"):
+        opt.relax(problem, n_starts=2, seed=1, first_start=-1)
+
+
 # ---------------------------------------------------------------------------------------
 # grid test
 

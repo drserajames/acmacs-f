@@ -162,9 +162,9 @@ PYBIND11_MODULE(_core, m)
 
     m.def(
         "relax",
-        [](const Problem& problem, std::size_t dimensions, std::size_t n_starts, std::uint64_t seed, const std::string& method, const std::string& precision, bool dimension_annealing,
-           std::size_t keep, int threads) {
-            RelaxOptions options{dimensions, n_starts, seed, method_from_string(method), precision_from_string(precision), dimension_annealing, 2.0, keep, threads};
+        [](const Problem& problem, std::size_t dimensions, std::size_t n_starts, std::size_t first_start, std::uint64_t seed, const std::string& method, const std::string& precision,
+           bool dimension_annealing, std::size_t keep, int threads) {
+            RelaxOptions options{dimensions, n_starts, first_start, seed, method_from_string(method), precision_from_string(precision), dimension_annealing, 2.0, keep, threads};
             std::vector<Projection> projections;
             {
                 py::gil_scoped_release release;
@@ -172,16 +172,16 @@ PYBIND11_MODULE(_core, m)
             }
             return projection_list(projections);
         },
-        py::arg("problem"), py::kw_only(), py::arg("dimensions"), py::arg("n_starts"), py::arg("seed"), py::arg("method") = "cg", py::arg("precision") = "fine",
+        py::arg("problem"), py::kw_only(), py::arg("dimensions"), py::arg("n_starts"), py::arg("first_start") = 0, py::arg("seed"), py::arg("method") = "cg", py::arg("precision") = "fine",
         py::arg("dimension_annealing") = false, py::arg("keep") = 0, py::arg("threads") = 0, "Maps from random starts, sorted by stress.");
 
     m.def(
         "relax_incremental",
-        [](const Problem& problem, const carray<double>& start_layout, std::size_t n_starts, std::uint64_t seed, const std::string& method, const std::string& precision, std::size_t keep,
-           int threads) {
+        [](const Problem& problem, const carray<double>& start_layout, std::size_t n_starts, std::size_t first_start, std::uint64_t seed, const std::string& method,
+           const std::string& precision, std::size_t keep, int threads) {
             std::size_t dimensions = 0;
             const auto layout = layout_vector(problem, start_layout, dimensions);
-            RelaxOptions options{dimensions, n_starts, seed, method_from_string(method), precision_from_string(precision), false, 2.0, keep, threads};
+            RelaxOptions options{dimensions, n_starts, first_start, seed, method_from_string(method), precision_from_string(precision), false, 2.0, keep, threads};
             std::vector<Projection> projections;
             {
                 py::gil_scoped_release release;
@@ -189,8 +189,26 @@ PYBIND11_MODULE(_core, m)
             }
             return projection_list(projections);
         },
-        py::arg("problem"), py::arg("start_layout"), py::kw_only(), py::arg("n_starts"), py::arg("seed"), py::arg("method") = "cg", py::arg("precision") = "fine", py::arg("keep") = 0,
-        py::arg("threads") = 0, "Maps from a layout whose NaN rows are placed at random.");
+        py::arg("problem"), py::arg("start_layout"), py::kw_only(), py::arg("n_starts"), py::arg("first_start") = 0, py::arg("seed"), py::arg("method") = "cg",
+        py::arg("precision") = "rough", py::arg("keep") = 0, py::arg("threads") = 0, "Maps from a layout whose NaN rows are placed at random (one precision for every start).");
+
+    m.def(
+        "refine",
+        [](const Problem& problem, const std::vector<carray<double>>& layouts, const std::string& method, const std::string& precision, int threads) {
+            std::vector<Projection> projections;
+            for (const auto& layout : layouts) {
+                std::size_t dimensions = 0;
+                auto args = layout_vector(problem, layout, dimensions);
+                projections.push_back(Projection{std::move(args), dimensions, 0.0, 0, 0, 0, 0});
+            }
+            {
+                py::gil_scoped_release release;
+                projections = refine(problem, std::move(projections), method_from_string(method), precision_from_string(precision), threads);
+            }
+            return projection_list(projections);
+        },
+        py::arg("problem"), py::arg("layouts"), py::kw_only(), py::arg("method") = "cg", py::arg("precision") = "fine", py::arg("threads") = 0,
+        "Minimises each layout further, in parallel; results in the order given.");
 
     m.def(
         "optimise",
