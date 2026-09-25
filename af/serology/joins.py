@@ -125,6 +125,20 @@ def link_sequences(
     return counts
 
 
+def _check_submitter_labs(con: Any, lab_submitters: Mapping[str, frozenset[str]]) -> None:
+    """The submitters table must be keyed by the tables' own lab codes, exactly.
+
+    A table keyed by another spelling of the labs (``cdc`` for ``CDC``) matches no antigen,
+    and the own-lab rule would silently never apply (design rule 1).
+    """
+    labs = {lab for (lab,) in con.execute("SELECT DISTINCT lab FROM tables").fetchall()}
+    if labs and not labs & set(lab_submitters):
+        raise StoreError(
+            "lab submitters name none of the store's table labs: "
+            f"table labs {sorted(labs)}, submitters keyed by {sorted(lab_submitters)}"
+        )
+
+
 def _match_rows(
     con: Any, indexes: Mapping[str, SequenceIndex], class_of: ClassOf, counts: LinkCounts
 ) -> None:
@@ -297,13 +311,17 @@ def link_from_store(
     GISAID submitting-lab names, :func:`af.seq.matching.read_lab_submitters`) lets the
     matcher settle a name tie by the antigen's own lab; without it that rule never applies.
     """
-    from af.seq.matching import index_from_store
+    from af.seq.matching import check_lab_submitters, index_from_store
 
     datasets = sorted({d for group in DATASETS_FOR.values() for d in group})
     present = {ref.dataset for ref in store.list_datasets("sequences")}
     missing = [d for d in datasets if d not in present]
     if missing:
         raise StoreError(f"sequence datasets missing from the store: {', '.join(missing)}")
+    if lab_submitters is not None:
+        # a submitter name that no longer appears in the store would silently stop breaking ties
+        check_lab_submitters(store, datasets, dict(lab_submitters))
+        _check_submitter_labs(con, lab_submitters)
     indexes = {d: index_from_store(store, [d], passage_rules) for d in datasets}
     for index in indexes.values():
         index.submitters = dict(lab_submitters or {})

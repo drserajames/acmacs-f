@@ -164,3 +164,14 @@ def test_a_name_tie_is_settled_by_the_antigens_own_lab(tmp_path: Path, syn: Any)
         "SELECT status, accession FROM antigen_sequences WHERE position = 3"
     ).fetchone()
     assert row == ("matched", "ACC4")
+
+
+def test_submitters_keyed_by_another_spelling_of_the_labs_are_refused(
+    tmp_path: Path, syn: Any
+) -> None:
+    from af.serology.joins import _check_submitter_labs
+
+    con = _store(tmp_path, syn)  # its table's lab is LABX
+    _check_submitter_labs(con, {"LABX": frozenset({"Lab X Institute"})})
+    with pytest.raises(StoreError, match="name none of the store's table labs"):
+        _check_submitter_labs(con, {"labx": frozenset({"Lab X Institute"})})
