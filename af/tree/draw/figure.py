@@ -38,6 +38,7 @@ class Overrides:
     show_clades: frozenset[str] = frozenset()
     hide_clades: frozenset[str] = frozenset()
     hide_hz_starting_at: frozenset[str] = frozenset()  # leaf name that starts a lettered band
+    reasons: dict[str, str] = field(default_factory=dict)  # "hide:<clade>" -> why, who decided
 
 
 @dataclass
@@ -163,7 +164,8 @@ def make_figure(
             flags or {}, [str(tree.leaf_id[i]) for i in layout.leaf_nodes]
         ),
         "marked_rows": int(marked.sum()) if marked is not None else None,
-        "overrides": {k: len(v) for k, v in asdict(config.overrides).items()},
+        "overrides": {k: len(v) for k, v in asdict(config.overrides).items() if k != "reasons"},
+        "override_reasons": dict(config.overrides.reasons),
     }
     pdf.with_suffix(".draw.json").write_text(json.dumps(report, indent=1, default=str))
     return report
