@@ -5,14 +5,13 @@ Names are invented and assembled at run time, so no strain-shaped text is commit
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Sequence
 from typing import Any
 
 import pytest
 
 from af.serology.rows import IdentityRules
+from af.tables.model import Antigen, Serum, Table
 
 
 def virus(place: str, number: int, year: int = 2021, prefix: str = "A(H3N2)") -> str:
@@ -45,24 +44,23 @@ def table(
     group: str = "h3-hi-labx",
     subtype: str = "A(H3N2)",
     date_suffix: int = 1,
-) -> dict[str, Any]:
-    body = {
-        "format": "af-table-1",
-        "table_id": table_id,
-        "group": group,
-        "lab": lab,
-        "subtype": subtype,
-        "lineage": "",
-        "assay": "HI",
-        "rbc": "turkey",
-        "date": date,
-        "date_suffix": date_suffix,
-        "antigens": antigens,
-        "sera": sera,
-        "titres": titres,
-    }
-    body["content_hash"] = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
-    return body
+) -> Table:
+    """A :class:`Table` from plain dicts; ``raw_name`` defaults to ``name``."""
+    return Table(
+        table_id=table_id,
+        group=group,
+        lab=lab,
+        subtype=subtype,
+        lineage="",
+        assay="HI",
+        rbc="turkey",
+        date=date,
+        date_suffix=date_suffix,
+        source_key=f"test {table_id}",
+        antigens=[Antigen(**{"raw_name": a["name"], **a}) for a in antigens],
+        sera=[Serum(**{"raw_name": s["name"], **s}) for s in sera],
+        titres=titres,
+    )
 
 
 class Synthetic:

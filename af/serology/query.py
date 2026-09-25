@@ -5,9 +5,9 @@ views are ``tables``, ``antigens``, ``sera`` and ``titres``, one row each per ta
 in a table, serum in a table and titre reading (see :mod:`af.serology.rows`).
 
 Preparations: geo and stat count antigen *preparations* (name, reassortant, annotations,
-passage), as today's report does (Sarah, 25 Sep 2026). That is not the chain identity:
-an antigen with no passage is still one preparation here. DISTINCT points are left out,
-as they are duplicates the lab asked to keep apart inside one table.
+passage with its harvest date), as today's report does (Sarah, 25 Sep 2026). That is not
+the chain identity: an antigen with no passage is still one preparation here. DISTINCT
+points are left out, as they are duplicates the lab asked to keep apart inside one table.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ class Preparation:
     name: str
     reassortant: str
     annotations: tuple[str, ...]
-    passage: str
+    passage: str  # with its harvest date, as the identity rules compare it
     collection_date: datetime.date | None  # earliest reported
     first_lab: str  # lab of the earliest table that titrated it
     first_table_date: datetime.date
@@ -63,12 +63,12 @@ def preparations(con: Any) -> list[Preparation]:
     rows = con.execute(
         f"""
         SELECT t.subtype, max(coalesce(a.lineage, '')), a.name, a.reassortant, a.annotations,
-               a.passage, min(a.collection_date),
+               a.identity_passage, min(a.collection_date),
                arg_min(t.lab, (t.date, coalesce(t.date_suffix, 0), t.lab, t.table_id)),
                min(t.date)
         FROM antigens a JOIN tables t USING (table_id)
         WHERE NOT list_contains(a.annotations, '{DISTINCT}')
-        GROUP BY t.subtype, a.name, a.reassortant, a.annotations, a.passage
+        GROUP BY t.subtype, a.name, a.reassortant, a.annotations, a.identity_passage
         ORDER BY ALL
         """
     ).fetchall()

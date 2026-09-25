@@ -1,19 +1,18 @@
 import datetime
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from af.serology import query
 from af.serology.rows import IdentityRules
 from af.serology.store import StoreError, build
-
-duckdb = pytest.importorskip("duckdb")
-
-from af.serology import query  # noqa: E402  (needs duckdb)
+from af.tables.model import Table
 
 
-def _tables(syn: Any) -> list[dict[str, Any]]:
+def _tables(syn: Any) -> list[Table]:
     """Two groups, two years; one antigen preparation in two tables, two labs."""
     shared = {"name": syn.virus("Somewhere", 1), "passage": "MDCK1", "date": "2021-01-05"}
     return [
@@ -54,8 +53,8 @@ def test_build_writes_partitions_and_counts(tmp_path: Path, syn: Any) -> None:
 def test_rebuild_reuses_unchanged_partitions_by_hard_link(tmp_path: Path, syn: Any) -> None:
     tables = _tables(syn)
     build(tables, tmp_path / "v1", syn.rules)
-    changed = [dict(t) for t in tables]
-    changed[2] = dict(changed[2], content_hash="different")
+    changed = list(tables)
+    changed[2] = replace(changed[2], titres=[[[">1280"]]])
     report = build(changed, tmp_path / "v2", syn.rules, previous=tmp_path / "v1")
     assert report.rebuilt == ["h3-hi-labx/2022"]
     assert sorted(report.reused) == ["h3-hi-labx/2021", "h3-hi-laby/2021"]

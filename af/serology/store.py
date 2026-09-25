@@ -18,7 +18,6 @@ caller gives a fresh output directory, and the previous version is only read.
 
 from __future__ import annotations
 
-import datetime
 import json
 import os
 import shutil
@@ -39,6 +38,7 @@ from af.serology.rows import (
     TableRows,
     rows_from_table,
 )
+from af.tables.model import Table
 
 KINDS: dict[str, dict[str, str]] = {
     "tables": TABLE_COLUMNS,
@@ -66,26 +66,24 @@ class BuildReport:
     removed: list[str] = field(default_factory=list)
 
 
-def partition_of(table: Mapping[str, Any]) -> str:
-    """``<group>/<year>`` from the table's group and ISO date."""
+def partition_of(table: Table) -> str:
+    """``<group>/<year>`` from the table's group and test date."""
     try:
-        year = datetime.date.fromisoformat(table["date"]).year
-    except (KeyError, TypeError, ValueError):
-        raise TableFormatError(
-            f"{table.get('table_id', '<no table_id>')}: date {table.get('date')!r} is not ISO"
-        ) from None
-    return f"{table['group']}/{year}"
+        year = table.test_date.year
+    except (TypeError, ValueError):
+        raise TableFormatError(f"{table.table_id}: date {table.date!r} is not ISO") from None
+    return f"{table.group}/{year}"
 
 
 def build(
-    tables: Iterable[Mapping[str, Any]],
+    tables: Iterable[Table],
     out_dir: Path,
     rules: IdentityRules,
     previous: Path | None = None,
 ) -> BuildReport:
     """Write a complete store version into the empty directory ``out_dir``.
 
-    ``tables`` is every table the store should contain (I2 dicts). ``previous`` is the
+    ``tables`` is every table the store should contain. ``previous`` is the
     last store version, whose unchanged partitions are hard-linked instead of rebuilt.
     """
     out_dir = Path(out_dir)
@@ -97,7 +95,7 @@ def build(
     partitions: dict[str, dict[str, str]] = {}
     all_counts: dict[str, dict[str, int]] = {}
     for partition, members in sorted(grouped.items()):
-        wanted = {t["table_id"]: t["content_hash"] for t in members}
+        wanted = {t.table_id: digest for t, digest in members}
         partitions[partition] = wanted
         target = out_dir / "partitions" / partition
         reusable = (
@@ -131,25 +129,25 @@ def build(
     return report
 
 
-def _group(tables: Iterable[Mapping[str, Any]]) -> dict[str, list[Mapping[str, Any]]]:
-    grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    seen: dict[str, str] = {}
+def _group(tables: Iterable[Table]) -> dict[str, list[tuple[Table, str]]]:
+    """Tables by partition, each with its content hash (computed once here)."""
+    grouped: dict[str, list[tuple[Table, str]]] = defaultdict(list)
+    seen: set[str] = set()
     for table in tables:
-        table_id = table["table_id"]
-        if table_id in seen:
-            raise StoreError(f"table {table_id!r} given twice")
-        seen[table_id] = table["content_hash"]
-        grouped[partition_of(table)].append(table)
+        if table.table_id in seen:
+            raise StoreError(f"table {table.table_id!r} given twice")
+        seen.add(table.table_id)
+        grouped[partition_of(table)].append((table, table.content_hash()))
     if not grouped:
         raise StoreError("no tables given: an empty serology store is never intended")
     return grouped
 
 
 def _write_partition(
-    members: list[Mapping[str, Any]], target: Path, rules: IdentityRules
+    members: list[tuple[Table, str]], target: Path, rules: IdentityRules
 ) -> dict[str, int]:
     """Flatten the partition's tables and write its four Parquet files."""
-    rows = [rows_from_table(t, rules) for t in members]
+    rows = [rows_from_table(t, rules) for t, _ in members]
     target.mkdir(parents=True)
     _write_parquet(target / "tables.parquet", KINDS["tables"], [r.table for r in rows])
     for kind in ("antigens", "sera", "titres"):

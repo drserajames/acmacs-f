@@ -1,4 +1,4 @@
-"""Turn one af table (interface I2, ``format: "af-table-1"``) into long-form store rows.
+"""Turn one af table (:class:`af.tables.model.Table`, interface I2) into long-form rows.
 
 The serology store keeps one row per table, per antigen in a table, per serum in a table
 and per titre reading. Nothing is merged here: several readings in one cell stay several
@@ -10,19 +10,23 @@ antigen" means and there is one copy of the rules (design rule 6).
 An antigen or serum the rules give no identity to (``None``: a DISTINCT point, an antigen
 with no passage, a serum with no serum id) gets a table-scoped key instead, so it is never
 merged with anything. How many rows that happened to is counted.
+
+Passage: the identity rules compare the passage *with* its harvest date, as ae writes it
+("MDCK2/SIAT1 (2016-05-12)"); ``af.tables`` keeps the date apart and builds that string in
+``Antigen.ae_passage()``. The store keeps both the lab's passage and the date, and records
+the combined string in ``identity_passage`` so preparations use the same rule.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from af.serology.titre import parse_reading
-
-TABLE_FORMAT = "af-table-1"
+from af.tables.model import Table
 
 AntigenIdentity = Callable[[str, str, Sequence[str], str], "tuple[Any, ...] | None"]
 SerumIdentity = Callable[[str, str, Sequence[str], str], "tuple[Any, ...] | None"]
@@ -44,7 +48,7 @@ class IdentityRules:
 
 
 class TableFormatError(ValueError):
-    """A table that is not in the af table format this store reads."""
+    """A table whose structure the store cannot hold (titre matrix shape, no rows)."""
 
 
 @dataclass
@@ -77,6 +81,8 @@ ANTIGEN_COLUMNS = {
     "reassortant": "VARCHAR",
     "annotations": "VARCHAR[]",
     "passage": "VARCHAR",
+    "passage_date": "DATE",
+    "identity_passage": "VARCHAR",
     "collection_date": "DATE",
     "lineage": "VARCHAR",
     "lab_ids": "VARCHAR[]",
@@ -91,6 +97,7 @@ SERUM_COLUMNS = {
     "reassortant": "VARCHAR",
     "annotations": "VARCHAR[]",
     "passage": "VARCHAR",
+    "passage_date": "DATE",
     "serum_id": "VARCHAR",
     "species": "VARCHAR",
     "lineage": "VARCHAR",
@@ -109,57 +116,63 @@ TITRE_COLUMNS = {
 }
 
 
-def rows_from_table(table: Mapping[str, Any], rules: IdentityRules) -> TableRows:
-    """Flatten one I2 table into store rows. Raises :class:`TableFormatError` on bad input."""
-    _check_format(table)
-    table_id = table["table_id"]
-    rows = TableRows(table={column: table.get(column) for column in TABLE_COLUMNS})
-    rows.table["group_key"] = table["group"]
-    for position, antigen in enumerate(table["antigens"]):
-        identity = rules.antigen(
-            antigen["name"],
-            antigen.get("reassortant", ""),
-            antigen.get("annotations", []),
-            antigen.get("passage", ""),
-        )
+def rows_from_table(table: Table, rules: IdentityRules) -> TableRows:
+    """Flatten one table into store rows. Raises :class:`TableFormatError` if it is unsound."""
+    _check_shape(table)
+    table_id = table.table_id
+    rows = TableRows(
+        table={
+            "table_id": table_id,
+            "content_hash": table.content_hash(),
+            "group_key": table.group,
+            "lab": table.lab,
+            "subtype": table.subtype,
+            "lineage": table.lineage,
+            "assay": table.assay,
+            "rbc": table.rbc,
+            "date": table.date,
+            "date_suffix": table.date_suffix,
+        }
+    )
+    for position, antigen in enumerate(table.antigens):
+        passage = antigen.ae_passage()
+        identity = rules.antigen(antigen.name, antigen.reassortant, antigen.annotations, passage)
         if identity is None:
             rows.without_identity["antigens"] += 1
         rows.antigens.append(
             {
                 "table_id": table_id,
                 "position": position,
-                "name": antigen["name"],
-                "reassortant": antigen.get("reassortant", ""),
-                "annotations": list(antigen.get("annotations", [])),
-                "passage": antigen.get("passage", ""),
-                "collection_date": antigen.get("date") or None,
-                "lineage": antigen.get("lineage", ""),
-                "lab_ids": list(antigen.get("lab_ids", [])),
-                "reference": bool(antigen.get("reference", False)),
+                "name": antigen.name,
+                "reassortant": antigen.reassortant,
+                "annotations": list(antigen.annotations),
+                "passage": antigen.passage,
+                "passage_date": antigen.passage_date,
+                "identity_passage": passage,
+                "collection_date": antigen.date or None,
+                "lineage": antigen.lineage,
+                "lab_ids": list(antigen.lab_ids),
+                "reference": antigen.reference,
                 "identity": _identity_text(identity),
                 "antigen_key": _key(identity, table_id, "a", position),
             }
         )
-    for position, serum in enumerate(table["sera"]):
-        identity = rules.serum(
-            serum["name"],
-            serum.get("reassortant", ""),
-            serum.get("annotations", []),
-            serum.get("serum_id", ""),
-        )
+    for position, serum in enumerate(table.sera):
+        identity = rules.serum(serum.name, serum.reassortant, serum.annotations, serum.serum_id)
         if identity is None:
             rows.without_identity["sera"] += 1
         rows.sera.append(
             {
                 "table_id": table_id,
                 "position": position,
-                "name": serum["name"],
-                "reassortant": serum.get("reassortant", ""),
-                "annotations": list(serum.get("annotations", [])),
-                "passage": serum.get("passage", ""),
-                "serum_id": serum.get("serum_id", ""),
-                "species": serum.get("species", ""),
-                "lineage": serum.get("lineage", ""),
+                "name": serum.name,
+                "reassortant": serum.reassortant,
+                "annotations": list(serum.annotations),
+                "passage": serum.passage,
+                "passage_date": serum.passage_date,
+                "serum_id": serum.serum_id,
+                "species": serum.species,
+                "lineage": serum.lineage,
                 "identity": _identity_text(identity),
                 "serum_key": _key(identity, table_id, "s", position),
             }
@@ -168,14 +181,13 @@ def rows_from_table(table: Mapping[str, Any], rules: IdentityRules) -> TableRows
     return rows
 
 
-def _titre_rows(table: Mapping[str, Any]) -> Any:
-    table_id = table["table_id"]
-    for ag, row in enumerate(table["titres"]):
+def _titre_rows(table: Table) -> Iterator[dict[str, Any]]:
+    for ag, row in enumerate(table.titres):
         for sr, readings in enumerate(row):
             for n, raw in enumerate(readings):
                 reading = parse_reading(raw)
                 yield {
-                    "table_id": table_id,
+                    "table_id": table.table_id,
                     "antigen_position": ag,
                     "serum_position": sr,
                     "reading": n,
@@ -186,18 +198,19 @@ def _titre_rows(table: Mapping[str, Any]) -> Any:
                 }
 
 
-def _check_format(table: Mapping[str, Any]) -> None:
-    """Refuse a table whose shape does not match I2, naming what is wrong."""
-    where = table.get("table_id", "<no table_id>")
-    if table.get("format") != TABLE_FORMAT:
-        raise TableFormatError(f"{where}: format {table.get('format')!r}, expected {TABLE_FORMAT}")
-    for key in ("table_id", "content_hash", "group", "lab", "subtype", "assay", "date"):
-        if not table.get(key):
-            raise TableFormatError(f"{where}: missing {key!r}")
-    n_ag, n_sr = len(table["antigens"]), len(table["sera"])
-    titres = table["titres"]
-    if len(titres) != n_ag or any(len(row) != n_sr for row in titres):
-        raise TableFormatError(f"{where}: titre matrix is not {n_ag} x {n_sr}")
+def _check_shape(table: Table) -> None:
+    """Only the matrix shape stops flattening. Antigens or sera with no titres are the
+    tables store's warnings, and the store holds such tables as they are."""
+    n_ag, n_sr = len(table.antigens), len(table.sera)
+    if len(table.titres) != n_ag:
+        raise TableFormatError(
+            f"{table.table_id}: {len(table.titres)} titre rows for {n_ag} antigens"
+        )
+    for no, row in enumerate(table.titres):
+        if len(row) != n_sr:
+            raise TableFormatError(
+                f"{table.table_id}: titre row {no}: {len(row)} cells, {n_sr} sera"
+            )
 
 
 def _identity_text(identity: tuple[Any, ...] | None) -> str | None:

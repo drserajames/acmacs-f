@@ -5,6 +5,7 @@ import pytest
 
 from af.serology.rows import TableFormatError, rows_from_table
 from af.serology.titre import TitreError, parse_reading
+from af.tables.model import Table
 
 
 @pytest.mark.parametrize(
@@ -23,7 +24,7 @@ def test_bad_reading_is_an_error(raw: str) -> None:
         parse_reading(raw)
 
 
-def _two_by_two(syn: Any, table_id: str = "t-2021-03-04") -> dict[str, Any]:
+def _two_by_two(syn: Any, table_id: str = "t-2021-03-04") -> Table:
     antigens = [
         {"name": syn.virus("Somewhere", 1), "passage": "MDCK1", "date": "2021-01-05"},
         {"name": syn.virus("Somewhere", 1), "passage": "E3", "annotations": ["DISTINCT"]},
@@ -33,7 +34,7 @@ def _two_by_two(syn: Any, table_id: str = "t-2021-03-04") -> dict[str, Any]:
         {"name": syn.virus("Elsewhere", 3), "serum_id": ""},
     ]
     titres = [[["40", "80"], []], [["<10"], [">1280"]]]
-    result: dict[str, Any] = syn.table(table_id, antigens, sera, titres)
+    result: Table = syn.table(table_id, antigens, sera, titres)
     return result
 
 
@@ -62,10 +63,27 @@ def test_same_identity_same_key_across_tables(syn: Any) -> None:
 
 def test_wrong_shape_is_refused(syn: Any) -> None:
     bad = _two_by_two(syn)
-    bad["titres"] = bad["titres"][:1]
-    with pytest.raises(TableFormatError, match="2 x 2"):
+    bad.titres = bad.titres[:1]
+    with pytest.raises(TableFormatError, match="titre rows"):
         rows_from_table(bad, syn.rules)
     bad = _two_by_two(syn)
-    bad["format"] = "something-else"
-    with pytest.raises(TableFormatError, match="format"):
+    bad.titres[1] = bad.titres[1][:1]
+    with pytest.raises(TableFormatError, match="titre row 1"):
         rows_from_table(bad, syn.rules)
+
+
+def test_harvest_date_is_part_of_identity(syn: Any) -> None:
+    """af.tables keeps the harvest date apart; identity compares passage *with* the date."""
+
+    def one(table_id: str, harvested: str | None) -> Table:
+        antigen = {"name": syn.virus("Somewhere", 1), "passage": "SIAT1", "passage_date": harvested}
+        serum = {"name": syn.virus("Elsewhere", 2), "serum_id": "S-1"}
+        result: Table = syn.table(table_id, [antigen], [serum], [[["40"]]])
+        return result
+
+    a = rows_from_table(one("t1", "2021-01-01"), syn.rules).antigens[0]
+    b = rows_from_table(one("t2", "2021-01-01"), syn.rules).antigens[0]
+    c = rows_from_table(one("t3", "2021-02-02"), syn.rules).antigens[0]
+    assert a["identity_passage"] == "SIAT1 (2021-01-01)"
+    assert (a["passage"], a["passage_date"]) == ("SIAT1", "2021-01-01")
+    assert a["antigen_key"] == b["antigen_key"] != c["antigen_key"]
