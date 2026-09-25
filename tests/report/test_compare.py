@@ -592,7 +592,17 @@ def test_canonical_mapping_takes_the_deepest_tag(monkeypatch: pytest.MonkeyPatch
         )
 
     monkeypatch.setattr(labels, "canonical_labels", fake)
-    clade_set = SimpleNamespace(depth=lambda c: depth[c])
+    parent: dict[str, str | None] = {"A": None, "A.1": "A"}
+
+    def is_within(name: str, ancestor: str) -> bool:
+        node: str | None = name
+        while node is not None:
+            if node == ancestor:
+                return True
+            node = parent[node]
+        return False
+
+    clade_set = SimpleNamespace(depth=lambda c: depth[c], is_within=is_within)
     names = [f"leaf{i}" for i in range(12)]
     ref = _tree_doc(names, ["OLD.PARENT"] * 12, [])
     for leaf in ref["tree"]["leaves"][:6]:
@@ -602,3 +612,41 @@ def test_canonical_mapping_takes_the_deepest_tag(monkeypatch: pytest.MonkeyPatch
     assert res["clade"]["canonical"]["unmapped"] == {"mystery": "unknown"}
     # ref: 6 x A.1 (deepest of its tags), 6 x A; new: 9 x A.1, 3 x unmapped:mystery
     assert res["clade"]["label_agreement"] == 6 / 12
+
+
+def test_sibling_clade_tags_are_ambiguous_not_picked(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    import af.clades.labels as labels
+
+    parent: dict[str, str | None] = {"R": None, "H": "R", "J": "R", "H.2": "H", "J.2": "J"}
+
+    def depth(c: str) -> int:
+        up = parent[c]
+        return 0 if up is None else 1 + depth(up)
+
+    def is_within(name: str, ancestor: str) -> bool:
+        node: str | None = name
+        while node is not None:
+            if node == ancestor:
+                return True
+            node = parent[node]
+        return False
+
+    def fake(labels_in: Any, clade_set: Any, allow_unmapped: bool = False) -> Any:
+        return SimpleNamespace(clade=lambda x: x, unmapped={}, counts=lambda: {})
+
+    monkeypatch.setattr(labels, "canonical_labels", fake)
+    clade_set = SimpleNamespace(depth=depth, is_within=is_within)
+    names = [f"leaf{i}" for i in range(10)]
+    ref = _tree_doc(names, ["J.2"] * 10, [])
+    for leaf in ref["tree"]["leaves"][:4]:
+        leaf["clade_tags"] = [
+            "H",
+            "H.2",
+            "J.2",
+        ]  # contradictory: H.2 and J.2 are siblings' children
+    res = trees.compare_figures(ref, _tree_doc(names, ["J.2"] * 10, []), clade_set)
+    canon = res["clade"]["canonical"]
+    assert canon["ambiguous"] == {"H.2|J.2": 4} and canon["ambiguous_leaves"] == 4
+    assert res["clade"]["label_agreement"] == 6 / 10  # the 4 are not silently counted as H.2 or J.2
