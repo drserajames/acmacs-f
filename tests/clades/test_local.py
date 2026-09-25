@@ -167,3 +167,44 @@ def test_a_cycle_through_local_parents_is_fatal(tmp_path: Path) -> None:
     )
     with pytest.raises(LocalCladeError, match="cycle"):
         extend_from_file(clade_set, path)
+
+
+def test_published_labels_changed_reports_an_overriding_local_clade(tmp_path: Path) -> None:
+    """The check WS5 runs when local definitions change: a local clade may name the
+    unnamed and may refine a published clade, but must never move a virus from one
+    published clade to another."""
+    from af.clades.assign import published_labels_changed
+
+    clade_set = synthetic(tmp_path)
+    refining = extend_from_file(
+        clade_set, write_local(tmp_path, f"{SUBTYPE}\tL.1\tP.1\t20V\tactive\t")
+    )
+    nodes = [
+        Node("root", None, sequence(p5="K")),
+        Node("mid", "root", sequence(p5="K", p9="T", p331="W")),
+        Node("leaf", "mid", sequence(p5="K", p9="T", p331="W", p20="V")),
+    ]
+    before = assign_tree(nodes, clade_set)
+    after = assign_tree(nodes, refining)
+    # the leaf became a local child of P.1, which is a refinement, not a change
+    assert after.clade("leaf") == "L.1"
+    assert published_labels_changed(before, after, refining) == {}
+
+
+def test_published_labels_changed_detects_a_real_move(tmp_path: Path) -> None:
+    """The negative case above only proves it stays quiet; this proves it speaks."""
+    from af.clades.assign import Assignment, TreeAssignment, published_labels_changed
+
+    clade_set = synthetic(tmp_path)
+
+    def assignment(clade: str) -> TreeAssignment:
+        return TreeAssignment(
+            clade_set_version=clade_set.version,
+            subtype=SUBTYPE,
+            assignments={"leaf": Assignment("leaf", clade)},
+        )
+
+    changed = published_labels_changed(assignment("P.1"), assignment("P.2"), clade_set)
+    assert changed == {"leaf": ("P.1", "P.2")}
+    # and a virus gaining a published clade where it had none is a change too
+    assert published_labels_changed(assignment("P.1"), assignment("P.1"), clade_set) == {}

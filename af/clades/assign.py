@@ -277,3 +277,31 @@ def assign_sequences(
     return {
         name: Assignment(node=name, clade=labels.get(name), inherited=False) for name in sequences
     }
+
+
+def published_labels_changed(
+    before: TreeAssignment, after: TreeAssignment, clade_set: CladeSet
+) -> dict[str, tuple[str | None, str | None]]:
+    """Nodes whose **published** clade differs between two assignments of one tree.
+
+    The check to run whenever the local layer changes: adding local definitions may give
+    a name to viruses the nomenclature leaves unnamed, and may refine a published clade
+    into a local child of it, but it must never change what published clade a virus is
+    in. A local clade attached at the root once did exactly that to 107,292 leaves of the
+    real H1 tree, and the symptom — every leaf's clade changing at once — looks from a
+    consumer's side like a new nomenclature rather than a bug.
+
+    A node is reported when the deepest published clade at or above its label changes.
+    Moving from no label to a local one, or from a published clade to a local child of
+    it, is not a change; moving from one published clade to another is.
+    """
+    changed: dict[str, tuple[str | None, str | None]] = {}
+    for node, assignment in after.assignments.items():
+        previous = before.assignments.get(node)
+        if previous is None:
+            continue
+        was = _published_anchor(previous.clade, clade_set)
+        now = _published_anchor(assignment.clade, clade_set)
+        if was != now:
+            changed[node] = (was, now)
+    return changed
