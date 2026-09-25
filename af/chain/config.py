@@ -10,9 +10,8 @@ Example::
     name = "labx-h9-hi"
     seed = 1
 
-    [tables]
-    directory = "../tables/labx-h9-hi"
-    group = "h9-hi-turkey-labx"
+    [tables]                      # read from the run config's [paths] store
+    dataset = "labx/h9-hi-turkey-labx"
     date_from = "2020-04-21"
     exclude = []
 
@@ -59,10 +58,15 @@ class MapOptions:
 
 @dataclass(frozen=True)
 class TableSelection:
-    """Either a tables-store dataset (`store` + `dataset`, the normal case) or a directory
-    of `.ace` tables (`directory` + `group`, for comparisons with ae-era tables)."""
+    """Either a tables-store dataset (`dataset`, the normal case) or a directory of `.ace`
+    tables (`directory` + `group`, for comparisons with ae-era tables).
 
-    store: Path | None = None  # tables store root
+    The tables store is not named here: where it lives is a fact about the machine, so it
+    comes from the run config (`[paths] store`) and one chain file runs anywhere. `store` is
+    still parsed only so that a chain file that sets it is refused with a clear message.
+    """
+
+    store: Path | None = None  # refused: see load_chain_config
     dataset: str | None = None  # e.g. "labx/h3-hi-turkey-labx"
     directory: Path | None = None
     group: str | None = None
@@ -113,27 +117,35 @@ class ChainConfig:
             raise ChainConfigError(f"{self.name}: tables are not in (date, suffix) order")
 
 
-def load_chain_config(path: Path, inputs_dir: Path | None = None) -> ChainConfig:
-    """`inputs_dir` receives the chart files made from store tables (the chain's own area)."""
+def load_chain_config(
+    path: Path, inputs_dir: Path | None = None, tables_store: Path | None = None
+) -> ChainConfig:
+    """`inputs_dir` receives the chart files made from store tables (the chain's own area);
+    `tables_store` is the machine's store root (the run config's `[paths] store`)."""
     s = load_config(path, ChainSettings)
     t = s.tables
+    if t.store is not None:
+        raise ChainConfigError(
+            f"{path}: [tables] store is a machine setting; remove it and set [paths] store"
+            " in the run config"
+        )
     start, end = _date(t.date_from), _date(t.date_to)
-    if t.store is not None and t.dataset is not None and t.directory is None:
+    if t.dataset is not None and t.directory is None:
         from af.chain.tables import tables_from_store
 
-        if inputs_dir is None:
-            raise ChainConfigError(f"{path}: store tables need an inputs directory")
-        ref, tables = tables_from_store(t.store, t.dataset, inputs_dir, set(t.exclude))
+        if inputs_dir is None or tables_store is None:
+            raise ChainConfigError(f"{path}: store tables need an inputs directory and a store")
+        ref, tables = tables_from_store(tables_store, t.dataset, inputs_dir, set(t.exclude))
         tables = [
             x
             for x in tables
             if (start is None or x.date >= start) and (end is None or x.date <= end)
         ]
         return ChainConfig(s.name, tables, s.options, s.seed, s.first_map, ref.to_json())
-    if t.directory is not None and t.group is not None and t.store is None:
+    if t.directory is not None and t.group is not None and t.dataset is None:
         tables = tables_from_directory(t.directory, t.group, start, end, set(t.exclude))
         return ChainConfig(s.name, tables, s.options, s.seed, s.first_map)
-    raise ChainConfigError(f"{path}: [tables] needs either store + dataset or directory + group")
+    raise ChainConfigError(f"{path}: [tables] needs either dataset or directory + group")
 
 
 def _date(text: str | None) -> datetime.date | None:

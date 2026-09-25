@@ -6,7 +6,8 @@
 The chain config says what the chain is (tables, map options, seed; `af.chain.config`), and
 its path says which chain it is: `.../chains/<lab>/<group>/<variant>.toml` is the dataset
 `<lab>/<group>/<variant>` in the work area and the store. The path is the one copy of that
-fact, so a `[tables] dataset` naming another lab or group is an error.
+fact, so a `[tables] dataset` naming another lab or group is an error. The tables are read
+from the run config's `[paths] store`; a chain file that names a store is refused.
 
 `run.toml` says where and how chains run on one machine, so one file serves every chain
 there, and the same chain runs on a laptop, the HPC or `o`:
@@ -109,7 +110,9 @@ def main(argv: list[str]) -> int:
     check_tables_dataset(args.chain, dataset)
     run = load_config(args.run, RunSettings)
     work = Work.open(run.paths.work).dataset("chains", dataset)
-    cfg = load_chain_config(args.chain, inputs_dir=work.root / "inputs")
+    cfg = load_chain_config(
+        args.chain, inputs_dir=work.root / "inputs", tables_store=run.paths.store
+    )
     if not args.review:
         split = None
         if run.split is not None:

@@ -6,7 +6,7 @@ import json
 import pytest
 
 from af.chain.backend import StubOptimiser
-from af.chain.config import ChainConfig, ChainConfigError, MapOptions
+from af.chain.config import ChainConfig, ChainConfigError, MapOptions, load_chain_config
 from af.chain.engine import run_chain
 from af.chain.tables import cell_titre, table_chart, tables_from_store
 from af.store.store import Provenance, Store
@@ -103,6 +103,24 @@ def test_only_map_changes_restart(tmp_path):
     # a titre changes in table 2: steps 2 and 3 re-run
     publish(tmp_path / "store", [make_table(k, titre_shift=1 if k == 2 else 0) for k in range(4)])
     assert run() == [True, True, False, False]
+
+
+def test_chain_file_reads_tables_from_the_run_configs_store(tmp_path):
+    publish(tmp_path / "store", [make_table(k) for k in range(3)])
+    chain = tmp_path / "chain.toml"
+    chain.write_text(f'name = "x"\nseed = 1\n[tables]\ndataset = "{DATASET}"\n')
+    cfg = load_chain_config(chain, tmp_path / "inputs", tables_store=tmp_path / "store")
+    assert len(cfg.tables) == 3 and cfg.tables_source is not None
+    with pytest.raises(ChainConfigError, match="need an inputs directory and a store"):
+        load_chain_config(chain, tmp_path / "inputs")
+
+
+def test_chain_file_naming_a_store_is_refused(tmp_path):
+    publish(tmp_path / "store", [make_table(0)])
+    chain = tmp_path / "chain.toml"
+    chain.write_text(f'name = "x"\nseed = 1\n[tables]\nstore = "store"\ndataset = "{DATASET}"\n')
+    with pytest.raises(ChainConfigError, match="machine setting"):
+        load_chain_config(chain, tmp_path / "inputs", tables_store=tmp_path / "store")
 
 
 def test_store_exclusion_must_match(tmp_path):
