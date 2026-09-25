@@ -350,3 +350,20 @@ def test_excused_points_are_removed_and_a_stale_list_fails(tmp_path: Path) -> No
     again = _map(pts, ["X"] * 12)  # both sides now show them: the excuse no longer applies
     notes = excuse_points("map/x/all", _map(pts, ["X"] * 12), again, [(entry, keys)], "name")
     assert notes[0]["stale"] == 2 and "STALE" in notes[0]["note"]
+
+
+def test_one_sided_points_are_listed_even_when_the_slot_passes(tmp_path: Path) -> None:
+    from af.report.compare.run import markdown
+
+    pts = [(float(i), float(i % 3)) for i in range(200)]
+    res = maps.compare(_map(pts[:199], ["X"] * 199), _map(pts, ["X"] * 200))
+    checks = map_checks(res, MapLimits(antigens_jaccard_min=0.99))
+    row = {"slot": "map/x/all", "status": slot_status(checks), "checks": checks, "detail": res}
+    limits = parse_config(
+        {"adoption": {"status": "final", "adopted_by": "a reviewer",
+                      "adopted": dt.date(2026, 9, 25)}},
+        Limits, base_dir=tmp_path,
+    )  # fmt: skip
+    text = markdown({"report": "r", "built": "b"}, [row], "l.toml", "name", limits.adoption)
+    assert row["status"] == "ok"  # Jaccard 0.995 passes the limit ...
+    assert "antigens only in new (1)" in text  # ... but the point is still listed

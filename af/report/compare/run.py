@@ -120,6 +120,8 @@ class Limits:
     excused: list[Excused] = field(default_factory=list)
 
 
+ONE_SIDED_LISTED = 25  # per slot, group and side, in COMPARISON.md; the JSON has them all
+
 MAP_CHECKS = (
     "antigens jaccard", "sera jaccard", "clade ARI", "p95 displacement", "frac moved > 1",
     "clade centroid max diff", "rotation deg", "reflected", "RMSD (not gated)",
@@ -298,22 +300,46 @@ def markdown(
         f"# Same-science comparison: {manifest['report']}", "",
         f"Report built {manifest['built']}; limits `{limits_name}`; points matched by {how}.", "",
         status, *changes, "",
-        "| Slot | Status | " + " | ".join(MAP_CHECKS) + " |",
-        "|---|---|" + "---|" * len(MAP_CHECKS),
+        "| Slot | Status | antigens only ref / only new | sera only ref / only new | "
+        + " | ".join(MAP_CHECKS) + " |",
+        "|---|---|---|---|" + "---|" * len(MAP_CHECKS),
     ]  # fmt: skip
-    notes = []
+    notes: list[str] = []
+    one_sided: list[str] = []
     for row in rows:
         if "checks" in row:
-            lines.append(f"| {row['slot']} | {row['status']} | "
+            a, s = row["detail"]["antigens"], row["detail"]["sera"]
+            counts = f"{a['only_ref']} / {a['only_new']} | {s['only_ref']} / {s['only_new']}"
+            lines.append(f"| {row['slot']} | {row['status']} | {counts} | "
                          + " | ".join(_cell(c) for c in row["checks"]) + " |")  # fmt: skip
+            one_sided += _one_sided(row["slot"], a, s)
             notes += [f"- {row['slot']} / {c['check']}: {c['expected']}"
                       for c in row["checks"] if "expected" in c]  # fmt: skip
             notes += [f"- {row['slot']}: {n['note']}" for n in row.get("excused", [])]
         else:
-            lines.append(f"| {row['slot']} | {row['status']} |" + " |" * len(MAP_CHECKS))
+            lines.append(f"| {row['slot']} | {row['status']} | | |" + " |" * len(MAP_CHECKS))
     if notes:
         lines += ["", "Named differences:", *notes]
+    if one_sided:
+        lines += ["", "Points on one side only (after excused points):", *one_sided]
     return "\n".join(lines) + "\n"
+
+
+def _one_sided(slot: str, antigens: dict[str, Any], sera: dict[str, Any]) -> list[str]:
+    """List one-sided points for a person to read; long lists are cut, with the count kept."""
+    out = []
+    for group, g in (("antigens", antigens), ("sera", sera)):
+        for side in ("ref", "new"):
+            keys = g[f"only_{side}_keys"]
+            if keys:
+                shown = ", ".join(keys[:ONE_SIDED_LISTED])
+                more = (
+                    f" … and {len(keys) - ONE_SIDED_LISTED} more"
+                    if len(keys) > ONE_SIDED_LISTED
+                    else ""
+                )
+                out.append(f"- {slot} {group} only in {side} ({len(keys)}): {shown}{more}")
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:

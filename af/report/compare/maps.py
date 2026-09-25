@@ -129,8 +129,9 @@ def _group(ref: list[Point], new: list[Point], how: str, clades: bool) -> dict[s
         "only_ref": len(ri.keys() - ni.keys()), "only_new": len(ni.keys() - ri.keys()),
         "ambiguous_dropped": {"ref": rdup, "new": ndup},
         "jaccard": len(common) / max(1, len(ri.keys() | ni.keys())),
-        "only_ref_examples": sorted(ri.keys() - ni.keys())[:5],
-        "only_new_examples": sorted(ni.keys() - ri.keys())[:5],
+        # Full lists: every one-sided point must be listed somewhere a person reads.
+        "only_ref_keys": sorted(ri.keys() - ni.keys()),
+        "only_new_keys": sorted(ni.keys() - ri.keys()),
     }  # fmt: skip
     if clades:
         coloured = [k for k in common if _coloured(ri[k]) and _coloured(ni[k])]
