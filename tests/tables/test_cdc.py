@@ -294,3 +294,43 @@ def test_sequence_link_fields(tmp_path):
 
 def test_bad_epi_isl_is_an_error(tmp_path):
     assert "not an EPI_ISL id" in read(tmp_path, [row(ag_epi_isolate_id="EPI123")]).errors[0]
+
+
+def test_lost_serum_lot_restored_only_for_its_ferret(tmp_path):
+    lost = dict(sr_lot="No Lot 01/01/2031 10:00:00", sr_ferret="F0-TEST1")
+    rows = [
+        row(**lost),
+        row(ag_position="2", ag_cdc_id="7", ag_strain_name="A/EXAMPLETOWN/2/2029", **lost),
+    ]
+    (t,) = read(tmp_path, rows).tables
+    assert t.sera[0].serum_id == "CDC T29-777" and t.sera[0].source["serum_id_rule"].startswith(
+        "serum_ids.tsv"
+    )
+    other = dict(sr_lot="No Lot 01/01/2031 10:00:00", sr_ferret="F0-OTHER")
+    (t2,) = read(tmp_path, [row(**other)]).tables
+    assert t2.sera[0].serum_id == "CDC No Lot 01/01/2031 10:00:00"  # a different ferret: untouched
+
+
+def test_restored_lot_is_titre_checked(tmp_path):
+    lost = dict(sr_lot="No Lot 01/01/2031 10:00:00", sr_ferret="F0-TEST1", titer_value="5")
+    res = read(
+        tmp_path,
+        [
+            row(**lost),
+            row(ag_position="2", ag_cdc_id="7", ag_strain_name="A/EXAMPLETOWN/2/2029", **lost),
+        ],
+    )
+    assert any("0/2 cells read >= 40" in e for e in res.errors)
+
+
+def test_key_joining_two_isolate_ids_is_flagged_not_split(tmp_path):
+    rows = [
+        row(ag_isolate_id="11"),
+        row(ag_isolate_id="12", sr_position="B", sr_lot="T29-002", titer_value="80"),
+    ]
+    (t,) = read(tmp_path, rows).tables
+    assert len(t.antigens) == 1
+    assert [w for w in t.warnings if w.startswith(cdc.MERGED_ISOLATES)] == [
+        f"{cdc.MERGED_ISOLATES}: A(H3N2)/EXAMPLETOWN/1/2029 SIAT1 (2029-12-20) "
+        "CDC isolate ids ['11', '12']"
+    ]

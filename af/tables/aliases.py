@@ -23,6 +23,7 @@ from .names import Name
 from .rules import Rule, Rules
 
 SOURCE_KEY = "alias_rule"  # set in Antigen/Serum.source when a rule renamed it
+SERUM_ID_KEY = "serum_id_rule"  # set in Serum.source when a serum_ids rule changed its id
 
 
 def resolve(
@@ -37,16 +38,16 @@ def resolve(
 
 def check_titres(table: Table, rules: Rules) -> list[str]:
     """Problems with renamed antigens or sera whose titres contradict the rename."""
-    by_where = {r.where: r for r in rules.strain_aliases.rules}
+    by_where = {r.where: r for r in (*rules.strain_aliases.rules, *rules.serum_ids.rules)}
     problems = []
     for no, antigen in enumerate(table.antigens):
         if (where := antigen.source.get(SOURCE_KEY)) is not None:
             problems += _check(table, by_where[where], antigen.name, table.titres[no])
     for no, serum in enumerate(table.sera):
-        if (where := serum.source.get(SOURCE_KEY)) is not None:
-            problems += _check(
-                table, by_where[where], serum.name, [row[no] for row in table.titres]
-            )
+        for key in (SOURCE_KEY, SERUM_ID_KEY):
+            if (where := serum.source.get(key)) is not None:
+                column = [row[no] for row in table.titres]
+                problems += _check(table, by_where[where], serum.name, column)
     return problems
 
 
@@ -65,6 +66,21 @@ def _check(table: Table, rule: Rule, name: str, cells: list[list[str]]) -> list[
 def _value(titre: str) -> int:
     """A '<N' counts as below N (never reacting); '>N' as N; plain N as N."""
     return 0 if titre.startswith("<") else int(titre.lstrip(">"))
+
+
+def serum_lot(rules: Rules, raw_lot: str, *, lab: str, ferret: str) -> tuple[str, Rule | None]:
+    """A serum id a lab lost or garbled, restored by a ``serum_ids`` rule. The rule applies
+    only when its ``ferret`` guard equals the lab's ferret id for the row: the ferret is the
+    evidence that this is the same serum (a lot like "No Lot <timestamp>" says nothing)."""
+    for rule in rules.serum_ids.rules:
+        if (
+            rules.serum_ids.in_scope(rule, lab=lab)
+            and rule.matches(raw_lot)
+            and rule["ferret"] == ferret
+        ):
+            rule.hits += 1
+            return rule["canonical"], rule
+    return raw_lot, None
 
 
 def parse_name(
