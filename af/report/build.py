@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from af.report.config import ReportConfig, Section, load, period_first, period_last
+from af.report.config import Meeting, ReportConfig, Section, load, period_first, period_last
 from af.report.figures import FigureError, Resolved, resolve
 from af.report.provenance import ProvenanceError, StoreUse, check_against_store, collect
 from af.run import Job, JobFailed, LocalRunner
@@ -93,6 +93,16 @@ def _caption(r: Resolved) -> str:
     return tag + tex_escape(f"{r.figure.title} ({r.version}, {when})")
 
 
+def _meeting(meeting: Meeting) -> str:
+    """ "21-24 September 2026" (one month), "30 September - 3 October 2026" (two), from config."""
+    a, b = meeting.start, meeting.end
+    if a == b:
+        return f"{a.day} {a.strftime('%B %Y')}"
+    if (a.year, a.month) == (b.year, b.month):
+        return f"{a.day}--{b.day} {b.strftime('%B %Y')}"
+    return f"{a.day} {a.strftime('%B')} -- {b.day} {b.strftime('%B %Y')}"
+
+
 def _cover(
     cfg: ReportConfig, n_placeholders: int, n_not_from_store: int, built_at: dt.datetime
 ) -> list[str]:
@@ -105,6 +115,8 @@ def _cover(
         r"\begin{titlepage}\centering\vspace*{60mm}",
         rf"{{\Huge {tex_escape(r.title)}\par}}\vspace{{12mm}}",
         rf"{{\Large {tex_escape(r.centre)}\par}}\vspace{{8mm}}",
+        rf"{{\Large {tex_escape(r.subtitle)}\par}}\vspace{{6mm}}" if r.subtitle else "",
+        rf"{{\Large {_meeting(r.meeting)}\par}}\vspace{{6mm}}" if r.meeting else "",
         rf"{{\Large {period}\par}}\vspace{{20mm}}",
         rf"Data up to {r.data_cutoff.day} {r.data_cutoff.strftime('%B %Y')}\par",
         rf"Built {built_at.strftime('%d %B %Y %H:%M %Z')}\par",
@@ -121,8 +133,10 @@ def _tree_pages(section: Section, figs: dict[str, Resolved], rel: dict[str, str]
     lines: list[str] = []
     for slot in section.slots:
         r = figs[slot]
+        # One tree: the section title is its heading. Several: say which tree each page is.
+        title = section.title if len(section.slots) == 1 else f"{section.title}: {r.figure.title}"
         lines += [
-            rf"\section{{{tex_escape(section.title)}: {tex_escape(r.figure.title)}}}",
+            rf"\{_level(section)}{{{tex_escape(title)}}}",
             r"\begin{center}",
             r"\includegraphics[width=\textwidth,height=0.88\textheight,keepaspectratio]"
             rf"{{{rel[slot]}}}",
@@ -133,27 +147,49 @@ def _tree_pages(section: Section, figs: dict[str, Resolved], rel: dict[str, str]
     return lines
 
 
-def _map_pages(section: Section, figs: dict[str, Resolved], rel: dict[str, str]) -> list[str]:
+def _level(section: Section) -> str:
+    """Sections under a group are subsections; ungrouped ones are sections."""
+    return "subsection" if section.group else "section"
+
+
+def _grid_pages(
+    section: Section, months: list[str], figs: dict[str, Resolved], rel: dict[str, str]
+) -> list[str]:
+    """Map and geo pages: a columns x rows grid per page, blank cells left empty.
+
+    Landscape sections turn the page (pdflscape): the report's map grids are 3 x 2 across.
+    """
     cols, rows = section.grid
-    per_page = cols * rows
     width = f"{0.98 / cols:.3f}\\linewidth"
+    # Fixed gaps, not \hfill: glue inside a centred paragraph shifts a row whose last cell is
+    # blank off the column grid (seen on the H3 map pages).
+    gap = f"{0.02 / (cols - 1):.4f}\\linewidth" if cols > 1 else "0pt"
     height = f"{0.8 / rows:.3f}\\textheight"
     lines: list[str] = []
-    for window in section.windows:
-        slots = [f"{s}/{window.name}" for s in section.slots]
-        for start in range(0, len(slots), per_page):
-            if start == 0:
-                lines.append(rf"\section{{{tex_escape(section.title)} {tex_escape(window.title)}}}")
-            lines.append(r"\begin{center}")
-            for i, slot in enumerate(slots[start : start + per_page]):
-                lines.append(
+    for n, (heading, cells) in enumerate(section.pages(months)):
+        if section.landscape:
+            lines.append(r"\begin{landscape}")
+        if n == 0 or heading:  # the section's first page, and the first page of each map window
+            lines.append(
+                rf"\{_level(section)}{{{tex_escape(f'{section.title} {heading}'.strip())}}}"
+            )
+        for start in range(0, len(cells), cols):
+            row = []
+            for slot in cells[start : start + cols]:
+                if slot is None:
+                    row.append(rf"\makebox[{width}]{{}}")  # a blank cell keeps its width
+                    continue
+                row.append(
                     rf"\begin{{minipage}}[t]{{{width}}}\centering"
                     rf"\includegraphics[width=\linewidth,height={height},keepaspectratio]"
                     rf"{{{rel[slot]}}}\\ \scriptsize {_caption(figs[slot])}"
                     rf"\zlabel{{{_label(slot)}}}\end{{minipage}}"
                 )
-                lines.append(r"\par\medskip" if (i + 1) % cols == 0 else r"\hfill")
-            lines += [r"\end{center}", r"\newpage"]
+            lines.append(r"\noindent" + rf"\hspace{{{gap}}}".join(row) + r"\par\medskip")
+        if section.landscape:
+            lines.append(r"\end{landscape}")
+        else:
+            lines.append(r"\newpage")
     return lines
 
 
@@ -172,17 +208,26 @@ def write_tex(
     lines = [
         r"\documentclass[a4paper,11pt]{article}",
         r"\usepackage[margin=15mm]{geometry}",
-        r"\usepackage{graphicx,xcolor,zref-user,zref-abspage}",
+        r"\usepackage{graphicx,xcolor,pdflscape,zref-user,zref-abspage}",
         # Physical page on every \zlabel: \label pages are logical and the title page resets them.
         r"\makeatletter\zref@addprop{main}{abspage}\makeatother",
         r"\usepackage[hidelinks]{hyperref}",
         r"\setlength{\parindent}{0pt}",
+        # Grouped reports (subtype > figure) are unnumbered, like the delivered VCM report.
+        r"\setcounter{secnumdepth}{0}" if any(sec.group for sec in cfg.sections) else "",
         r"\begin{document}",
         *_cover(cfg, sum(r.figure.placeholder for r in figs.values()), n_not_from_store, built_at),
     ]
+    group = None
     for section in cfg.sections:
-        pages = _tree_pages if section.kind == "trees" else _map_pages
-        lines += pages(section, figs, rel)
+        if section.group and section.group != group:
+            lines.append(rf"\section*{{{tex_escape(section.group)}}}")
+            lines.append(rf"\addcontentsline{{toc}}{{section}}{{{tex_escape(section.group)}}}")
+        group = section.group
+        if section.kind == "trees":
+            lines += _tree_pages(section, figs, rel)
+        else:
+            lines += _grid_pages(section, cfg.months(), figs, rel)
     lines.append(r"\end{document}")
     tex = build / "report.tex"
     tex.write_text("\n".join(lines) + "\n")
