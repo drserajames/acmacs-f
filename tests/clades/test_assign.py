@@ -13,7 +13,8 @@ import pytest
 from af.clades.assign import AssignmentError, Node, assign_sequences, assign_tree
 from af.clades.nomenclature import CladeSet
 from af.clades.sequence import AlignedSequence, GapSupport
-from clades.synthetic import build_clone, load_synthetic
+
+from .synthetic import build_clone, load_synthetic
 
 SUBTYPE = "A(H3N2)"
 

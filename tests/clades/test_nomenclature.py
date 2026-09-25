@@ -6,7 +6,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from clades.synthetic import build_clone, clone_commit, commit_command
 
 from af.clades.nomenclature import (
     CladeSet,
@@ -15,6 +14,8 @@ from af.clades.nomenclature import (
     load_clade_set,
     load_clade_sets,
 )
+
+from .synthetic import build_clone, clone_commit, commit_command
 
 SUBTYPE = "A(H3N2)"
 
