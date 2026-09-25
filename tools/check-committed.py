@@ -10,6 +10,9 @@ and runs every check there, with no caches:
 - `af` is imported from the export, not from the worktree. Python runs with `-S`
   (so the editable install's import hook is not loaded) and the current
   environment's site-packages is put on PYTHONPATH for the dependencies.
+- Real-data tests run against the private data repo beside *this checkout* (or
+  ``$AF_DATA`` if set): the export lives in a temporary directory, where the tests'
+  default ``../acmacs-f-data`` would not exist and they would silently skip.
 - The compiled optimiser (`af/map/_core*.so`) is not in git. It is copied from the
   current environment into the export, so the map tests still run. Rebuild first
   (`pip install -e .`) if you changed C++.
@@ -57,7 +60,14 @@ def main() -> int:
             print("note: uncommitted changes in the worktree are NOT checked")
         if copied:
             print("compiled extensions copied in:", ", ".join(copied))
-        failed = [name for name, command in checks(export) if not run(name, command, export)]
+        af_data = os.environ.get("AF_DATA") or str((repo.parent / "acmacs-f-data").resolve())
+        print(
+            f"AF_DATA={af_data}"
+            + ("" if Path(af_data).is_dir() else " (absent: real-data tests skip)")
+        )
+        failed = [
+            name for name, command in checks(export) if not run(name, command, export, af_data)
+        ]
     finally:
         if args.keep:
             print(f"kept {export}")
@@ -80,8 +90,9 @@ def checks(export: Path) -> list[tuple[str, list[str]]]:
     ]
 
 
-def run(name: str, command: list[str], export: Path) -> bool:
+def run(name: str, command: list[str], export: Path, af_data: str) -> bool:
     env = dict(os.environ)
+    env["AF_DATA"] = af_data
     env["PYTHONPATH"] = os.pathsep.join([str(export), *site.getsitepackages()])
     print(f"\n== {name}", flush=True)
     result = subprocess.run(command, cwd=export, env=env)
