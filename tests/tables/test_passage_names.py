@@ -75,3 +75,19 @@ def test_names(rules, raw, subtype, name, reassortant, annotations):
 def test_wrong_type_is_kept_and_reported_t40(rules):
     n = names.parse("A/EXAMPLETOWN/1/2029", "B", rules.reassortants, "CDC")
     assert n.name.startswith("A/") and n.problems
+
+
+def test_cyrillic_type_and_two_digit_year(rules):
+    n = names.parse("А/EXAMPLETOWN/5/29", "A(H3N2)", rules.reassortants, "CDC", not_after=2030)
+    assert n.name == "A(H3N2)/EXAMPLETOWN/5/2029"
+    assert any("Cyrillic" in p for p in n.problems) and any(
+        "two-digit year" in p for p in n.problems
+    )
+
+
+def test_two_digit_year_pivots_on_the_test_year_and_is_reported_without_one(rules):
+    assert names.parse(
+        "A/EXAMPLETOWN/5/95", "A(H3N2)", rules.reassortants, "CDC", not_after=2030
+    ).name.endswith("/1995")
+    unpivoted = names.parse("A/EXAMPLETOWN/5/29", "A(H3N2)", rules.reassortants, "CDC")
+    assert any("four-digit year" in p for p in unpivoted.problems)

@@ -14,7 +14,10 @@ separates the two. A rule whose titres disagree fails the run, loudly.
 
 from __future__ import annotations
 
+import re
+
 from . import names
+from .locations import ChineseLocations
 from .model import Table
 from .names import Name
 from .rules import Rule, Rules
@@ -65,12 +68,37 @@ def _value(titre: str) -> int:
 
 
 def parse_name(
-    rules: Rules, raw: str, *, lab: str, subtype: str, applies_to: str, warnings: list[str]
+    rules: Rules,
+    raw: str,
+    *,
+    lab: str,
+    subtype: str,
+    applies_to: str,
+    warnings: list[str],
+    locations: ChineseLocations | None = None,
+    not_after: int | None = None,
 ) -> tuple[Name, str | None]:
-    """Parse ``raw`` after any rename; returns the name and the rule's location, if renamed.
-    A rename is recorded as a warning too, so it shows wherever the table is reviewed."""
-    text, rule = resolve(rules, raw, lab=lab, subtype=subtype, applies_to=applies_to)
-    name = names.parse(text, subtype, rules.reassortants, lab)
+    """Parse ``raw`` after the lab's rewrites, any named rename and Chinese locations.
+
+    Order: ``name_rewrites`` (systematic spellings, e.g. a lab's "BV/" for "B/"), then a
+    ``strain_aliases`` rename (returned, so the titre check can find it), then a Chinese
+    location romanised through ``locations``. Every change is recorded as a warning, so it
+    shows wherever the table is reviewed. An unmapped Chinese location raises LookupError.
+    """
+    text = raw
+    if (rewrite := rules.name_rewrites.find(raw, lab=lab)) is not None:
+        text = re.compile(rewrite["pattern"], re.IGNORECASE).sub(rewrite["replacement"], raw)
+        warnings.append(f"name {raw!r} rewritten {text!r} by {rewrite.where}")
+    text, rule = resolve(rules, text, lab=lab, subtype=subtype, applies_to=applies_to)
+    if locations is not None and text.count("/") >= 3:
+        head, location, rest = text.split("/", 2)
+        if (romanised := locations.romanise(location)) is not None:
+            text = f"{head}/{romanised.text}/{rest}"
+            if romanised.source == "locdb name (kept)":
+                warnings.append(
+                    f"name {raw!r}: Chinese location kept (locationdb names it, no spelling)"
+                )
+    name = names.parse(text, subtype, rules.reassortants, lab, not_after=not_after)
     warnings.extend(name.problems)
     if rule is None:
         return name, None

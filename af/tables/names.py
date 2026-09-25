@@ -35,8 +35,19 @@ class Name:
     problems: list[str] = field(default_factory=list)
 
 
-def parse(raw: str, subtype: str, reassortants: RuleTable, lab: str) -> Name:
-    """``subtype`` is the table's: "A(H1N1)", "A(H3N2)" or "B"."""
+_TYPE_HOMOGLYPHS = str.maketrans({"\u0410": "A", "\u0412": "B"})  # Cyrillic А, В
+_TWO_DIGIT_YEAR = re.compile(r"(\d{2})(?:[\s-]+(.+))?")
+
+
+def parse(
+    raw: str, subtype: str, reassortants: RuleTable, lab: str, *, not_after: int | None = None
+) -> Name:
+    """``subtype`` is the table's: "A(H1N1)", "A(H3N2)" or "B".
+
+    ``not_after`` (the table's test year) allows a two-digit year: 20yy unless that is later
+    than the test, then 19yy. Without it a two-digit year is reported, never guessed from
+    today's date.
+    """
     text = _SPACES.sub(" ", raw.strip().upper())
     # A trailing "(...)" is split off first: it can itself contain a '/' (eu-d5, 38 GISAID
     # names such as "(23/228)"). A second trailing group stays in the name and is reported.
@@ -49,6 +60,10 @@ def parse(raw: str, subtype: str, reassortants: RuleTable, lab: str) -> Name:
         return Name(text, problems=[f"name {raw!r}: expected type/location/isolate/year"])
     flu_type, *middle, last = parts
     problems = []
+    if (latin := flu_type.translate(_TYPE_HOMOGLYPHS)) != flu_type:
+        # Cyrillic letters that look like A or B (seen in names CNIC relays from Russian labs)
+        problems.append(f"name {raw!r}: Cyrillic letter in the type read as {latin!r}")
+        flu_type = latin
     prefix = subtype
     if flu_type not in ("A", "B") and not flu_type.startswith("A("):
         problems.append(f"name {raw!r}: unknown type {flu_type!r}")
@@ -57,11 +72,16 @@ def parse(raw: str, subtype: str, reassortants: RuleTable, lab: str) -> Name:
         problems.append(f"name {raw!r}: {flu_type} virus on a {subtype} table")
         prefix = flu_type  # keep what the lab wrote; never relabel (D-ingestion T40)
     m = _YEAR_AND_EXTRA.fullmatch(last)
-    if m is None:
+    short = _TWO_DIGIT_YEAR.fullmatch(last) if m is None and not_after is not None else None
+    if m is not None:
+        year, extra = m[1], m[2] or ""
+    elif short is not None and not_after is not None:
+        full = 2000 + int(short[1])
+        year, extra = str(full if full <= not_after else full - 100), short[2] or ""
+        problems.append(f"name {raw!r}: two-digit year {short[1]!r} read as {year}")
+    else:
         problems.append(f"name {raw!r}: {last!r} does not start with a four-digit year")
         year, extra = last, ""
-    else:
-        year, extra = m[1], m[2] or ""
     if len(middle) == 2:
         location, isolate = middle
     else:

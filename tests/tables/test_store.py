@@ -111,6 +111,7 @@ def test_stored_table_reads_back_with_its_hash(tmp_path):
     store = Store.open(s[1].store)
     version = store.resolve(store.current(KIND, "cdc/h3-hi-guinea-pig-cdc"))
     stored = read_table(version / "tables" / "h3-hi-guinea-pig-cdc-20300102.json")
+    assert s[0].cdc is not None
     (fresh,) = cdc.read(s[0].cdc.tsv, Rules(s[0].rules)).tables
     identity.assign([fresh], None)
     assert stored.content_hash() == fresh.content_hash()
@@ -118,7 +119,11 @@ def test_stored_table_reads_back_with_its_hash(tmp_path):
 
 def test_pipeline_step_names_its_inputs_by_role(tmp_path):
     tables, paths = settings(tmp_path, [row(**H3)])
+    assert tables.cdc is not None
     parameters = {"rules": str(tables.rules), "run": "cdc/all", "cdc": {"tsv": str(tables.cdc.tsv)}}
     step = make_step(parameters, base_dir=tmp_path, paths=paths)
-    assert step.name == "tables-update" and set(step.inputs) == {"rules", "cdc_tsv"}
+    assert step.name == "tables-update" and set(step.inputs) == {
+        "rules",
+        "input:" + tables.cdc.tsv.parent.name + "/cdc.tsv",
+    }
     assert step.outputs[0].path == paths.work / "tables" / "cdc" / "all" / "state" / PUBLISHED

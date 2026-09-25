@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -60,10 +61,31 @@ class CDCInputs:
 
 
 @dataclass(frozen=True)
+class LocationSources:
+    """Where Chinese location names are romanised from (see af.tables.locations)."""
+
+    locdb: Path  # acmacs-data locationdb.json.xz
+    chinese_aliases: Path  # e.g. whocc-tables cnic-location-aliases.tsv
+
+
+@dataclass(frozen=True)
+class AC21Inputs:
+    """One folder of AC Excel 2.1 workbooks. ``start`` bounds what is read: a workbook is read
+    when the YYYYMMDD in its file name is on or after it, and its test date must then equal
+    that file-name date (checked), so the bound is on the test date."""
+
+    lab: str
+    dir: Path
+    start: str  # ISO date
+
+
+@dataclass(frozen=True)
 class TablesSettings:
     rules: Path
     run: str  # work-area key for this run's state, e.g. "cdc/all" (one run publishes many groups)
-    cdc: CDCInputs
+    cdc: CDCInputs | None = None
+    ac21: list[AC21Inputs] = field(default_factory=list)
+    locations: LocationSources | None = None
 
 
 @dataclass(frozen=True)
@@ -105,10 +127,7 @@ def update(
         return (1 if errors else 0), report
     provenance = Provenance(
         step=STEP,
-        inputs=tuple(
-            _external(p)
-            for p in (settings.rules, settings.cdc.tsv, *settings.cdc.xlsx, *settings.cdc.season)
-        ),
+        inputs=tuple(_external(p) for p in (settings.rules, *_input_files(settings))),
         parameters={},
         started=started,
         finished=dt.datetime.now(dt.UTC),
@@ -122,22 +141,80 @@ def update(
 
 
 def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list[str], list[str]]:
-    result = cdc.read(settings.cdc.tsv, rules)
-    report = [f"read {settings.cdc.tsv}: {result.rows} rows -> {len(result.tables)} tables"]
+    tables, report, errors = _read_cdc(settings.cdc, rules) if settings.cdc else ([], [], [])
+    if settings.ac21:
+        from . import ac21
+        from .locations import ChineseLocations
+
+        if settings.locations is None:
+            raise ValueError("[tables.locations] is required to read AC Excel 2.1 workbooks")
+        locations = ChineseLocations.load(
+            settings.locations.locdb, settings.locations.chinese_aliases
+        )
+        for inputs in settings.ac21:
+            files = _dated_files(inputs)
+            result = ac21.read(files, rules, locations, lab=inputs.lab)
+            report.append(
+                f"read {len(files)} {inputs.lab} workbooks in {inputs.dir} "
+                f"-> {len(result.tables)} tables"
+            )
+            report.extend(f"skipped: {s}" for s in result.skipped_tests)
+            if result.dropped:
+                report.append(
+                    "  dropped: " + ", ".join(f"{k} {v}" for k, v in sorted(result.dropped.items()))
+                )
+            errors.extend(result.errors)
+            for table in result.tables:
+                stem_date = _file_date(Path(table.meta["file"]))
+                if stem_date != table.date:
+                    errors.append(
+                        f"{table.meta['file']}: test date {table.date} "
+                        f"!= file-name date {stem_date}"
+                    )
+            tables.extend(result.tables)
+    return tables, report, errors
+
+
+def _file_date(path: Path) -> str | None:
+    m = re.search(r"(\d{4})(\d{2})(\d{2})", path.stem)
+    return dt.date(int(m[1]), int(m[2]), int(m[3])).isoformat() if m else None
+
+
+def _dated_files(inputs: AC21Inputs) -> list[Path]:
+    """Workbooks in the folder dated on or after ``start``; Excel lock files (~$) are not
+    workbooks. A workbook whose name carries no date is an error, not silently skipped."""
+    if not inputs.dir.is_dir():
+        raise FileNotFoundError(f"workbook folder missing: {inputs.dir}")
+    start = dt.date.fromisoformat(inputs.start).isoformat()
+    out = []
+    for path in sorted(inputs.dir.glob("*.xlsx")):
+        if path.name.startswith("~$"):
+            continue
+        day = _file_date(path)
+        if day is None:
+            raise ValueError(f"{path}: no YYYYMMDD date in the file name")
+        if dt.date.fromisoformat(day) >= dt.date.fromisoformat(start):
+            out.append(path)
+    return out
+
+
+def _read_cdc(inputs: CDCInputs, rules: Rules) -> tuple[list[Table], list[str], list[str]]:
+    result = cdc.read(inputs.tsv, rules)
+    report = [f"read {inputs.tsv}: {result.rows} rows -> {len(result.tables)} tables"]
     report.append("dropped: " + ", ".join(f"{k} {v}" for k, v in sorted(result.dropped.items())))
     report.extend(f"skipped: {s}" for s in result.skipped_tests)
     errors = list(result.errors)
     tables = list(result.tables)
-    if settings.cdc.xlsx:
+    if inputs.xlsx:
         from . import cdc_xlsx  # needs openpyxl; imported only when there are workbooks
 
-        xl = cdc_xlsx.read(list(settings.cdc.xlsx), rules)
-        report.append(f"read {len(settings.cdc.xlsx)} CDC workbooks -> {len(xl.tables)} tables")
+        xl = cdc_xlsx.read(list(inputs.xlsx), rules)
+        report.append(f"read {len(inputs.xlsx)} CDC workbooks -> {len(xl.tables)} tables")
         report.extend(f"skipped: {s}" for s in xl.skipped_tests)
         errors.extend(xl.errors)
         errors.extend(duplicates(result.tables, xl.tables))
         tables.extend(xl.tables)
-    for season_file in settings.cdc.season:
+    for season_file in inputs.season:
         from . import cdc_season
 
         season = cdc_season.read(season_file, rules)
@@ -151,6 +228,17 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
         errors.extend(duplicates(result.tables, season.tables))
         tables.extend(season.tables)
     return tables, report, errors
+
+
+def _input_files(settings: TablesSettings) -> list[Path]:
+    files: list[Path] = []
+    if settings.cdc:
+        files += [settings.cdc.tsv, *settings.cdc.xlsx, *settings.cdc.season]
+    if settings.locations:
+        files += [settings.locations.locdb, settings.locations.chinese_aliases]
+    for inputs in settings.ac21:
+        files += _dated_files(inputs)
+    return files
 
 
 def _check_round_trip(store: Store, tables: list[Table]) -> None:
@@ -205,9 +293,9 @@ def make_step(parameters: Mapping[str, Any], *, base_dir: Path, paths: PathsConf
     directory of the pipeline config) and the roots come from the config's ``[paths]``.
     Inputs are named by role, so the step's record does not depend on where files live."""
     settings = parse_config(dict(parameters), TablesSettings, base_dir=base_dir)
-    inputs = {"rules": settings.rules, "cdc_tsv": settings.cdc.tsv}
-    inputs.update({f"cdc_xlsx:{p.name}": p for p in settings.cdc.xlsx})
-    inputs.update({f"cdc_season:{p.name}": p for p in settings.cdc.season})
+    inputs = {"rules": settings.rules}
+    for path in _input_files(settings):
+        inputs[f"input:{path.parent.name}/{path.name}"] = path
     state = state_dir(paths, settings)
 
     def action(_: StepContext) -> None:

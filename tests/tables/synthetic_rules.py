@@ -16,6 +16,8 @@ RULES: dict[str, list[str]] = {
         "CDC\tHINT\tregex\t[0-9]\t<10" + META,
         "CDC\t*\texact\t5\t<10" + META,
         "CDC\tHI\texact\tUnable to test\t*" + META + "yes",
+        "LABX\t*\texact\t*\t*" + META + "yes",
+        "LABX\t*\texact\t5\t<10" + META + "yes",
     ],
     "control_sera": [
         "lab\tfield\tkind\tpattern\taction\tvalue\tevidence\tadded_by\tadded_on\toptional",
@@ -71,9 +73,19 @@ RULES: dict[str, list[str]] = {
         + META
         + "yes",
     ],
+    "name_rewrites": [
+        "lab\tkind\tpattern\treplacement\tevidence\tadded_by\tadded_on\toptional",
+        "LABX\tregex\tBX/(.*)\tB/\\1" + META + "yes",
+    ],
+    "flu_types": [
+        "lab\tkind\tpattern\tsubtype\tlineage\tevidence\tadded_by\tadded_on\toptional",
+        "LABX\texact\tH3N2\tA(H3N2)\t-" + META + "yes",
+        "LABX\texact\tB_VIC\tB\tVICTORIA" + META + "yes",
+    ],
     "lab_conventions": [
-        "lab\tdate_order\tevidence\tadded_by\tadded_on\toptional",
-        "CDC\tMDY" + META + "yes",
+        "lab\tdate_order\tpassage_plus\tevidence\tadded_by\tadded_on\toptional",
+        "CDC\tMDY\t" + META + "yes",
+        "LABX\tYMD\trepeat-previous" + META + "yes",
     ],
 }
 
