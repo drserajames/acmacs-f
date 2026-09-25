@@ -279,3 +279,84 @@ def test_current_chain_on_old_tables_is_stale(tmp_path: Path) -> None:
     with pytest.raises(ProvenanceError, match="stale: .* rest on tables/labx/m"):
         build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
                                tmp_path / "m.json", deep=False)  # fmt: skip
+
+
+# ---- VCM layout: geo months, blank cells, landscape grids, groups, meeting ----------------
+
+VCM = """
+[report]
+id = "vcm-test"
+kind = "vcm"
+title = "Test consultation"
+subtitle = "for a test hemisphere"
+period = { first = "2025-11", last = "2026-02" }
+data_cutoff = 2026-02-20
+meeting = { start = 2026-02-23, end = 2026-02-26 }
+
+[figures]
+allow_placeholders = true
+
+[[sections]]
+group = "Subtype X"
+kind = "geo"
+title = "X geographic data"
+slots = ["geo/x"]
+grid = [1, 3]
+
+[[sections]]
+group = "Subtype X"
+kind = "maps"
+title = "X maps"
+landscape = true
+grid = [3, 2]
+slots = ["map/a", "map/b", "-", "map/c", "-", "-"]
+windows = [{ name = "all", title = "" }]
+"""
+
+
+def test_geo_expands_over_the_period_across_a_year_end(tmp_path: Path) -> None:
+    cfg = tmp_path / "v.toml"
+    cfg.write_text(VCM)
+    slots = load(cfg).all_slots()
+    assert [s for s in slots if s.startswith("geo/")] == [
+        "geo/x/2025-11",
+        "geo/x/2025-12",
+        "geo/x/2026-01",
+        "geo/x/2026-02",
+    ]
+    assert [s for s in slots if s.startswith("map/")] == ["map/a/all", "map/b/all", "map/c/all"]
+
+
+def test_blank_cells_only_in_map_grids(tmp_path: Path) -> None:
+    cfg = tmp_path / "v.toml"
+    cfg.write_text(VCM.replace('slots = ["geo/x"]', 'slots = ["geo/x", "-"]'))
+    with pytest.raises(ConfigError, match="blank cells"):
+        load(cfg)
+
+
+def test_meeting_dates_on_the_cover() -> None:
+    from af.report.config import Meeting
+
+    assert (
+        build._meeting(Meeting(dt.date(2026, 9, 21), dt.date(2026, 9, 24)))
+        == "21--24 September 2026"
+    )
+    assert build._meeting(Meeting(dt.date(2026, 9, 30), dt.date(2026, 10, 2))) == (
+        "30 September -- 2 October 2026"
+    )
+
+
+@needs_latex
+def test_vcm_layout_builds(tmp_path: Path) -> None:
+    cfg = tmp_path / "v.toml"
+    cfg.write_text(VCM)
+    root = tmp_path / "figs"
+    for slot in load(cfg).all_slots():
+        placeholder.make(root, slot, slot, T0)
+    pdf = build.build(cfg, root, tmp_path / "out")
+    tex = (tmp_path / "out" / "build" / "report.tex").read_text()
+    assert r"\begin{landscape}" in tex and r"\setcounter{secnumdepth}{0}" in tex
+    assert tex.count(r"\makebox[0.327\linewidth]{}") == 3  # the three blank cells
+    record = json.loads((tmp_path / "out" / "vcm-test.build.json").read_text())
+    # cover, contents, 2 geo pages (4 months, 3 per page), 1 landscape map page
+    assert record["output"]["pages"] == 5 and pdf.is_file()
