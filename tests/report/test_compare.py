@@ -415,3 +415,13 @@ def test_loose_matching_ignores_spelling_but_keeps_distinct_points_apart() -> No
     assert maps.normalise_key("PORT TOWN ONE|cell", "loose") == maps.point_key(
         ref["map"]["antigens"][0], "loose"
     )
+
+
+def test_reference_passage_class_uses_the_af_rule() -> None:
+    from af.report.compare.reference_ae import passage_class
+
+    # ae's attribute says cell here (last step MDCK); af's rule says egg (an egg step occurred).
+    assert passage_class({"P": "E2/E1MDCK2", "T": {"p": "c"}}) == "egg"
+    assert passage_class({"P": "SIAT1 (2026-01-02)"}) == "cell"
+    assert passage_class({"P": "E3", "R": "NYMC X-1"}) == "reassortant"
+    assert passage_class({"P": ""}) is None
