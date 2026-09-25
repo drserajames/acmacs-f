@@ -80,8 +80,10 @@ class TestJoin:
             [(DEFLINE.replace("e=2021-03-17", "e=2021-01-01"), "ACGT")],
             [row(Collection_Date="2021")],
         )
-        assert str(records[0].collection_date) == "2021"
-        assert records[0].collection_date.precision is Precision.YEAR
+        date = records[0].collection_date
+        assert date is not None
+        assert str(date) == "2021"
+        assert date.precision is Precision.YEAR
         assert counts.defline_date_differs == 1
         assert counts.date_precision["year"] == 1
 
