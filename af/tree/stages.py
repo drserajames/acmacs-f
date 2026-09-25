@@ -93,6 +93,12 @@ the tree version (workstream 4's af.clades.from_tree), reading the clades popula
 
 STATE_DIR = "state"
 
+CONTINENT_NOT_ASSIGNED = (
+    "no country -> continent table yet (workstream 2, rules/locations/countries.tsv); every leaf's "
+    "continent is null and draws grey"
+)
+"""Recorded in tree.json's counts, so a figure with no continent colours says why."""
+
 TEST_PURPOSE = "test"
 """A test-only export (a stand-in outgroup) publishes only under a purpose starting with this:
 weekly and report trees are read by people, and must never be rooted on a stand-in."""
@@ -674,10 +680,14 @@ def _populate_step(
             branch_scale=sub.scale,
             backend=get_backend(sub.asr_backend),
             assign_clades=None if clades is None else af_clades_assigner(clades.load()),
-            continent_of=lambda record: record.region,
+            # No continent until WS2's country -> continent table exists (rules/locations/
+            # countries.tsv, Q55-Q57): GISAID's region is not the legend's vocabulary, and a
+            # region -> legend map would still misplace Russia, the Middle East and Central America.
+            continent_of=None,
             outgroup=sub.outgroup,
             excluded=excluded,
         )
+        populated.counts["continent_not_assigned"] = CONTINENT_NOT_ASSIGNED
         apply_flags(populated, find_outliers(populated, clock))
         i6.write(populated, out, inputs.purpose, build_source(layout))
 

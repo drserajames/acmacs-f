@@ -367,3 +367,13 @@ def test_the_old_per_subtype_key_is_rejected(tmp_path: Path) -> None:
     config.write_text(config.read_text() + 'nomenclature = "clones"\n')
     with pytest.raises(Exception, match="nomenclature: unknown key"):
         stages.load_run_config(config)
+
+
+def test_the_stage_assigns_no_continent_and_says_why(tmp_path: Path) -> None:
+    config = make_project(tmp_path / "p")
+    statuses(config)
+    store = Store.open(tmp_path / "p" / "store")
+    version = store.version_dir(store.current("trees", "h3/weekly"))
+    assert i6.read_metadata(version)["counts"]["continent_not_assigned"].startswith("no country")
+    nodes = i6.read_nodes(version, columns=["is_leaf", "continent"]).to_pylist()
+    assert {n["continent"] for n in nodes if n["is_leaf"]} == {None}

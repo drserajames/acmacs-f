@@ -36,6 +36,26 @@ DatePrecision = Literal["day", "month", "year"]
 _BASES = frozenset("ACGT")
 
 
+CONTINENTS = frozenset(
+    {
+        "EUROPE",
+        "NORTH-AMERICA",
+        "SOUTH-AMERICA",
+        "CENTRAL-AMERICA",
+        "MIDDLE-EAST",
+        "AFRICA",
+        "ASIA",
+        "RUSSIA",
+        "AUSTRALIA-OCEANIA",
+        "ANTARCTICA",
+    }
+)
+"""The tree figure's continent legend (I6-DRAFT; workstream 9's ``CONTINENT_COLOURS``). A
+``continent_of`` must return one of these or None. Anything else would draw grey without saying
+so: GISAID's own region names ("Asia", "Oceania") are not this vocabulary, and have none of Russia,
+the Middle East or Central America."""
+
+
 class PopulateError(ValueError):
     """The tree and its inputs do not fit together (missing leaf metadata, missing states)."""
 
@@ -320,6 +340,12 @@ def populate(
         populated.continents = {
             key: continent_of(record) for key, record in populated.leaves.items()
         }
+        outside = sorted({v for v in populated.continents.values() if v and v not in CONTINENTS})
+        if outside:
+            raise PopulateError(
+                f"continent_of returned value(s) outside the figure's legend: {outside[:5]}; "
+                f"expected one of {sorted(CONTINENTS)} or None"
+            )
         counts["leaves_without_continent"] = sum(v is None for v in populated.continents.values())
         # Every value counted, so one outside the figure's legend vocabulary is visible.
         tally: dict[str, int] = {}
