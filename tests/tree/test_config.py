@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from af.tree.config import (
-    LONG_BRANCH_BY_SCALE,
+    LongBranchSetting,
     SubtypeSettings,
     TreeConfigError,
     load_tree_config,
@@ -25,12 +25,17 @@ seed = 7
 outgroup = "EPI_ISL_70001|EPI70001"
 branch_scale = "mutations"
 long_branch_threshold = 0.006
+long_branch_reason = "an invented override for this test"
 report_cutoff = "2021-01-01"
 
 [subtypes.h1]
 outgroup = "EPI_ISL_70002|EPI70002"
 branch_scale = "ml"
 asr_backend = "treetime"
+
+[long_branch.ml]
+threshold = 0.01
+reason = "an invented calibration for this test"
 """
 
 
@@ -89,28 +94,41 @@ def test_an_unknown_asr_backend_is_refused() -> None:
         SubtypeSettings(outgroup="X", asr_backend="haruspicy")
 
 
-def test_the_ml_scale_has_a_calibrated_default_threshold() -> None:
-    settings = SubtypeSettings(outgroup="X", branch_scale="ml")
-    assert settings.long_branch == LONG_BRANCH_BY_SCALE["ml"] == 0.01
-    assert settings.no_long_branch_reason() is None
-    rule = settings.long_branch_rule()
-    assert rule is not None and "9 of 9 hand-hidden" in rule.why
+def test_a_scale_row_applies_to_every_subtype_on_that_scale(tmp_path: Path) -> None:
+    settings = load_tree_config(write(tmp_path, EXAMPLE))
+    h1 = settings.for_subtype("h1")
+    assert h1.long_branch == 0.01
+    rule = h1.long_branch_rule()
+    assert rule is not None and "[long_branch.ml] an invented calibration" in rule.why
 
 
-def test_the_mutations_scale_has_no_default_and_will_not_invent_one() -> None:
-    """Its only would-be threshold has no ground truth; guessing would invent a curation rule."""
+def test_a_subtype_override_beats_its_scale_row_and_carries_its_own_reason(tmp_path: Path) -> None:
+    text = EXAMPLE + '\n[long_branch.mutations]\nthreshold = 0.004\nreason = "invented"\n'
+    h3 = load_tree_config(write(tmp_path, text)).for_subtype("h3")
+    rule = h3.long_branch_rule()
+    assert rule is not None and rule.threshold == 0.006
+    assert "an invented override" in rule.why
+
+
+def test_a_scale_with_no_row_drops_nothing_and_says_why() -> None:
+    """No threshold in code: a scale config does not calibrate is never given an invented one."""
     settings = SubtypeSettings(outgroup="X", branch_scale="mutations")
     assert settings.long_branch is None
     assert settings.long_branch_rule() is None
-    assert "will not invent one" in str(settings.no_long_branch_reason())
+    assert "no [long_branch.mutations] row" in str(settings.no_long_branch_reason())
 
 
-def test_setting_the_threshold_explicitly_enables_the_drop_on_either_scale() -> None:
-    settings = SubtypeSettings(outgroup="X", branch_scale="mutations", long_branch_threshold=0.006)
-    rule = settings.long_branch_rule()
-    assert rule is not None and rule.threshold == 0.006
-    assert "Set explicitly in config" in rule.why
-    assert settings.no_long_branch_reason() is None
+def test_a_threshold_without_its_reason_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(TreeConfigError, match="reason"):
+        SubtypeSettings(outgroup="X", long_branch_threshold=0.006)
+    with pytest.raises(TreeConfigError, match="reason"):
+        LongBranchSetting(threshold=0.01, reason=" ")
+
+
+def test_a_row_for_an_unknown_scale_is_refused(tmp_path: Path) -> None:
+    text = EXAMPLE + '\n[long_branch.furlongs]\nthreshold = 1.0\nreason = "x"\n'
+    with pytest.raises((ConfigError, TreeConfigError), match="furlongs"):
+        load_tree_config(write(tmp_path, text))
 
 
 def test_turning_the_drop_off_is_reported_as_a_reason() -> None:

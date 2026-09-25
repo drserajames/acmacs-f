@@ -13,10 +13,11 @@ Per subtype, because almost every one of these genuinely differs between subtype
 * **outgroup** — a different strain for each, and the build cannot root without it.
 * **ASR backend** — B/Vic's clades are defined by deletions, so it needs a gap-capable backend;
   af refuses a gap-blind one there (``af.tree.populate``).
-* **long-branch threshold** — and this one is a trap: the threshold is in the units of the branch
-  scale. ae's 0.01 was set against ML lengths, and on the mutations scale the longest branch
-  possible is about 16/1650 = 0.0097, so it can never fire. Left unset it defaults per scale, and
-  :func:`af.tree.prebuild.plan` reports a threshold that cannot fire as inert.
+* **long-branch threshold** — in the units of the branch scale, so it is set **per scale**, in
+  config, with its reason in the same row (Sarah, 25 Sep, Q9): ``[long_branch.<scale>]``. ae's 0.01
+  was set against ML lengths; on the mutations scale the longest branch possible is about
+  16/1650 = 0.0097, so carried over it could never fire. A scale with no row drops nothing, and
+  says so; :func:`af.tree.prebuild.plan` reports a threshold that cannot fire as inert.
 
 Nothing here reads the environment, and an unknown key in the file is an error, not a typo that
 silently leaves a default in place.
@@ -35,26 +36,38 @@ from af.tree.populate import BRANCH_SCALES, BranchScale
 from af.tree.prebuild import DEFAULT_LONG_BRANCH, LONG_BRANCH, LONG_BRANCH_RULE, ExclusionRule
 from af.util.config import load_config
 
-#: The long-branch threshold that each branch scale has *evidence* for.
-#:
-#: ``ml``: ae's 0.01, calibrated — on the round's H1 tree it drops 9 leaves and all 9 were
-#: hand-hidden (notes/trees/CLOCK.md).
-#:
-#: ``mutations``: **None, deliberately.** There is no ground truth for this scale: the only
-#: hand-curated long-branch set is H1's, and H1 is the ML-scale subtype. Measured on the round's
-#: trees, a mutations-scale threshold is not a small adjustment of ae's number but a different
-#: quantity — at 6 changes it would drop 168 H3 and 82 B/Vic leaves, against 9 for H1. Picking one
-#: would be inventing a curation rule, so af requires it to be set deliberately and drops nothing
-#: until it is. For whoever sets it, on the 2026-0921 trees:
-#:
-#:     changes:   4     5     6     8    10
-#:     H3:     1324   447   168    35    11
-#:     B/Vic:   549   196    82    16     1
-LONG_BRANCH_BY_SCALE: dict[str, float | None] = {"ml": DEFAULT_LONG_BRANCH, "mutations": None}
-
 
 class TreeConfigError(ValueError):
     """The tree config is not usable as written."""
+
+
+@dataclass(frozen=True)
+class LongBranchSetting:
+    """One ``[long_branch.<scale>]`` row: the threshold, and why it is that number.
+
+    The reason is required (design rule 11): a reader of the tree must be able to tell why a
+    sequence is missing from it. What is known, for whoever writes the rows:
+
+    ``ml``: ae's 0.01 is calibrated — on the 2026-0921 H1 tree it drops 9 leaves and all 9 were
+    hand-hidden (notes/trees/CLOCK.md).
+
+    ``mutations``: there is no ground truth; the only hand-curated long-branch set is H1's, which is
+    on the ML scale. It is a different quantity, not a small adjustment of ae's number. Leaves over
+    the threshold on the 2026-0921 trees, by changes on the terminal branch (x / alignment length):
+
+        changes:   4     5     6     8    10
+        H3:     1324   447   168    35    11
+        B/Vic:   549   196    82    16     1
+    """
+
+    threshold: float
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.threshold <= 0:
+            raise TreeConfigError("long_branch threshold must be positive")
+        if not self.reason.strip():
+            raise TreeConfigError("a long_branch row needs its reason (design rule 11)")
 
 
 @dataclass(frozen=True)
@@ -66,7 +79,10 @@ class SubtypeSettings:
     asr_backend: str = DEFAULT_BACKEND
     collapse_tolerance: float = 0.0
     long_branch_threshold: float | None = None
-    """In the units of ``branch_scale``. Unset: :data:`LONG_BRANCH_BY_SCALE` for that scale."""
+    """In the units of ``branch_scale``. Unset: the ``[long_branch.<scale>]`` row, if any.
+    Set here only for a subtype that genuinely differs from its scale's row."""
+    long_branch_reason: str | None = None
+    """Required with ``long_branch_threshold``. Filled from the scale's row otherwise."""
     clock_z_threshold: float = 4.0
     drop_long_branches: bool = True
     """Sarah, 25 Sep: long branches go before the tree is built. Off only for a deliberate
@@ -89,6 +105,8 @@ class SubtypeSettings:
             problems.append("outgroup is empty; the build cannot root the tree without one")
         if self.long_branch_threshold is not None and self.long_branch_threshold <= 0:
             problems.append("long_branch_threshold must be positive")
+        if self.long_branch_threshold is not None and not (self.long_branch_reason or "").strip():
+            problems.append("long_branch_threshold needs a long_branch_reason (design rule 11)")
         if problems:
             raise TreeConfigError("; ".join(problems))
 
@@ -99,27 +117,15 @@ class SubtypeSettings:
 
     @property
     def long_branch(self) -> float | None:
-        """The threshold to use, or None when this scale has none and config did not set one."""
-        if self.long_branch_threshold is not None:
-            return self.long_branch_threshold
-        return LONG_BRANCH_BY_SCALE[self.branch_scale]
+        """The threshold to use, or None when config sets none for this scale or subtype."""
+        return self.long_branch_threshold
 
     def long_branch_rule(self) -> ExclusionRule | None:
-        """The pre-build rule, or None when no threshold applies — never an invented number.
-
-        None means the build drops nothing and says so, which is the honest outcome for a scale
-        with no calibration behind it (:data:`LONG_BRANCH_BY_SCALE`).
-        """
+        """The pre-build rule, or None when config sets no threshold — never an invented number."""
         threshold = self.long_branch
         if threshold is None:
             return None
-        if self.long_branch_threshold is None:
-            why = f"{LONG_BRANCH_RULE.why} Default for the {self.branch_scale!r} scale."
-        else:
-            why = (
-                f"{LONG_BRANCH_RULE.why} Set explicitly in config for this subtype, on the "
-                f"{self.branch_scale!r} scale."
-            )
+        why = f"{LONG_BRANCH_RULE.why} {self.branch_scale!r} scale: {self.long_branch_reason}"
         return ExclusionRule(reason=LONG_BRANCH, threshold=threshold, why=why)
 
     def no_long_branch_reason(self) -> str | None:
@@ -128,8 +134,8 @@ class SubtypeSettings:
             return "drop_long_branches is off in config"
         if self.long_branch is None:
             return (
-                f"no long_branch_threshold for the {self.branch_scale!r} scale: it has no "
-                "calibration, and af will not invent one. Set it in config to drop long branches."
+                f"no [long_branch.{self.branch_scale}] row in config, so nothing is dropped; af "
+                "will not invent a threshold (Sarah, 25 Sep: set per scale, in config)"
             )
         return None
 
@@ -148,6 +154,8 @@ class TreeSettings:
 
     subtypes: dict[str, SubtypeSettings]
     cmaple: CmapleSettings = field(default_factory=CmapleSettings)
+    long_branch: dict[str, LongBranchSetting] = field(default_factory=dict)
+    """Keyed by branch scale. A scale with no row drops no long branches, and says so."""
     defaults: dict[str, str] = field(default_factory=dict)
     """Applied to every subtype that does not set the key itself. Strings, converted per field."""
 
@@ -160,16 +168,32 @@ class TreeSettings:
             raise TreeConfigError("no [subtypes.<name>] section: there is nothing to build")
         if self.cmaple.search not in SEARCH_TYPES:  # CmapleSettings checks this too; be explicit
             raise TreeConfigError(f"cmaple.search must be one of {SEARCH_TYPES}")
+        unknown = sorted(set(self.long_branch) - set(BRANCH_SCALES))
+        if unknown:
+            raise TreeConfigError(
+                f"[long_branch.X] for unknown scale(s) {unknown}: {BRANCH_SCALES}"
+            )
 
     def for_subtype(self, subtype: str) -> SubtypeSettings:
-        """One subtype's settings. An unknown subtype is an error, never a default (rule 4)."""
+        """One subtype's settings, with its scale's long-branch row applied unless it sets its own.
+
+        An unknown subtype is an error, never a default (rule 4).
+        """
         try:
-            return self.subtypes[subtype]
+            settings = self.subtypes[subtype]
         except KeyError:
             known = ", ".join(sorted(self.subtypes))
             raise TreeConfigError(
                 f"no settings for subtype {subtype!r}; the config names: {known}"
             ) from None
+        row = self.long_branch.get(settings.branch_scale)
+        if settings.long_branch_threshold is not None or row is None:
+            return settings
+        return replace(
+            settings,
+            long_branch_threshold=row.threshold,
+            long_branch_reason=f"[long_branch.{settings.branch_scale}] {row.reason}",
+        )
 
     def cmaple_for(self, subtype: str) -> CmapleSettings:
         """CMAPLE settings with this run's thread count applied."""
@@ -183,7 +207,7 @@ def load_tree_config(path: Path) -> TreeSettings:
 
 
 __all__ = [
-    "LONG_BRANCH_BY_SCALE",
+    "LongBranchSetting",
     "SubtypeSettings",
     "TreeConfigError",
     "TreeSettings",
