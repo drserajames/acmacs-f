@@ -10,7 +10,7 @@ selection, from raw inputs, through long-lived stores, into reports. Licence GPL
 |---|---|
 | `af/util` | config loading, artefact checks, provenance |
 | `af/run` | local and SLURM runners for external tools |
-| `af/store` | store layout (`raw/`, `sequences/`, `clades/`, `tables/`, `trees/`, `chains/`, `serology/`, `snapshots/`), versions, cache, report manifests |
+| `af/store` | store layout (`raw/`, `sequences/`, `clades/`, `tables/`, `trees/`, `chains/`, `serology/`, `snapshots/`), versions, cache, report manifests; the work area for step state (`[paths] store`, `work`) |
 | `af/pipeline` | step driver with incremental skipping |
 | `af/seq`, `af/tables`, `af/clades` | sequences, titre tables, clade assignment |
 | `af/tree` (`build`, `asr`, `draw`) | trees |
