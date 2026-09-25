@@ -32,6 +32,11 @@ dependencies:
   - gotree >=0.5.2
   - treetime >=0.12.1     # noarch; the linux-64-only builds stop at 0.2.4, don't pin below
   - treeswift >=1.1.50
-  # Python libraries the tree steps use.
+  # Python libraries: af's core runtime set (pyproject.toml), plus biopython for the tree steps.
   - biopython >=1.88
   - numpy >=2
+  - pyarrow >=16
+  - python-duckdb >=1.1  # conda-forge name of the duckdb Python package (native osx-arm64 + linux-64)
+  - matplotlib-base >=3.8
+  - openpyxl >=3.1
+  - cartopy >=0.23       # the `geo` extra
