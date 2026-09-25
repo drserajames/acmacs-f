@@ -35,7 +35,8 @@ def point_key(point: Point, how: str) -> str:
         return str(point["id"])
     if point.get("serum_id"):  # a serum id identifies the serum; passage class may be unset
         return f"{point['name']}|{point['serum_id']}"
-    return f"{point['name']}|{point['passage_class']}"
+    # A null passage class (not a passage: specimen ids, blanks) keys as "none" on both sides.
+    return f"{point['name']}|{point['passage_class'] or 'none'}"
 
 
 def drawn(point: Point) -> bool:
