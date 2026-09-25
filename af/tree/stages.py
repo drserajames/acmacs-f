@@ -1,0 +1,600 @@
+"""The tree stages as :mod:`af.pipeline` steps: build -> asr -> populate -> publish (task 5.12).
+
+One pipeline per subtype, kept in the work area at ``<work>/trees/<subtype>/``::
+
+    state/                     af.pipeline records, one per step
+    build/tree.nwk             the finished tree (rooted, collapsed, ladderized)
+    build/alignment.fasta      exactly the sequences in that tree
+    build/build.json           the build's counts, and what the pre-build filter dropped
+    asr/ancestral.parquet      one state per internal node, keyed by node id
+    asr/asr.json               which backend, its version, how long it took
+    populate/<purpose>/        the I6 files (af.tree.io.i6), ready to publish
+    publish/published.json     the store ref the publish step wrote
+
+**Why the step records survive a sync.** Every input is *named* (``inputs={"alignment": p}``),
+and every output lies under the pipeline's ``root`` (the subtype's work directory), so records are
+keyed by role and by relative path, never by where the files happen to live. A work area synced to
+the HPC or to ``o`` under another root is up to date there too; only a change of content re-runs.
+
+**Why build does not read the leaf metadata.** CMAPLE is the expensive step. Leaf names, dates and
+places change often (a corrected date, a new location alias) and none of them affects topology, so
+they are an input of populate, not of build. The pre-build drops are recorded by leaf key and named
+at populate, which does read the metadata.
+
+Task 5.1 (export) is blocked on the sequence store, so the pipeline starts from its two outputs,
+given in config: the aligned FASTA keyed by leaf key (:func:`af.tree.populate.leaf_key`), and the
+leaf records as Parquet (:func:`write_leaves` defines the columns). When export exists it becomes
+the producer of those two files, and nothing downstream changes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import datetime
+import json
+import logging
+import sys
+import time
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from af.pipeline import Pipeline, Step, StepContext, StepOutcome
+from af.run import LocalRunner, Runner
+from af.store import Store
+from af.store.ref import ExternalInput
+from af.store.store import Provenance
+from af.store.work import PathsConfig, Work
+from af.tree.asr import get_backend
+from af.tree.asr.base import AncestralStates
+from af.tree.build import build, prune_starting_tree
+from af.tree.clock import apply_flags, find_outliers
+from af.tree.config import SubtypeSettings, TreeSettings
+from af.tree.io import i6, newick
+from af.tree.io.fasta import read_alignment, write_alignment
+from af.tree.model import Tree
+from af.tree.populate import CladeAssigner, LeafRecord, af_clades_assigner, leaf_key, populate
+from af.tree.prebuild import ExclusionPlan, ExclusionRule
+from af.tree.prebuild import plan as prebuild_plan
+from af.util.artefacts import Artefact
+from af.util.config import load_config
+
+log = logging.getLogger(__name__)
+
+KIND = "trees"
+BUILD, ASR, POPULATE, PUBLISH = "build", "asr", "populate", "publish"
+STAGES = (BUILD, ASR, POPULATE, PUBLISH)
+
+CODE_VERSION = 1
+"""Bump when a stage's code changes what it writes, so existing records stop counting."""
+
+
+class StageError(ValueError):
+    """A stage's input or configuration is not usable."""
+
+
+# ---------------------------------------------------------------------------------------------
+# Configuration
+
+
+@dataclass(frozen=True)
+class SubtypeInputs:
+    """Where one subtype's inputs come from. All paths from config; none has a default."""
+
+    alignment: Path
+    """Aligned FASTA keyed by leaf key: export's output (task 5.1)."""
+    leaves: Path
+    """Leaf records, Parquet, as :func:`write_leaves` writes them: export's other output."""
+    previous: Path | None = None
+    """The last finished tree. The long-branch rule is measured on it (Sarah, 25 Sep: long
+    branches leave before the build), and with ``incremental`` CMAPLE starts from it. Absent on a
+    first build, and then nothing is dropped, which build.json says."""
+    incremental: bool = False
+    """Start CMAPLE from ``previous`` rather than from scratch. Off by default: the incremental
+    topology is not yet tested against a from-scratch build (notes/trees/CUT-NODE.md §3b)."""
+    clade_set: str | None = None
+    """The nomenclature's subtype name (a key of af.clades.nomenclature.HA_REPOSITORIES)."""
+    nomenclature: Path | None = None
+    """The directory holding the influenza-clade-nomenclature clones."""
+    purpose: str = "weekly"
+
+    def __post_init__(self) -> None:
+        if (self.clade_set is None) != (self.nomenclature is None):
+            raise StageError("clade_set and nomenclature go together: give both or neither")
+        if self.incremental and self.previous is None:
+            raise StageError("incremental = true needs a previous tree to start from")
+
+
+@dataclass(frozen=True)
+class TreeRunConfig:
+    """``[paths]``, ``[trees]`` (af.tree.config.TreeSettings) and ``[inputs.<subtype>]``."""
+
+    paths: PathsConfig
+    trees: TreeSettings
+    inputs: dict[str, SubtypeInputs]
+
+    def __post_init__(self) -> None:
+        unknown = sorted(set(self.inputs) - set(self.trees.subtypes))
+        if unknown:
+            raise StageError(f"[inputs.X] for subtype(s) with no [trees.subtypes.X]: {unknown}")
+
+
+def load_run_config(path: Path) -> TreeRunConfig:
+    return load_config(Path(path), TreeRunConfig)
+
+
+# ---------------------------------------------------------------------------------------------
+# Hand-off files between stages
+
+LEAF_SCHEMA = pa.schema(
+    [
+        ("leaf_id", pa.string()),
+        ("epi_isl", pa.string()),
+        ("accession", pa.string()),
+        ("name", pa.string()),
+        ("collection_date", pa.date32()),
+        ("date_precision", pa.string()),
+        ("collection_date_first", pa.date32()),
+        ("collection_date_last", pa.date32()),
+        ("country", pa.string()),
+        ("region", pa.string()),
+    ]
+)
+"""The leaf records export hands to populate. The sequence is not here: it is in the alignment,
+under the same key, and one copy of it is enough (design rule 6)."""
+
+_LEAF_FIELDS = [name for name in LEAF_SCHEMA.names if name != "leaf_id"]
+
+
+def write_leaves(records: Mapping[str, LeafRecord], path: Path) -> None:
+    rows = sorted(records.values(), key=lambda record: record.key)
+    columns: dict[str, list[Any]] = {"leaf_id": [record.key for record in rows]}
+    for name in _LEAF_FIELDS:
+        columns[name] = [getattr(record, name) for record in rows]
+    pq.write_table(pa.table(columns, schema=LEAF_SCHEMA), path, compression="zstd")
+
+
+def read_leaves(path: Path, alignment: Mapping[str, str]) -> dict[str, LeafRecord]:
+    """Leaf records joined to their aligned sequences. A leaf with no sequence is an error."""
+    table = pq.read_table(path, schema=LEAF_SCHEMA)
+    records: dict[str, LeafRecord] = {}
+    for row in table.to_pylist():
+        key = row.pop("leaf_id")
+        if key != leaf_key(row["epi_isl"], row["accession"]):
+            raise StageError(f"{path}: leaf_id {key!r} does not match its EPI_ISL and accession")
+        if key in records:
+            raise StageError(f"{path}: leaf {key!r} appears twice")
+        sequence = alignment.get(key)
+        if sequence is None:
+            raise StageError(f"{path}: leaf {key!r} has no sequence in the alignment")
+        records[key] = LeafRecord(nucleotides=sequence, **row)
+    return records
+
+
+def write_states(states: AncestralStates, tree: Tree, directory: Path) -> None:
+    """``ancestral.parquet`` (the I6 layout, one row per internal node) and ``asr.json``."""
+    internal = [node for node in tree.preorder() if not node.is_leaf]
+    missing = [node.id_hex for node in internal if node.node_id not in states.nucleotides]
+    if missing:
+        raise StageError(f"{states.backend} gave no state for {len(missing)} internal nodes")
+    table = pa.table(
+        {
+            "node_id": [node.id_hex for node in internal],
+            "nucleotides": [states.nucleotides[node.node_id] for node in internal],
+        },
+        schema=i6.ANCESTRAL_SCHEMA,
+    )
+    pq.write_table(table, directory / i6.ANCESTRAL_FILE, compression="zstd")
+    meta = {
+        "backend": states.backend,
+        "backend_version": states.backend_version,
+        "seconds": states.seconds,
+        "parameters": dict(states.parameters),
+    }
+    (directory / ASR_META).write_text(json.dumps(meta, indent=1, sort_keys=True) + "\n")
+
+
+def read_states(directory: Path) -> AncestralStates:
+    meta = json.loads((directory / ASR_META).read_text())
+    table = pq.read_table(directory / i6.ANCESTRAL_FILE, schema=i6.ANCESTRAL_SCHEMA)
+    nucleotides = {
+        int(node_id, 16): sequence
+        for node_id, sequence in zip(
+            table["node_id"].to_pylist(), table["nucleotides"].to_pylist(), strict=True
+        )
+    }
+    return AncestralStates(
+        nucleotides=nucleotides,
+        backend=meta["backend"],
+        backend_version=meta["backend_version"],
+        seconds=meta["seconds"],
+        parameters=meta["parameters"],
+    )
+
+
+def load_finished_tree(path: Path) -> Tree:
+    """A finished tree read back. Ids are recomputed from leaf keys, so they match the build's."""
+    tree = newick.load(path)
+    tree.assign_ids()
+    return tree
+
+
+def _parse_json(path: Path) -> object:
+    return json.loads(path.read_text())
+
+
+def _parse_parquet(path: Path) -> object:
+    return pq.read_table(path)
+
+
+def _parse_tree(path: Path) -> object:
+    return load_finished_tree(path)
+
+
+# ---------------------------------------------------------------------------------------------
+# The steps
+
+TREE_FILE = "tree.nwk"
+ALIGNMENT_FILE = "alignment.fasta"
+BUILD_META = "build.json"
+ASR_META = "asr.json"
+PUBLISHED_FILE = "published.json"
+
+
+@dataclass(frozen=True)
+class Layout:
+    """Where one subtype's stages write, under its work directory (the pipeline root)."""
+
+    root: Path
+    purpose: str
+
+    @property
+    def state(self) -> Path:
+        return self.root / "state"
+
+    def stage(self, name: str) -> Path:
+        return self.root / name
+
+    @property
+    def tree(self) -> Path:
+        return self.stage(BUILD) / TREE_FILE
+
+    @property
+    def alignment(self) -> Path:
+        return self.stage(BUILD) / ALIGNMENT_FILE
+
+    @property
+    def build_meta(self) -> Path:
+        return self.stage(BUILD) / BUILD_META
+
+    @property
+    def ancestral(self) -> Path:
+        return self.stage(ASR) / i6.ANCESTRAL_FILE
+
+    @property
+    def asr_meta(self) -> Path:
+        return self.stage(ASR) / ASR_META
+
+    @property
+    def i6(self) -> Path:
+        return self.stage(POPULATE) / self.purpose
+
+    @property
+    def published(self) -> Path:
+        return self.stage(PUBLISH) / PUBLISHED_FILE
+
+
+def layout_for(paths: PathsConfig, subtype: str, purpose: str) -> Layout:
+    """The subtype's work directory. The work area must exist: a typo must not start afresh."""
+    work = Work.open(paths.work).dataset(KIND, subtype)
+    return Layout(root=work.root, purpose=purpose)
+
+
+def tree_steps(
+    subtype: str,
+    settings: TreeSettings,
+    inputs: SubtypeInputs,
+    layout: Layout,
+    store_root: Path,
+) -> list[Step]:
+    """The four steps for one subtype, in order. Each names its inputs by role."""
+    sub = settings.for_subtype(subtype)
+    return [
+        _build_step(subtype, settings, sub, inputs, layout),
+        _asr_step(sub, settings.threads, layout),
+        _populate_step(subtype, sub, inputs, layout),
+        _publish_step(subtype, inputs, layout, store_root),
+    ]
+
+
+def _build_step(
+    subtype: str,
+    settings: TreeSettings,
+    sub: SubtypeSettings,
+    inputs: SubtypeInputs,
+    layout: Layout,
+) -> Step:
+    named: dict[str, Path] = {"alignment": inputs.alignment}
+    if inputs.previous is not None:
+        named["previous"] = inputs.previous
+    cmaple = settings.cmaple_for(subtype)
+    rule = sub.long_branch_rule() if sub.drop_long_branches else None
+    parameters = {
+        "code_version": CODE_VERSION,
+        # Not the executable's path: it differs between the laptop, the HPC and o, and a path is
+        # not a reason to rebuild. The version CMAPLE reports is in build.json. After upgrading
+        # CMAPLE, re-run deliberately (--force build).
+        "cmaple": {k: v for k, v in dataclasses.asdict(cmaple).items() if k != "executable"},
+        "outgroup": sub.outgroup,
+        "collapse_tolerance": sub.collapse_tolerance,
+        "long_branch_threshold": None if rule is None else rule.threshold,
+        "incremental": inputs.incremental,
+    }
+
+    def action(context: StepContext) -> None:
+        out = layout.stage(BUILD)
+        out.mkdir(parents=True, exist_ok=True)
+        exclude, not_dropped = _prebuild(sub, inputs, rule)
+        starting = None
+        if inputs.incremental:
+            assert inputs.previous is not None  # SubtypeInputs checks this
+            keep = sorted(set(read_alignment(inputs.alignment)) - exclude.keys())
+            starting, _ = prune_starting_tree(
+                newick.load(inputs.previous), keep, out / "starting.nwk"
+            )
+        result = build(
+            inputs.alignment,
+            sub.outgroup,
+            out / "cmaple",
+            settings=cmaple,
+            starting_tree=starting,
+            collapse_tolerance=sub.collapse_tolerance,
+            runner=context.runner,
+            exclude=exclude,
+        )
+        newick.dump(result.tree, layout.tree, precision=12)
+        in_tree = {leaf.name or "" for leaf in result.tree.leaves()}
+        sequences = read_alignment(inputs.alignment)
+        write_alignment(layout.alignment, {key: sequences[key] for key in sorted(in_tree)})
+        meta = {
+            "subtype": subtype,
+            "counts": result.counts,
+            "prebuild": exclude.counts,
+            "prebuild_not_applied": not_dropped,
+            "excluded": exclude.records(),
+        }
+        layout.build_meta.write_text(json.dumps(meta, indent=1, default=str) + "\n")
+
+    return Step(
+        name=BUILD,
+        action=action,
+        inputs=named,
+        parameters=parameters,
+        outputs=[
+            Artefact(layout.tree, parse=_parse_tree),
+            Artefact(layout.alignment, parse=read_alignment),
+            Artefact(layout.build_meta, parse=_parse_json),
+        ],
+    )
+
+
+def _prebuild(
+    sub: SubtypeSettings, inputs: SubtypeInputs, rule: ExclusionRule | None
+) -> tuple[ExclusionPlan, str | None]:
+    """The pre-build drops, and why there are none when there are none (never silently)."""
+    reason = sub.no_long_branch_reason()
+    if reason is not None or rule is None:
+        return ExclusionPlan(), reason or "no long-branch rule"
+    if inputs.previous is None:
+        return ExclusionPlan(), "no previous tree to measure long branches on (first build)"
+    previous = newick.load(inputs.previous)
+    return prebuild_plan(previous, rule, keep=[sub.outgroup], source=str(inputs.previous)), None
+
+
+def _asr_step(sub: SubtypeSettings, threads: int, layout: Layout) -> Step:
+    def action(_: StepContext) -> None:
+        out = layout.stage(ASR)
+        out.mkdir(parents=True, exist_ok=True)
+        tree = load_finished_tree(layout.tree)
+        backend = get_backend(sub.asr_backend)
+        states = backend.reconstruct(tree, layout.alignment, out / "work", threads=threads)
+        write_states(states, tree, out)
+
+    return Step(
+        name=ASR,
+        action=action,
+        inputs={"tree": layout.tree, "alignment": layout.alignment},
+        parameters={"code_version": CODE_VERSION, "backend": sub.asr_backend, "threads": threads},
+        outputs=[
+            Artefact(layout.ancestral, parse=_parse_parquet),
+            Artefact(layout.asr_meta, parse=_parse_json),
+        ],
+    )
+
+
+def _clades_input(inputs: SubtypeInputs) -> Path | None:
+    """The nomenclature directory populate reads, so a nomenclature change re-runs it."""
+    if inputs.clade_set is None or inputs.nomenclature is None:
+        return None
+    from af.clades.nomenclature import HA_REPOSITORIES
+
+    repository = HA_REPOSITORIES.get(inputs.clade_set)
+    if repository is None:
+        known = ", ".join(sorted(HA_REPOSITORIES))
+        raise StageError(f"clade_set {inputs.clade_set!r} is not one of: {known}")
+    return inputs.nomenclature / repository / "subclades"
+
+
+def _populate_step(
+    subtype: str, sub: SubtypeSettings, inputs: SubtypeInputs, layout: Layout
+) -> Step:
+    named = {
+        "tree": layout.tree,
+        "ancestral": layout.ancestral,
+        "asr_meta": layout.asr_meta,
+        "alignment": layout.alignment,
+        "build_meta": layout.build_meta,
+        "leaves": inputs.leaves,
+    }
+    clades = _clades_input(inputs)
+    if clades is not None:
+        named["clades"] = clades
+    clock = sub.clock_settings()
+    parameters = {
+        "code_version": CODE_VERSION,
+        "purpose": inputs.purpose,
+        "branch_scale": sub.branch_scale,
+        "outgroup": sub.outgroup,
+        "clade_set": inputs.clade_set,
+        "clock": _recordable(dataclasses.asdict(clock)),
+    }
+
+    def action(_: StepContext) -> None:
+        out = layout.i6
+        out.mkdir(parents=True, exist_ok=True)
+        for stale in out.iterdir():
+            stale.unlink()
+        tree = load_finished_tree(layout.tree)
+        leaves = read_leaves(inputs.leaves, read_alignment(layout.alignment))
+        names = {key: record.name for key, record in leaves.items()}
+        excluded = json.loads(layout.build_meta.read_text())["excluded"]
+        for row in excluded:
+            row["name"] = names.get(row["leaf_id"])
+        populated = populate(
+            tree,
+            subtype,
+            leaves,
+            read_states(layout.stage(ASR)),
+            branch_scale=sub.scale,
+            backend=get_backend(sub.asr_backend),
+            assign_clades=_assigner(inputs),
+            continent_of=lambda record: record.region,
+            outgroup=sub.outgroup,
+            excluded=excluded,
+        )
+        apply_flags(populated, find_outliers(populated, clock))
+        i6.write(populated, out, inputs.purpose)
+
+    return Step(
+        name=POPULATE,
+        action=action,
+        inputs=named,
+        parameters=parameters,
+        outputs=[
+            Artefact(layout.i6 / i6.TREE_FILE, parse=_parse_tree),
+            Artefact(layout.i6 / i6.NODES_FILE, parse=_parse_parquet),
+            Artefact(layout.i6 / i6.META_FILE, parse=_parse_json),
+        ],
+    )
+
+
+def _recordable(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Settings as a step parameter: dates become ISO strings, which is how a record keeps them."""
+    result: dict[str, Any] = json.loads(json.dumps(dict(settings), default=str))
+    return result
+
+
+def _assigner(inputs: SubtypeInputs) -> CladeAssigner | None:
+    if inputs.clade_set is None or inputs.nomenclature is None:
+        return None
+    from af.clades.nomenclature import load_clade_set
+
+    return af_clades_assigner(load_clade_set(inputs.clade_set, inputs.nomenclature))
+
+
+def _publish_step(subtype: str, inputs: SubtypeInputs, layout: Layout, store_root: Path) -> Step:
+    external = {"alignment": inputs.alignment, "leaves": inputs.leaves}
+    clades = _clades_input(inputs)
+    if clades is not None:
+        external["clades"] = clades
+
+    def action(_: StepContext) -> None:
+        started = datetime.datetime.now(datetime.UTC)
+        store = Store.open(store_root)
+        provenance_inputs = tuple(ExternalInput.of(path) for path in external.values())
+        with store.build(KIND, f"{subtype}/{inputs.purpose}") as builder:
+            builder.link(layout.i6, ".")
+            meta = i6.read_metadata(layout.i6)
+            summary = {
+                "leaves": meta["leaves"],
+                "internal_nodes": meta["internal_nodes"],
+                "branch_scale": meta["branch_scale"],
+            }
+            provenance = Provenance(
+                step=f"{KIND}.{PUBLISH}",
+                inputs=provenance_inputs,
+                parameters={"subtype": subtype, "purpose": inputs.purpose},
+                started=started,
+                finished=datetime.datetime.now(datetime.UTC),
+            )
+            ref = builder.publish(provenance, summary=summary)
+        layout.published.parent.mkdir(parents=True, exist_ok=True)
+        layout.published.write_text(json.dumps(ref.to_json(), indent=1, sort_keys=True) + "\n")
+
+    return Step(
+        name=PUBLISH,
+        action=action,
+        inputs={"i6": layout.i6},
+        parameters={"code_version": CODE_VERSION, "purpose": inputs.purpose},
+        # The I6 directory is not itself a declared output, so the driver cannot infer this.
+        after=[POPULATE],
+        outputs=[Artefact(layout.published, parse=_parse_json)],
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# Running
+
+
+def subtype_pipeline(config: TreeRunConfig, subtype: str, runner: Runner | None = None) -> Pipeline:
+    try:
+        inputs = config.inputs[subtype]
+    except KeyError:
+        raise StageError(
+            f"no [inputs.{subtype}] in the config; it names: {', '.join(sorted(config.inputs))}"
+        ) from None
+    layout = layout_for(config.paths, subtype, inputs.purpose)
+    steps = tree_steps(subtype, config.trees, inputs, layout, config.paths.store)
+    return Pipeline(steps, state_dir=layout.state, runner=runner or LocalRunner(), root=layout.root)
+
+
+def run(
+    config: TreeRunConfig,
+    subtypes: Sequence[str] | None = None,
+    *,
+    targets: Sequence[str] | None = None,
+    force: Collection[str] = (),
+    runner: Runner | None = None,
+) -> dict[str, list[StepOutcome]]:
+    """Run what is out of date, subtype by subtype. The first failure stops the run."""
+    chosen = list(subtypes) if subtypes else sorted(config.inputs)
+    outcomes: dict[str, list[StepOutcome]] = {}
+    for subtype in chosen:
+        started = time.monotonic()
+        log.info("%s:", subtype)
+        outcomes[subtype] = subtype_pipeline(config, subtype, runner).run(targets, force=force)
+        log.info("%s: stages done in %.0fs", subtype, time.monotonic() - started)
+    return outcomes
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("config", type=Path)
+    parser.add_argument("--subtype", action="append", help="default: every [inputs.X]")
+    parser.add_argument("--until", choices=STAGES, help="stop after this stage")
+    parser.add_argument("--force", action="append", default=[], choices=STAGES)
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    config = load_run_config(args.config)
+    targets = [args.until] if args.until else None
+    run(config, args.subtype, targets=targets, force=args.force)  # the driver logs each outcome
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
