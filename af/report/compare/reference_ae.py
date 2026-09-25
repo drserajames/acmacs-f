@@ -307,9 +307,18 @@ def tree_i7(
             "subtype": subtype,
             "leaves": leaves,
             "sections": sections,
-            "time_series": {"first": series[0], "last": series[1]} if series else None,
+            "time_series": _drawn_months(series) if series else None,
         },
     }
+
+
+def _drawn_months(series: tuple[str, str]) -> dict[str, str]:
+    """The ``.tal`` time-series end is exclusive: end "2026-10" draws through September 2026
+    (ae cc/tal/time-series.cc, following AD). I7 records the first and LAST month drawn."""
+    first, end = series
+    year, month = int(end[:4]), int(end[5:7])
+    year, month = (year - 1, 12) if month == 1 else (year, month - 1)
+    return {"first": first, "last": f"{year:04d}-{month:02d}"}
 
 
 def strain_name(leaf_id: str) -> str:
