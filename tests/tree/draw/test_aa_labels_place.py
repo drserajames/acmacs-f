@@ -101,3 +101,16 @@ def test_placement_avoids_ink_and_other_labels_and_is_deterministic():
     assert [p.box for p in a] == [p.box for p in b]
     m = placement_metrics(a, grid)
     assert m["box_overlaps"] == 0 and m["labels_on_tree_ink"] == 0 and m["leader_crossings"] == 0
+
+
+def test_target_label_count_sets_the_size_threshold():
+    t = standard_tree()
+    lay = compute_layout(t)
+    # stems: K2N 20 rows, A6S 20 rows, L7F 10 rows
+    two, counts = select_labels(t, lay, p=LabelParams(target_labels=2, min_rows_floor=5))
+    assert {" ".join(lab.subs) for lab in two} == {"K2N", "A6S"}
+    assert counts["size threshold (rows)"] == 20
+    three, _ = select_labels(t, lay, p=LabelParams(target_labels=3, min_rows_floor=5))
+    assert len(three) == 3
+    floor, _ = select_labels(t, lay, p=LabelParams(target_labels=3, min_rows_floor=15))
+    assert len(floor) == 2  # the floor wins over the target

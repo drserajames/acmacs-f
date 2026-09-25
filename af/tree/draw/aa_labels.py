@@ -4,7 +4,11 @@ The ASR gives substitutions on every branch; a report tree can carry a few dozen
 are the old renderer's two (subtree size, leaf consensus: ae cc/tree/aa-transitions.cc) plus two
 that replace hand curation measured on a real round (notes/tree-figure/COMPARISON.md §4):
 
-- size: the subtree has at least ``min_share`` of the drawn rows;
+- size: the subtree has at least ``min_share`` of the drawn rows; or, with ``target_labels``
+  set, the threshold follows label density: it is lowered or raised until about that many
+  labels survive the other filters (a figure with dense changes gets a higher threshold, a
+  sparse one a lower threshold, down to ``min_rows_floor``). A per-subtype constant would bake
+  in whatever density one round happened to have;
 - near-root: a change carried by more than ``max_share`` of the drawn rows says nothing;
 - leaf consensus: the derived residue is the most common one (> ``consensus``) among the
   node's drawn leaves, not counting leaves under a later change at the same position, so a
@@ -45,7 +49,9 @@ class AALabel:
 
 @dataclass
 class LabelParams:
-    min_share: float = 0.00767
+    min_share: float = 0.00767  # used when target_labels is None
+    target_labels: int | None = None  # label count the size threshold is set to reach
+    min_rows_floor: int = 20  # with a target, never label a subtree smaller than this
     max_share: float = 0.99
     consensus: float = 0.6
     backbone_reversion: float = 0.9
@@ -93,13 +99,14 @@ def select_labels(
                 keep[of - f : ol - f + 1] = False
         return [rows_aa[f + k] for k in np.flatnonzero(keep)]
 
+    min_rows = p.min_rows_floor if p.target_labels else p.min_share * layout.n_rows
     labels = []
     for node, subs in enumerate(tree.aa_subs):
         if not subs or tree.is_leaf(node) or layout.first_row[node] < 0:
             continue
         counts["candidate nodes"] += 1
         nrows = layout.rows_of(node)
-        if nrows < p.min_share * layout.n_rows:
+        if nrows < min_rows:
             counts["dropped: small subtree"] += 1
             continue
         if nrows > p.max_share * layout.n_rows:
@@ -129,5 +136,20 @@ def select_labels(
             first = str(tree.leaf_id[layout.leaf_nodes[span[0]]])
             last = str(tree.leaf_id[layout.leaf_nodes[span[1]]])
             labels.append(AALabel(node, keep, first, last, nrows))
+    if p.target_labels:
+        labels, threshold = _to_target(labels, p.target_labels)
+        counts["size threshold (rows)"] = threshold
+        counts["dropped: below density threshold"] = counts["candidate nodes"] - len(labels)
     counts["labels"] = len(labels)
     return labels, dict(counts)
+
+
+def _to_target(labels: list[AALabel], target: int) -> tuple[list[AALabel], int]:
+    """Keep the ``target`` largest labels; ties at the cut stay in, so the count can exceed it.
+
+    Returns the kept labels in their original (tree) order and the row threshold used.
+    """
+    if len(labels) <= target:
+        return labels, min((lab.rows for lab in labels), default=0)
+    threshold = sorted((lab.rows for lab in labels), reverse=True)[target - 1]
+    return [lab for lab in labels if lab.rows >= threshold], threshold
