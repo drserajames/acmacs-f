@@ -1,69 +1,94 @@
-"""Join serology antigens to their sequences, clades and locations.
+"""Join serology antigens to their sequences, clades and places.
 
-Where a lab states which sequenced isolate an antigen is (CDC gives an EPI_ISL for 99% of
-its antigens), the join is on that id, never on the name: a name match can pick the wrong
-passage or a different virus with a similar name. Name matching for labs that give no id
-belongs to the sequence workstream and plugs in as further rows of ``antigen_links``.
+Which sequence belongs with a table antigen is decided by the sequence workstream's
+matcher (:mod:`af.seq.matching`), the one copy of that rule: the lab's EPI_ISL when it
+gave one, otherwise the strain name within the antigen's subtype, the antigen's passage
+class choosing among a name's sequences. This module runs it for every antigen row, keeps
+what it said, and joins the chosen sequence's place and clade.
 
-EPI_ISL alone is not unique in GISAID (one isolate can have several HA accessions), so an
-antigen is matched only when its EPI_ISL has exactly one HA accession in the sequence
-store. Every antigen gets exactly one status, and each status is counted, so nothing is
-dropped silently:
+Every antigen row gets exactly one status, and each is counted, so nothing is dropped
+silently:
 
-- ``matched``: one accession; the clade and location come with it;
-- ``ambiguous``: several accessions for the EPI_ISL; none is chosen;
-- ``not_in_store``: the EPI_ISL is not in the sequence store (for example a submission
-  older than the pulls);
-- ``no_link``: the lab gave no EPI_ISL.
+- ``matched``: the matcher chose a sequence and raised no doubt;
+- ``doubtful``: it chose one but flagged it (the EPI_ISL's name differs, an egg antigen
+  with no egg sequence, a reassortant, ...). ``af.seq.matching.DOUBTFUL`` says which
+  flags; a doubtful match is kept for review and never used unreviewed (it colours no
+  geo dot);
+- ``unmatched``: no sequence, or a tie between different sequences it would not break.
 
-The lab's own pairing is carried through: ``proxy`` means the lab paired the antigen with
-a related isolate's sequence (a different passage or harvest), which makes the clade a
-likely but not certain property of the tested virus. Consumers decide whether to use
-proxies; the counts say how many there are.
+Every flag is counted too, and the lab's own pairing (``exact`` or ``proxy``) is kept.
 
-Inputs, as agreed between workstreams:
-
-- ``antigen_links`` (a view the caller defines): ``table_id, position, epi_isl, pairing``;
-- the sequence store's ``isolates.parquet`` (I3): ``epi_isl, accession, country, region,
-  place, collection_date``, and more;
-- the clade store's ``assignments.parquet`` (I4): ``epi_isl, accession, clade, method``.
-  An empty ``clade`` means the nomenclature names no clade there. A matched sequence with
-  no assignment row at all is a separate count, because it means the clade store is behind
-  the sequence store.
+Places come from the sequence store's isolates (I3), clades from the clade store's
+assignments (I4), both on the chosen ``(epi_isl, accession)``. An empty ``clade`` means the
+nomenclature names none; a matched sequence with no assignment row at all is a separate
+count, because it means the clade store is behind the sequence store.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+
+from af.seq.matching import Match, SequenceIndex
 from af.serology.store import StoreError
 
-STATUSES = ("matched", "ambiguous", "not_in_store", "no_link")
+STATUSES = ("matched", "doubtful", "unmatched")
+SEVERAL_DATASETS = "serology.matched-in-several-datasets"
+NO_DATASET = "serology.no-sequence-dataset"
+
+#: Which sequence datasets an antigen is matched within, by (subtype, lineage). A B antigen
+#: of unknown lineage is matched across both B datasets.
+DATASETS_FOR: dict[tuple[str, str], tuple[str, ...]] = {
+    ("A(H1N1)", ""): ("h1",),
+    ("A(H3N2)", ""): ("h3",),
+    ("B", "VICTORIA"): ("bvic",),
+    ("B", "YAMAGATA"): ("byam",),
+    ("B", ""): ("bvic", "byam"),
+}
+
+ClassOf = Callable[[Mapping[str, Any]], str]
+
+
+def passage_class_column(row: Mapping[str, Any]) -> str:
+    """The tables store's passage class; "unknown" for tables read before it existed."""
+    return str(row.get("passage_class") or "unknown")
 
 
 @dataclass
 class LinkCounts:
     clades_joined: bool = True
     by_status: dict[str, int] = field(default_factory=dict)
+    by_method: dict[str, int] = field(default_factory=dict)
+    by_flag: dict[str, int] = field(default_factory=dict)
     by_status_and_pairing: dict[tuple[str, str], int] = field(default_factory=dict)
     matched_without_clade_row: int = 0
     matched_with_empty_clade: int = 0
 
 
-def link_sequences(con: Any, isolates: Sequence[Path], clades: Sequence[Path] | None) -> LinkCounts:
-    """Define the view ``antigen_sequences`` (one row per antigen link) and count it.
+def link_sequences(
+    con: Any,
+    indexes: Mapping[str, SequenceIndex],
+    isolates: Sequence[Path],
+    clades: Sequence[Path] | None,
+    class_of: ClassOf = passage_class_column,
+) -> LinkCounts:
+    """Match every antigen row and define the view ``antigen_sequences``; return counts.
 
-    ``clades=None`` joins sequences and places only, deliberately (for example before the
-    clade store exists); the clade columns are then empty and the counts say so. An empty
-    list is still an error: it means clade files were expected and none were found.
+    ``indexes`` maps a sequence dataset key (h1, h3, bvic, byam) to its matcher index;
+    ``isolates`` are the same datasets' isolate Parquet files, for places. ``clades=None``
+    joins sequences and places only, deliberately; an empty list is an error.
     """
     if not isolates:
-        raise StoreError("no sequence isolates given: cannot join antigens to sequences")
+        raise StoreError("no sequence isolates given: cannot join antigens to places")
     if clades is not None and not clades:
         raise StoreError("no clade assignments given: cannot join antigens to clades")
+    counts = LinkCounts(clades_joined=clades is not None)
+    _match_rows(con, indexes, class_of, counts)
     con.execute(f"CREATE OR REPLACE VIEW isolates AS SELECT * FROM {_parquet(isolates)}")
     if clades is None:
         con.execute(
@@ -73,47 +98,114 @@ def link_sequences(con: Any, isolates: Sequence[Path], clades: Sequence[Path] | 
         )
     else:
         con.execute(f"CREATE OR REPLACE VIEW clade_rows AS SELECT * FROM {_parquet(clades)}")
-    _refuse_duplicate_clade_rows(con)
+    _refuse_duplicates(con, "isolates", "sequence isolates")
+    _refuse_duplicates(con, "clade_rows", "clade assignments")
     con.execute(
         """
         CREATE OR REPLACE VIEW antigen_sequences AS
-        WITH candidates AS (
-            SELECT l.table_id, l.position, count(i.accession) AS n
-            FROM antigen_links l LEFT JOIN isolates i ON i.epi_isl = l.epi_isl
-            GROUP BY l.table_id, l.position
-        )
-        SELECT l.table_id, l.position, l.epi_isl, coalesce(l.pairing, '') AS pairing,
-               CASE WHEN coalesce(l.epi_isl, '') = '' THEN 'no_link'
-                    WHEN c.n = 0 THEN 'not_in_store'
-                    WHEN c.n > 1 THEN 'ambiguous'
-                    ELSE 'matched' END AS status,
-               i.accession, i.country, i.region, i.place,
+        SELECT m.table_id, m.position, m.method, m.flags, m.doubtful, m.epi_isl, m.accession,
+               m.dataset, coalesce(a.sequence_pairing, '') AS pairing,
+               CASE WHEN m.accession IS NULL THEN 'unmatched'
+                    WHEN m.doubtful THEN 'doubtful' ELSE 'matched' END AS status,
+               i.country, i.region, i.place,
                i.collection_date AS sequence_collection_date,
                k.clade, k.method AS clade_method,
                k.epi_isl IS NOT NULL AS has_clade_row
-        FROM antigen_links l
-        JOIN candidates c USING (table_id, position)
-        LEFT JOIN isolates i ON c.n = 1 AND i.epi_isl = l.epi_isl
-        LEFT JOIN clade_rows k ON k.epi_isl = i.epi_isl AND k.accession = i.accession
+        FROM antigen_matches m
+        JOIN antigens a ON a.table_id = m.table_id AND a.position = m.position
+        LEFT JOIN isolates i ON i.epi_isl = m.epi_isl AND i.accession = m.accession
+        LEFT JOIN clade_rows k ON k.epi_isl = m.epi_isl AND k.accession = m.accession
         """
     )
-    counts = _counts(con)
-    counts.clades_joined = clades is not None
+    _count(con, counts)
     return counts
 
 
-def _refuse_duplicate_clade_rows(con: Any) -> None:
-    """Two clade rows for one sequence would double antigens in every count downstream."""
+def _match_rows(
+    con: Any, indexes: Mapping[str, SequenceIndex], class_of: ClassOf, counts: LinkCounts
+) -> None:
+    """Run the matcher on every antigen row; store the answers as table ``antigen_matches``."""
+    cursor = con.execute(
+        "SELECT a.*, t.subtype FROM antigens a JOIN tables t USING (table_id) "
+        "ORDER BY a.table_id, a.position"
+    )
+    columns = [d[0] for d in cursor.description]
+    out: dict[str, list[Any]] = {k: [] for k in _MATCH_COLUMNS}
+    flags_seen: Counter[str] = Counter()
+    methods: Counter[str] = Counter()
+    for values in cursor.fetchall():
+        row = dict(zip(columns, values, strict=True))
+        match = _match_row(row, indexes, class_of)
+        chosen = match.chosen if match is not None else None
+        flags = list(match.flags) if match is not None else [NO_DATASET]
+        flags_seen.update(flags)
+        methods[(match.method if match is not None else None) or "none"] += 1
+        out["table_id"].append(row["table_id"])
+        out["position"].append(row["position"])
+        out["method"].append(match.method if match is not None else None)
+        out["epi_isl"].append(chosen.epi_isl if chosen else None)
+        out["accession"].append(chosen.accession if chosen else None)
+        out["dataset"].append(chosen.dataset if chosen else None)
+        out["flags"].append(flags)
+        out["doubtful"].append(
+            bool(match is not None and (match.doubtful or SEVERAL_DATASETS in match.flags))
+        )
+    table = pa.table({k: pa.array(v, type=_MATCH_COLUMNS[k]) for k, v in out.items()})
+    con.register("antigen_matches_arrow", table)
+    con.execute("CREATE OR REPLACE TABLE antigen_matches AS SELECT * FROM antigen_matches_arrow")
+    con.unregister("antigen_matches_arrow")
+    counts.by_flag = dict(sorted(flags_seen.items()))
+    counts.by_method = dict(sorted(methods.items()))
+
+
+def _match_row(
+    row: Mapping[str, Any], indexes: Mapping[str, SequenceIndex], class_of: ClassOf
+) -> Match | None:
+    """The matcher's answer for one antigen row; None if no dataset covers its subtype."""
+    datasets = DATASETS_FOR.get((row["subtype"], row.get("lineage") or ""))
+    if not datasets or any(d not in indexes for d in datasets):
+        return None
+    results = [
+        indexes[d].match(
+            row["name"],
+            class_of(row),
+            epi_isl=row.get("epi_isl") or "",
+            reassortant=row.get("reassortant") or "",
+        )
+        for d in datasets
+    ]
+    found = [r for r in results if r.chosen is not None]
+    if len(found) <= 1:
+        return found[0] if found else results[0]
+    # a B antigen of unknown lineage matched in both B datasets: keep the first, flagged;
+    # _match_rows makes it doubtful, since which lineage it is decides everything downstream
+    return replace(found[0], flags=(*found[0].flags, SEVERAL_DATASETS))
+
+
+_MATCH_COLUMNS: dict[str, pa.DataType] = {
+    "table_id": pa.string(),
+    "position": pa.int32(),
+    "method": pa.string(),
+    "epi_isl": pa.string(),
+    "accession": pa.string(),
+    "dataset": pa.string(),
+    "flags": pa.list_(pa.string()),
+    "doubtful": pa.bool_(),
+}
+
+
+def _refuse_duplicates(con: Any, view: str, what: str) -> None:
+    """Two rows for one sequence would double antigens in every count downstream."""
     row = con.execute(
-        "SELECT count(*) FROM (SELECT epi_isl, accession FROM clade_rows "
+        f"SELECT count(*) FROM (SELECT epi_isl, accession FROM {view} "
         "GROUP BY ALL HAVING count(*) > 1)"
     ).fetchone()
     if row and row[0]:
-        raise StoreError(f"clade assignments have {row[0]} sequences with more than one row")
+        raise StoreError(f"{what} have {row[0]} sequences with more than one row")
 
 
-def _counts(con: Any) -> LinkCounts:
-    counts = LinkCounts(by_status={status: 0 for status in STATUSES})
+def _count(con: Any, counts: LinkCounts) -> None:
+    counts.by_status = {status: 0 for status in STATUSES}
     for status, pairing, n in con.execute(
         "SELECT status, pairing, count(*) FROM antigen_sequences GROUP BY ALL ORDER BY ALL"
     ).fetchall():
@@ -128,7 +220,6 @@ def _counts(con: Any) -> LinkCounts:
     ).fetchone()
     assert row is not None
     counts.matched_without_clade_row, counts.matched_with_empty_clade = int(row[0]), int(row[1])
-    return counts
 
 
 def _parquet(paths: Sequence[Path]) -> str:
@@ -154,7 +245,8 @@ PreparationKey = tuple[
 
 def preparation_sequences(con: Any) -> dict[PreparationKey, PreparationSequence]:
     """For every preparation (as :func:`af.serology.query.preparations` groups them) with at
-    least one matched row, its sequence. Needs the ``antigen_sequences`` view.
+    least one ``matched`` row, its sequence. Doubtful rows are left out: unreviewed, they
+    must not decide anything. Needs the ``antigen_sequences`` view.
 
     A preparation appears in many tables; normally every row names the same isolate. When
     rows name different sequences the preparation is marked ``conflict`` and gets none,
@@ -182,3 +274,40 @@ def preparation_sequences(con: Any) -> dict[PreparationKey, PreparationSequence]
         else:
             out[key] = PreparationSequence(epi, acc, clade, pairing, conflict=False)
     return out
+
+
+def link_from_store(
+    con: Any,
+    store: Any,
+    passage_rules: Sequence[Any],
+    *,
+    with_clades: bool,
+    class_of: ClassOf = passage_class_column,
+) -> LinkCounts:
+    """:func:`link_sequences` over the CURRENT ``sequences/*`` (and ``clades/*``) datasets.
+
+    ``with_clades=False`` is the deliberate sequences-only join; with ``True`` a missing
+    clade dataset is an error, not an empty join.
+    """
+    from af.seq.matching import index_from_store
+
+    datasets = sorted({d for group in DATASETS_FOR.values() for d in group})
+    present = {ref.dataset for ref in store.list_datasets("sequences")}
+    missing = [d for d in datasets if d not in present]
+    if missing:
+        raise StoreError(f"sequence datasets missing from the store: {', '.join(missing)}")
+    indexes = {d: index_from_store(store, [d], passage_rules) for d in datasets}
+    isolates = [
+        path
+        for d in datasets
+        for path in sorted(
+            (store.resolve(store.current("sequences", d)) / "isolates").glob("*/*.parquet")
+        )
+    ]
+    clades = None
+    if with_clades:
+        refs = store.list_datasets("clades")
+        if not refs:
+            raise StoreError("no clades datasets in the store")
+        clades = [p for ref in refs for p in sorted(store.resolve(ref).glob("*.parquet"))]
+    return link_sequences(con, indexes, isolates, clades, class_of)
