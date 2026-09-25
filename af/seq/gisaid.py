@@ -150,10 +150,17 @@ def join(
     counts = PullCounts(isolates=len(by_isolate))
     out: list[SequenceRecord] = []
     missing: list[str] = []
+    no_accession: list[str] = []
 
     for defline, sequence in records:
         gisaid_name, fields = parse_defline(defline)
         epi_isl = fields.get(ISOLATE_KEY, "")
+        if not fields.get(ACCESSION_KEY, "").strip():
+            # The accession is half the key. A header split across lines (older records)
+            # loses its later fields, and an empty accession would still make a valid-looking
+            # key, so this is fatal rather than defaulted.
+            no_accession.append(epi_isl or gisaid_name)
+            continue
         row = by_isolate.get(epi_isl)
         if row is None:
             missing.append(epi_isl or gisaid_name)
@@ -206,6 +213,13 @@ def join(
             )
         )
 
+    if no_accession:
+        shown = ", ".join(sorted(no_accession)[:5])
+        raise PullError(
+            f"{len(no_accession)} defline(s) have no segment accession ({ACCESSION_KEY}=), so"
+            f" they have no store key; a header broken across lines? {shown}"
+            f"{' …' if len(no_accession) > 5 else ''}"
+        )
     if missing:
         shown = ", ".join(sorted(missing)[:5])
         raise PullError(

@@ -135,6 +135,12 @@ class TestRefusals:
         with pytest.raises(PullError, match="EPI_ISL_1"):
             join([(DEFLINE, "ACGT")], [])
 
+    def test_a_defline_cut_before_its_accession_raises(self) -> None:
+        """A header broken across lines loses its later fields; the key must not default."""
+        truncated = DEFLINE.split("_|_j=")[0]
+        with pytest.raises(PullError, match="no segment accession.*EPI_ISL_1"):
+            join([(truncated, "ACGT")], [row()])
+
     def test_a_repeated_key_raises(self) -> None:
         with pytest.raises(PullError, match="more than once"):
             join([(DEFLINE, "ACGT"), (DEFLINE, "TTTT")], [row()])
