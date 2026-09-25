@@ -146,6 +146,8 @@ class Table:
         for no, row in enumerate(self.titres):
             if len(row) != len(self.sera):
                 errors.append(f"titre row {no}: {len(row)} cells for {len(self.sera)} sera")
+        if errors:
+            return errors  # the per-antigen/serum checks below assume the shape is right
         for no, ag in enumerate(self.antigens):
             if all(not cell for cell in self.titres[no]):
                 errors.append(f"antigen {no} {ag.name} has no titres")
