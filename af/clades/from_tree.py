@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from af.clades.assign import Assignment
+from af.clades.fallback import StoreFallback, assign_from_store, disagreements
 from af.clades.nomenclature import CladeSet
 from af.clades.store import CladeRow, CladeStoreError, dataset_for, publish, rows_from_assignments
 from af.store import ExternalInput, Store, StoreRef
@@ -94,25 +95,110 @@ def publish_from_tree(
     *,
     nomenclature: Iterable[ExternalInput],
     started: datetime.datetime,
+    sequences: StoreRef | None = None,
 ) -> StoreRef:
-    """Publish ``clades/<subtype>`` from the tree version ``tree``, which is its input."""
-    if tree.kind != "trees":
-        raise CladeStoreError(f"{tree}: expected a tree-store version, got kind {tree.kind!r}")
-    directory = store.resolve(tree, verify=True)
-    rows = rows_from_tree(directory, subtype, clade_set)
-    meta = i6.read_metadata(directory)
-    excluded = i6.read_excluded(directory)
+    """Publish ``clades/<subtype>`` from the tree version ``tree``, which is its input.
+
+    With ``sequences``, the sequences not on the tree are labelled too, by the fallback
+    (:func:`publish_clades`).
+    """
+    return publish_clades(
+        store,
+        subtype,
+        clade_set,
+        tree=tree,
+        sequences=sequences,
+        nomenclature=nomenclature,
+        started=started,
+    )
+
+
+def publish_clades(
+    store: Store,
+    subtype: str,
+    clade_set: CladeSet,
+    *,
+    tree: StoreRef | None,
+    sequences: StoreRef | None,
+    nomenclature: Iterable[ExternalInput],
+    started: datetime.datetime,
+) -> StoreRef:
+    """One ``clades/<subtype>`` table: the tree's calls, and the fallback's for the rest.
+
+    Consumers want one clade per sequence and one place to look it up, so the two engines
+    share a table and the ``method`` column says which one decided each row: the tree
+    engine for tree leaves (it uses ancestry), Nextclade's stored call for every other
+    sequence in ``sequences`` (it uses the sequence alone). Either input may be absent — no
+    tree yet (maps are labelled before the month's tree), or no fallback wanted — but not
+    both.
+
+    A tree leaf missing from ``sequences`` is an error: the tree was built from sequences
+    this version does not hold, so the two inputs do not describe the same set. Where both
+    engines label a sequence the tree's call is kept, and the genuine disagreements (a
+    different clade, not merely a less specific one) are counted in the report.
+    """
+    if tree is None and sequences is None:
+        raise CladeStoreError(f"{subtype}: give a tree version, a sequence version, or both")
+    rows: list[CladeRow] = []
+    report: dict[str, Any] = {}
+    inputs: list[StoreRef] = []
+    if tree is not None:
+        if tree.kind != "trees":
+            raise CladeStoreError(f"{tree}: expected a tree-store version, got kind {tree.kind!r}")
+        directory = store.resolve(tree, verify=True)
+        rows = rows_from_tree(directory, subtype, clade_set)
+        report = _tree_report(tree, i6.read_metadata(directory), i6.read_excluded(directory))
+        inputs.append(tree)
+    if sequences is not None:
+        if sequences.kind != "sequences":
+            raise CladeStoreError(
+                f"{sequences}: expected a sequence-store version, got kind {sequences.kind!r}"
+            )
+        fallback = assign_from_store(store, sequences, clade_set)
+        rows, fallback_report = _with_fallback(rows, fallback, subtype, clade_set)
+        report["fallback"] = fallback_report
+        report.setdefault("not_on_tree", {})["labelled_by"] = "fallback, in this table"
+        inputs += [sequences, fallback.dataset]
     return publish(
         store,
         subtype,
         rows,
         clade_set,
-        labelled=tree,
+        labelled=inputs[0],
         nomenclature=nomenclature,
         started=started,
-        engine="tree",
-        extra_report=_tree_report(tree, meta, excluded),
+        engine="+".join(name for name, ref in (("tree", tree), ("fallback", sequences)) if ref),
+        extra_inputs=inputs[1:],
+        extra_report=report,
     )
+
+
+def _with_fallback(
+    tree_rows: list[CladeRow], fallback: StoreFallback, subtype: str, clade_set: CladeSet
+) -> tuple[list[CladeRow], dict[str, Any]]:
+    """Tree rows plus a fallback row for every sequence not on the tree."""
+    on_tree = {(row.epi_isl, row.accession): row for row in tree_rows}
+    missing = sorted(set(on_tree) - set(fallback.assignments))
+    if missing:
+        raise CladeStoreError(
+            f"{len(missing)} tree leaves are not in the sequence version, e.g. {missing[:3]}: "
+            "the tree was built from other sequences"
+        )
+    tree_calls = {key: Assignment(str(key), row.clade) for key, row in on_tree.items()}
+    both = {key: fallback.assignments[key] for key in on_tree}
+    disagree = disagreements(tree_calls, both, clade_set)
+    rows = list(tree_rows)
+    for (epi_isl, accession), assignment in sorted(fallback.assignments.items()):
+        if (epi_isl, accession) not in on_tree:
+            rows.append(CladeRow(epi_isl, accession, subtype, assignment.clade, method="fallback"))
+    return rows, {
+        "dataset": {"dataset": fallback.dataset.dataset, "version": fallback.dataset.version},
+        **fallback.counts.to_json(),
+        "no_call": fallback.no_call,
+        "labelled_here": len(rows) - len(tree_rows),
+        "tree_vs_fallback_disagree": len(disagree),
+        "tree_vs_fallback_compared": len(both),
+    }
 
 
 def _check_metadata(

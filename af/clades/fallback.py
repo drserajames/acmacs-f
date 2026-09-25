@@ -29,10 +29,15 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from af.clades.assign import Assignment
 from af.clades.nomenclature import CladeSet
+from af.seq.processed import read_table
+from af.store import Store, StoreRef
+
+#: Whatever the two assignments are keyed by: a tree node, or a sequence's store key.
+K = TypeVar("K")
 
 #: Nextclade's own words for "no clade here". Both mean the nomenclature does not name
 #: the virus, which is an answer, not a failure: on the round's H1 tree 10,942 leaves are
@@ -178,6 +183,92 @@ def assign_from_tsv(
     return assign_from_rows(read_rows(tsv), clade_set, identities=identities)
 
 
+#: The sequence store's columns this step reads (``af.seq.processed.SEQUENCES``).
+#: Only the subclade column: ``nextclade_clade`` holds the older display names, and reading
+#: it as a clade is the two-hierarchies mistake (``CladeSet.legacy_name``).
+STORE_COLUMNS = ("epi_isl", "accession", "nextclade_subclade", "nextclade_qc_status")
+
+
+@dataclass(frozen=True)
+class StoreFallback:
+    """Clade calls for every sequence of one sequence-store version.
+
+    ``assignments`` is keyed by ``(epi_isl, accession)``, the store's key. ``no_call``
+    counts sequences Nextclade made no call for at all (the column is null: the sequence
+    did not align), which is different from "unassigned" — an answer — and gets no row.
+    """
+
+    assignments: Mapping[tuple[str, str], Assignment]
+    counts: FallbackCounts
+    no_call: int
+    dataset: StoreRef
+
+
+def assign_from_store(store: Store, sequences: StoreRef, clade_set: CladeSet) -> StoreFallback:
+    """Read the clade calls ``af.seq.nextclade`` stored with the sequences, and assign.
+
+    The Nextclade dataset that made the calls is the ``raw/nextclade/...`` input in the
+    version's provenance, and it is checked against the pinned nomenclature before any
+    call is trusted (:func:`dataset_for_calls`).
+    """
+    dataset = dataset_for_calls(store, sequences, clade_set)
+    table = read_table(store, sequences, "sequences", STORE_COLUMNS)
+    rows: list[dict[str, str]] = []
+    keys: dict[str, tuple[str, str]] = {}
+    no_call = 0
+    for record in table.to_pylist():
+        if record["nextclade_subclade"] is None:
+            no_call += 1
+            continue
+        key = (record["epi_isl"], record["accession"])
+        name = f"{key[0]}|{key[1]}"
+        keys[name] = key
+        rows.append(
+            {
+                NAME_COLUMN: name,
+                "subclade": record["nextclade_subclade"],
+                QC_COLUMN: record["nextclade_qc_status"] or "",
+            }
+        )
+    by_name, counts = assign_from_rows(rows, clade_set)
+    assignments = {keys[name]: assignment for name, assignment in by_name.items()}
+    return StoreFallback(assignments, counts, no_call, dataset)
+
+
+def dataset_for_calls(store: Store, sequences: StoreRef, clade_set: CladeSet) -> StoreRef:
+    """The one Nextclade dataset in ``sequences``' provenance that made its clade calls.
+
+    A version may list more than one: B sequences are aligned against both lineages'
+    datasets to place them. The one that made the calls is the one that assigns clades
+    at all and agrees with the pinned nomenclature (:func:`check_dataset_agrees`); a
+    dataset with no clades cannot have made any. Exactly one must qualify: none means
+    the calls came from a dataset out of step with the pin, two means af cannot tell
+    which vocabulary the calls are in.
+    """
+    provenance = json.loads((store.resolve(sequences) / "PROVENANCE.json").read_text())
+    qualifying: list[StoreRef] = []
+    rejected: list[str] = []
+    for item in provenance["inputs"]:
+        entry = item.get("store")
+        if not entry or entry["kind"] != "raw" or not entry["dataset"].startswith("nextclade/"):
+            continue
+        ref = StoreRef.from_json(entry)
+        try:
+            check_dataset_agrees(store.resolve(ref) / "dataset", clade_set)
+        except FallbackError as error:
+            rejected.append(f"{ref.dataset}: {error}")
+            continue
+        qualifying.append(ref)
+    if len(qualifying) != 1:
+        found = ", ".join(ref.dataset for ref in qualifying) or "none"
+        detail = "".join(f"\n  {line}" for line in rejected)
+        raise FallbackError(
+            f"{sequences}: expected one Nextclade dataset that assigns {clade_set.subtype} "
+            f"clades at {clade_set.version}, found {found}{detail}"
+        )
+    return qualifying[0]
+
+
 def _clade(row: Mapping[str, str]) -> str | None:
     for column in SUBCLADE_COLUMNS:
         if column in row:
@@ -190,10 +281,10 @@ def _clade(row: Mapping[str, str]) -> str | None:
 
 
 def disagreements(
-    tree_assignments: Mapping[str, Assignment],
-    fallback_assignments: Mapping[str, Assignment],
+    tree_assignments: Mapping[K, Assignment],
+    fallback_assignments: Mapping[K, Assignment],
     clade_set: CladeSet,
-) -> dict[str, tuple[str | None, str | None]]:
+) -> dict[K, tuple[str | None, str | None]]:
     """Where the tree engine and Nextclade disagree about the same sequences.
 
     Worth running wherever both are available, and reporting on the tree's review page:
@@ -202,7 +293,7 @@ def disagreements(
     and an ancestor of it do not count — the tree engine is often more specific, which is
     the point of it — only genuinely different clades do.
     """
-    changed: dict[str, tuple[str | None, str | None]] = {}
+    changed: dict[K, tuple[str | None, str | None]] = {}
     for name, tree in tree_assignments.items():
         other = fallback_assignments.get(name)
         if other is None:
