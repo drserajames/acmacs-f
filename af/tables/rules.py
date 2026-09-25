@@ -148,12 +148,24 @@ class Rules:
             required=("kind", "pattern", "action"),
         )
         self.lab_conventions = RuleTable(
-            directory / "lab_conventions.tsv", scope=("lab",), required=("date_order",)
+            directory / "lab_conventions.tsv",
+            scope=("lab",),
+            required=("date_order", "passage_plus"),
         )
         self.strain_aliases = RuleTable(
             directory / "strain_aliases.tsv",
             scope=("lab", "subtype", "applies_to"),
             required=("kind", "pattern", "canonical", "min_titre", "min_fraction"),
+        )
+        self.name_rewrites = RuleTable(
+            directory / "name_rewrites.tsv",
+            scope=("lab",),
+            required=("kind", "pattern", "replacement"),
+        )
+        self.flu_types = RuleTable(
+            directory / "flu_types.tsv",
+            scope=("lab",),
+            required=("kind", "pattern", "subtype", "lineage"),
         )
         self.season_files = RuleTable(
             directory / "season_files.tsv",
@@ -172,6 +184,8 @@ class Rules:
             self.lab_conventions,
             self.strain_aliases,
             self.season_files,
+            self.name_rewrites,
+            self.flu_types,
         ]
 
     def usage_report(self) -> list[str]:
