@@ -25,7 +25,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from . import dates, names
+from . import aliases, dates
 from .cdc import LAB, ReadResult
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
@@ -78,7 +78,7 @@ def read(paths: list[Path], rules: Rules) -> ReadResult:
             table.provenance = dict(provenance)
             result.dropped.update(table.dropped)
             result.rows += len(table.antigens)
-            if problems := table.check():
+            if problems := table.check() or aliases.check_titres(table, rules):
                 result.errors.extend(f"{sheet.where(0)}: {p}" for p in problems)
             result.tables.append(table)
     return result
@@ -223,8 +223,16 @@ class SheetReader:
             if self.rules.control_antigens.find(name_raw, lab=LAB) is not None:
                 self.dropped["antigens: control"] += 1
                 continue
-            name = names.parse(name_raw, subtype, self.rules.reassortants, LAB)
-            self.warnings.extend(f"{self.s.where(r, name_col)}: {p}" for p in name.problems)
+            problems: list[str] = []
+            name, renamed = aliases.parse_name(
+                self.rules,
+                name_raw,
+                lab=LAB,
+                subtype=subtype,
+                applies_to="antigen",
+                warnings=problems,
+            )
+            self.warnings.extend(f"{self.s.where(r, name_col)}: {p}" for p in problems)
             passage, harvest, annotations, site = self._passage_cell(r, passage_cols, test_date)
             collected = self.s.cell(r, date_col)
             antigens.append(
@@ -244,6 +252,8 @@ class SheetReader:
                     },
                 )
             )
+            if renamed:
+                antigens[-1].source[aliases.SOURCE_KEY] = renamed
             titres.append([self._titre(r, c) for c in titre_cols])
         keep = [i for i, row in enumerate(titres) if any(row)]
         self.dropped["antigens: no readings"] += len(titres) - len(keep)
@@ -356,8 +366,11 @@ class SheetReader:
                 by_letter[letter] = None  # type: ignore[assignment]
                 r += 1
                 continue
-            name = names.parse(raw, subtype, self.rules.reassortants, LAB)
-            self.warnings.extend(f"{self.s.where(r, 1)}: {p}" for p in name.problems)
+            problems: list[str] = []
+            name, serum_renamed = aliases.parse_name(
+                self.rules, raw, lab=LAB, subtype=subtype, applies_to="serum", warnings=problems
+            )
+            self.warnings.extend(f"{self.s.where(r, 1)}: {p}" for p in problems)
             passage, harvest, annotations, _ = self.passage_text(
                 self.s.cell(r, labels["PASSAGE"]), r, labels["PASSAGE"], test_date
             )
@@ -383,6 +396,8 @@ class SheetReader:
                     "pool": self.s.cell(r, labels["POOL"]) if "POOL" in labels else "",
                 },
             )
+            if serum_renamed:
+                serum.source[aliases.SOURCE_KEY] = serum_renamed
             if letter in by_letter:
                 raise self.fail(r, 0, f"serum letter {letter} twice")
             by_letter[letter] = serum

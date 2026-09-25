@@ -234,3 +234,39 @@ def test_check_reports_bad_shapes_without_crashing(tmp_path):
     assert t.check() == ["1 titre rows for 2 antigens"]
     t.titres = [[["40"]], []]  # a short row
     assert t.check() == ["titre row 1: 0 cells for 1 sera"]
+
+
+def _typo_rows(values: list[str]) -> list[dict[str, str]]:
+    sera = [("A", "T29-001"), ("B", "T29-002"), ("C", "T29-003"), ("D", "T29-004")]
+    return (
+        [row()]
+        + [
+            row(
+                ag_position="2",
+                ag_cdc_id="7",
+                ag_strain_name="B/EXAMPLETYPO/7/2029",
+                sr_position=pos,
+                sr_lot=lot,
+                titer_value=value,
+            )
+            for (pos, lot), value in zip(sera, values, strict=True)
+        ]
+        + [row(sr_position=pos, sr_lot=lot) for pos, lot in sera[1:]]
+    )
+
+
+def test_named_rename_with_titres_that_agree(tmp_path):
+    res = read(tmp_path, _typo_rows(["640", "320", "20", "1280"]))
+    assert res.errors == []
+    renamed = res.tables[0].antigens[1]
+    assert (
+        renamed.name == "A(H3N2)/EXAMPLETYPO/7/2029" and renamed.raw_name == "B/EXAMPLETYPO/7/2029"
+    )
+    assert renamed.source["alias_rule"] == "strain_aliases.tsv:2"
+    assert any("renamed" in w for w in res.tables[0].warnings)
+
+
+def test_rename_refused_when_titres_disagree(tmp_path):
+    res = read(tmp_path, _typo_rows(["5", "20", "5", "40"]))  # 1 of 4 reads >= 40
+    assert any("renamed by strain_aliases.tsv:2" in e for e in res.errors)
+    assert any("1/4 cells read >= 40" in e for e in res.errors)

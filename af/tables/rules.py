@@ -143,6 +143,16 @@ class Rules:
         self.lab_conventions = RuleTable(
             directory / "lab_conventions.tsv", scope=("lab",), required=("date_order",)
         )
+        self.strain_aliases = RuleTable(
+            directory / "strain_aliases.tsv",
+            scope=("lab", "subtype", "applies_to"),
+            required=("kind", "pattern", "canonical", "min_titre", "min_fraction"),
+        )
+        self.season_files = RuleTable(
+            directory / "season_files.tsv",
+            scope=("lab",),
+            required=("file", "subtype", "date_from", "date_to", "table_key"),
+        )
 
     def tables(self) -> list[RuleTable]:
         return [
@@ -153,6 +163,8 @@ class Rules:
             self.passage_tokens,
             self.control_antigens,
             self.lab_conventions,
+            self.strain_aliases,
+            self.season_files,
         ]
 
     def usage_report(self) -> list[str]:

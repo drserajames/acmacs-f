@@ -53,6 +53,7 @@ STEP = "tables-update"
 class CDCInputs:
     tsv: Path
     xlsx: list[Path] = field(default_factory=list)
+    season: list[Path] = field(default_factory=list)  # older per-season files, scoped by rules
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,10 @@ def update(settings: TablesSettings, *, dry_run: bool = False) -> tuple[int, lis
         return (1 if errors else 0), report
     provenance = Provenance(
         step=STEP,
-        inputs=tuple(_external(p) for p in (settings.rules, settings.cdc.tsv, *settings.cdc.xlsx)),
+        inputs=tuple(
+            _external(p)
+            for p in (settings.rules, settings.cdc.tsv, *settings.cdc.xlsx, *settings.cdc.season)
+        ),
         parameters={},
         started=started,
         finished=dt.datetime.now(dt.UTC),
@@ -120,6 +124,19 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
         errors.extend(xl.errors)
         errors.extend(duplicates(result.tables, xl.tables))
         tables.extend(xl.tables)
+    for season_file in settings.cdc.season:
+        from . import cdc_season
+
+        season = cdc_season.read(season_file, rules)
+        report.append(
+            f"read {season_file}: {season.rows} rows in scope -> {len(season.tables)} tables"
+        )
+        report.append(
+            "season file: " + ", ".join(f"{k} {v}" for k, v in sorted(season.dropped.items()))
+        )
+        errors.extend(season.errors)
+        errors.extend(duplicates(result.tables, season.tables))
+        tables.extend(season.tables)
     return tables, report, errors
 
 
@@ -177,6 +194,7 @@ def make_step(parameters: Mapping[str, Any], *, base_dir: Path) -> Step:
     settings = parse_config(dict(parameters), TablesSettings, base_dir=base_dir)
     inputs = {"rules": settings.rules, "cdc_tsv": settings.cdc.tsv}
     inputs.update({f"cdc_xlsx:{p.name}": p for p in settings.cdc.xlsx})
+    inputs.update({f"cdc_season:{p.name}": p for p in settings.cdc.season})
 
     def action(_: StepContext) -> None:
         status, report = update(settings)

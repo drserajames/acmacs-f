@@ -62,6 +62,19 @@ RULES: dict[str, list[str]] = {
         "lab\tkind\tpattern\taction\tevidence\tadded_by\tadded_on\toptional",
         "CDC\tregex\tKIT-[0-9]+ .*\tdrop" + META + "yes",
     ],
+    "strain_aliases": [
+        "lab\tsubtype\tapplies_to\tkind\tpattern\tcanonical\tmin_titre\tmin_fraction"
+        "\tevidence\tadded_by\tadded_on\toptional",
+        "CDC\tA(H3N2)\tantigen\texact\tB/EXAMPLETYPO/7/2029\tA/EXAMPLETYPO/7/2029\t40\t0.5"
+        + META
+        + "yes",
+    ],
+    "season_files": [
+        "lab\tfile\tsubtype\tdate_from\tdate_to\ttable_key\tevidence\tadded_by\tadded_on\toptional",
+        "CDC\tseason.tsv\tH1 swl\t2029-08-01\t2029-08-31\tassay_date+subtype+assay-type"
+        + META
+        + "yes",
+    ],
     "lab_conventions": [
         "lab\tdate_order\tevidence\tadded_by\tadded_on\toptional",
         "CDC\tMDY" + META + "yes",
