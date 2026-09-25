@@ -177,11 +177,12 @@ def test_incremental_needs_a_previous_tree(tmp_path: Path) -> None:
         )
 
 
-def test_clades_need_both_the_set_and_the_nomenclature(tmp_path: Path) -> None:
-    with pytest.raises(stages.StageError, match="both or neither"):
-        stages.SubtypeInputs(
-            alignment=tmp_path / "a.fasta", leaves=tmp_path / "l.parquet", clade_set="A(H3N2)"
-        )
+def test_a_clade_set_without_clones_fails(tmp_path: Path) -> None:
+    inputs = stages.SubtypeInputs(
+        alignment=tmp_path / "a.fasta", leaves=tmp_path / "l.parquet", clade_set="A(H3N2)"
+    )
+    with pytest.raises(stages.StageError, match=r"needs \[paths\] nomenclature"):
+        stages.clade_source(inputs, None)
 
 
 def test_inputs_for_an_unconfigured_subtype_are_refused(tmp_path: Path) -> None:
@@ -195,9 +196,11 @@ def test_inputs_for_an_unconfigured_subtype_are_refused(tmp_path: Path) -> None:
 def with_clades(config: Path, pin: str | None = None) -> None:
     """Point the config at a synthetic nomenclature clone (tests/clades/synthetic.py)."""
     build_clone(config.parent / "clones")
-    text = config.read_text() + (
-        'clade_set = "A(H3N2)"\nnomenclature = "clones"\nnomenclature_repository = "synthetic_HA"\n'
+    # The clones directory is the shared [paths] key; the subtype names its clade_set.
+    text = config.read_text().replace(
+        'work = "work"\n', 'work = "work"\nnomenclature = "clones"\n', 1
     )
+    text += 'clade_set = "A(H3N2)"\nnomenclature_repository = "synthetic_HA"\n'
     if pin is not None:
         text += f'clade_pin = "{pin}"\n'
     config.write_text(text)
@@ -348,4 +351,19 @@ def test_a_subtype_called_state_is_refused(tmp_path: Path) -> None:
     config = make_project(tmp_path / "p")
     config.write_text(config.read_text().replace("h3", "state"))
     with pytest.raises(Exception, match="cannot be called 'state'"):
+        stages.load_run_config(config)
+
+
+def test_a_clade_set_needs_the_shared_nomenclature_path(tmp_path: Path) -> None:
+    """[paths] nomenclature is the one place the clones directory is configured."""
+    config = make_project(tmp_path / "p")
+    config.write_text(config.read_text() + 'clade_set = "A(H3N2)"\n')
+    with pytest.raises(Exception, match=r"\[paths\] nomenclature .* required"):
+        stages.load_run_config(config)
+
+
+def test_the_old_per_subtype_key_is_rejected(tmp_path: Path) -> None:
+    config = make_project(tmp_path / "p")
+    config.write_text(config.read_text() + 'nomenclature = "clones"\n')
+    with pytest.raises(Exception, match="nomenclature: unknown key"):
         stages.load_run_config(config)
