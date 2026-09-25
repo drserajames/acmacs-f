@@ -73,6 +73,8 @@ class ImportReport:
     dead: list[DeadRow] = field(default_factory=list)
     needs_local: list[DeadRow] = field(default_factory=list)
     renamed: list[tuple[str, str, str]] = field(default_factory=list)
+    repeated: list[DeadRow] = field(default_factory=list)
+    """Rows that repeat an earlier row of the same name exactly: kept once, listed here."""
 
     def summary(self) -> str:
         lines = [
@@ -81,6 +83,7 @@ class ImportReport:
             f"colour schemes: {len(self.colour_rows)}",
             f"rows needing a local definition: {len(self.needs_local)}",
             f"dead rows: {len(self.dead)}",
+            f"repeated rows (kept once): {len(self.repeated)}",
         ]
         lines.extend(f"  {dead}" for dead in self.dead)
         return "\n".join(lines)
@@ -173,6 +176,7 @@ def import_semantic_clades(
         mapping = dict((legacy_names or {}).get(subtype, {}))
         local_names = set((defined_locally or {}).get(subtype, ()))
         groups: list[Group] = []
+        by_name: dict[str, Group] = {}
         for index, row in enumerate(tables.get("attributes", []), start=1):
             name = (row.get("name") or "").strip()
             if not name:
@@ -194,7 +198,30 @@ def import_semantic_clades(
                 continue
             if anchor_raw and anchor != anchor_raw:
                 report.renamed.append((subtype, anchor_raw, str(anchor)))
-            groups.append(Group(subtype, name, anchor, substitutions, row.get("note", ""), index))
+            group = Group(subtype, name, anchor, substitutions, row.get("note", ""), index)
+            first = by_name.get(name)
+            if first is not None:
+                # the old file repeats some rows verbatim; a repeat is harmless and kept once,
+                # but two different definitions under one name is a real conflict
+                if (first.anchor, first.substitutions) == (group.anchor, group.substitutions):
+                    report.repeated.append(
+                        DeadRow(
+                            subtype, "attributes", index, name, f"repeats row {first.source_line}"
+                        )
+                    )
+                else:
+                    report.dead.append(
+                        DeadRow(
+                            subtype,
+                            "attributes",
+                            index,
+                            name,
+                            f"redefines the group of row {first.source_line} differently",
+                        )
+                    )
+                continue
+            by_name[name] = group
+            groups.append(group)
         if groups:
             report.groups[subtype] = GroupSet(subtype, tuple(groups))
         imported_groups = {group.name for group in groups}

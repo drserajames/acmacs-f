@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from af.clades.groups import GroupError, GroupSet, load_groups
 from af.clades.importer import (
     ImportError_,
     clades_json_names,
@@ -151,3 +152,39 @@ def test_clades_json_names_reads_entry_names(tmp_path: Path) -> None:
     path = tmp_path / "clades.json"
     path.write_text('{"  version": "clades-v2", "A(H3N2)": [{"N": "P.9", "aa": "20V"}, "note"]}')
     assert clades_json_names(path) == {"A(H3N2)": {"P.9"}}
+
+
+REPEATS = MODULE.replace(
+    "| GONE 20V | P.9   | 20V |\n",
+    "| GONE 20V | P.9   | 20V |\n| 21W      |       | 21W |\n| P.1 20V  | P.1   | 22K |\n",
+)
+
+
+def test_a_verbatim_repeat_is_kept_once_and_listed(tmp_path: Path) -> None:
+    """The old file repeats some attribute rows exactly. Written twice, the groups file
+    would be refused by load_groups; kept once, the repeat is still reported."""
+    report = import_semantic_clades(write_module(tmp_path, REPEATS), synthetic(tmp_path))
+    assert report.groups[SUBTYPE].names == ("P.1 20V", "21W")
+    assert [(row.row, row.name, row.reason) for row in report.repeated] == [
+        (4, "21W", "repeats row 2")
+    ]
+
+
+def test_a_name_redefined_differently_is_dead(tmp_path: Path) -> None:
+    report = import_semantic_clades(write_module(tmp_path, REPEATS), synthetic(tmp_path))
+    [conflict] = [row for row in report.dead if row.name == "P.1 20V"]
+    assert conflict.row == 5 and "differently" in conflict.reason
+
+
+def test_repeats_do_not_break_the_written_groups_file(tmp_path: Path) -> None:
+    clade_sets = synthetic(tmp_path)
+    report = import_semantic_clades(write_module(tmp_path, REPEATS), clade_sets)
+    path = tmp_path / "groups.tsv"
+    write_groups(report, path)
+    assert load_groups(path, clade_sets)[SUBTYPE].names == ("P.1 20V", "21W")
+
+
+def test_a_group_set_refuses_two_groups_of_one_name(tmp_path: Path) -> None:
+    group = import_semantic_clades(write_module(tmp_path), synthetic(tmp_path)).groups[SUBTYPE]
+    with pytest.raises(GroupError, match="duplicate group 'P.1 20V'"):
+        GroupSet(SUBTYPE, (*group.groups, group.groups[0]))
