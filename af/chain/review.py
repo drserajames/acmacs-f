@@ -67,7 +67,9 @@ def build_review(chain_root: Path, thresholds: Thresholds = THRESHOLDS) -> Path:
         steps.append((s, record, thumb.relative_to(out)))
         oriented_prev, prev_chart = layout, chart
     page = out / "index.html"
-    page.write_text(_page(doc, steps))
+    tmp = out / "index.html.tmp"  # replace, never write in place (the page may be published)
+    tmp.write_text(_page(doc, steps))
+    tmp.replace(page)
     return page
 
 
