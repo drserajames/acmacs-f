@@ -6,7 +6,8 @@ its reason (``notes/sequences/RULES-DRAFT.md`` R1–R11, R4''). The order they a
 here, not in config, so no config can change what beats what:
 
 1. **filters**, in config order: ``host`` (R1), ``date_floor`` (R4), ``aa_deletion`` (R5),
-   ``cut`` (R4'', the VCM cut node);
+   ``cut`` (R4'', the VCM cut node). A host rule may name an override ``file`` of records whose
+   GISAID host is wrong (EPI_ISL, accession, reason); they pass it and are counted as added;
 2. ``include_list`` (R7) adds listed records back that a filter removed;
 3. ``qc`` (R3) applies to everything, included records too;
 4. ``exclude_list`` (R6) removes listed records; exclude beats include;
@@ -61,7 +62,7 @@ class Rule:
     allow: list[str] = field(default_factory=list)  # host
     floor: str = ""  # date_floor, ISO date
     position: int = 0  # aa_deletion, 1-based mature HA
-    file: Path | None = None  # include_list / exclude_list
+    file: Path | None = None  # include_list / exclude_list; host: overrides
     max_unknown_aa: int = -1  # qc
     max_deleted_aa: int = -1  # qc
 
@@ -130,9 +131,10 @@ def select(store: Store, config: SubtypeRules, *, cut: Cut | None = None) -> Sel
     counts: list[RuleCount] = []
     by_kind = {kind: [r for r in config.rules if r.kind == kind] for kind in KINDS}
     for rule in (r for r in config.rules if r.kind in FILTERS):
-        removed = {k for k in kept if _filtered(rule, records[k], cut, known)}
-        kept -= removed
-        counts.append(_count(rule, len(removed), 0, len(kept)))
+        caught = {k for k in kept if _filtered(rule, records[k], cut, known)}
+        saved = caught & _host_overrides(rule, records)
+        kept -= caught - saved
+        counts.append(_count(rule, len(caught - saved), len(saved), len(kept)))
     for rule in by_kind["include_list"]:
         listed = _listed(rule, records) - {config.outgroup.key}
         added = listed - kept
@@ -179,6 +181,8 @@ def _check_rules(rules: Sequence[Rule], cut: Cut | None) -> None:
             rule.file is None or not rule.file.is_file()
         ):
             problems.append(f"{rule.id}: list file {rule.file} missing")
+        if rule.kind == "host" and rule.file is not None and not rule.file.is_file():
+            problems.append(f"{rule.id}: override file {rule.file} missing")
         if rule.kind == "qc" and min(rule.max_unknown_aa, rule.max_deleted_aa) < 0:
             problems.append(f"{rule.id}: qc needs max_unknown_aa and max_deleted_aa")
         if rule.kind == "aa_deletion" and rule.position < 1:
@@ -235,6 +239,27 @@ def _listed(rule: Rule, records: dict[Key, _Record]) -> set[Key]:
         if row.get("list", want) == want and row["epi_isl"]
     }
     return keys & records.keys()
+
+
+def _host_overrides(rule: Rule, records: dict[Key, _Record]) -> set[Key]:
+    """Keys a host rule lets through although their GISAID host is not allowed (R1, Q1).
+
+    Every row needs a reason. A row that overrides nothing -- its record is not in this store
+    version, or its host is already allowed -- is an error unless the rule is optional: an
+    override that has stopped applying is either stale or waiting for a pull, and either way
+    someone should look.
+    """
+    if rule.kind != "host" or rule.file is None:
+        return set()
+    lines = [line for line in rule.file.read_text().splitlines() if not line.startswith("#")]
+    rows = list(csv.DictReader(lines, delimiter="\t"))
+    if unexplained := [r["epi_isl"] for r in rows if not (r.get("reason") or "").strip()]:
+        raise SelectionError(f"{rule.id}: override rows without a reason: {unexplained}")
+    keys = {(r["epi_isl"], r["accession"]) for r in rows}
+    idle = sorted(k for k in keys if k not in records or records[k].host in rule.allow)
+    if idle and not rule.optional:
+        raise SelectionError(f"{rule.id}: override rows that change nothing: {idle}")
+    return keys - set(idle)
 
 
 def _count(rule: Rule, removed: int, added: int, remaining: int) -> RuleCount:
