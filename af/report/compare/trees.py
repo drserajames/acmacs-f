@@ -67,6 +67,91 @@ def read_ae_tjz(path: Path) -> Tree:
     return tree
 
 
+def read_newick(path: Path, collapse_at_most: float | None = None) -> Tree:
+    """Read a Newick tree. Iterative, so 100k-leaf ladder-shaped trees do not hit recursion limits.
+
+    ``collapse_at_most``: internal branches with length <= this are collapsed (their children move
+    up to the grandparent). A zero-length branch is an arbitrary resolution of a polytomy, so two
+    runs that differ only by seed resolve it differently, and counting it would measure the seed.
+    Leaf clades are not in Newick; they stay empty (compare clades from the annotation table).
+    """
+    text = path.read_text().strip()
+    if not text.endswith(";"):
+        raise ValueError(f"{path}: Newick does not end with ';'")
+    parents: list[int] = []
+    lengths: list[float | None] = []
+    names: dict[int, str] = {}
+    stack: list[int] = []
+    current = -1
+    i, n = 0, len(text) - 1
+
+    def new_node(parent: int) -> int:
+        parents.append(parent)
+        lengths.append(None)
+        return len(parents) - 1
+
+    def read_label(i: int) -> tuple[str, int]:
+        if text[i] == "'":
+            end = text.index("'", i + 1)
+            return text[i + 1 : end], end + 1
+        j = i
+        while j < n and text[j] not in ",():;[":
+            j += 1
+        return text[i:j].strip(), j
+
+    while i < n:
+        c = text[i]
+        if c == "(":
+            current = new_node(stack[-1] if stack else -1)
+            stack.append(current)
+            i += 1
+        elif c == ",":
+            i += 1
+        elif c == ")":
+            current = stack.pop()
+            i += 1
+            label, i = read_label(i)  # internal labels (support values) are ignored
+        elif c == ":":
+            j = i + 1
+            while j < n and text[j] not in ",();[":
+                j += 1
+            lengths[current] = float(text[i + 1 : j])
+            i = j
+        elif c == "[":
+            i = text.index("]", i) + 1  # comments
+        else:
+            current = new_node(stack[-1] if stack else -1)
+            label, i = read_label(i)
+            names[current] = label
+    if stack:
+        raise ValueError(f"{path}: unbalanced parentheses")
+    return _build(parents, lengths, names, collapse_at_most)
+
+
+def _build(
+    parents: list[int], lengths: list[float | None], names: dict[int, str],
+    collapse_at_most: float | None,
+) -> Tree:  # fmt: skip
+    """Renumber into a :class:`Tree`, skipping collapsed internal nodes (parents first)."""
+    tree = Tree()
+    new_index: dict[int, int] = {}
+    for old, parent in enumerate(parents):  # a parent always precedes its children here
+        target = -1 if parent < 0 else new_index[parent]
+        length = lengths[old]
+        collapse = (
+            collapse_at_most is not None and old not in names and parent >= 0
+            and length is not None and length <= collapse_at_most
+        )  # fmt: skip
+        if collapse:
+            new_index[old] = target  # children attach to the grandparent
+            continue
+        new_index[old] = tree.add(target)
+        if old in names:
+            tree.leaf_name[new_index[old]] = names[old]
+            tree.leaf_clades[new_index[old]] = []
+    return tree
+
+
 def _unique_keys(tree: Tree) -> tuple[dict[int, str], int]:
     counts = Counter(strain_key(v) for v in tree.leaf_name.values())
     keep = {n: strain_key(v) for n, v in tree.leaf_name.items() if counts[strain_key(v)] == 1}

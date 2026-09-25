@@ -267,3 +267,22 @@ def test_resolving_a_polytomy_keeps_reference_recovery_at_one() -> None:
         full.leaf_clades[leaf] = ["C"]
     res = trees.compare(star, full)["splits_by_size"][">=2"]
     assert res["ref_recovered"] == 1.0 and res["rf"] > 0
+
+
+def test_newick_reader_and_zero_length_collapse(tmp_path: Path) -> None:
+    path = tmp_path / "t.nwk"
+    path.write_text("((leaf1:1,leaf2:1):0,('leaf 3':1,leaf4:1)0.9:1,leaf5:1);")
+    full = trees.read_newick(path)
+    assert sorted(full.leaf_name.values()) == ["leaf 3", "leaf1", "leaf2", "leaf4", "leaf5"]
+    assert len(full.parent) == 8
+    collapsed = trees.read_newick(path, collapse_at_most=0.0)
+    assert len(collapsed.parent) == 7  # the zero-length (1,2) node is gone
+    res = trees.compare(full, collapsed)["splits_by_size"][">=2"]
+    assert res["ref"] == 2 and res["new"] == 1 and res["shared"] == 1
+
+
+def test_newick_rejects_unbalanced(tmp_path: Path) -> None:
+    path = tmp_path / "bad.nwk"
+    path.write_text("((A:1,B:1);")
+    with pytest.raises(ValueError, match="unbalanced"):
+        trees.read_newick(path)
