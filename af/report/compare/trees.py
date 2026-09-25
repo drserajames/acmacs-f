@@ -277,12 +277,22 @@ def _spearman(x: list[float], y: list[float]) -> float:
     return 1 - 6 * d2 / (n * (n * n - 1))
 
 
-def compare_figures(ref: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+def compare_figures(
+    ref: dict[str, Any], new: dict[str, Any], clade_set: Any = None
+) -> dict[str, Any]:
     """Same-science comparison of two tree-figure I7s: which leaves, their order, clades, sections.
 
     Order is the rank correlation of the drawn position of every leaf both figures draw: 1 means
     the same top-to-bottom order. Sections are matched by clade label; each is compared by the
     leaves (drawn on both sides) that fall inside it.
+
+    With a ``clade_set`` (af.clades CladeSet), every clade label on both sides is first mapped to
+    its upstream canonical name (af.clades.labels.canonical_labels, the one resolver), and a leaf
+    takes the DEEPEST canonical clade among its labels (``clade_tags`` when the I7 has them). The
+    reference's last ae tag is sometimes a legacy name coarser than an earlier canonical one, and
+    local sub-groups fold into their upstream parent. Labels that map to nothing are kept as
+    "unmapped:<label>" (their own group) and listed, never dropped. Without a clade set, labels
+    are compared as written.
     """
     ri, rdup = _figure_leaves(ref)
     ni, ndup = _figure_leaves(new)
@@ -297,21 +307,50 @@ def compare_figures(ref: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
             [float(ri[k]["order"]) for k in common], [float(ni[k]["order"]) for k in common]
         ),
     }  # fmt: skip
-    lr = [str(ri[k]["clade"]) for k in common]
-    ln = [str(ni[k]["clade"]) for k in common]
+    canon = _Canonical(ref, new, clade_set) if clade_set is not None else None
+    leaf_clade = canon.leaf if canon else (lambda leaf: str(leaf["clade"]))
+    lr = [leaf_clade(ri[k]) for k in common]
+    ln = [leaf_clade(ni[k]) for k in common]
     out["clade"] = {
         "label_agreement": sum(a == b for a, b in zip(lr, ln, strict=True)) / max(1, len(common)),
         "adjusted_rand": adjusted_rand(lr, ln),
+        "canonical": canon.summary() if canon else None,
     }
-    out["sections"] = _compare_sections(ref, new, ri, ni, set(common))
+    section_label = canon.label if canon else (lambda label: label)
+    out["sections"] = _compare_sections(ref, new, ri, ni, set(common), section_label)
     rts, nts = ref["tree"]["time_series"], new["tree"]["time_series"]
     out["time_series"] = {"ref": rts, "new": nts, "same": rts == nts}
     return out
 
 
+def _section_bounds(
+    section: dict[str, Any], by_name: dict[str, list[int]]
+) -> tuple[int | None, int | None]:
+    """A section's first and last drawn position.
+
+    Recorded positions (``first_order``/``last_order``) are used when the I7 has them. Otherwise
+    the bound names are looked up; a strain drawn more than once is resolved by the pair of
+    positions whose span best matches the section's ``n_leaves``, never by whichever came last.
+    """
+    from af.report.compare.maps import spelling_key
+
+    if section.get("first_order") is not None and section.get("last_order") is not None:
+        return int(section["first_order"]), int(section["last_order"])
+    firsts = by_name.get(spelling_key(strain_key(section["first_leaf"])), [])
+    lasts = by_name.get(spelling_key(strain_key(section["last_leaf"])), [])
+    if not firsts or not lasts:
+        return None, None
+    want = section.get("n_leaves")
+    pairs = [(f, la) for f in firsts for la in lasts]
+    if want:
+        pairs.sort(key=lambda p: abs(abs(p[1] - p[0]) + 1 - int(want)))
+    return pairs[0]
+
+
 def _section_members(
-    doc: dict[str, Any], index: dict[str, dict[str, Any]], common: set[str]
-) -> tuple[dict[str, set[str]], list[str]]:
+    doc: dict[str, Any], index: dict[str, dict[str, Any]], common: set[str],
+    label: Any = None,
+) -> tuple[dict[str, set[str]], list[str]]:  # fmt: skip
     """Clade label -> the common leaves drawn between the section's first and last leaf.
 
     Section bounds are matched like leaves (ae hash suffix removed, spelling-normalised). A
@@ -320,16 +359,14 @@ def _section_members(
     from af.report.compare.maps import spelling_key
 
     position = {k: leaf["order"] for k, leaf in index.items() if k in common}
-    by_name = {
-        spelling_key(strain_key(leaf["name"])): leaf["order"]
-        for leaf in doc["tree"]["leaves"]
-        if leaf["shown"]
-    }
+    by_name: dict[str, list[int]] = {}
+    for leaf in doc["tree"]["leaves"]:
+        if leaf["shown"]:
+            by_name.setdefault(spelling_key(strain_key(leaf["name"])), []).append(leaf["order"])
     out: dict[str, set[str]] = {}
     unresolved: list[str] = []
     for section in doc["tree"]["sections"]:
-        first = by_name.get(spelling_key(strain_key(section["first_leaf"])))
-        last = by_name.get(spelling_key(strain_key(section["last_leaf"])))
+        first, last = _section_bounds(section, by_name)
         if first is None or last is None:
             unresolved.append(
                 f"{section['clade']} ({section['first_leaf']} .. {section['last_leaf']})"
@@ -337,17 +374,18 @@ def _section_members(
             continue
         lo, hi = min(first, last), max(first, last)
         members = {k for k, p in position.items() if lo <= p <= hi}
-        out.setdefault(section["clade"], set()).update(members)  # a split clade: union of parts
+        name = label(section["clade"]) if label else section["clade"]
+        out.setdefault(name, set()).update(members)  # a split clade: union of parts
     return out, unresolved
 
 
 def _compare_sections(
     ref: dict[str, Any], new: dict[str, Any], ri: dict[str, dict[str, Any]],
-    ni: dict[str, dict[str, Any]], common: set[str],
+    ni: dict[str, dict[str, Any]], common: set[str], label: Any = None,
 ) -> dict[str, Any]:  # fmt: skip
     (rs, r_unresolved), (ns, n_unresolved) = (
-        _section_members(ref, ri, common),
-        _section_members(new, ni, common),
+        _section_members(ref, ri, common, label),
+        _section_members(new, ni, common, label),
     )
     matched = {}
     for label in sorted(rs.keys() & ns.keys()):
@@ -358,3 +396,38 @@ def _compare_sections(
     return {"matched": matched, "only_ref": sorted(rs.keys() - ns.keys()),
             "only_new": sorted(ns.keys() - rs.keys()), "min_jaccard": worst,
             "unresolved": {"ref": r_unresolved, "new": n_unresolved}}  # fmt: skip
+
+
+class _Canonical:
+    """One canonical mapping of every clade label in two tree figures, via af.clades.labels."""
+
+    def __init__(self, ref: dict[str, Any], new: dict[str, Any], clade_set: Any) -> None:
+        from af.clades.labels import canonical_labels
+
+        labels: set[str | None] = set()
+        for doc in (ref, new):
+            for leaf in doc["tree"]["leaves"]:
+                labels.update(leaf.get("clade_tags") or [leaf["clade"]])
+            labels.update(section["clade"] for section in doc["tree"]["sections"])
+        self.map = canonical_labels(sorted(labels, key=str), clade_set, allow_unmapped=True)
+        self.clade_set = clade_set
+
+    def _one(self, label: str | None) -> str | None:
+        """Canonical name, or None: unnamed (outside every clade) or unmapped (listed apart)."""
+        if label is None or label in self.map.unmapped:
+            return None
+        return self.map.clade(label)
+
+    def leaf(self, leaf: dict[str, Any]) -> str:
+        tags = leaf.get("clade_tags") or [leaf["clade"]]
+        mapped = [c for c in (self._one(t) for t in tags) if c]
+        if mapped:
+            return str(max(mapped, key=self.clade_set.depth))
+        raw = [t for t in tags if t is not None and t in self.map.unmapped]
+        return f"unmapped:{raw[-1]}" if raw else "unnamed"
+
+    def label(self, label: str) -> str:
+        return self._one(label) or f"unmapped:{label}"
+
+    def summary(self) -> dict[str, Any]:
+        return {"counts": self.map.counts(), "unmapped": dict(self.map.unmapped)}
