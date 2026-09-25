@@ -287,8 +287,10 @@ def af_source() -> dict[str, Any]:
     """Which af code built this: version, and the git commit of the source actually imported.
 
     A report must say what produced it. When af runs from a git checkout (an editable install)
-    the commit and whether it had uncommitted changes are recorded; from an installed wheel there
-    is no checkout, and ``commit`` is null rather than guessed.
+    the commit and whether it had uncommitted changes are recorded. A frozen af release (a
+    non-editable install made by tools/make-release.py) has no checkout, but records the commit it
+    was built from: that is used, with ``dirty`` false, since a release is read-only. Otherwise
+    ``commit`` is null rather than guessed.
     """
     import subprocess
 
@@ -304,13 +306,28 @@ def af_source() -> dict[str, Any]:
         ).stdout.strip()
 
     try:
-        if Path(git("rev-parse", "--show-toplevel")).resolve() != source.parent:
-            return record  # af sits inside some other repository (e.g. a home-rooted one)
-        record["commit"] = git("rev-parse", "HEAD")
-        record["dirty"] = bool(git("status", "--porcelain", "--untracked-files=no"))
+        if Path(git("rev-parse", "--show-toplevel")).resolve() == source.parent:
+            record["commit"] = git("rev-parse", "HEAD")
+            record["dirty"] = bool(git("status", "--porcelain", "--untracked-files=no"))
+            return record
     except (OSError, subprocess.CalledProcessError):
-        pass  # not a git checkout: commit stays null, which the record says plainly
+        pass  # not a git checkout of acmacs-f: try the release record next
+    release = _release_info()
+    if release and release.get("commit"):
+        record.update(commit=release["commit"], dirty=False, release=release)
     return record
+
+
+def _release_info() -> dict[str, Any] | None:
+    """af's release record, when running from a release made by tools/make-release.py."""
+    import importlib
+
+    try:  # by name: af.run.runtime arrives with the releases work, and may not exist yet
+        runtime = importlib.import_module("af.run.runtime")
+    except ImportError:
+        return None  # an af without release support: nothing to record
+    info = runtime.release_info()
+    return dict(info) if info else None
 
 
 def build_record(
