@@ -15,8 +15,12 @@ from af.store.snapshot import (
     write_snapshot,
 )
 from af.store.store import Provenance, Store, VersionBuilder
+from af.store.work import DatasetWork, PathsConfig, Work
 
 __all__ = [
+    "DatasetWork",
+    "PathsConfig",
+    "Work",
     "KINDS",
     "ExternalInput",
     "Manifest",
