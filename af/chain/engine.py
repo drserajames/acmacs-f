@@ -24,6 +24,7 @@ import hashlib
 import json
 import logging
 import shutil
+import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -34,13 +35,14 @@ import numpy as np
 from af.chain.backend import Optimiser, default_optimiser
 from af.chain.config import ChainConfig, TableRef, config_to_json
 from af.chain.diagnostics import step_diagnostics
+from af.chain.starts import read_result, write_problem
 from af.chart.ace import read_chart, read_json, write_chart
 from af.chart.merge import ColumnBasisConvention, MergeOptions, MergeType, merge
 from af.chart.model import Chart, Projection
 from af.chart.procrustes import procrustes
 from af.chart.titre import MergeSettings
 from af.pipeline import Pipeline, Step, StepContext
-from af.run.job import Runner
+from af.run.job import Job, Resources, Runner
 from af.run.local import LocalRunner
 from af.util.artefacts import Artefact, sha256_path
 
@@ -63,6 +65,90 @@ class StepResult:
     record: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class SplitStarts:
+    """Run a map's starts as `chunks` jobs through the step's runner (af.run: local or SLURM).
+
+    Not part of any step's key: per-start seeding makes the maps the same however the
+    starts are split. `work_dir` holds the jobs' problem and result files (outside the
+    store), `threads` is each job's thread count.
+    """
+
+    chunks: int
+    work_dir: Path
+    threads: int = 1
+
+
+class Mapper:
+    """Makes a map's starts, in one process or split into jobs."""
+
+    def __init__(self, optimiser: Optimiser, split: SplitStarts | None) -> None:
+        self.optimiser = optimiser
+        self.split = split
+
+    def make(
+        self,
+        runner: Runner,
+        label: str,
+        arrays: dict,
+        n_starts: int,
+        dim: int,
+        seed: int,
+        start_layout: np.ndarray | None,
+    ) -> list[dict]:
+        if self.split is None or self.split.chunks <= 1:
+            return self.optimiser.optimise(arrays, n_starts, dim, seed, start_layout)
+        work = self.split.work_dir / label
+        if work.exists():
+            shutil.rmtree(work)
+        work.mkdir(parents=True)
+        problem = write_problem(
+            work / "problem.npz",
+            arrays,
+            seed=seed,
+            dimensions=dim,
+            optimiser=self.optimiser.key,
+            start_layout=start_layout,
+        )
+        jobs = []
+        for k, (first, count) in enumerate(_chunks(n_starts, self.split.chunks)):
+            out = work / f"starts-{first:06d}-{count:06d}.npz"
+            jobs.append(
+                Job(
+                    name=f"{label.replace('/', '-')}-{k:03d}",
+                    command=[
+                        sys.executable,
+                        "-m",
+                        "af.chain.starts",
+                        problem,
+                        str(first),
+                        str(count),
+                        out,
+                        str(self.split.threads),
+                    ],
+                    cwd=work,
+                    log=work / f"starts-{k:03d}.log",
+                    outputs=[Artefact(out)],
+                    resources=Resources(threads=self.split.threads),
+                )
+            )
+        runner.run_many(jobs)
+        chunks = [m for job in jobs for m in read_result(Path(job.outputs[0].path))]
+        return self.optimiser.combine(arrays, chunks, incremental=start_layout is not None)
+
+
+def _chunks(n: int, k: int) -> list[tuple[int, int]]:
+    """Split starts 0..n-1 into k contiguous (first, count) runs, sizes differing by at most one."""
+    k = min(k, n)
+    base, extra = divmod(n, k)
+    out, first = [], 0
+    for i in range(k):
+        count = base + (1 if i < extra else 0)
+        out.append((first, count))
+        first += count
+    return out
+
+
 def step_dir(root: Path, index: int) -> Path:
     return root / "steps" / f"{index:04d}"
 
@@ -78,14 +164,14 @@ def _json(path: Path) -> object:
 # ----------------------------------------------------------------------
 
 
-def chain_steps(cfg: ChainConfig, root: Path, optimiser: Optimiser) -> list[Step]:
+def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
     """One pipeline step per chain step, each depending on the previous step's chosen map."""
     first_source = cfg.first_map if cfg.first_map else cfg.tables[0].path
     merged_tables = cfg.tables if cfg.first_map else cfg.tables[1:]
     common = {
         "chain": cfg.name,
         "options": asdict(cfg.options),
-        "optimiser": optimiser.name,
+        "optimiser": mapper.optimiser.name,
         "seed": cfg.seed,
     }
     steps = []
@@ -96,7 +182,7 @@ def chain_steps(cfg: ChainConfig, root: Path, optimiser: Optimiser) -> list[Step
     steps.append(
         Step(
             name="step-0000",
-            action=_action(lambda d: _first_step(cfg, d, optimiser), d0),
+            action=_action(functools.partial(_first_step, cfg, mapper=mapper), d0),
             inputs=[Path(first_source)],
             outputs=[
                 Artefact(p, parse=_ace if p.suffix == ".ace" else _json) for p in first_outputs
@@ -118,7 +204,7 @@ def chain_steps(cfg: ChainConfig, root: Path, optimiser: Optimiser) -> list[Step
                         index=index,
                         previous_path=previous,
                         table_ref=table,
-                        optimiser=optimiser,
+                        mapper=mapper,
                     ),
                     d,
                 ),
@@ -131,12 +217,12 @@ def chain_steps(cfg: ChainConfig, root: Path, optimiser: Optimiser) -> list[Step
     return steps
 
 
-def _action(work: Callable[[Path], None], directory: Path) -> Callable[[StepContext], None]:
+def _action(work: Callable[[Path, Runner], None], directory: Path) -> Callable[[StepContext], None]:
     def run(context: StepContext) -> None:
         if directory.exists():
             shutil.rmtree(directory)  # never leave an earlier run's files beside this one's
         directory.mkdir(parents=True)
-        work(directory)
+        work(directory, context.runner)
 
     return run
 
@@ -147,11 +233,15 @@ def run_chain(
     optimiser: Optimiser | None = None,
     runner: Runner | None = None,
     until_step: int | None = None,
+    split: SplitStarts | None = None,
 ) -> list[StepResult]:
-    """Run or resume a chain into `store_root/<name>/`; returns every step, skipped or remade."""
+    """Run or resume a chain into `store_root/<name>/`; returns every step, skipped or remade.
+
+    `runner` runs the start chunks when `split` is given (af.run LocalRunner or SlurmRunner).
+    """
     optimiser = optimiser or default_optimiser()
     root = Path(store_root) / cfg.name
-    steps = chain_steps(cfg, root, optimiser)
+    steps = chain_steps(cfg, root, Mapper(optimiser, split))
     pipeline = Pipeline(steps, state_dir=root / "state", runner=runner or LocalRunner())
     targets = None if until_step is None else [steps[until_step].name]
     outcomes = pipeline.run(targets)
@@ -250,7 +340,8 @@ def _json_default(o: object) -> object:
     raise TypeError(type(o))
 
 
-def _first_step(cfg: ChainConfig, directory: Path, optimiser: Optimiser) -> None:
+def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Mapper) -> None:
+    optimiser = mapper.optimiser
     o = cfg.options
     if cfg.first_map:
         chart = read_chart(cfg.first_map)
@@ -272,8 +363,9 @@ def _first_step(cfg: ChainConfig, directory: Path, optimiser: Optimiser) -> None
     arrays = table.optimiser_arrays(
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
     )
-    all_maps = optimiser.optimise(
-        arrays, o.scratch_starts, o.dimensions, _step_seed(cfg, 0, [t.path]), None
+    seed = _step_seed(cfg, 0, [t.path])
+    all_maps = mapper.make(
+        runner, f"{cfg.name}/0000/scratch", arrays, o.scratch_starts, o.dimensions, seed, None
     )
     chart = _map_chart(
         table,
@@ -300,13 +392,15 @@ def _first_step(cfg: ChainConfig, directory: Path, optimiser: Optimiser) -> None
 def _merge_step(
     cfg: ChainConfig,
     directory: Path,
+    runner: Runner,
     *,
     index: int,
     previous_path: Path,
     table_ref: TableRef,
-    optimiser: Optimiser,
+    mapper: Mapper,
 ) -> None:
     o = cfg.options
+    optimiser = mapper.optimiser
     previous = read_chart(previous_path)
     merged, report = merge(previous, read_chart(table_ref.path), _merge_options(cfg))
     write_chart(merged, directory / "merge.ace")
@@ -316,9 +410,12 @@ def _merge_step(
     seed = _step_seed(cfg, index, [previous_path, table_ref.path])
     start = merged.projections[0].layout.copy()
     start[arrays["disconnected"]] = np.nan
-    all_incremental = optimiser.optimise(arrays, o.incremental_starts, o.dimensions, seed, start)
-    all_scratch = optimiser.optimise(
-        arrays, o.scratch_starts, o.dimensions, seed ^ 0x5DEECE66D, None
+    label = f"{cfg.name}/{index:04d}"
+    all_incremental = mapper.make(
+        runner, f"{label}/incremental", arrays, o.incremental_starts, o.dimensions, seed, start
+    )
+    all_scratch = mapper.make(
+        runner, f"{label}/scratch", arrays, o.scratch_starts, o.dimensions, seed ^ 0x5DEECE66D, None
     )
     inc_chart = _map_chart(
         merged,

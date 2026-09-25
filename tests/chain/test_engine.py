@@ -133,3 +133,42 @@ def test_stub_gradient_matches_finite_differences(tables):
         e[i] = h
         num = (stress_and_gradient(x + e, t, 2)[0] - stress_and_gradient(x - e, t, 2)[0]) / (2 * h)
         assert num == pytest.approx(g[i], rel=1e-5, abs=1e-6)
+
+
+def test_split_starts_give_the_same_chain(tables, tmp_path):
+    """Starts run as 3 local jobs through af.run give exactly the single-process maps."""
+    from af.chain.engine import SplitStarts, _chunks
+    from af.run.local import LocalRunner
+
+    assert _chunks(10, 3) == [(0, 4), (4, 3), (7, 3)]
+    assert _chunks(2, 5) == [(0, 1), (1, 1)]
+    single = run(config(tables), tmp_path / "a")
+    split = run_chain(
+        config(tables),
+        tmp_path / "b",
+        optimiser=StubOptimiser(),
+        runner=LocalRunner(max_parallel=2),
+        split=SplitStarts(chunks=3, work_dir=tmp_path / "work"),
+    )
+    assert [r.record["start_stresses"] for r in split] == [
+        r.record["start_stresses"] for r in single
+    ]
+    assert [r.record["stress"] for r in split] == [r.record["stress"] for r in single]
+
+
+def test_command_line(tables, tmp_path):
+    from af.chain.__main__ import main
+
+    (tmp_path / "chain.toml").write_text(
+        f'name = "{GROUP}"\nseed = 3\n[tables]\ndirectory = "tables"\ngroup = "{GROUP}"\n'
+        "[options]\nscratch_starts = 4\nincremental_starts = 3\ngrid_test = false\n"
+    )
+    (tmp_path / "run.toml").write_text(
+        'store_root = "store"\noptimiser = "stub"\n[runner]\nkind = "local"\n'
+        '[split]\nchunks = 2\nwork_dir = "work"\n'
+    )
+    assert main([str(tmp_path / "chain.toml"), str(tmp_path / "run.toml")]) == 0
+    doc = json.loads((tmp_path / "store" / GROUP / "chain.json").read_text())
+    assert doc["complete"] and len(doc["steps"]) == 4
+    assert (tmp_path / "store" / GROUP / "review" / "index.html").exists()
+    assert main([str(tmp_path / "chain.toml"), str(tmp_path / "run.toml"), "--review"]) == 0

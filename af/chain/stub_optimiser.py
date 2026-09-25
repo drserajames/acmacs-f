@@ -94,6 +94,7 @@ def optimise(
     seed: int = 0,
     start_layout: np.ndarray | None = None,
     keep: int = 10,
+    first_start: int = 0,
 ) -> list[dict]:
     """Run `n_starts` minimisations; projections sorted by stress (I1 output shape).
 
@@ -105,7 +106,7 @@ def optimise(
     unmovable = arrays.get("unmovable")
     span = max(float(t.distance.max(initial=1.0)), 1.0)
     results = []
-    for i in range(n_starts):
+    for i in range(first_start, first_start + n_starts):
         rng = np.random.default_rng([seed, i])
         if start_layout is not None:
             x0 = start_layout.copy()
