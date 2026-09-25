@@ -7,14 +7,16 @@ provenance record relies on are produced.
 
 from __future__ import annotations
 
+import os
 import random
 import shutil
+from pathlib import Path
 
 import pytest
 
 from af.run import JobFailed
 from af.tree import build
-from af.tree.build import CmapleSettings
+from af.tree.build import CmapleSettings, build_job
 from af.tree.io import fasta, newick
 
 
@@ -162,3 +164,31 @@ def test_a_failed_build_raises_rather_than_reporting_success(tmp_path) -> None:
     settings = CmapleSettings(executable="definitely-not-a-real-binary")
     with pytest.raises((JobFailed, FileNotFoundError, OSError)):
         build.build(alignment, outgroup="outgroup", out_dir=tmp_path / "out", settings=settings)
+
+
+def test_the_job_uses_absolute_paths_because_it_runs_in_the_output_directory(tmp_path) -> None:
+    """A relative path would be resolved again inside cwd, where it does not exist.
+
+    Found on the server: CMAPLE exited 1 with "Could not open out/cmaple/cmaple.log for logging"
+    when the caller passed relative paths.
+    """
+    alignment, _ = alignment_of(tmp_path)
+    monkeypatched = Path.cwd()
+    os.chdir(tmp_path)
+    try:
+        job, treefile = build_job(Path(alignment.name), Path("out"), CmapleSettings(), name="c")
+    finally:
+        os.chdir(monkeypatched)
+    assert job.cwd.is_absolute()
+    assert treefile.is_absolute()
+    for part in job.argv()[1:]:
+        if "/" in part:
+            assert Path(part).is_absolute(), f"relative path in the command: {part}"
+
+
+def test_the_job_log_is_not_cmaples_own_log(tmp_path) -> None:
+    """Two writers on one file: the runner's stdout capture and CMAPLE's <prefix>.log."""
+    alignment, _ = alignment_of(tmp_path)
+    job, _ = build_job(alignment, tmp_path / "out", CmapleSettings())
+    cmaple_own_log = (tmp_path / "out" / "cmaple.log").resolve()
+    assert job.log.resolve() != cmaple_own_log
