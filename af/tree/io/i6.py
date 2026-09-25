@@ -39,6 +39,7 @@ TREE_FILE = "tree.nwk"
 NODES_FILE = "nodes.parquet"
 ANCESTRAL_FILE = "ancestral.parquet"
 META_FILE = "tree.json"
+EXCLUDED_FILE = "excluded.json"
 
 _list_of_str = pa.list_(pa.string())
 
@@ -153,6 +154,7 @@ def metadata(populated: PopulatedTree, purpose: str) -> dict[str, Any]:
             "reconstructs_gaps": populated.gaps_reconstructed,
             "gap_blind_override": populated.counts.get("gap_blind_override"),
         },
+        "excluded_before_build": len(populated.excluded),
         "clade_set_version": populated.clade_set_version,
         "clade_parents": dict(sorted(populated.clade_parents.items())),
         "counts": dict(sorted(populated.counts.items())),
@@ -179,6 +181,12 @@ def write(populated: PopulatedTree, directory: Path, purpose: str) -> list[Path]
         ancestral_path = directory / ANCESTRAL_FILE
         pq.write_table(ancestral, ancestral_path, compression="zstd")
         written.append(ancestral_path)
+    if populated.excluded:
+        # A separate file, not a tree.json field: it is a list of records, and a person looking
+        # for "what left the tree" should find it by name in the version directory.
+        excluded_path = directory / EXCLUDED_FILE
+        excluded_path.write_text(json.dumps(populated.excluded, indent=1, default=str) + "\n")
+        written.append(excluded_path)
     meta_path = directory / META_FILE
     meta_path.write_text(json.dumps(metadata(populated, purpose), indent=1, default=str) + "\n")
     written.append(meta_path)
@@ -193,6 +201,15 @@ def read_metadata(directory: Path) -> dict[str, Any]:
     if meta.get("format") != FORMAT:
         raise I6Error(f"{directory}: format {meta.get('format')!r}, this reader expects {FORMAT}")
     return meta
+
+
+def read_excluded(directory: Path) -> list[dict[str, Any]]:
+    """The sequences the pre-build filter dropped. Empty when the file is absent."""
+    path = Path(directory) / EXCLUDED_FILE
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = json.loads(path.read_text())
+    return rows
 
 
 def read_nodes(directory: Path, columns: list[str] | None = None) -> pa.Table:

@@ -232,3 +232,21 @@ def test_a_gap_blind_backend_is_fine_where_no_clade_needs_a_deletion() -> None:
         assign_clades=_deletion_engine(()),
     )
     assert "gap_blind_override" not in result.counts
+
+
+def test_the_prebuild_drops_are_written_beside_the_tree(tmp_path: Path) -> None:
+    """A count is not enough: WS11 needs "dropped by the filter" to differ from "lost"."""
+    tree, ids = built()
+    dropped = [{"leaf_id": "EPI_ISL_9001|EPI9001", "reason": "long_branch", "branch_length": 0.05}]
+    result = populate(tree, "h3", records(), states_for(ids), excluded=dropped)
+    assert result.counts["excluded_before_build"] == 1
+    i6.write(result, tmp_path, "weekly")
+    assert i6.read_excluded(tmp_path) == dropped
+    assert i6.read_metadata(tmp_path)["excluded_before_build"] == 1
+
+
+def test_no_excluded_file_is_written_when_nothing_was_dropped(tmp_path: Path) -> None:
+    tree, ids = built()
+    i6.write(populate(tree, "h3", records(), states_for(ids)), tmp_path, "weekly")
+    assert not (tmp_path / i6.EXCLUDED_FILE).exists()
+    assert i6.read_excluded(tmp_path) == []

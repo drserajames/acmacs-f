@@ -36,6 +36,8 @@ class BuildResult:
 
     tree: Tree
     counts: dict[str, Any] = field(default_factory=dict)
+    excluded: ExclusionPlan | None = None
+    """What the pre-build filter dropped, carried so the tree store can name it."""
 
 
 def finish_tree(
@@ -103,6 +105,7 @@ def build(
     result.counts["seed"] = settings.seed
     result.counts["from_scratch"] = "no" if starting_tree else "yes"
     result.counts.update({f"prebuild_{k}": v for k, v in counts_before.items()})
+    result.excluded = exclude
     return result
 
 

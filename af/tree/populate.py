@@ -131,6 +131,8 @@ class PopulatedTree:
     clade_parents: dict[str, str | None] = field(default_factory=dict)
     continents: dict[str, str | None] = field(default_factory=dict)
     flags: dict[int, list[str]] = field(default_factory=dict)
+    excluded: list[dict[str, Any]] = field(default_factory=list)
+    """Sequences the pre-build filter dropped, by name (WS11: "dropped" must differ from "lost")."""
     titrated: dict[str, bool] = field(default_factory=dict)
     titrated_by: dict[str, list[str]] = field(default_factory=dict)
     counts: dict[str, Any] = field(default_factory=dict)
@@ -166,6 +168,7 @@ def populate(
     continent_of: Callable[[LeafRecord], str | None] | None = None,
     outgroup: str | None = None,
     allow_gap_blind: bool = False,
+    excluded: list[dict[str, Any]] | None = None,
 ) -> PopulatedTree:
     """Attach everything I6 carries to a finished tree (see the module docstring).
 
@@ -306,6 +309,10 @@ def populate(
         counts=counts,
         gaps_reconstructed=gaps_reconstructed,
     )
+
+    populated.excluded = list(excluded or [])
+    if populated.excluded:
+        counts["excluded_before_build"] = len(populated.excluded)
 
     if continent_of is not None:
         populated.continents = {

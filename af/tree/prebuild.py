@@ -24,7 +24,7 @@ reader of the figure can always be told what left and why.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -76,6 +76,31 @@ class ExclusionPlan:
 
     def keys(self) -> set[str]:
         return set(self.drop)
+
+    def records(self, names: Mapping[str, str] | None = None) -> list[dict[str, object]]:
+        """One row per dropped sequence, for the tree store.
+
+        WS11's comparison needs to tell "dropped by the filter" from "lost", so a count is not
+        enough: the identity travels with the tree. ``epi_isl`` and ``accession`` come from the
+        leaf key itself; ``name`` is filled when the caller has the sequence records to hand.
+        """
+        by_name = names or {}
+        rows: list[dict[str, object]] = []
+        for key in sorted(self.drop):
+            epi_isl, _, accession = key.partition("|")
+            rows.append(
+                {
+                    "leaf_id": key,
+                    "epi_isl": epi_isl,
+                    "accession": accession,
+                    "name": by_name.get(key),
+                    "reason": self.drop[key],
+                    "branch_length": self.lengths.get(key),
+                    "measured_on": self.counts.get("measured_on"),
+                    "threshold": self.counts.get("threshold"),
+                }
+            )
+        return rows
 
     def by_reason(self) -> dict[str, list[str]]:
         out: dict[str, list[str]] = {}

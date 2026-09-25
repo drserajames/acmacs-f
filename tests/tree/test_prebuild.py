@@ -113,3 +113,25 @@ def test_a_threshold_that_cannot_fire_says_so() -> None:
 
 def test_a_threshold_that_can_fire_is_not_called_inert() -> None:
     assert "inert" not in plan(tree_of(), keep=["outgroup"]).counts
+
+
+def test_records_name_each_dropped_sequence_for_the_comparison() -> None:
+    """WS11 must be able to tell "dropped by the filter" from "lost", so identity travels."""
+    result = plan(tree_of(), keep=["outgroup"])
+    result.drop.clear()
+    result.lengths.clear()
+    result.drop["EPI_ISL_9001|EPI9001"] = LONG_BRANCH
+    result.lengths["EPI_ISL_9001|EPI9001"] = 0.05
+    (row,) = result.records({"EPI_ISL_9001|EPI9001": "A/EXAMPLETOWN/2/2024"})
+    assert row["epi_isl"] == "EPI_ISL_9001"
+    assert row["accession"] == "EPI9001"
+    assert row["name"] == "A/EXAMPLETOWN/2/2024"
+    assert row["reason"] == LONG_BRANCH
+    assert row["branch_length"] == 0.05
+    assert row["threshold"] == 0.01
+
+
+def test_records_work_without_a_name_lookup() -> None:
+    result = plan(tree_of(), keep=["outgroup"])
+    assert all(row["name"] is None for row in result.records())
+    assert [row["leaf_id"] for row in result.records()] == ["b"]
