@@ -12,11 +12,12 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import af
+from af.store import StoreRef
 
 from .layout import Layout
 from .model import DrawTree
@@ -88,8 +89,13 @@ def write_i7(
     inputs: Mapping[str, str],
     out: Path | None = None,
     notes: str = "",
+    store_refs: Sequence[StoreRef] = (),
 ) -> Path:
-    """Write ``<pdf stem>.i7.json`` beside the PDF. ``inputs``: store item -> content hash."""
+    """Write ``<pdf stem>.i7.json`` beside the PDF. ``inputs``: store item -> content hash.
+
+    ``store_refs`` are the store versions the figure was drawn from; the report builder records
+    them (and whatever they rest on) in the report manifest.
+    """
     if not pdf.is_file() or pdf.stat().st_size == 0:
         raise FileNotFoundError(f"I7 needs the rendered PDF first: {pdf}")
     doc = {
@@ -102,6 +108,7 @@ def write_i7(
             "producer": f"af.tree.draw {af.__version__}",
             "created": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
             "inputs": dict(inputs),
+            **({"store_refs": [ref.to_json() for ref in store_refs]} if store_refs else {}),
         },
         "tree": dict(tree_info),
         "notes": notes,
