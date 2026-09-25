@@ -111,6 +111,7 @@ def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
         out_pdf=out,
         created=dt.datetime(2026, 9, 25, 12, 0, tzinfo=dt.UTC),
         provenance={"inputs": {"chain": {"name": "synthetic", "sha256": "0" * 64}}},
+        flags=["189R move refused: 4.499 u > cap 4.0 u"],
     )
     assert result.recent_hidden == 0
     doc = json.loads(result.i7.read_text())
@@ -131,6 +132,7 @@ def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
     by_id = {a["id"]: a for a in doc["map"]["antigens"]}
     assert not by_id["ag-new"]["greyed"]  # unpainted: base grey, not the window rule
     assert by_id["ag0"]["greyed"] and by_id["ag0"]["colour"] == "#c8c8c8"
+    assert doc["map"]["flags"] == ["189R move refused: 4.499 u > cap 4.0 u"]
     vac = [a for a in doc["map"]["antigens"] if a["vaccine"]]
     assert vac[0]["label"] == "Te/25-cell" and not vac[0]["greyed"]
 

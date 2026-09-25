@@ -210,6 +210,7 @@ def i7_document(
     created: dt.datetime,
     provenance: dict[str, Any],
     orientation: dict[str, object] | None = None,
+    flags: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The I7 JSON for a rendered map (eu-23's I7 draft v1). ``created`` must carry a time zone."""
     if created.tzinfo is None:
@@ -263,6 +264,10 @@ def i7_document(
         "sequenced_unpainted": scene.sequenced_unpainted,
         "unsequenced": sum(not p.sequenced for p in shown_ag),
     }
+    if flags:
+        # Short notes about what happened while the map was made: a curation rule that refused,
+        # a guard that fired. The comparison prints them, so a flagged map is never silently odd.
+        map_block["flags"] = list(flags)
     if orientation is not None:
         map_block["orientation"] = orientation
     return {

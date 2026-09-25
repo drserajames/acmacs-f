@@ -55,6 +55,7 @@ def finish_map(
     created: dt.datetime,
     provenance: dict[str, Any],
     orientation: dict[str, object] | None = None,
+    flags: Sequence[str] = (),
     look: Look = DEFAULT_LOOK,
 ) -> FinishedMap:
     """Produce ``out_pdf`` and its I7 for one chart and window.
@@ -112,6 +113,7 @@ def finish_map(
         created=created,
         provenance=provenance,
         orientation=orientation,
+        flags=flags,
     )
     i7 = write_i7(doc, out_pdf)
     return FinishedMap(
