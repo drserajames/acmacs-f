@@ -101,8 +101,10 @@ OTHER/[0-9]+/(?:19|20)?[0-9]{2}
 # insensitive, with ' ', '_' or '-' between words. Narrow on purpose: the case-insensitivity is
 # scoped to this pattern only, and every word after the first must itself start with EXAMPLE or
 # be TOWN or CITY, so no real place can follow the prefix ("A/EXAMPLE HONG KONG/..." stays
-# flagged). E.g. a/example-town/1/2020, EXAMPLE-TOWN/3/2021, A/Example_City/12/2026.
-(?i:(?:[AB](?:\([^)]*\))?/)?B?EXAMPLE[A-Z]*(?:[ _-](?:EXAMPLE[A-Z]*|TOWN|CITY))*/[0-9]+/(?:19|20)?[0-9]{2})
+# flagged). The isolate may join parts with '-' or '_', each part all digits or containing
+# EXAMPLE (optionally after leading digits), so a real lab code or isolate can't match.
+# E.g. a/example-town/1/2020, EXAMPLE-TOWN/3/2021, B/EXAMPLETOWN/EXAMPLELAB-23/2021.
+(?i:(?:[AB](?:\([^)]*\))?/)?B?EXAMPLE[A-Z]*(?:[ _-](?:EXAMPLE[A-Z]*|TOWN|CITY))*/(?:[0-9]*EXAMPLE[A-Z0-9]*|[0-9]+)(?:[_-](?:[0-9]*EXAMPLE[A-Z0-9]*|[0-9]+))*/(?:19|20)?[0-9]{2})
 # Synthetic placeholder serum ids used in format docs/examples (LAB 0000-000 style):
 LAB [0-9]{4}-[0-9]{3}(?:,[0-9]{4}-[0-9]{3})*
 # Placeholder strain/location examples used in gate's own documentation (SOMEWHERE, etc.):
