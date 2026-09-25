@@ -23,6 +23,7 @@ dependencies = [
   "duckdb>=1.1",      # queries over the Parquet stores (serology, stat)
   "matplotlib>=3.8",  # every report path renders PDFs
   "openpyxl>=3.1",    # lab xlsx tables (tables workstream)
+  "xlrd>=2.0.1",      # GISAID metadata .xls (legacy BIFF): the only source of exact collection dates
   "brotli>=1.1",      # brotli-compressed .ace charts and tables (chains, tables)
 ]
 
