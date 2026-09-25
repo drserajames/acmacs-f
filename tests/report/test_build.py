@@ -159,11 +159,13 @@ def test_latex_failure_is_fatal_and_leaves_no_pdf(
 # ---- store provenance -------------------------------------------------------------------
 
 
-def _publish(store: Store, kind: str, dataset: str, text: str) -> StoreRef:
+def _publish(
+    store: Store, kind: str, dataset: str, text: str, inputs: tuple[StoreRef, ...] = ()
+) -> StoreRef:
     started = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
     with store.build(kind, dataset) as version:
         (version.path / "data.txt").write_text(text)
-        return version.publish(Provenance("test", (), {}, started, started))
+        return version.publish(Provenance("test", inputs, {}, started, started))
 
 
 def _real_figure(
@@ -250,3 +252,30 @@ def test_stand_in_figure_needs_bring_up_mode(tmp_path: Path) -> None:
     with pytest.raises(build.BuildError, match="3 not drawn from the store"):
         build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), None, None,
                                deep=False)  # fmt: skip
+
+
+@needs_latex
+def test_manifest_includes_upstream_tables(tmp_path: Path) -> None:
+    cfg, root = _setup(tmp_path, allow=False)
+    store = Store.create(tmp_path / "store")
+    tables = _publish(store, "tables", "labx/m", "tables v1")
+    chain = _publish(store, "chains", "labx/m/main", "chain v1", (tables,))
+    later = T0 + dt.timedelta(hours=1)
+    for slot in load(cfg).all_slots():
+        _real_figure(root, slot, [chain], later, "v1")
+    manifest = tmp_path / "manifest.json"
+    build.build(cfg, root, tmp_path / "out", store_root=store.root, manifest_path=manifest)
+    assert set(read_manifest(manifest)) == {chain, tables}
+
+
+def test_current_chain_on_old_tables_is_stale(tmp_path: Path) -> None:
+    cfg, root = _setup(tmp_path, allow=False)
+    store = Store.create(tmp_path / "store")
+    tables = _publish(store, "tables", "labx/m", "tables v1")
+    chain = _publish(store, "chains", "labx/m/main", "chain v1", (tables,))
+    for slot in load(cfg).all_slots():
+        _real_figure(root, slot, [chain], T0 + dt.timedelta(hours=1), "v1")
+    _publish(store, "tables", "labx/m", "tables v2")  # new tables; the chain was not rebuilt
+    with pytest.raises(ProvenanceError, match="stale: .* rest on tables/labx/m"):
+        build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                               tmp_path / "m.json", deep=False)  # fmt: skip
