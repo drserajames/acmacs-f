@@ -38,11 +38,6 @@ def connect(version_dir: Path) -> Any:
         con.execute(
             f"CREATE VIEW {kind} AS SELECT * FROM read_parquet([{listing}], union_by_name = true)"
         )
-    # What af.serology.joins joins on: the isolate each antigen's lab paired it with.
-    con.execute(
-        "CREATE VIEW antigen_links AS SELECT table_id, position, epi_isl, "
-        "sequence_pairing AS pairing FROM antigens"
-    )
     return con
 
 
