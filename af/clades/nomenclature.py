@@ -115,6 +115,8 @@ class CladeSet:
     subclades: Mapping[str, Subclade]
     version: str
     legacy_clades: Mapping[str, Subclade] = field(default_factory=dict)
+    local_names: frozenset[str] = frozenset()
+    """Clades af defines itself (:mod:`af.clades.local`); empty for a pure upstream set."""
     _ancestors: Mapping[str, tuple[str, ...]] = field(repr=False, default_factory=dict)
 
     def __iter__(self) -> Iterator[Subclade]:
@@ -173,6 +175,22 @@ class CladeSet:
     def depth(self, name: str) -> int:
         """Number of ancestors; the deepest matching clade is the most specific one."""
         return len(self.ancestors(name))
+
+    def is_local(self, name: str) -> bool:
+        return name in self.local_names
+
+    def upstream_depth(self, name: str) -> int:
+        """Depth of the deepest published clade at or above ``name``; -1 if there is none.
+
+        This is what stops a local clade overriding a published one. A local clade sitting
+        under a published parent inherits that parent's standing and refines it; one
+        attached at the root has no published ancestor, so it ranks below every published
+        clade and can only be assigned where the nomenclature says nothing at all.
+        """
+        for candidate in (name, *self.ancestors(name)):
+            if candidate not in self.local_names:
+                return self.depth(candidate)
+        return -1
 
     def cumulative(self, name: str) -> dict[tuple[Alphabet, int], str]:
         """The full signature of ``name``: its own branch's mutations and its ancestors'.

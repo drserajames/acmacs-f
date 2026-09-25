@@ -152,9 +152,15 @@ def assign_tree(
 
 def _assign_node(node: Node, inherited: str | None, clade_set: CladeSet) -> Assignment:
     """The deepest candidate the sequence does not contradict, else the inherited clade."""
-    candidates = clade_set.descendants(inherited) if inherited else clade_set.names
+    # Restrict to the inherited clade's subtree — but by its deepest *published* ancestor.
+    # A label with no published ancestry (a locally defined pre-nomenclature lineage) makes
+    # no claim about where the virus sits in the nomenclature, so it must not shut the
+    # published clades out: when it did, two local clades captured 107,292 H1 leaves that
+    # upstream names.
+    anchor = _published_anchor(inherited, clade_set)
+    candidates = clade_set.descendants(anchor) if anchor else clade_set.names
     best: Assignment | None = None
-    best_key: tuple[int, int, str] | None = None
+    best_key: tuple[int, int, int, str] | None = None
     for candidate in candidates:
         if clade_set[candidate].revoked and candidate != inherited:
             continue
@@ -169,14 +175,32 @@ def _assign_node(node: Node, inherited: str | None, clade_set: CladeSet) -> Assi
             # sequence cannot carry (a signal peptide, or a deletion under a gap-blind
             # reconstruction), purely because it is deeper.
             continue
-        # Deeper wins; at equal depth prefer more supporting evidence, then the name, so
+        # Published standing first, then depth, then supporting evidence, then the name so
         # that sister clades never break ties by dictionary order (design rule 8).
-        key = (clade_set.depth(candidate), support, candidate)
+        # Without the first term a locally defined clade attached at the root outranks the
+        # nomenclature itself: measured on the real H1 tree, adding two local clades moved
+        # 107,292 leaves that upstream does name.
+        key = (
+            clade_set.upstream_depth(candidate),
+            clade_set.depth(candidate),
+            support,
+            candidate,
+        )
         if best_key is None or key > best_key:
             best, best_key = Assignment(node.name, candidate, support, unobservable), key
     if best is None:
         return Assignment(node.name, inherited, inherited=True)
     return replace(best, inherited=best.clade == inherited)
+
+
+def _published_anchor(inherited: str | None, clade_set: CladeSet) -> str | None:
+    """The deepest published clade at or above ``inherited``, or None if there is none."""
+    if inherited is None:
+        return None
+    for candidate in (inherited, *clade_set.ancestors(inherited)):
+        if not clade_set.is_local(candidate):
+            return candidate
+    return None
 
 
 def _test(node: Node, clade_set: CladeSet, candidate: str) -> tuple[int, int, int] | None:
