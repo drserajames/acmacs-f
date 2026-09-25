@@ -70,9 +70,10 @@ class LocationSources:
 
 @dataclass(frozen=True)
 class AC21Inputs:
-    """One folder of AC Excel 2.1 workbooks. ``start`` bounds what is read: a workbook is read
-    when the YYYYMMDD in its file name is on or after it, and its test date must then equal
-    that file-name date (checked), so the bound is on the test date."""
+    """One folder of a lab's dated workbooks (AC Excel 2.1, or NIID's layout). ``start``
+    bounds what is read: a workbook is read when the YYYYMMDD in its file name is on or after
+    it, and its test date must then equal that file-name date (checked), so the bound is on
+    the test date."""
 
     lab: str
     dir: Path
@@ -85,6 +86,7 @@ class TablesSettings:
     run: str  # work-area key for this run's state, e.g. "cdc/all" (one run publishes many groups)
     cdc: CDCInputs | None = None
     ac21: list[AC21Inputs] = field(default_factory=list)
+    niid: list[AC21Inputs] = field(default_factory=list)  # NIID's own layout (af.tables.niid)
     locations: LocationSources | None = None
 
 
@@ -157,25 +159,41 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
         for inputs in settings.ac21:
             files = _dated_files(inputs)
             result = ac21.read(files, rules, locations, lab=inputs.lab)
-            report.append(
-                f"read {len(files)} {inputs.lab} workbooks in {inputs.dir} "
-                f"-> {len(result.tables)} tables"
-            )
-            report.extend(f"skipped: {s}" for s in result.skipped_tests)
-            if result.dropped:
-                report.append(
-                    "  dropped: " + ", ".join(f"{k} {v}" for k, v in sorted(result.dropped.items()))
-                )
-            errors.extend(result.errors)
-            for table in result.tables:
-                stem_date = _file_date(Path(table.meta["file"]))
-                if stem_date != table.date:
-                    errors.append(
-                        f"{table.meta['file']}: test date {table.date} "
-                        f"!= file-name date {stem_date}"
-                    )
-            tables.extend(result.tables)
+            _add_workbooks(inputs, files, result, tables, report, errors)
+    for inputs in settings.niid:
+        from . import niid
+
+        files = _dated_files(inputs)
+        _add_workbooks(
+            inputs, files, niid.read(files, rules, lab=inputs.lab), tables, report, errors
+        )
     return tables, report, errors
+
+
+def _add_workbooks(
+    inputs: AC21Inputs,
+    files: list[Path],
+    result: cdc.ReadResult,
+    tables: list[Table],
+    report: list[str],
+    errors: list[str],
+) -> None:
+    report.append(
+        f"read {len(files)} {inputs.lab} workbooks in {inputs.dir} -> {len(result.tables)} tables"
+    )
+    report.extend(f"skipped: {s}" for s in result.skipped_tests)
+    if result.dropped:
+        report.append(
+            "  dropped: " + ", ".join(f"{k} {v}" for k, v in sorted(result.dropped.items()))
+        )
+    errors.extend(result.errors)
+    for table in result.tables:
+        stem_date = _file_date(Path(table.meta["file"]))
+        if stem_date != table.date:
+            errors.append(
+                f"{table.meta['file']}: test date {table.date} != file-name date {stem_date}"
+            )
+    tables.extend(result.tables)
 
 
 def _file_date(path: Path) -> str | None:
@@ -239,7 +257,7 @@ def _input_files(settings: TablesSettings) -> list[Path]:
         files += [settings.cdc.tsv, *settings.cdc.xlsx, *settings.cdc.season]
     if settings.locations:
         files += [settings.locations.locdb, settings.locations.chinese_aliases]
-    for inputs in settings.ac21:
+    for inputs in [*settings.ac21, *settings.niid]:
         files += _dated_files(inputs)
     return files
 

@@ -55,7 +55,22 @@ class PassageParser:
             key=len,
             reverse=True,
         )
-        self.step = re.compile("(" + "|".join(map(re.escape, names)) + r")(\d+|X)?", re.IGNORECASE)
+        self.step = re.compile(
+            "(" + "|".join(map(re.escape, names)) + r")(\d+|X)?(\([^()]*\))?", re.IGNORECASE
+        )
+
+    def last_step_name(self, text: str) -> str | None:
+        """The name, as written, of the last step in ``text`` (for a lab's "E3+1")."""
+        pos, name = 0, None
+        while pos < len(text):
+            m = self.step.match(text, pos)
+            if m is None:
+                return None
+            name, pos = m[1], m.end()
+        return name
+
+    def is_step_name(self, text: str) -> bool:
+        return self.tokens.find(text, lab=self.lab) is not None
 
     def passage_class(self, canonical: str) -> str:
         """The class (see ``class_of``) of a passage already written canonically. Readers
@@ -88,7 +103,9 @@ class PassageParser:
                 rule = self.tokens.find(m[1], lab=self.lab)
                 assert rule is not None  # the alternation is built from the same rules
                 count = m[2] or ""
-                steps.append((rule["canonical"], "?" if count.upper() == "X" else count))
+                # a note in brackets after a step (NIID "E2(Am1Al1)") stays with it
+                note = (m[3] or "").upper()
+                steps.append((rule["canonical"], ("?" if count.upper() == "X" else count) + note))
                 classes.append(rule["class"])
                 pos = m.end()
             if not steps:
