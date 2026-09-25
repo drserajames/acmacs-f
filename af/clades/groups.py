@@ -98,6 +98,18 @@ class GroupSet:
     subtype: str
     groups: tuple[Group, ...]
 
+    def __post_init__(self) -> None:
+        # A second group of one name would be silently shadowed by the first in every
+        # lookup; the file loader refuses it, and so must a set built in memory.
+        seen: set[str] = set()
+        repeated: list[str] = []
+        for group in self.groups:
+            if group.name in seen:
+                repeated.append(group.name)
+            seen.add(group.name)
+        if repeated:
+            raise GroupError(self.subtype, [f"duplicate group {name!r}" for name in repeated])
+
     def __iter__(self) -> Iterator[Group]:
         return iter(self.groups)
 
