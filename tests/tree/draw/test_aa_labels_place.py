@@ -6,16 +6,6 @@ np = pytest.importorskip(
     "numpy", reason="numpy not installed: af.tree.draw needs it (pyproject, WS1)"
 )
 
-from tree.draw.synthetic import (  # noqa: E402
-    BASE,
-    build,
-    clade_block,
-    inner,
-    leaf,
-    mutate,
-    standard_tree,
-)
-
 from af.tree.draw.aa_labels import LabelParams, leaf_consensus, select_labels  # noqa: E402
 from af.tree.draw.layout import compute_layout  # noqa: E402
 from af.tree.draw.place import (  # noqa: E402
@@ -24,6 +14,16 @@ from af.tree.draw.place import (  # noqa: E402
     place_labels,
     placement_metrics,
     segment_hits_box,
+)
+
+from .synthetic import (  # noqa: E402
+    BASE,
+    build,
+    clade_block,
+    inner,
+    leaf,
+    mutate,
+    standard_tree,
 )
 
 LOW = LabelParams(min_share=0.05, max_share=0.99)

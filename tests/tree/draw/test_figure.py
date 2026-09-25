@@ -10,11 +10,11 @@ pytest.importorskip(
     "matplotlib", reason="matplotlib not installed: the tree renderer needs it (pyproject, WS1)"
 )
 
-from tree.draw.synthetic import PARENTS, standard_tree  # noqa: E402
-
 from af.tree.draw.figure import FigureConfig, Overrides, make_figure  # noqa: E402
 from af.tree.draw.render import DashBar  # noqa: E402
 from af.tree.draw.sections import SectionOverrideError, SelectParams  # noqa: E402
+
+from .synthetic import PARENTS, standard_tree  # noqa: E402
 
 I7_KEYS = {"i7_version", "kind", "title", "placeholder", "figure", "provenance", "tree", "notes"}
 

@@ -6,8 +6,6 @@ np = pytest.importorskip(
     "numpy", reason="numpy not installed: af.tree.draw needs it (pyproject, WS1)"
 )
 
-from tree.draw.synthetic import PARENTS, build, inner, leaf, standard_tree  # noqa: E402
-
 from af.tree.draw.layout import HideRuleError, HideRules, compute_layout  # noqa: E402
 from af.tree.draw.model import TreeModelError  # noqa: E402
 from af.tree.draw.sections import (  # noqa: E402
@@ -20,6 +18,8 @@ from af.tree.draw.sections import (  # noqa: E402
     select_clades,
 )
 from af.tree.draw.timeseries import compute, months, parse_month  # noqa: E402
+
+from .synthetic import PARENTS, build, inner, leaf, standard_tree  # noqa: E402
 
 
 def test_model_rejects_duplicate_leaf_ids():
