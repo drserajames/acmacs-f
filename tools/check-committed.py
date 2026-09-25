@@ -10,6 +10,9 @@ and runs every check there, with no caches:
 - `af` is imported from the export, not from the worktree. Python runs with `-S`
   (so the editable install's import hook is not loaded) and the current
   environment's site-packages is put on PYTHONPATH for the dependencies.
+- The environment must have everything CI installs: the core dependencies and every
+  extra (`pip install -e '.[dev,geo]'`). The check reads HEAD's pyproject.toml and
+  stops, naming what is missing, before a test fails at collection for want of it.
 - Real-data tests run against the private data repo beside *this checkout* (or
   ``$AF_DATA`` if set): the export lives in a temporary directory, where the tests'
   default ``../acmacs-f-data`` would not exist and they would silently skip.
@@ -33,11 +36,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import site
 import subprocess
 import sys
 import tempfile
+import tomllib
+from importlib import metadata
 from pathlib import Path
 
 
@@ -57,6 +63,14 @@ def main() -> int:
             capture_output=True,
         )
         subprocess.run(["tar", "-x", "-C", str(export)], input=archive.stdout, check=True)
+        missing = missing_requirements(export)
+        if missing:
+            print("STOP: this environment lacks what CI installs:")
+            for line in missing:
+                print(f"  - {line}")
+            extras = ",".join(optional_extras(export))
+            print(f"Install as CI does: pip install -e '.[{extras}]'")
+            return 1
         stale = stale_extension_reason(export)
         if stale:
             print(f"STOP: {stale}")
@@ -104,6 +118,39 @@ def run(name: str, command: list[str], export: Path, af_data: str) -> bool:
     print(f"\n== {name}", flush=True)
     result = subprocess.run(command, cwd=export, env=env)
     return result.returncode == 0
+
+
+def optional_extras(export: Path) -> list[str]:
+    project = tomllib.loads((export / "pyproject.toml").read_text())["project"]
+    return sorted(project.get("optional-dependencies", {}))
+
+
+def missing_requirements(export: Path) -> list[str]:
+    """Requirements from HEAD's pyproject (core + every extra) not installed here."""
+    project = tomllib.loads((export / "pyproject.toml").read_text())["project"]
+    wanted = [(requirement, "core") for requirement in project.get("dependencies", [])]
+    for extra, requirements in project.get("optional-dependencies", {}).items():
+        wanted += [(requirement, f"extra {extra}") for requirement in requirements]
+    missing = []
+    for requirement, source in wanted:
+        name = re.split(r"[\s<>=!~;\[]", requirement, maxsplit=1)[0]
+        try:
+            installed = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            missing.append(f"{requirement} ({source}): not installed")
+            continue
+        if not version_satisfies(installed, requirement):
+            missing.append(f"{requirement} ({source}): {installed} installed")
+    return missing
+
+
+def version_satisfies(installed: str, requirement: str) -> bool:
+    """True unless `packaging` is available and says the version is out of range."""
+    try:
+        from packaging.requirements import Requirement
+    except ImportError:
+        return True  # presence was checked; the range needs packaging
+    return Requirement(requirement).specifier.contains(installed, prereleases=True)
 
 
 def stale_extension_reason(export: Path) -> str | None:
