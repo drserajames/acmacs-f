@@ -12,8 +12,14 @@ For each step, in order, :meth:`Pipeline.run`:
 3. otherwise drops the old record, runs the action, checks every output artefact,
    writes a provenance file beside each output, and saves the new record.
 
-The first failure stops the run, and the exception propagates. Steps that already
-finished keep their records, so the next run starts from the failed step. A step
+Independent steps run in parallel, up to ``max_parallel`` at a time (1, the default,
+is serial): a step starts as soon as every step it depends on has finished. So the
+three subtypes' trees build side by side, each through the runner (local or SLURM).
+
+The first failure stops new steps from starting. Steps already running are left to
+finish, so their records are saved, and then the first exception propagates. Steps that
+finished keep their records, so the next run starts from the failed step. A Ctrl-C,
+SIGTERM or SIGHUP cancels the runner's jobs in flight before the run stops. A step
 whose upstream re-ran but produced identical output is correctly skipped, because
 its input hashes did not change.
 
@@ -25,6 +31,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -38,7 +45,7 @@ from af.pipeline.record import (
     output_roles,
     save_record,
 )
-from af.run.job import Runner, now
+from af.run.job import Runner, now, signals_as_exceptions
 from af.util.artefacts import Artefact, check_artefacts, write_provenance
 
 log = logging.getLogger(__name__)
@@ -86,10 +93,15 @@ class Pipeline:
         state_dir: Path,
         runner: Runner,
         root: Path | None = None,
+        max_parallel: int = 1,
     ) -> None:
         """``root``: unnamed inputs and outputs under it are recorded relative to it, so
         the whole tree can move (or sync to another machine) without re-running steps.
+        ``max_parallel``: how many independent steps may run at once.
         """
+        if max_parallel < 1:
+            raise PipelineError("max_parallel must be at least 1")
+        self.max_parallel = max_parallel
         self.steps = {step.name: step for step in steps}
         self.state_dir = state_dir
         self.runner = runner
@@ -133,12 +145,52 @@ class Pipeline:
         unknown = sorted(set(force) - set(self.steps))
         if unknown:
             raise PipelineError(f"unknown step(s) to force: {unknown}")
-        outcomes = []
-        for step in self.order(targets):
-            outcome = self._run_step(step, forced=step.name in force)
-            log.info("%s: %s (%s)", step.name, outcome.status, outcome.reason)
-            outcomes.append(outcome)
-        return outcomes
+        planned = self.order(targets)
+        outcomes: dict[str, StepOutcome] = {}
+        with signals_as_exceptions(), ThreadPoolExecutor(max_workers=self.max_parallel) as pool:
+            try:
+                failure = self._schedule(pool, planned, outcomes, force)
+            except BaseException:
+                # Ctrl-C / SIGTERM / SIGHUP arrive here, in the main thread, while steps
+                # wait on jobs in worker threads: stop those jobs, then stop.
+                self.runner.cancel_active()
+                raise
+        if failure is not None:
+            raise failure
+        return [outcomes[step.name] for step in planned]
+
+    def _schedule(
+        self,
+        pool: ThreadPoolExecutor,
+        planned: list[Step],
+        outcomes: dict[str, StepOutcome],
+        force: Collection[str],
+    ) -> BaseException | None:
+        """Run ``planned`` as their dependencies allow; return the first failure, if any."""
+        pending = list(planned)
+        running: dict[Future[StepOutcome], Step] = {}
+        failure: BaseException | None = None
+        while pending or running:
+            if failure is None:
+                for step in [s for s in pending if self._dependencies[s.name] <= outcomes.keys()]:
+                    if len(running) >= self.max_parallel:
+                        break
+                    pending.remove(step)
+                    running[pool.submit(self._run_step, step, forced=step.name in force)] = step
+            if not running:
+                break  # a failure stopped new steps and nothing is left running
+            done, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in done:
+                step = running.pop(future)
+                try:
+                    outcome = future.result()
+                except Exception as error:
+                    log.error("%s: failed: %s", step.name, error)
+                    failure = failure or error
+                    continue
+                log.info("%s: %s (%s)", step.name, outcome.status, outcome.reason)
+                outcomes[step.name] = outcome
+        return failure
 
     def _run_step(self, step: Step, *, forced: bool) -> StepOutcome:
         try:

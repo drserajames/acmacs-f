@@ -16,7 +16,7 @@ import pytest
 FAKE_SBATCH = """\
 #!{python}
 # Fake sbatch: run array tasks locally. KILL_TASKS lists task ids to "kill" before they run.
-import os, subprocess, sys
+import os, signal, subprocess, sys
 args = sys.argv[1:]
 if args == ["--version"]:
     print("slurm-fake 0.0")
@@ -27,14 +27,26 @@ script = args[-1]
 array = next(a.split("=", 1)[1] for a in args if a.startswith("--array="))
 last = int(array.split("%")[0].split("-")[1])
 killed = {{int(x) for x in os.environ.get("KILL_TASKS", "").split(",") if x}}
+# Like SLURM, a cancelled job ends: record our pid under the job name for fake scancel,
+# and on SIGTERM stop the running task and exit.
+name = next(a.split("=", 1)[1] for a in args if a.startswith("--job-name="))
+pidfile = os.path.join(os.path.dirname(sys.argv[0]), "running-" + name)
+with open(pidfile, "w") as f:
+    f.write(str(os.getpid()))
+child = None
+def cancelled(signum, frame):
+    if child is not None:
+        child.terminate()
+    sys.exit(143)
+signal.signal(signal.SIGTERM, cancelled)
 worst = 0
 for task in range(last + 1):
     if task in killed:
         worst = max(worst, 1)
         continue
     env = {{**os.environ, "SLURM_ARRAY_TASK_ID": str(task)}}
-    rc = subprocess.run(["/bin/sh", script], env=env).returncode
-    worst = max(worst, rc)
+    child = subprocess.Popen(["/bin/sh", script], env=env)
+    worst = max(worst, child.wait())
 print("12345")
 sys.exit(worst)
 """
@@ -45,5 +57,24 @@ def fake_sbatch(tmp_path: Path) -> Path:
     path = tmp_path / "bin" / "sbatch"
     path.parent.mkdir()
     path.write_text(FAKE_SBATCH.format(python=sys.executable))
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path
+
+
+FAKE_SCANCEL = """\
+#!/bin/sh
+# Fake scancel: --name=<job name> -> SIGTERM the fake sbatch that recorded that name.
+here="$(dirname "$0")"
+echo "$@" >> "$here/scancel-calls.txt"
+name="${{1#--name=}}"
+[ -f "$here/running-$name" ] && kill -TERM "$(cat "$here/running-$name")"
+exit 0
+"""
+
+
+@pytest.fixture
+def fake_scancel(fake_sbatch: Path) -> Path:
+    path = fake_sbatch.parent / "scancel"
+    path.write_text(FAKE_SCANCEL.format())
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
     return path

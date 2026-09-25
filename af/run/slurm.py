@@ -12,11 +12,13 @@ How success is established, without trusting any single signal:
 sbatch's own exit code is logged but not relied on: for an array it is the highest
 task exit code, which cannot say *which* task failed.
 
-If the driver is interrupted (Ctrl-C) or fails while waiting, every job it submitted
-is cancelled (``scancel --name``: each submission has a unique job name), so no
-orphaned job keeps writing into a directory the next run will use. A driver killed
-outright (SIGKILL, a dropped ssh session) cannot clean up. Run long pipelines
-inside tmux, or submit the driver itself as a SLURM job.
+If the driver is interrupted (Ctrl-C), terminated (SIGTERM, e.g. by a job
+scheduler or ``kill``), loses its terminal (SIGHUP, a dropped ssh session) or fails
+while waiting, every job it has in flight is cancelled (``scancel --name``: each
+submission has a unique job name), so no orphaned job keeps writing into a directory
+the next run will use. The waits run in worker threads but signals arrive in the
+main thread, which is why cancelling works from a shared registry of in-flight
+submissions. Only SIGKILL cannot be handled; run long pipelines in tmux anyway.
 
 Arrays longer than ``max_array_size`` (the cluster's MaxArraySize, often 1001) are
 split into several arrays, submitted together.
@@ -35,11 +37,12 @@ from __future__ import annotations
 import logging
 import shlex
 import subprocess
+import threading
 import time
 import uuid
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from af.run.job import (
@@ -51,6 +54,7 @@ from af.run.job import (
     collect,
     finish,
     now,
+    signals_as_exceptions,
 )
 
 log = logging.getLogger(__name__)
@@ -74,6 +78,10 @@ class SlurmRunner:
     max_array_size: int | None = None
     sbatch: str = "sbatch"
     scancel: str = "scancel"
+    _active: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if self.max_array_size is not None and self.max_array_size < 1:
@@ -89,12 +97,25 @@ class SlurmRunner:
         for job in jobs:
             by_resources.setdefault(job.resources, []).append(job)
         arrays = [chunk for group in by_resources.values() for chunk in self._chunks(group)]
-        with ThreadPoolExecutor(max_workers=max(1, len(arrays))) as pool:
-            grouped = list(pool.map(self._submit_array, arrays))
+        with signals_as_exceptions(), ThreadPoolExecutor(max_workers=max(1, len(arrays))) as pool:
+            try:
+                grouped = list(pool.map(self._submit_array, arrays))
+            except BaseException:
+                # Ctrl-C, SIGTERM/SIGHUP or an error arrives here, in the main thread,
+                # while workers still block in sbatch --wait: cancel what they wait on.
+                self.cancel_active()
+                raise
         outcome_by_name = {
             outcome.job.name: outcome for outcomes in grouped for outcome in outcomes
         }
         return collect([outcome_by_name[job.name] for job in jobs])
+
+    def cancel_active(self) -> None:
+        """scancel every submission still in flight. Their sbatch --wait then returns."""
+        with self._lock:
+            names = sorted(self._active)
+        for name in names:
+            self._cancel(name)
 
     def _chunks(self, jobs: list[Job]) -> list[list[Job]]:
         size = self.max_array_size or len(jobs)
@@ -113,14 +134,20 @@ class SlurmRunner:
         argv = self._sbatch_argv(jobs, batch, array_script)
         log.info("submitting %d task(s): %s", len(jobs), shlex.join(argv))
         started = now()
+        name = _job_name(jobs, batch)
+        with self._lock:
+            self._active.add(name)
         try:
             submitted = subprocess.run(argv, capture_output=True, text=True)
         except OSError as error:
             return [Failure(job, f"could not run sbatch: {error}") for job in jobs]
         except BaseException:
-            # Interrupted or failed while waiting: don't leave the jobs running.
-            self._cancel(_job_name(jobs, batch))
+            # Failed while waiting, in this thread: don't leave the jobs running.
+            self._cancel(name)
             raise
+        finally:
+            with self._lock:
+                self._active.discard(name)
         (batch / "sbatch.out").write_text(submitted.stdout + submitted.stderr)
         log.info("sbatch exited %d for %s", submitted.returncode, batch.name)
         if submitted.returncode != 0 and not any(

@@ -79,14 +79,18 @@ python -m af.run.smoke --work-dir /shared/scratch/af-smoke [--partition P] [--ac
 
 It prints a PASS/FAIL table and writes `smoke-report.json` into the work directory.
 
+Independent pipeline steps run side by side with `[pipeline] max_parallel = N` (default 1,
+one after another), so the three subtypes' trees can build at the same time.
+
 What the cluster must provide:
 
 - **A shared filesystem** for the conda env / venv (jobs run the submitting interpreter),
   the work directory, the store and the work area.
 - **`sbatch --wait`** (SLURM ≥ 17). Jobs inherit the submitting environment (`--export=ALL`).
-- **A driver that outlives the jobs.** `run()` blocks until the jobs finish. Ctrl-C or an
-  error cancels the submitted jobs (`scancel --name`), but a killed driver can't. Run long
-  pipelines in tmux, or submit the driver itself as a SLURM job.
+- **A driver that outlives the jobs.** `run()` blocks until the jobs finish. Ctrl-C,
+  SIGTERM, SIGHUP (a dropped ssh session) or an error cancels every job in flight
+  (`scancel --name`) before the driver exits; only SIGKILL cannot be handled. Still, run
+  long pipelines in tmux, or submit the driver itself as a SLURM job.
 - **The interpreter's `af` is the code that runs.** Python jobs (`Job.python_module`, the smoke
   test) run `python -m …` with the submitting interpreter, so install the checked-out code into
   it (`pip install -e .` in that env). An env whose editable install points at another

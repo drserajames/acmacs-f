@@ -13,8 +13,11 @@ contract is the same for all of them:
 from __future__ import annotations
 
 import datetime
+import signal
 import sys
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -118,6 +121,50 @@ class Runner(Protocol):
     def run(self, job: Job) -> JobResult: ...
 
     def run_many(self, jobs: Sequence[Job]) -> list[JobResult]: ...
+
+    def cancel_active(self) -> None:
+        """Stop every job this runner has in flight (on interrupt or termination)."""
+        ...
+
+
+class Terminated(BaseException):
+    """The driver received SIGTERM or SIGHUP.
+
+    A BaseException, like KeyboardInterrupt, so a step's ``except Exception`` cannot
+    swallow it: the run must stop and its jobs must be cancelled.
+    """
+
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+        super().__init__(f"terminated by {signal.Signals(signum).name}")
+
+
+TERMINATING_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
+@contextmanager
+def signals_as_exceptions() -> Iterator[None]:
+    """While active, SIGTERM and SIGHUP raise :class:`Terminated` in the main thread.
+
+    Python's default for both is to die at once, skipping every ``finally`` and so
+    leaving submitted SLURM jobs running unwatched. SIGINT already raises
+    KeyboardInterrupt. Handlers can only be installed from the main thread;
+    elsewhere this does nothing, and the caller in the main thread (the pipeline, or
+    a runner called directly) is the one that catches the exception and cancels.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def handler(signum: int, frame: object) -> None:
+        raise Terminated(signum)
+
+    previous = {sig: signal.signal(sig, handler) for sig in TERMINATING_SIGNALS}
+    try:
+        yield
+    finally:
+        for sig, old in previous.items():
+            signal.signal(sig, old)
 
 
 def finish(job: Job, returncode: int | None, started: datetime.datetime) -> JobResult | Failure:
