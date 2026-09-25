@@ -26,7 +26,7 @@ from collections import Counter
 from pathlib import Path
 
 from . import aliases, dates
-from .cdc import LAB, ReadResult
+from .cdc import LAB, ReadResult, _titre_order
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
 from .rules import Rules
@@ -256,9 +256,44 @@ class SheetReader:
             if renamed:
                 antigens[-1].source[aliases.SOURCE_KEY] = renamed
             titres.append([self._titre(r, c) for c in titre_cols])
+        antigens, titres = self._merge_repeats(antigens, titres)
         keep = [i for i, row in enumerate(titres) if any(row)]
         self.dropped["antigens: no readings"] += len(titres) - len(keep)
         return [antigens[i] for i in keep], [titres[i] for i in keep]
+
+    def _merge_repeats(
+        self, antigens: list[Antigen], titres: list[list[list[str]]]
+    ) -> tuple[list[Antigen], list[list[list[str]]]]:
+        """A sheet that lists one preparation on several rows (same name, passage cell,
+        harvest date and CDC id) gives one antigen with every row's readings, as the TSV reader
+        does for repeated rows of a test: both routes into a CDC table must agree, and a
+        chart cannot hold two points with one identity."""
+        first: dict[tuple[str, ...], int] = {}
+        out_ag: list[Antigen] = []
+        out_ti: list[list[list[str]]] = []
+        for antigen, row in zip(antigens, titres, strict=True):
+            key = (
+                antigen.raw_name,
+                antigen.source["passage_cell"],
+                antigen.passage_date or "",
+                ",".join(antigen.lab_ids),
+            )
+            if key not in first:
+                first[key] = len(out_ag)
+                out_ag.append(antigen)
+                out_ti.append([list(cell) for cell in row])
+                continue
+            i = first[key]
+            for cell, more in zip(out_ti[i], row, strict=True):
+                cell.extend(more)
+                cell.sort(key=_titre_order)
+            out_ag[i].source.setdefault("repeated_rows", []).append(antigen.source["row"])
+            self.dropped["antigens: repeated rows merged"] += 1
+            self.warnings.append(
+                f"{self.s.where(antigen.source['row'] - 1)}: {antigen.raw_name!r} repeats row "
+                f"{out_ag[i].source['row']}; readings merged"
+            )
+        return out_ag, out_ti
 
     def _block_end(self, start: int, titre_cols: list[int]) -> int:
         """The antigen block ends at the SERUM CONTROL row; failing that, at the first blank row
