@@ -13,7 +13,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 
-_SLASH = re.compile(r"(\d{1,4})[/.-](\d{1,2})[/.-](\d{2,4})")
+_SLASH = re.compile(r"(\d{1,4})[/.-](\d{1,2})[/.-](\d{1,4})")  # year length checked in _build
 ORDERS = {"MDY": (0, 1, 2), "DMY": (1, 0, 2), "YMD": (1, 2, 0)}  # (month, day, year) positions
 
 

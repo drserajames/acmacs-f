@@ -18,11 +18,13 @@ RULES: dict[str, list[str]] = {
         "CDC\tHI\texact\tUnable to test\t*" + META + "yes",
         "LABX\t*\texact\t*\t*" + META + "yes",
         "LABX\t*\texact\t5\t<10" + META + "yes",
+        "LABN\tHI\texact\t≧640\t>320" + META + "yes",
     ],
     "control_sera": [
         "lab\tfield\tkind\tpattern\taction\tvalue\tevidence\tadded_by\tadded_on\toptional",
         "CDC\tlot\tregex\t.*POOL.*\tdrop\thuman pool" + META,
         "CDC\tlot\tregex\t[0-9]{2}MouseS[0-9]+\tspecies\tMOUSE" + META + "yes",
+        "LABN\tname\tregex\tHuman pool .*\tdrop\thuman pool" + META + "yes",
     ],
     "table_defaults": [
         "lab\tsubtype\tassay\trbc\tevidence\tadded_by\tadded_on\toptional",
@@ -36,6 +38,7 @@ RULES: dict[str, list[str]] = {
         "*\tregex\tB?X-?([0-9]+[A-Z]?(?:-CL)?)\tNYMC-\\1" + META + "yes",
         "*\tregex\t(IVR|CVR)-?([0-9]+[A-Z]?)\t\\1-\\2" + META + "yes",
         "*\tregex\tCNIC-?([0-9]+[A-Z]?)\tCNIC-\\1" + META + "yes",
+        "*\tregex\tSAN-?([0-9]+[A-Z]?)\tSAN-\\1" + META + "yes",
     ],
     "passage_tokens": [
         "lab\tkind\tpattern\tcanonical\tclass\tevidence\tadded_by\tadded_on\toptional",
@@ -43,6 +46,7 @@ RULES: dict[str, list[str]] = {
             f"*\texact\t{token}\t{canonical}\t{cls}" + META + "yes"
             for token, canonical, cls in [
                 ("C", "MDCK", "cell"),
+                ("MDCK", "MDCK", "cell"),
                 ("S", "SIAT", "cell"),
                 ("QMC", "QMC", "cell"),
                 ("HCK", "HCK", "cell"),
@@ -53,6 +57,8 @@ RULES: dict[str, list[str]] = {
                 ("SPF", "SPF", "egg"),
                 ("D", "D", "egg"),
                 ("X", "X", "unknown"),
+                ("AX-4", "AX4", "cell"),
+                ("SPE", "SPE", "egg"),
             ]
         ),
     ],
@@ -76,11 +82,13 @@ RULES: dict[str, list[str]] = {
     "name_rewrites": [
         "lab\tkind\tpattern\treplacement\tevidence\tadded_by\tadded_on\toptional",
         "LABX\tregex\tBX/(.*)\tB/\\1" + META + "yes",
+        "LABN\tregex\t(.*/[0-9]{4})\\s*pdm\\b\\s*(.*)\t\\1 \\2" + META + "yes",
     ],
     "flu_types": [
         "lab\tkind\tpattern\tsubtype\tlineage\tevidence\tadded_by\tadded_on\toptional",
         "LABX\texact\tH3N2\tA(H3N2)\t-" + META + "yes",
         "LABX\texact\tB_VIC\tB\tVICTORIA" + META + "yes",
+        "LABN\tregex\t.*influenza EXAMPLE H3 viruses.*\tA(H3N2)\t-" + META + "yes",
     ],
     "serum_ids": [
         "lab\tkind\tpattern\tferret\tcanonical\tmin_titre\tmin_fraction"
@@ -91,6 +99,7 @@ RULES: dict[str, list[str]] = {
         "lab\tdate_order\tpassage_plus\tevidence\tadded_by\tadded_on\toptional",
         "CDC\tMDY\t" + META + "yes",
         "LABX\tYMD\trepeat-previous" + META + "yes",
+        "LABN\tYMD\trepeat-previous" + META + "yes",
     ],
 }
 
