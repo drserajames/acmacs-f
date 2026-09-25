@@ -7,7 +7,7 @@ from pathlib import Path
 from af.tables import cdc_season
 from af.tables.rules import Rules
 
-from .conftest import write_rules
+from .synthetic_rules import write_rules
 
 
 def season_row(**kw: str) -> dict[str, str]:

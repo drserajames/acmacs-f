@@ -11,7 +11,7 @@ from af.tables.rules import Rules
 from af.tables.store import INDEX, KIND, read_table
 from af.tables.update import PUBLISHED, CDCInputs, TablesSettings, make_step, state_dir, update
 
-from .conftest import write_rules
+from .synthetic_rules import write_rules
 from .test_cdc import row, write_tsv
 
 

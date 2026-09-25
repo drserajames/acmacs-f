@@ -34,6 +34,8 @@ class Antigen:
     annotations: list[str] = field(default_factory=list)
     lineage: str = ""  # B only: "VICTORIA"/"YAMAGATA"; per antigen, since old B tables mix them
     reference: bool = False  # the lab marked it a reference antigen
+    epi_isl: str = ""  # GISAID isolate the lab paired this antigen with ("" = none given)
+    sequence_pairing: str = ""  # "exact" (sequenced this passage), "proxy" (another isolate), ""
     source: dict[str, Any] = field(default_factory=dict)  # lab-specific fields, verbatim
 
     def ae_passage(self) -> str:
@@ -54,6 +56,8 @@ class Serum:
     lineage: str = ""
     reassortant: str = ""
     annotations: list[str] = field(default_factory=list)  # e.g. ["BOOSTED"]
+    epi_isl: str = ""  # as for Antigen: the serum strain's paired GISAID isolate
+    sequence_pairing: str = ""
     source: dict[str, Any] = field(default_factory=dict)
 
     def ae_passage(self) -> str:
@@ -109,8 +113,8 @@ class Table:
         for key in ("meta", "warnings", "dropped", "source_key"):
             d.pop(key)
         for item in (*d["antigens"], *d["sera"]):
-            item.pop("source")
-            item.pop("raw_name")
+            for key in ("source", "raw_name", "epi_isl", "sequence_pairing"):
+                item.pop(key)  # sequence links: CDC fills them in later; no map depends on them
         return d
 
     def map_hash(self) -> str:
