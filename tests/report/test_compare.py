@@ -403,3 +403,15 @@ def test_orientation_is_of_the_bulk_not_pulled_by_moved_points() -> None:
     res = maps.compare(_map(a, ["X"] * 200), _map(b, ["X"] * 200))["procrustes"]
     assert abs(res["rotation_deg"]) < 1e-6  # the bulk is not turned at all
     assert abs(res["rotation_deg_all_points"]) > abs(res["rotation_deg"])
+
+
+def test_loose_matching_ignores_spelling_but_keeps_distinct_points_apart() -> None:
+    ref = _map([(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)], ["X"] * 3)
+    new = _map([(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)], ["X"] * 3)
+    ref["map"]["antigens"][0]["name"] = "PORT-TOWN ONE"
+    new["map"]["antigens"][0]["name"] = "PORT TOWN ONE"
+    assert maps.compare(ref, new, "name")["antigens"]["jaccard"] < 1.0
+    assert maps.compare(ref, new, "loose")["antigens"]["jaccard"] == 1.0
+    assert maps.normalise_key("PORT TOWN ONE|cell", "loose") == maps.point_key(
+        ref["map"]["antigens"][0], "loose"
+    )

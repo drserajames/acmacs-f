@@ -255,7 +255,10 @@ def compare_report(
     )
     if orphans:
         raise ValueError(f"expected/excused: slots not in this report {orphans}")
-    excused = [(entry, read_keys(entry.points)) for entry in limits.excused]
+    excused = [
+        (entry, {maps.normalise_key(k, how) for k in read_keys(entry.points)})
+        for entry in limits.excused
+    ]
     rows: list[dict[str, Any]] = []
     failed = 0
     for fig in manifest["figures"]:
@@ -361,7 +364,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("record", type=Path, help="the build record, <report id>.build.json")
     parser.add_argument("reference", type=Path)
     parser.add_argument("--limits", type=Path, required=True)
-    parser.add_argument("--match", choices=("id", "name"), default="name")
+    parser.add_argument(
+        "--match", choices=maps.MATCH_MODES, default="loose",
+        help="loose (default): name spelling-normalised + passage class; see maps.spelling_key",
+    )  # fmt: skip
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     limits = load_config(args.limits, Limits)

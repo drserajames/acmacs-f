@@ -22,6 +22,7 @@ and counted, never merged.
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -31,13 +32,45 @@ Point = dict[str, Any]
 XY = tuple[float, float]
 
 
+MATCH_MODES = ("id", "name", "loose")
+
+
+def spelling_key(name: str) -> str:
+    """Name with everything but letters and digits removed, upper case.
+
+    af keeps each lab's spelling of a location (DECISIONS 24 Sep: no locdb rewrites), where ae
+    rewrote names, so the same virus is COTE D'IVOIRE on one side and COTE DIVOIRE on the other,
+    or LASERENA and LA SERENA. Two different strains that differ only in punctuation or spacing
+    would collide; they are then dropped as ambiguous and counted, never merged.
+    """
+    return re.sub(r"[^0-9A-Z]", "", name.upper())
+
+
 def point_key(point: Point, how: str) -> str:
+    """Matching key: ``id``; ``name`` (name + passage class, or + serum id); ``loose`` (``name``
+    with the name spelling-normalised by :func:`spelling_key`)."""
+    if how not in MATCH_MODES:
+        raise ValueError(f"match mode {how!r} not one of {MATCH_MODES}")
     if how == "id":
         return str(point["id"])
+    name = spelling_key(point["name"]) if how == "loose" else point["name"]
     if point.get("serum_id"):  # a serum id identifies the serum; passage class may be unset
-        return f"{point['name']}|{point['serum_id']}"
+        return f"{name}|{point['serum_id']}"
     # A null passage class (not a passage: specimen ids, blanks) keys as "none" on both sides.
-    return f"{point['name']}|{point['passage_class'] or 'none'}"
+    return f"{name}|{point['passage_class'] or 'none'}"
+
+
+def _label(point: Point) -> str:
+    """How a point is listed for a reader: its own spelling, whatever key matched it."""
+    return point_key(point, "name")
+
+
+def normalise_key(key: str, how: str) -> str:
+    """A ``NAME|rest`` key written by hand (excused-point files), keyed as ``point_key`` would."""
+    if how != "loose":
+        return key
+    name, _, rest = key.rpartition("|")
+    return f"{spelling_key(name)}|{rest}"
 
 
 def drawn(point: Point) -> bool:
@@ -153,11 +186,15 @@ def _group(ref: list[Point], new: list[Point], how: str, clades: bool) -> dict[s
         "ambiguous_dropped": {"ref": rdup, "new": ndup},
         "jaccard": len(common) / max(1, len(ri.keys() | ni.keys())),
         # Full lists: every one-sided point must be listed somewhere a person reads.
-        "only_ref_keys": sorted(ri.keys() - ni.keys()),
-        "only_new_keys": sorted(ni.keys() - ri.keys()),
+        "only_ref_keys": sorted(_label(ri[k]) for k in ri.keys() - ni.keys()),
+        "only_new_keys": sorted(_label(ni[k]) for k in ni.keys() - ri.keys()),
         # Frame: drawn on both sides, inside the frame on one side only.
-        "in_frame_only_ref_keys": sorted(k for k, (r, n) in in_frame.items() if r and not n),
-        "in_frame_only_new_keys": sorted(k for k, (r, n) in in_frame.items() if n and not r),
+        "in_frame_only_ref_keys": sorted(
+            _label(ri[k]) for k, (r, n) in in_frame.items() if r and not n
+        ),
+        "in_frame_only_new_keys": sorted(
+            _label(ni[k]) for k, (r, n) in in_frame.items() if n and not r
+        ),
     }  # fmt: skip
     if clades:
         coloured = [k for k in common if _coloured(ri[k]) and _coloured(ni[k])]
