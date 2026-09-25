@@ -20,6 +20,13 @@ now JIHS) and similar names belong to other institutes. What cannot be chosen by
 rules is **flagged, never taken silently** (T31): an egg antigen with only cell sequences is
 still matched, but flagged doubtful; a tie between different sequences is not matched.
 
+Last, for a lab that numbers its viruses uniquely (CNIC: one number per virus per year,
+Sarah Q52), a name that found nothing or left a tie may be matched by **number**: the lab's
+own deposit with the same isolate number and year, within the same province (the first word
+of the location) unless the rule's scope is national. The district spelling is what may
+differ. It is taken only when that key has one district among the lab's deposits, flagged
+``match.lab-number``; a key with several is flagged ``match.lab-number-collision`` and left.
+
 Passage classes of GISAID's free-text passages come from a rule table
 (``gisaid_passage_classes.tsv``, acmacs-f-data); table antigens bring their own class from
 the table parsers.
@@ -31,7 +38,7 @@ import csv
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import duckdb
@@ -49,6 +56,8 @@ CELL_FROM_ORIGINAL = "match.cell-antigen-original-sequence"
 IDENTICAL_DUPLICATES = "match.identical-duplicates"
 AMBIGUOUS = "match.ambiguous"
 OWN_LAB = "match.own-lab"
+LAB_NUMBER = "match.lab-number"
+LAB_NUMBER_COLLISION = "match.lab-number-collision"
 REASSORTANT = "match.reassortant"
 NO_MATCH = "match.none"
 DOUBTFUL = frozenset({EPI_NAME_DIFFERS, SEVERAL_ACCESSIONS, EGG_WITHOUT_EGG_SEQUENCE,
@@ -118,6 +127,20 @@ class Match:
         return any(flag in DOUBTFUL for flag in self.flags)
 
 
+@dataclass(frozen=True)
+class NumberRule:
+    """Match by (province, isolate number, year) among ``lab``'s own deposits."""
+
+    lab: str
+    scope: str = "province"  # or "national": the number is unique across the country
+
+    def key(self, location: str, isolate: str, year: str) -> tuple[str, str, str]:
+        if self.scope not in ("province", "national"):
+            raise ValueError(f"number rule scope {self.scope!r}: province or national")
+        province = location.split(" ")[0] if self.scope == "province" else ""
+        return (province, isolate, year)
+
+
 @dataclass
 class SequenceIndex:
     """Candidates by EPI_ISL and by name key, over one or more sequence datasets."""
@@ -128,8 +151,11 @@ class SequenceIndex:
     )
     counts: Counter[str] = field(default_factory=Counter)
     submitters: dict[str, frozenset[str]] = field(default_factory=dict)  # lab -> GISAID names
+    number_rules: dict[str, NumberRule] = field(default_factory=dict)  # lab -> rule
+    _by_number: dict[str, dict[tuple[str, str, str], list[Candidate]]] | None = None
 
     def add(self, candidate: Candidate) -> None:
+        self._by_number = None
         self.by_epi[candidate.epi_isl].append(candidate)
         key = name_key(candidate.name)
         if key is not None:
@@ -160,6 +186,8 @@ class SequenceIndex:
         key = name_key(name)
         found = self.by_name.get(key, []) if key is not None else []
         result = self._from_name(found, antigen_class, flags, self.submitters.get(lab, frozenset()))
+        if result.chosen is None and key is not None and lab in self.number_rules:
+            result = self._from_number(result, key, lab, antigen_class)
         self.counts.update(result.flags or ["match.clean"])
         return result
 
@@ -181,6 +209,37 @@ class SequenceIndex:
             tier = mine
         chosen = _one_sequence(tier, flags, AMBIGUOUS)
         return Match("name", chosen, tuple(found), tuple(flags))
+
+    def _from_number(
+        self, result: Match, key: tuple[str, str, str], lab: str, antigen_class: str
+    ) -> Match:
+        """The lab's own deposit with this number: only for a name with no match or a tie."""
+        rule = self.number_rules[lab]
+        found = self._numbered(lab).get(rule.key(*key), [])
+        if not found:
+            return result
+        flags = [f for f in result.flags if f != NO_MATCH]
+        if len({c.name.split("/")[1] for c in found}) > 1:  # districts of the key
+            return replace(result, flags=(*result.flags, LAB_NUMBER_COLLISION))
+        tier = _preferred(found, antigen_class, flags)
+        chosen = _one_sequence(tier, flags, AMBIGUOUS)
+        if chosen is None:
+            return result  # the number finds the same tie: nothing gained
+        flags = [f for f in flags if f != AMBIGUOUS]
+        return Match("number", chosen, tuple(found), (*flags, LAB_NUMBER))
+
+    def _numbered(self, lab: str) -> dict[tuple[str, str, str], list[Candidate]]:
+        if self._by_number is None:
+            self._by_number = {}
+        if lab not in self._by_number:
+            own, rule = self.submitters.get(lab, frozenset()), self.number_rules[lab]
+            table: dict[tuple[str, str, str], list[Candidate]] = defaultdict(list)
+            for key, cands in self.by_name.items():
+                for c in cands:
+                    if c.submitting_lab in own:
+                        table[rule.key(*key)].append(c)
+            self._by_number[lab] = dict(table)
+        return self._by_number[lab]
 
 
 def _preferred(found: list[Candidate], antigen_class: str, flags: list[str]) -> list[Candidate]:
