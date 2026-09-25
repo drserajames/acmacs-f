@@ -81,20 +81,21 @@ def runs(member: np.ndarray) -> list[tuple[int, int]]:
 
 @dataclass
 class BandParams:
-    merge_gap_fraction: float = 0.05  # merge runs across a gap <= this share of the clade ...
-    merge_min_purity: float = 0.80  # ... only if the merged span stays this pure
-    min_gap: int = 5  # always merge gaps this small (single odd leaves)
-    drop_fraction: float = 0.10  # bands smaller than this share of the largest are strays
+    """Values and their reasons: defaults.toml [bands]."""
+
+    merge_gap_fraction: float
+    merge_min_purity: float
+    min_gap: int
+    drop_fraction: float
 
 
-def clade_bands(member: np.ndarray, clade: str, p: BandParams | None = None) -> CladeSections:
+def clade_bands(member: np.ndarray, clade: str, p: BandParams) -> CladeSections:
     """Bands from contiguous runs, merged across gaps that are small relative to the clade.
 
     A merge is refused if the merged span would fall below ``merge_min_purity`` members, so a
     band never swallows a sibling clade. The old per-clade tolerances were absolute tip counts
     that had to be retuned as the tree grew; these are relative.
     """
-    p = p or BandParams()
     total = int(member.sum())
     if total == 0:
         return CladeSections(clade, [], [], 0)
@@ -123,11 +124,13 @@ def clade_bands(member: np.ndarray, clade: str, p: BandParams | None = None) -> 
 
 @dataclass
 class SelectParams:
-    min_share: float = 0.0075  # a clade needs this share of the drawn rows
-    max_share: float = 0.95  # above this it covers nearly everything and says nothing
-    min_coherence: float = 0.7  # its largest band must hold this share of its rows
-    cut_window_share: float = 0.5  # a nested band splits its parent's letter only if this
-    # share of its rows falls in the report's time window (a lineage still circulating)
+    """Values and their reasons: defaults.toml [clades]."""
+
+    min_share: float  # shown if on at least this share of the drawn rows ...
+    min_window_leaves: int  # ... or with at least this many leaves in the time window
+    max_share: float
+    min_coherence: float
+    cut_window_share: float
 
 
 @dataclass
@@ -141,14 +144,19 @@ class Selection:
 def select_clades(
     member: Mapping[str, np.ndarray],
     parents: Mapping[str, str | None],
-    n_rows: int,
-    p: SelectParams | None = None,
-    bands: BandParams | None = None,
+    in_window: np.ndarray,
+    p: SelectParams,
+    bands: BandParams,
     force_show: frozenset[str] = frozenset(),
     force_hide: frozenset[str] = frozenset(),
 ) -> Selection:
-    """Choose the clades that get a bracket; slots follow nesting depth among those chosen."""
-    p = p or SelectParams()
+    """Choose the clades that get a bracket; slots follow nesting depth among those chosen.
+
+    A clade is "very small" (not shown) when it is on less than ``min_share`` of the rows AND
+    has fewer than ``min_window_leaves`` leaves in the window: small clades that are still
+    circulating keep their bracket.
+    """
+    n_rows = len(in_window)
     missing = sorted((force_show | force_hide) - set(member))
     if missing:
         raise SectionOverrideError(f"clade override(s) match no drawn clade: {missing}")
@@ -156,6 +164,7 @@ def select_clades(
     for clade in sorted(member):
         m = member[clade]
         share = m.sum() / n_rows
+        in_win = int((m & in_window).sum())
         cs = clade_bands(m, clade, bands)
         coherence = max(b.members for b in cs.bands) / cs.total if cs.bands else 0.0
         if clade in force_hide:
@@ -164,8 +173,11 @@ def select_clades(
             shown.append(cs)
         elif share > p.max_share:
             rejected[clade] = f"on {share:.3f} of rows (> {p.max_share})"
-        elif share < p.min_share:
-            rejected[clade] = f"on {share:.4f} of rows (< {p.min_share})"
+        elif share < p.min_share and in_win < p.min_window_leaves:
+            rejected[clade] = (
+                f"very small: on {share:.4f} of rows (< {p.min_share}) and "
+                f"{in_win} leaves in the window (< {p.min_window_leaves})"
+            )
         elif coherence < p.min_coherence:
             rejected[clade] = f"scattered: largest band holds {coherence:.2f} of its rows"
         else:
@@ -197,7 +209,7 @@ def hz_partition(
     sel: Selection,
     parents: Mapping[str, str | None],
     in_window: np.ndarray,
-    p: SelectParams | None = None,
+    p: SelectParams,
     min_rows_fraction: float = 0.002,
     hide_first_rows: frozenset[int] = frozenset(),
 ) -> list[HzBand]:
@@ -208,7 +220,6 @@ def hz_partition(
     smaller than ``min_rows_fraction`` of the rows are not lettered. ``hide_first_rows`` is the
     override (the caller resolves leaf names to rows and errors on a name that matches nothing).
     """
-    p = p or SelectParams()
     n = len(in_window)
     owner = np.full(n, -1)
     clades: list[str] = []

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .aa_labels import LabelParams, select_labels
+from .defaults import load_defaults
 from .i7 import tree_block, write_i7
 from .layout import HideRules, compute_layout, rows_matching
 from .model import DrawTree
@@ -45,9 +46,10 @@ class FigureConfig:
     window_start: str  # 'YYYY-MM', inclusive
     window_end: str  # 'YYYY-MM', exclusive
     hide: HideRules = field(default_factory=HideRules)
-    select: SelectParams = field(default_factory=SelectParams)
-    bands: BandParams = field(default_factory=BandParams)
-    labels: LabelParams = field(default_factory=LabelParams)
+    # Rule thresholds: defaults.toml unless a config supplies its own (load_defaults(path)).
+    select: SelectParams = field(default_factory=lambda: load_defaults().clades)
+    bands: BandParams = field(default_factory=lambda: load_defaults().bands)
+    labels: LabelParams = field(default_factory=lambda: load_defaults().labels)
     overrides: Overrides = field(default_factory=Overrides)
     dash_bars: list[DashBar] = field(default_factory=list)
     strains: list[tuple[str, str]] = field(default_factory=list)  # (leaf id, label text)
@@ -78,7 +80,7 @@ def make_figure(
     selection = select_clades(
         member,
         parents,
-        layout.n_rows,
+        ts.in_window,
         config.select,
         config.bands,
         config.overrides.show_clades,

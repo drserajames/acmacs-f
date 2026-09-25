@@ -1,16 +1,20 @@
 """Layout, hiding rules, clade membership, bands, selection and lettered bands."""
 
+from dataclasses import replace
+from pathlib import Path
+
 import pytest
 
 np = pytest.importorskip(
     "numpy", reason="numpy not installed: af.tree.draw needs it (pyproject, WS1)"
 )
 
+import af.tree.draw as af_draw  # noqa: E402
+from af.tree.draw.defaults import load_defaults  # noqa: E402
 from af.tree.draw.layout import HideRuleError, HideRules, compute_layout  # noqa: E402
 from af.tree.draw.model import TreeModelError  # noqa: E402
 from af.tree.draw.sections import (  # noqa: E402
     SectionOverrideError,
-    SelectParams,
     _letter,
     clade_bands,
     clade_membership,
@@ -18,8 +22,12 @@ from af.tree.draw.sections import (  # noqa: E402
     select_clades,
 )
 from af.tree.draw.timeseries import compute, months, parse_month  # noqa: E402
+from af.util.config import ConfigError  # noqa: E402
 
 from .synthetic import PARENTS, build, inner, leaf, standard_tree  # noqa: E402
+
+D = load_defaults()
+CL = replace(D.clades, min_share=0.1, min_window_leaves=10**9)  # size by share only
 
 
 def test_model_rejects_duplicate_leaf_ids():
@@ -89,7 +97,7 @@ def test_bands_merge_small_gaps_but_not_through_a_sibling():
     m = np.zeros(200, bool)
     m[0:50] = m[52:100] = True  # 2-row gap: merged
     m[150:200] = True  # 50-row gap of another clade: 50 > 5% of 148, stays separate
-    cs = clade_bands(m, "C")
+    cs = clade_bands(m, "C", D.bands)
     assert [(b.first, b.last) for b in cs.bands] == [(0, 99), (150, 199)]
 
 
@@ -97,7 +105,7 @@ def test_bands_drop_small_strays_and_count_them():
     m = np.zeros(300, bool)
     m[0:200] = True
     m[290] = True
-    cs = clade_bands(m, "C")
+    cs = clade_bands(m, "C", D.bands)
     assert [(b.first, b.last) for b in cs.bands] == [(0, 199)]
     assert len(cs.dropped) == 1 and cs.dropped[0].members == 1
 
@@ -106,7 +114,7 @@ def test_selection_rules_and_slots():
     t = standard_tree()
     lay = compute_layout(t)
     member = clade_membership([t.clade[i] for i in lay.leaf_nodes], PARENTS)
-    sel = select_clades(member, PARENTS, lay.n_rows, SelectParams(min_share=0.1))
+    sel = select_clades(member, PARENTS, np.ones(lay.n_rows, bool), CL, D.bands)
     shown = {cs.clade for cs in sel.shown}
     assert shown == {"X", "X.1", "X.1.1", "X.2"}
     assert "ROOTCL" in sel.rejected  # on every row
@@ -118,19 +126,21 @@ def test_clade_override_must_name_a_clade():
     lay = compute_layout(t)
     member = clade_membership([t.clade[i] for i in lay.leaf_nodes], PARENTS)
     with pytest.raises(SectionOverrideError):
-        select_clades(member, PARENTS, lay.n_rows, force_hide=frozenset({"Q.7"}))
+        select_clades(
+            member, PARENTS, np.ones(lay.n_rows, bool), CL, D.bands, force_hide=frozenset({"Q.7"})
+        )
 
 
 def test_hz_letters_old_nested_band_stays_inside_parent():
     t = standard_tree()
     lay = compute_layout(t)
     member = clade_membership([t.clade[i] for i in lay.leaf_nodes], PARENTS)
-    sel = select_clades(member, PARENTS, lay.n_rows, SelectParams(min_share=0.1))
+    sel = select_clades(member, PARENTS, np.ones(lay.n_rows, bool), CL, D.bands)
     rows = lay.leaf_nodes
     ts = compute(
         [t.date[i] for i in rows], [t.date_precision[i] for i in rows], "2024-10", "2026-10"
     )
-    hz = hz_partition(sel, PARENTS, ts.in_window)
+    hz = hz_partition(sel, PARENTS, ts.in_window, CL)
     # X.1.1 (in window) cuts X.1; X.2 (collected 2023) stays inside X's letter
     assert [(h.letter, h.clade, h.first, h.last) for h in hz] == [
         ("A", "X.1", 0, 9),
@@ -143,10 +153,10 @@ def test_hz_override_by_row_must_match_a_band_start():
     t = standard_tree()
     lay = compute_layout(t)
     member = clade_membership([t.clade[i] for i in lay.leaf_nodes], PARENTS)
-    sel = select_clades(member, PARENTS, lay.n_rows, SelectParams(min_share=0.1))
+    sel = select_clades(member, PARENTS, np.ones(lay.n_rows, bool), CL, D.bands)
     inw = np.ones(lay.n_rows, bool)
     with pytest.raises(SectionOverrideError):
-        hz_partition(sel, PARENTS, inw, hide_first_rows=frozenset({3}))
+        hz_partition(sel, PARENTS, inw, CL, hide_first_rows=frozenset({3}))
 
 
 def test_letters_continue_past_z():
@@ -159,3 +169,40 @@ def test_months_window_end_is_exclusive_and_parsed():
     assert parse_month("2025") is None and parse_month("2025-13-01") is None
     with pytest.raises(ValueError):
         months("2026-10", "2024-10")
+
+
+def test_very_small_means_small_and_not_circulating():
+    """Default rule: hidden only if under min_share of rows AND under min_window_leaves."""
+    t = standard_tree()
+    lay = compute_layout(t)
+    member = clade_membership([t.clade[i] for i in lay.leaf_nodes], PARENTS)
+    rows = lay.leaf_nodes
+    inw = compute(
+        [t.date[i] for i in rows], [t.date_precision[i] for i in rows], "2024-10", "2026-10"
+    )
+    p = replace(D.clades, min_share=0.3, min_window_leaves=10)
+    sel = select_clades(member, PARENTS, inw.in_window, p, D.bands)
+    shown = {cs.clade for cs in sel.shown}
+    # X.1.1: 10 rows (0.2 of rows) but all 10 in the window -> shown;
+    # X.2: 20 rows (0.4) -> shown by share although none is in the window
+    assert {"X.1.1", "X.2"} <= shown
+    small = replace(p, min_window_leaves=11)
+    sel = select_clades(member, PARENTS, inw.in_window, small, D.bands)
+    assert "X.1.1" not in {cs.clade for cs in sel.shown}
+    assert sel.rejected["X.1.1"].startswith("very small")
+
+
+def test_shipped_defaults_carry_the_agreed_values(tmp_path):
+    assert (D.clades.min_share, D.clades.min_window_leaves, D.labels.target_labels) == (
+        0.016,
+        100,
+        45,
+    )
+    shipped = Path(af_draw.__file__).parent / "defaults.toml"
+    edited = tmp_path / "mine.toml"
+    edited.write_text(shipped.read_text().replace("target_labels = 45", "target_labels = 30"))
+    assert load_defaults(edited).labels.target_labels == 30
+    broken = tmp_path / "broken.toml"
+    broken.write_text(shipped.read_text().replace("min_window_leaves", "min_window_leafs"))
+    with pytest.raises(ConfigError):
+        load_defaults(broken)

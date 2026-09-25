@@ -8,7 +8,14 @@ paths and the build folder can move; and the output is checked before success is
 The checks are that every figure was typeset (its physical page is in the ``.aux``) and that the
 PDF ends on the last figure's page.
 
-Run: ``python -m af.report.build <config.toml> --figures <root> --out <dir>``.
+Before any LaTeX runs, the figures' store provenance is checked (:mod:`af.report.provenance`):
+the refs are consistent, they resolve in the store, and no unpinned figure is stale. After a
+successful build, the report manifest (store refs, in the store's snapshot format) is written
+where ``--manifest`` says, normally ``acmacs-f-data/reports/<id>/manifest.json``. A build
+record with the figure hashes, slots and LaTeX details sits beside the PDF.
+
+Run: ``python -m af.report.build <config.toml> --figures <root> --store <root>
+--manifest <path> --out <dir>``.
 """
 
 from __future__ import annotations
@@ -24,13 +31,15 @@ from typing import Any
 
 from af.report.config import ReportConfig, Section, load, period_first, period_last
 from af.report.figures import FigureError, Resolved, resolve
+from af.report.provenance import ProvenanceError, StoreUse, check_against_store, collect
 from af.run import Job, JobFailed, LocalRunner
+from af.store import Store, StoreError, write_manifest
 from af.util.artefacts import Artefact, sha256_path
 from af.util.config import ConfigError
 
 LATEX = "pdflatex"
 MAX_PASSES = 4
-MANIFEST_VERSION = 0  # PROVISIONAL: replace with the store's manifest format (I9)
+BUILD_RECORD_VERSION = 1
 
 
 class BuildError(RuntimeError):
@@ -56,13 +65,22 @@ def resolve_all(cfg: ReportConfig, root: Path) -> dict[str, Resolved]:
             errors.append(str(err))
     if errors:
         raise BuildError(f"{len(errors)} figure(s) not usable:\n  " + "\n  ".join(errors))
-    placeholders = [slot for slot, r in out.items() if r.figure.placeholder]
-    if placeholders and not cfg.figures.allow_placeholders:
-        raise BuildError(
-            f"{len(placeholders)} placeholder figure(s) and allow_placeholders is off: "
-            + ", ".join(placeholders)
-        )
     return out
+
+
+def check_bring_up(cfg: ReportConfig, figs: dict[str, Resolved], use: StoreUse) -> None:
+    """Placeholders and figures not drawn from the store need bring-up mode (allow_placeholders)."""
+    placeholders = [slot for slot, r in figs.items() if r.figure.placeholder]
+    if (placeholders or use.not_from_store) and not cfg.figures.allow_placeholders:
+        parts = []
+        if placeholders:
+            parts.append(f"{len(placeholders)} placeholder(s): {', '.join(placeholders)}")
+        if use.not_from_store:
+            parts.append(
+                f"{len(use.not_from_store)} not drawn from the store: "
+                + ", ".join(use.not_from_store)
+            )
+        raise BuildError("allow_placeholders is off and there are " + "; ".join(parts))
 
 
 def _label(slot: str) -> str:
@@ -75,7 +93,9 @@ def _caption(r: Resolved) -> str:
     return tag + tex_escape(f"{r.figure.title} ({r.version}, {when})")
 
 
-def _cover(cfg: ReportConfig, n_placeholders: int, built_at: dt.datetime) -> list[str]:
+def _cover(
+    cfg: ReportConfig, n_placeholders: int, n_not_from_store: int, built_at: dt.datetime
+) -> list[str]:
     r = cfg.report
     first, last = period_first(cfg), period_last(cfg)
     period = first.strftime("%B %Y")
@@ -89,10 +109,10 @@ def _cover(cfg: ReportConfig, n_placeholders: int, built_at: dt.datetime) -> lis
         rf"Data up to {r.data_cutoff.day} {r.data_cutoff.strftime('%B %Y')}\par",
         rf"Built {built_at.strftime('%d %B %Y %H:%M %Z')}\par",
     ]
-    if n_placeholders:
+    if n_placeholders or n_not_from_store:
         lines.append(
             rf"\vspace{{10mm}}{{\Large\color{{red}} DRAFT: {n_placeholders} placeholder "
-            r"figure(s)\par}"
+            rf"figure(s), {n_not_from_store} not drawn from the store\par}}"
         )
     return [*lines, r"\end{titlepage}", r"\tableofcontents", r"\newpage"]
 
@@ -138,8 +158,9 @@ def _map_pages(section: Section, figs: dict[str, Resolved], rel: dict[str, str])
 
 
 def write_tex(
-    cfg: ReportConfig, figs: dict[str, Resolved], build: Path, built_at: dt.datetime
-) -> Path:
+    cfg: ReportConfig, figs: dict[str, Resolved], build: Path, built_at: dt.datetime,
+    n_not_from_store: int = 0,
+) -> Path:  # fmt: skip
     """Copy figures in by content hash and write ``report.tex`` (relative paths only)."""
     fig_dir = build / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -157,7 +178,7 @@ def write_tex(
         r"\usepackage[hidelinks]{hyperref}",
         r"\setlength{\parindent}{0pt}",
         r"\begin{document}",
-        *_cover(cfg, sum(r.figure.placeholder for r in figs.values()), built_at),
+        *_cover(cfg, sum(r.figure.placeholder for r in figs.values()), n_not_from_store, built_at),
     ]
     for section in cfg.sections:
         pages = _tree_pages if section.kind == "trees" else _map_pages
@@ -217,18 +238,24 @@ def check_output(tex: Path, slots: list[str]) -> int:
     return n
 
 
-def manifest(
-    cfg: ReportConfig, config_path: Path, figs: dict[str, Resolved], final: Path,
-    pages: int, passes: int, built_at: dt.datetime,
+def build_record(
+    cfg: ReportConfig, config_path: Path, figs: dict[str, Resolved], use: StoreUse,
+    final: Path, pages: int, passes: int, built_at: dt.datetime, manifest_path: Path | None,
 ) -> dict[str, Any]:  # fmt: skip
+    """Everything about this build beyond the store refs: slots, figure hashes, LaTeX."""
     return {
-        "manifest_version": MANIFEST_VERSION,
+        "build_record_version": BUILD_RECORD_VERSION,
         "report": cfg.report.id,
         "kind": cfg.report.kind,
         "built": built_at.isoformat(),
         "config": {"path": str(config_path), "sha256": sha256_path(config_path)},
         "latex": {"engine": LATEX, "passes": passes},
         "output": {"pdf": final.name, "sha256": sha256_path(final), "pages": pages},
+        "report_manifest": (
+            {"path": str(manifest_path), "sha256": sha256_path(manifest_path)}
+            if manifest_path else None
+        ),
+        "store": use.to_json(),
         "placeholders": sum(r.figure.placeholder for r in figs.values()),
         "figures": [
             {
@@ -244,37 +271,74 @@ def manifest(
             }
             for slot, r in figs.items()
         ],
-    }
+    }  # fmt: skip
 
 
-def build(config_path: Path, figures_root: Path, out_dir: Path) -> Path:
+def check_provenance(
+    cfg: ReportConfig, figs: dict[str, Resolved], store_root: Path | None,
+    manifest_path: Path | None, *, deep: bool,
+) -> StoreUse:  # fmt: skip
+    """All provenance checks, before any LaTeX: a problem found after typesetting is wasted work."""
+    use = collect(figs)
+    check_bring_up(cfg, figs, use)
+    if use.refs:
+        if store_root is None or manifest_path is None:
+            raise BuildError(
+                f"figures name {len(use.refs)} store version(s): --store and --manifest are "
+                "required to check them and record them"
+            )
+        check_against_store(use, figs, Store.open(store_root), deep=deep)
+    elif manifest_path is not None:
+        raise BuildError(
+            "no figure was drawn from the store, so there is no report manifest to write; "
+            "this is a bring-up build (drop --manifest)"
+        )
+    return use
+
+
+def build(
+    config_path: Path, figures_root: Path, out_dir: Path, *,
+    store_root: Path | None = None, manifest_path: Path | None = None, deep: bool = False,
+) -> Path:  # fmt: skip
     """Build the report; return the PDF path. Raises on any problem, leaving no final PDF."""
     cfg = load(config_path)
     built_at = dt.datetime.now(dt.UTC)  # shown on the cover and recorded; decides nothing
     figs = resolve_all(cfg, figures_root)
+    use = check_provenance(cfg, figs, store_root, manifest_path, deep=deep)
     build_dir = out_dir / "build"
     if build_dir.exists():
         shutil.rmtree(build_dir)  # never reuse a stale .aux/.toc or an old figure
     build_dir.mkdir(parents=True)
-    tex = write_tex(cfg, figs, build_dir, built_at)
+    tex = write_tex(cfg, figs, build_dir, built_at, len(use.not_from_store))
     passes = run_latex(tex, LocalRunner())
     pages = check_output(tex, cfg.all_slots())
     final = out_dir / f"{cfg.report.id}.pdf"
     shutil.copyfile(tex.with_suffix(".pdf"), final)
-    record = manifest(cfg, config_path, figs, final, pages, passes, built_at)
-    (out_dir / f"{cfg.report.id}.manifest.json").write_text(json.dumps(record, indent=1))
+    if manifest_path is not None:
+        description = f"report {cfg.report.id}: {final.name} sha256 {sha256_path(final)}"
+        write_manifest(manifest_path, use.refs, description)
+    record = build_record(
+        cfg, config_path, figs, use, final, pages, passes, built_at, manifest_path
+    )
+    (out_dir / f"{cfg.report.id}.build.json").write_text(json.dumps(record, indent=1))
     return final
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build a report PDF from its TOML config.")
     parser.add_argument("config", type=Path)
-    parser.add_argument("--figures", type=Path, required=True, help="figure root (provisional)")
+    parser.add_argument("--figures", type=Path, required=True, help="figure root")
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--store", type=Path, help="store root; required when figures name refs")
+    parser.add_argument("--manifest", type=Path, help="where to write the report manifest")
+    parser.add_argument("--deep", action="store_true", help="re-hash every store file")
     args = parser.parse_args(argv)
     try:
-        pdf = build(args.config, args.figures, args.out)
-    except (BuildError, ConfigError, FigureError) as err:
+        pdf = build(
+            args.config, args.figures, args.out,
+            store_root=args.store, manifest_path=args.manifest, deep=args.deep,
+        )  # fmt: skip
+    except (BuildError, ConfigError, FigureError, ProvenanceError, StoreError) as err:
         print(f"report build FAILED: {err}", file=sys.stderr)
         return 1
     print(pdf)

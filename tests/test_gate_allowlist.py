@@ -10,7 +10,8 @@ import sys
 from types import ModuleType
 
 import pytest
-from conftest import REPO_ROOT
+
+from tests.helpers import REPO_ROOT
 
 
 def strain(*parts: str) -> str:

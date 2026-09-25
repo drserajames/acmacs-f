@@ -1,12 +1,15 @@
 """aa-transition label filters and label placement."""
 
+from dataclasses import replace
+
 import pytest
 
 np = pytest.importorskip(
     "numpy", reason="numpy not installed: af.tree.draw needs it (pyproject, WS1)"
 )
 
-from af.tree.draw.aa_labels import LabelParams, leaf_consensus, select_labels  # noqa: E402
+from af.tree.draw.aa_labels import leaf_consensus, select_labels  # noqa: E402
+from af.tree.draw.defaults import load_defaults  # noqa: E402
 from af.tree.draw.layout import compute_layout  # noqa: E402
 from af.tree.draw.place import (  # noqa: E402
     Grid,
@@ -26,19 +29,20 @@ from .synthetic import (  # noqa: E402
     standard_tree,
 )
 
-LOW = LabelParams(min_share=0.05, max_share=0.99)
+D = load_defaults()
+LOW = replace(D.labels, target_labels=0, min_share=0.05, max_share=0.99)
 
 
 def labels_of(tree, **kw):
     lay = compute_layout(tree)
-    labels, counts = select_labels(tree, lay, p=LabelParams(**{**LOW.__dict__, **kw}))
+    labels, counts = select_labels(tree, lay, (), p=replace(LOW, **kw))
     return {" ".join(lab.subs) for lab in labels}, counts
 
 
 def test_stem_changes_are_labelled_and_keyed_by_leaf_ids():
     t = standard_tree()
     lay = compute_layout(t)
-    labels, _ = select_labels(t, lay, p=LOW)
+    labels, _ = select_labels(t, lay, (), LOW)
     by_text = {" ".join(lab.subs): lab for lab in labels}
     assert set(by_text) == {"K2N", "L7F", "A6S"}
     assert by_text["L7F"].first == "EPI_ISL_0000010" and by_text["L7F"].rows == 10
@@ -107,10 +111,10 @@ def test_target_label_count_sets_the_size_threshold():
     t = standard_tree()
     lay = compute_layout(t)
     # stems: K2N 20 rows, A6S 20 rows, L7F 10 rows
-    two, counts = select_labels(t, lay, p=LabelParams(target_labels=2, min_rows_floor=5))
+    two, counts = select_labels(t, lay, (), replace(D.labels, target_labels=2, min_rows_floor=5))
     assert {" ".join(lab.subs) for lab in two} == {"K2N", "A6S"}
     assert counts["size threshold (rows)"] == 20
-    three, _ = select_labels(t, lay, p=LabelParams(target_labels=3, min_rows_floor=5))
+    three, _ = select_labels(t, lay, (), replace(D.labels, target_labels=3, min_rows_floor=5))
     assert len(three) == 3
-    floor, _ = select_labels(t, lay, p=LabelParams(target_labels=3, min_rows_floor=15))
+    floor, _ = select_labels(t, lay, (), replace(D.labels, target_labels=3, min_rows_floor=15))
     assert len(floor) == 2  # the floor wins over the target

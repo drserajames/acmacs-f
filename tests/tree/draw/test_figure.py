@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -10,9 +11,10 @@ pytest.importorskip(
     "matplotlib", reason="matplotlib not installed: the tree renderer needs it (pyproject, WS1)"
 )
 
+from af.tree.draw.defaults import load_defaults  # noqa: E402
 from af.tree.draw.figure import FigureConfig, Overrides, make_figure  # noqa: E402
 from af.tree.draw.render import DashBar  # noqa: E402
-from af.tree.draw.sections import SectionOverrideError, SelectParams  # noqa: E402
+from af.tree.draw.sections import SectionOverrideError  # noqa: E402
 
 from .synthetic import PARENTS, standard_tree  # noqa: E402
 
@@ -24,7 +26,7 @@ def config(**kw):
         title="TEST tree",
         window_start="2024-10",
         window_end="2026-10",
-        select=SelectParams(min_share=0.1),
+        select=replace(load_defaults().clades, min_share=0.1, min_window_leaves=10**9),
         dash_bars=[DashBar(2, {"K": "transparent", "N": "#e72f27"}, [("2N", "#e72f27")])],
         strains=[("EPI_ISL_0000012", "leaf-0012")],
         **kw,

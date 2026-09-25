@@ -1,0 +1,56 @@
+# Default rules for the report tree figure (af.tree.draw).
+#
+# To change one: copy this file, edit the value, and load your copy with
+# af.tree.draw.defaults.load_defaults(path). Every key must be present (a missing or
+# misspelt key is an error). To show or hide one clade by name instead of changing a
+# rule, use Overrides.show_clades / Overrides.hide_clades; overrides are counted in the
+# draw report.
+
+[clades]
+# A clade gets a bracket if it is on at least `min_share` of the drawn rows OR has at
+# least `min_window_leaves` leaves collected in the report's time window. The two
+# together reproduce every show/hide choice in the Sep 2026 round's hand-curated H3, H1
+# and B/Vic trees, with no named hides (Sarah, 25 Sep 2026: "make the proposed hide
+# rule the default"). Neither alone does: small clades are shown if still circulating.
+min_share = 0.016
+min_window_leaves = 100
+# A clade on more than this share of the rows labels nearly everything and says nothing.
+max_share = 0.95
+# The clade's largest band must hold this share of its rows, or it is scattered across
+# the tree rather than a clade on it.
+min_coherence = 0.7
+# A nested clade gets its own letter only if this share of its rows is in the window
+# (a lineage still circulating); otherwise it stays inside its parent's letter
+# (Sarah, 25 Sep 2026: "clades should get a letter ... when they are very small I hide them").
+cut_window_share = 0.5
+
+[bands]
+# Runs of a clade merge across gaps up to this share of the clade's size ...
+merge_gap_fraction = 0.05
+# ... provided the merged band stays at least this pure,
+merge_min_purity = 0.80
+# and always across gaps of this many rows (single odd leaves).
+min_gap = 5
+# Bands smaller than this share of the clade's largest band are strays: counted, not drawn.
+drop_fraction = 0.10
+
+[labels]
+# About this many aa-transition labels per figure: the subtree-size threshold follows the
+# density of changes instead of being a fixed share of rows (Sarah, 25 Sep 2026: "yes
+# default 45, but make it easy to change"). Measured on the Sep 2026 round: 41 of H3's
+# 44 hand labels, 24 of H1's 47, 29 of B/Vic's 32. Set 0 to use min_share instead.
+target_labels = 45
+# With a target, a label never goes on a subtree smaller than this many rows.
+min_rows_floor = 20
+# Used only when target_labels = 0: a label needs this share of the drawn rows.
+min_share = 0.00767
+# A change carried by more than this share of the rows says nothing.
+max_share = 0.99
+# The derived residue must be the leaf consensus above this share.
+consensus = 0.6
+# A reversion is printed only if it covers at least this share of the forward change's rows ...
+backbone_reversion = 0.9
+# ... or sits on the stem of a drawn clade band (row overlap at least this).
+stem_overlap = 0.9
+# Substitutions to or from these residues are never labels.
+hide_aa = "X"
