@@ -172,3 +172,61 @@ def _aligned_sequences(store: Store, con: Any) -> _Aligned:
         [paths],
     ).fetchall()
     return _Aligned({(e, a): AlignedSequence(aa, gaps=GapSupport.OBSERVED) for e, a, aa in rows})
+
+
+#: The clade store's subtype for a table subtype: B tables are coloured by the B/Victoria
+#: clade set (there is no B/Yamagata clade table, by design; those dots stay uncoloured).
+CLADE_SUBTYPE = {"A(H1N1)": "A(H1N1)", "A(H3N2)": "A(H3N2)", "B": "B/Vic"}
+
+
+@dataclass(frozen=True)
+class SchemeChoice:
+    """Which colour scheme a subtype's geo dots use: ``<directory>/<name>.tsv``."""
+
+    directory: Path
+    name: str
+
+
+def clade_colouring(
+    store: Store,
+    clones: Path,
+    schemes: Mapping[str, SchemeChoice],
+    groups: Path | None = None,
+) -> dict[str, SubtypeColouring]:
+    """Per table subtype, the clade colouring geo uses (Sarah, Q46: by clade for now).
+
+    The clade set is the one the current ``clades/<subtype>`` table was labelled with
+    (:func:`af.clades.store.clade_set_for`), so "is this within that clade?" is answered by
+    the nomenclature revision that assigned the label. Schemes and groups come from the
+    user's tables (paths from config). This is the seam for other colourings later (the
+    antigenic maps' extra colouring): anything that yields a :class:`SubtypeColouring`.
+    """
+    from af.clades.colours import load_colour_schemes
+    from af.clades.groups import load_groups
+    from af.clades.store import clade_set_for, dataset_for
+
+    clade_sets = {}
+    for subtype in schemes:
+        if subtype not in CLADE_SUBTYPE:
+            raise ValueError(f"no clade set for table subtype {subtype!r}")
+        clade_subtype = CLADE_SUBTYPE[subtype]
+        ref = store.current("clades", dataset_for(clade_subtype))
+        clade_sets[subtype] = clade_set_for(store, ref, clones)
+    group_sets = (
+        load_groups(groups, {CLADE_SUBTYPE[s]: c for s, c in clade_sets.items()})
+        if groups is not None
+        else {}
+    )
+    out = {}
+    for subtype, choice in schemes.items():
+        group_set = group_sets.get(CLADE_SUBTYPE[subtype])
+        loaded = load_colour_schemes(
+            choice.directory, CLADE_SUBTYPE[subtype], clade_sets[subtype], group_set
+        )
+        if choice.name not in loaded:
+            raise ValueError(
+                f"no colour scheme {choice.name!r} in {choice.directory} "
+                f"(there are: {', '.join(sorted(loaded))})"
+            )
+        out[subtype] = SubtypeColouring(loaded[choice.name], clade_sets[subtype], group_set)
+    return out
