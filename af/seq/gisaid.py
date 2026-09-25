@@ -22,12 +22,13 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from af.seq import names
-from af.seq.dates import CollectionDate, DateProblem
+from af.seq.dates import CollectionDate, DateProblem, Precision
 from af.seq.dates import parse as parse_date
 
 #: Defline key for the segment accession, which is the per-sequence half of the key.
@@ -36,7 +37,29 @@ ACCESSION_KEY = "o"
 ISOLATE_KEY = "a"
 #: Defline key for the collection date. Read only to *check* the workbook, never to use.
 DEFLINE_DATE_KEY = "e"
+#: Defline keys for the labs. The workbook has no lab columns at all (measured on all 60
+#: workbooks of the definitive set, 25 Sep 2026), so these are the only source.
+ORIGINATING_LAB_KEY = "j"
+SUBMITTING_LAB_KEY = "k"
 
+#: Workbook columns af reads. A workbook without one of them is refused: reading it with a
+#: default would give every record an empty host, location or date, silently.
+REQUIRED_COLUMNS = (
+    "Isolate_Id",
+    "Collection_Date",
+    "Subtype",
+    "Lineage",
+    "Host",
+    "Passage_History",
+    "Location",
+    "Submission_Date",
+)
+#: Present only in workbooks whose window holds embargoed records, so its absence means
+#: "none embargoed": all 202 embargoed isolates of the definitive set are in the 10 of 60
+#: workbooks that have it, each with a date, and no other row has a value (25 Sep 2026).
+EMBARGO_COLUMN = "Publishing_Embargo_Until"
+
+_XL_DATE = 3  # xlrd.XL_CELL_DATE
 _FIELD = re.compile(r"_\|_|\|")
 _UNKNOWN = re.compile(r"N")
 _AMBIGUOUS = re.compile(r"[^ACGTN]")  # R, Y, W … : a stated ambiguity, unlike N
@@ -81,6 +104,7 @@ class PullCounts:
     uracil_converted: int = 0
     date_precision: Counter[str] = field(default_factory=Counter)
     defline_date_differs: int = 0
+    defline_date_conflicts: int = 0
     unreadable_date: int = 0
     name_problems: Counter[str] = field(default_factory=Counter)
     #: N, i.e. "not known". Counted apart from R/Y/W…, which state a real ambiguity;
@@ -95,11 +119,63 @@ class PullCounts:
             "uracil_converted": self.uracil_converted,
             "date_precision": dict(self.date_precision),
             "defline_date_differs": self.defline_date_differs,
+            "defline_date_conflicts": self.defline_date_conflicts,
             "unreadable_date": self.unreadable_date,
             "name_problems": dict(self.name_problems),
             "unknown_bases": self.unknown_bases,
             "ambiguous_bases": self.ambiguous_bases,
         }
+
+
+@dataclass
+class Workbook:
+    """The rows of one metadata workbook, as text, and what reading them changed."""
+
+    rows: list[dict[str, str]]
+    #: Cells whose value held a line break, per column. Older records carry them inside
+    #: field values (e.g. a passage history over two lines); they are joined with a space.
+    line_breaks: Counter[str] = field(default_factory=Counter)
+
+
+def read_workbook(path: Path) -> Workbook:
+    """Read GISAID's metadata workbook (legacy ``.xls``): first sheet, first row the header.
+
+    Every value is returned as text. GISAID writes dates as text, never as Excel date
+    cells (none in the 315,267 rows of the definitive set), and a date cell is refused
+    here rather than converted: an Excel serial is exactly how a bare year becomes 1905.
+    """
+    import xlrd  # the only xls reader; imported here so af imports without it
+
+    sheet = xlrd.open_workbook(str(path), on_demand=True).sheet_by_index(0)
+    header = [str(cell.value).strip() for cell in sheet.row(0)]
+    return rows_from_cells(header, (sheet.row(index) for index in range(1, sheet.nrows)), path)
+
+
+def rows_from_cells(header: Sequence[str], rows: Iterable[Sequence[Any]], source: Path) -> Workbook:
+    """Turn ``xlrd`` cells into text rows; separated from :func:`read_workbook` for testing."""
+    if len(set(header)) != len(header):
+        raise PullError(f"{source}: repeated column names in the header")
+    out = Workbook(rows=[])
+    for number, cells in enumerate(rows, start=2):
+        row: dict[str, str] = {}
+        for column, cell in zip(header, cells, strict=False):
+            row[column] = _cell_text(cell, column, number, source, out.line_breaks)
+        out.rows.append(row)
+    return out
+
+
+def _cell_text(cell: Any, column: str, row: int, source: Path, line_breaks: Counter[str]) -> str:
+    if cell.ctype == _XL_DATE:
+        raise PullError(f"{source} row {row}, {column}: an Excel date cell; GISAID writes text")
+    value = cell.value
+    if isinstance(value, float):
+        text = str(int(value)) if value.is_integer() else str(value)
+    else:
+        text = str(value)
+    if "\n" in text or "\r" in text:
+        line_breaks[column] += 1
+        text = " ".join(part.strip() for part in text.splitlines() if part.strip())
+    return text.strip()
 
 
 def parse_defline(defline: str) -> tuple[str, dict[str, str]]:
@@ -146,6 +222,7 @@ def join(
     reintroduce exactly the defline-only metadata this module exists to avoid. Missing
     rows raise rather than being dropped (design rule 3).
     """
+    _check_columns(workbook_rows)
     by_isolate = {row["Isolate_Id"].strip(): row for row in workbook_rows if row.get("Isolate_Id")}
     counts = PullCounts(isolates=len(by_isolate))
     out: list[SequenceRecord] = []
@@ -186,6 +263,11 @@ def join(
                 # Expected for every partial date: the defline says 1 January where the
                 # workbook says a month or a year. Counted, not a problem.
                 counts.defline_date_differs += 1
+                if collection_date.precision is Precision.DAY:
+                    # Not a precision difference: GISAID's two files state different days
+                    # (1 of 288,183 in the definitive set). The workbook is still used.
+                    counts.defline_date_conflicts += 1
+                    problems.append("date.defline-conflict")
 
         name = names.normalise(gisaid_name, subtype)
         for problem in name.problems:
@@ -200,15 +282,15 @@ def join(
                 name=name.name,
                 nucleotides=nucleotides,
                 collection_date=collection_date,
-                subtype=row.get("Subtype", "").strip(),
-                lineage=row.get("Lineage", "").strip(),
-                host=row.get("Host", "").strip(),
-                passage=row.get("Passage_History", "").strip(),
-                location=row.get("Location", "").strip(),
-                originating_lab=row.get("Originating_Lab", "").strip(),
-                submitting_lab=row.get("Submitting_Lab", "").strip(),
-                submission_date=row.get("Submission_Date", "").strip(),
-                embargoed_until=row.get("Publishing_Embargo_Until", "").strip(),
+                subtype=row["Subtype"].strip(),
+                lineage=row["Lineage"].strip(),
+                host=row["Host"].strip(),
+                passage=row["Passage_History"].strip(),
+                location=row["Location"].strip(),
+                originating_lab=fields.get(ORIGINATING_LAB_KEY, "").strip(),
+                submitting_lab=fields.get(SUBMITTING_LAB_KEY, "").strip(),
+                submission_date=row["Submission_Date"].strip(),
+                embargoed_until=row.get(EMBARGO_COLUMN, "").strip(),
                 problems=tuple(problems),
             )
         )
@@ -229,6 +311,13 @@ def join(
         )
     _check_keys_unique(out)
     return out, counts
+
+
+def _check_columns(workbook_rows: Sequence[Mapping[str, str]]) -> None:
+    present: set[str] = set().union(*workbook_rows) if workbook_rows else set()
+    missing = [column for column in REQUIRED_COLUMNS if column not in present]
+    if workbook_rows and missing:
+        raise PullError(f"workbook has no column(s) {missing}; af reads them for every record")
 
 
 def _check_keys_unique(records: Sequence[SequenceRecord]) -> None:

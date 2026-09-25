@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from af.seq import gisaid
 from af.seq.dates import Precision
 from af.seq.gisaid import PullError, join, parse_defline, read_fasta
 
@@ -157,3 +160,65 @@ def test_counts_serialise_for_provenance() -> None:
     as_json = counts.to_json()
     assert as_json["uracil_converted"] == 1
     assert as_json["date_precision"] == {"month": 1}
+
+
+class Cell:
+    """Stands in for an xlrd cell: text is ctype 1, a number 2, an Excel date 3."""
+
+    def __init__(self, value: object, ctype: int = 1) -> None:
+        self.value = value
+        self.ctype = ctype
+
+
+class TestWorkbook:
+    def test_values_become_text_and_line_breaks_are_joined_and_counted(self) -> None:
+        header = ["Isolate_Id", "Passage_History", "Host_Age"]
+        cells = [[Cell("EPI_ISL_1"), Cell("details: P1;\ntype: example"), Cell(34.0, 2)]]
+        book = gisaid.rows_from_cells(header, cells, Path("example.xls"))
+        assert book.rows == [
+            {"Isolate_Id": "EPI_ISL_1", "Passage_History": "details: P1; type: example",
+             "Host_Age": "34"}
+        ]  # fmt: skip
+        assert book.line_breaks == {"Passage_History": 1}
+
+    def test_an_excel_date_cell_is_refused(self) -> None:
+        """A bare year typed into a date cell is how 2023 becomes 1905-07-15."""
+        with pytest.raises(PullError, match="row 2, Collection_Date: an Excel date cell"):
+            gisaid.rows_from_cells(["Collection_Date"], [[Cell(2023.0, 3)]], Path("x.xls"))
+
+    def test_a_repeated_column_is_refused(self) -> None:
+        with pytest.raises(PullError, match="repeated column"):
+            gisaid.rows_from_cells(["Host", "Host"], [], Path("x.xls"))
+
+
+class TestColumnsAndLabs:
+    def test_a_missing_required_column_is_refused(self) -> None:
+        bare = row()
+        del bare["Host"]
+        with pytest.raises(PullError, match=r"no column\(s\) \['Host'\]"):
+            join([(DEFLINE, "ACGT")], [bare])
+
+    def test_labs_come_from_the_defline(self) -> None:
+        """The workbook has no lab columns; a workbook value must not be read."""
+        defline = DEFLINE.replace("j=Example Lab", "j=Example Origin").replace(
+            "k=Example Lab", "k=Example Submitter"
+        )
+        records, _ = join([(defline, "ACGT")], [row(Originating_Lab="WRONG")])
+        assert (records[0].originating_lab, records[0].submitting_lab) == (
+            "Example Origin",
+            "Example Submitter",
+        )
+
+    def test_embargo_column_is_optional(self) -> None:
+        records, _ = join([(DEFLINE, "ACGT")], [row()])
+        assert records[0].embargoed_until == ""
+        records, _ = join([(DEFLINE, "ACGT")], [row(Publishing_Embargo_Until="2027-01-01")])
+        assert records[0].embargoed_until == "2027-01-01"
+
+
+def test_a_full_date_that_disagrees_with_the_defline_is_flagged() -> None:
+    """Not a precision difference: GISAID's two files name different days."""
+    records, counts = join([(DEFLINE, "ACGT")], [row(Collection_Date="2020-05-05")])
+    assert str(records[0].collection_date) == "2020-05-05"  # the workbook still wins
+    assert "date.defline-conflict" in records[0].problems
+    assert (counts.defline_date_differs, counts.defline_date_conflicts) == (1, 1)
