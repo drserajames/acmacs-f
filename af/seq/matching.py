@@ -221,12 +221,16 @@ def index_from_store(
     index = SequenceIndex()
     for dataset in datasets:
         version = store.resolve(store.current("sequences", dataset))
+        isolates = str(version / "isolates" / "*" / "*.parquet")
+        # A store without submitters gives none: the own-lab rule then never applies, and
+        # check_lab_submitters reports every named submitter as missing.
+        columns = {c for (c, *_) in duckdb.execute(
+            "describe select * from read_parquet(?)", [isolates]).fetchall()}  # fmt: skip
+        submitter = "coalesce(i.submitting_lab, '')" if "submitting_lab" in columns else "''"
         rows = duckdb.execute(
-            "select i.epi_isl, i.accession, i.name, i.passage, s.seq_hash,"
-            " coalesce(i.submitting_lab, '')"
+            "select i.epi_isl, i.accession, i.name, i.passage, s.seq_hash, " + submitter +
             " from read_parquet(?) i join read_parquet(?) s using (epi_isl, accession)",
-            [str(version / "isolates" / "*" / "*.parquet"),
-             str(version / "sequences" / "*" / "*.parquet")],
+            [isolates, str(version / "sequences" / "*" / "*.parquet")],
         ).fetchall()  # fmt: skip
         for epi_isl, accession, name, passage, seq_hash, submitter in rows:
             kind = passage_class(passage, passage_rules)
