@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from af.geo.colours import UNCOLOURED, DotStyle
 from af.serology.query import Preparation
 
 
@@ -62,7 +63,7 @@ def months(first: Month, last: Month) -> list[Month]:
 class GeoCounts:
     """Dots per (subtype, month, location), plus what could not be placed."""
 
-    dots: Counter[tuple[str, Month, str]] = field(default_factory=Counter)
+    dots: Counter[tuple[str, Month, str, DotStyle]] = field(default_factory=Counter)
     months: list[Month] = field(default_factory=list)
     undated: Counter[str] = field(default_factory=Counter)  # subtype -> preparations
     no_location: Counter[tuple[str, str]] = field(default_factory=Counter)  # (subtype, name)
@@ -74,8 +75,13 @@ def geo_counts(
     last: Month,
     location_of: Callable[[str], str | None],
     rule: DotRule = DotRule.PREPARATION,
+    style_of: Callable[[Preparation], DotStyle] | None = None,
 ) -> GeoCounts:
-    """Count dots for each month in ``first..last`` under ``rule``."""
+    """Count dots for each month in ``first..last`` under ``rule``.
+
+    ``style_of`` colours each dot (:func:`af.geo.colours.dot_styles`); without it every
+    dot is drawn uncoloured.
+    """
     if rule is not DotRule.PREPARATION:
         raise NotImplementedError(rule)
     window = months(first, last)
@@ -92,11 +98,9 @@ def geo_counts(
         if location is None:
             result.no_location[prep.subtype, prep.name] += 1
             continue
-        result.dots[prep.subtype, month, location] += 1
+        style = style_of(prep) if style_of is not None else UNCOLOURED
+        result.dots[prep.subtype, month, location, style] += 1
     return result
-
-
-UNCOLOURED = "unassigned"
 
 
 def to_i7(counts: GeoCounts, subtype: str) -> dict[str, Any]:
@@ -104,14 +108,14 @@ def to_i7(counts: GeoCounts, subtype: str) -> dict[str, Any]:
 
     periods -> locations -> point groups with a count. Every month of the window is listed,
     empty ones included, so a month with no data is still a map. Until clade colours are
-    joined (workstream 4) each location has one point group coloured ``"unassigned"``, and
-    ``af.report.compare.geo`` then compares locations only. What could not be placed is
-    listed with the document.
+    joined, points are ``"transparent"`` with no ``clade``, and ``af.report.compare.geo``
+    then compares locations only. A coloured point carries its legend label as ``clade``.
+    What could not be placed is listed with the document.
     """
-    by_month: dict[Month, dict[str, int]] = {month: {} for month in counts.months}
-    for (s, month, location), n in counts.dots.items():
+    by_month: dict[Month, dict[str, Counter[DotStyle]]] = {m: {} for m in counts.months}
+    for (s, month, location, style), n in counts.dots.items():
         if s == subtype:
-            by_month[month][location] = n
+            by_month[month].setdefault(location, Counter())[style] += n
     return {
         "subtype": subtype,
         "periods": [
@@ -119,8 +123,8 @@ def to_i7(counts: GeoCounts, subtype: str) -> dict[str, Any]:
                 "period": str(month),
                 "title": f"{calendar.month_name[month.month]} {month.year}",
                 "locations": [
-                    {"name": name, "points": [{"color": UNCOLOURED, "count": n}]}
-                    for name, n in sorted(locations.items())
+                    {"name": name, "points": _points(styles)}
+                    for name, styles in sorted(locations.items())
                 ],
             }
             for month, locations in by_month.items()
@@ -128,3 +132,14 @@ def to_i7(counts: GeoCounts, subtype: str) -> dict[str, Any]:
         "undated": counts.undated[subtype],
         "no_location": sorted(name for s, name in counts.no_location if s == subtype),
     }
+
+
+def _points(styles: Counter[DotStyle]) -> list[dict[str, Any]]:
+    """Point groups at one location, the largest first (drawn at the centre)."""
+    points = []
+    for style, n in sorted(styles.items(), key=lambda kv: (-kv[1], kv[0].label)):
+        point: dict[str, Any] = {"color": style.colour or "transparent", "count": n}
+        if style.label:
+            point["clade"] = style.label
+        points.append(point)
+    return points

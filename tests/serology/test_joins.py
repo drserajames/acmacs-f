@@ -1,12 +1,14 @@
 """Joins to invented sequence (I3) and clade (I4) Parquet files."""
 
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import pytest
 
-from af.serology.joins import link_sequences
-from af.serology.store import StoreError
+from af.serology import query
+from af.serology.joins import link_sequences, preparation_sequences
+from af.serology.store import StoreError, build
 
 
 def _parquet(con: duckdb.DuckDBPyConnection, path: Path, select: str) -> Path:
@@ -92,3 +94,29 @@ def test_missing_inputs_and_duplicate_clade_rows_are_refused(
     )
     with pytest.raises(StoreError, match="more than one row"):
         link_sequences(con, [isolates], [doubled])
+
+
+def test_preparation_sequences_agree_or_conflict(tmp_path: Path, syn: Any) -> None:
+    """One preparation in two tables naming one sequence gets it; naming two gets none."""
+    same = {"name": syn.virus("Somewhere", 1), "passage": "MDCK1", "date": "2021-01-05"}
+    split = {"name": syn.virus("Somewhere", 2), "passage": "SIAT1", "date": "2021-01-06"}
+    serum = {"name": syn.virus("Elsewhere", 3), "serum_id": "S-1"}
+    tables = [
+        syn.table("t1", [same, split], [serum], [[["80"]], [["40"]]]),
+        syn.table("t2", [same, split], [serum], [[["160"]], [["40"]]], date="2021-03-05"),
+    ]
+    build(tables, tmp_path / "v1", syn.rules)
+    con = query.connect(tmp_path / "v1")
+    con.execute(
+        """CREATE VIEW antigen_links AS SELECT * FROM (VALUES
+            ('t1', 0, 'EPI_ISL_1', 'proxy'), ('t2', 0, 'EPI_ISL_1', 'exact'),
+            ('t1', 1, 'EPI_ISL_2', 'exact'), ('t2', 1, 'EPI_ISL_4', 'exact')
+        ) AS v(table_id, position, epi_isl, pairing)"""
+    )
+    isolates, clades = _inputs(con, tmp_path)
+    link_sequences(con, [isolates], [clades])
+    got = {key[1]: value for key, value in preparation_sequences(con).items()}
+    agreed = got[syn.virus("Somewhere", 1)]
+    assert (agreed.accession, agreed.clade, agreed.pairing) == ("ACC1", "CLADE-X", "exact")
+    assert not agreed.conflict
+    assert got[syn.virus("Somewhere", 2)].conflict

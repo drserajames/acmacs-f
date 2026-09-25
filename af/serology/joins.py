@@ -119,3 +119,51 @@ def _counts(con: Any) -> LinkCounts:
 def _parquet(paths: Sequence[Path]) -> str:
     listing = ", ".join(f"'{Path(p).as_posix()}'" for p in paths)
     return f"read_parquet([{listing}], union_by_name = true)"
+
+
+@dataclass(frozen=True)
+class PreparationSequence:
+    """The one sequence a preparation's table rows point at, or why there is none."""
+
+    epi_isl: str | None
+    accession: str | None
+    clade: str | None
+    pairing: str  # "exact" if any row is an exact pairing, else "proxy" or ""
+    conflict: bool  # its rows point at different sequences: none is chosen
+
+
+PreparationKey = tuple[
+    str, str, str, tuple[str, ...], str
+]  # subtype, name, reass., annot., passage
+
+
+def preparation_sequences(con: Any) -> dict[PreparationKey, PreparationSequence]:
+    """For every preparation (as :func:`af.serology.query.preparations` groups them) with at
+    least one matched row, its sequence. Needs the ``antigen_sequences`` view.
+
+    A preparation appears in many tables; normally every row names the same isolate. When
+    rows name different sequences the preparation is marked ``conflict`` and gets none,
+    rather than one picked by table order.
+    """
+    rows = con.execute(
+        """
+        SELECT t.subtype, a.name, a.reassortant, a.annotations, a.identity_passage,
+               list(DISTINCT s.epi_isl || '|' || s.accession) AS sequences,
+               any_value(s.epi_isl), any_value(s.accession), any_value(s.clade),
+               bool_or(s.pairing = 'exact'), bool_or(s.pairing = 'proxy')
+        FROM antigen_sequences s
+        JOIN antigens a ON a.table_id = s.table_id AND a.position = s.position
+        JOIN tables t ON t.table_id = s.table_id
+        WHERE s.status = 'matched'
+        GROUP BY t.subtype, a.name, a.reassortant, a.annotations, a.identity_passage
+        """
+    ).fetchall()
+    out: dict[PreparationKey, PreparationSequence] = {}
+    for subtype, name, reassortant, annots, passage, seqs, epi, acc, clade, ex, px in rows:
+        key = (subtype, name, reassortant, tuple(annots), passage)
+        pairing = "exact" if ex else "proxy" if px else ""
+        if len(seqs) > 1:
+            out[key] = PreparationSequence(None, None, None, pairing, conflict=True)
+        else:
+            out[key] = PreparationSequence(epi, acc, clade, pairing, conflict=False)
+    return out
