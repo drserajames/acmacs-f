@@ -80,6 +80,11 @@ class Geometry:
     bar_gap: float = 4.5
     label_font: float = 6.8
     strain_font: float = 6.2
+    # Fixed scales, for figures compared side by side (e.g. a tree before and after pruning):
+    # the branch length drawn across the tree's width, and the rows the page height holds.
+    # None = fit this tree.
+    x_max: float | None = None
+    row_capacity: int | None = None
 
 
 @dataclass
@@ -125,9 +130,13 @@ class _Page:
     def __init__(self, spec: FigureSpec) -> None:
         g, lay = spec.geometry, spec.layout
         self.g = g
-        self.row_h = (g.bottom - g.top) / lay.n_rows
+        capacity = g.row_capacity or lay.n_rows
+        if capacity < lay.n_rows:
+            raise ValueError(f"row_capacity {capacity} < {lay.n_rows} rows to draw")
+        self.row_h = (g.bottom - g.top) / capacity
+        self.bottom = g.top + lay.n_rows * self.row_h  # where the drawn rows end
         self.tree_right = g.tree_right - g.centre_col
-        xmax = float(np.nanmax(lay.node_x[lay.leaf_nodes])) or 1.0
+        xmax = g.x_max or float(np.nanmax(lay.node_x[lay.leaf_nodes])) or 1.0
         self.nx = g.tree_left + lay.node_x / xmax * (self.tree_right - g.tree_left)
         self.ny = g.top + (lay.node_y + 0.5) * self.row_h
 
@@ -235,11 +244,11 @@ def _draw_matrix(ax: Axes, spec: FigureSpec, pg: _Page, colours: np.ndarray) -> 
     right = g.ts_left + len(ts.months) * g.ts_slot
     for k in range(len(ts.months) + 1):
         x = g.ts_left + k * g.ts_slot
-        ax.plot([x, x], [g.top, g.bottom], color="black", lw=0.5)
+        ax.plot([x, x], [g.top, pg.bottom], color="black", lw=0.5)
     for k, (y, m) in enumerate(ts.months):
         x = g.ts_left + (k + 0.5) * g.ts_slot
         text = f"{MONTHS[m - 1]} {y % 100:02d}"
-        for yy, va in ((g.top - 2, "bottom"), (g.bottom + 2, "top")):
+        for yy, va in ((g.top - 2, "bottom"), (pg.bottom + 2, "top")):
             ax.text(
                 x, yy, text, rotation=-90, ha="center", va=va, fontsize=5.8, rotation_mode="anchor"
             )
@@ -376,7 +385,7 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
         (lab.node, "\n".join(lab.subs), (float(pg.nx[lab.node]), float(pg.ny[lab.node])))
         for lab in spec.labels
     ]
-    search = Search(left=2.0, top=g.top - 4, bottom=g.bottom + 2)
+    search = Search(left=2.0, top=g.top - 4, bottom=pg.bottom + 2)
     placed = place_labels(items, grid, _text_width(font), g.label_font * 1.2, search=search)
     for p in placed:
         x0, y0, x1, y1 = p.box

@@ -70,3 +70,14 @@ def test_override_naming_nothing_fails(tmp_path):
     cfg = config(overrides=Overrides(hide_hz_starting_at=frozenset({"no-such-leaf"})))
     with pytest.raises(SectionOverrideError):
         make_figure(standard_tree(), PARENTS, cfg, tmp_path / "x.pdf", {})
+
+
+def test_fixed_scale_for_side_by_side_figures(tmp_path):
+    from af.tree.draw.render import Geometry
+
+    ok = config(geometry=Geometry(x_max=1.0, row_capacity=80))
+    report = make_figure(standard_tree(), PARENTS, ok, tmp_path / "s.pdf", {})
+    assert report["rows"] == 50
+    too_small = config(geometry=Geometry(row_capacity=10))
+    with pytest.raises(ValueError, match="row_capacity"):
+        make_figure(standard_tree(), PARENTS, too_small, tmp_path / "t.pdf", {})
