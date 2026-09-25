@@ -1,0 +1,288 @@
+"""Comparison metrics on synthetic maps and trees (invented names only)."""
+
+from __future__ import annotations
+
+import datetime as dt
+import math
+import random
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from af.report.compare import geo, maps, trees
+from af.report.compare.reference_ae import absolute_viewport, colour_labels, style_chain, transform
+from af.report.compare.run import (
+    Expected,
+    Limits,
+    MapLimits,
+    apply_expected,
+    compare_report,
+    map_checks,
+    slot_status,
+)
+from af.util.config import ConfigError, load_config, parse_config
+
+
+def _rotate(points: list[tuple[float, float]], degrees: float) -> list[tuple[float, float]]:
+    t = math.radians(degrees)
+    c, s = math.cos(t), math.sin(t)
+    return [(x * c - y * s, x * s + y * c) for x, y in points]
+
+
+def _cloud(n: int, seed: int, spread: float = 3.0) -> list[tuple[float, float]]:
+    rng = random.Random(seed)
+    return [(rng.gauss(0, spread), rng.gauss(0, spread)) for _ in range(n)]
+
+
+def _map(points: list[tuple[float, float]], clades: list[str]) -> dict[str, Any]:
+    antigens = [
+        {"id": f"TEST/{i}/2025", "name": f"TEST/{i}/2025", "passage_class": "cell",
+         "xy": list(p), "shown": True, "in_viewport": True, "clade": c, "colour": "#000000",
+         "greyed": False}
+        for i, (p, c) in enumerate(zip(points, clades, strict=True))
+    ]  # fmt: skip
+    return {"title": "synthetic", "map": {"antigens": antigens, "sera": []}}
+
+
+def test_procrustes_ignores_rotation_and_translation_and_reports_the_angle() -> None:
+    a = _cloud(50, 0)
+    b = [(x + 5, y - 2) for x, y in _rotate(a, 30)]
+    fit = maps.procrustes(a, b)
+    assert fit.rmsd < 1e-9
+    assert abs(fit.rotation_deg + 30) < 1e-6 and not fit.reflected
+
+
+def test_procrustes_detects_reflection() -> None:
+    a = _cloud(40, 1)
+    fit = maps.procrustes(a, [(x, -y) for x, y in _rotate(a, 70)])
+    assert fit.reflected and fit.rmsd < 1e-9
+
+
+def test_procrustes_does_not_scale() -> None:
+    a = _cloud(30, 2)
+    assert maps.procrustes(a, [(2 * x, 2 * y) for x, y in a]).rmsd > 1.0
+
+
+def test_adjusted_rand_ignores_label_names() -> None:
+    x = ["a", "a", "b", "b", "c", "c"]
+    assert maps.adjusted_rand(x, ["p", "p", "q", "q", "r", "r"]) == 1.0
+    assert maps.adjusted_rand(x, ["p", "q", "p", "q", "p", "q"]) < 0.1
+
+
+def test_whole_clade_move_is_caught_by_centroids_not_p95() -> None:
+    big = [(x * 0.3, y * 0.3) for x, y in _cloud(190, 3, 1.0)]
+    small = [(6 + x * 0.3, y * 0.3) for x, y in _cloud(10, 4, 1.0)]
+    clades = ["X"] * 190 + ["Y"] * 10
+    moved = big + [(x + 4, y) for x, y in small]  # clade Y, 5% of points, moves 4 units
+    res = maps.compare(_map(big + small, clades), _map(moved, clades))
+    assert res["procrustes"]["p95"] < 0.5
+    assert res["clade_centroids"]["max_abs_diff"] > 3.0
+
+
+def test_missing_points_are_counted() -> None:
+    pts = [(float(i), 0.0) for i in range(10)]
+    res = maps.compare(_map(pts, ["X"] * 10), _map(pts[:8], ["X"] * 8))
+    assert res["antigens"]["only_ref"] == 2 and res["antigens"]["common"] == 8
+
+
+def test_duplicate_keys_are_dropped_and_counted() -> None:
+    pts = [(float(i), 0.0) for i in range(6)]
+    ref = _map(pts, ["X"] * 6)
+    ref["map"]["antigens"][1]["name"] = ref["map"]["antigens"][0]["name"]
+    res = maps.compare(ref, _map(pts, ["X"] * 6), how="name")
+    assert res["antigens"]["ambiguous_dropped"]["ref"] == 2
+
+
+def _random_tree(names: list[str], seed: int) -> trees.Tree:
+    rng = random.Random(seed)
+    nodes: list[Any] = [("leaf", n) for n in names]
+    while len(nodes) > 1:
+        i, j = sorted(rng.sample(range(len(nodes)), 2))
+        b, a = nodes.pop(j), nodes.pop(i)
+        nodes.append(("inner", [a, b]))
+    tree = trees.Tree()
+    stack = [(nodes[0], -1)]
+    while stack:
+        (kind, value), parent = stack.pop()
+        me = tree.add(parent)
+        if kind == "leaf":
+            tree.leaf_name[me] = value
+            tree.leaf_clades[me] = ["C" + value[-1]]
+        else:
+            stack.extend((child, me) for child in value)
+    return tree
+
+
+def test_rf_is_zero_for_the_same_tree_and_high_for_a_random_one() -> None:
+    names = [f"TEST/{i}/2025" for i in range(200)]
+    t1 = _random_tree(names, 1)
+    same = trees.compare(t1, _random_tree(names, 1))
+    assert same["splits_by_size"][">=2"]["rf"] == 0 and same["tip_sets_identical"]
+    assert trees.compare(t1, _random_tree(names, 2))["rf_normalised"] > 0.9
+
+
+def test_leaves_match_through_the_ae_hash_suffix() -> None:
+    names = [f"TEST/{i}/2025" for i in range(50)]
+    res = trees.compare(
+        _random_tree(names, 3), _random_tree([n + "_OR_0A1B2C3D" for n in names], 3)
+    )
+    assert res["common_leaves"] == 50 and res["rf_normalised"] == 0
+
+
+def test_tree_rejects_child_before_parent() -> None:
+    with pytest.raises(ValueError):
+        trees.Tree().add(5)
+
+
+def test_reference_transform_and_viewport_follow_ae() -> None:
+    # t = [a, b, c, d]: x' = a*x + c*y, y' = b*x + d*y (90 degrees here).
+    assert transform([[1.0, 0.0], [0.0, 2.0]], [0.0, 1.0, -1.0, 0.0]) == [[0.0, 1.0], [-2.0, 0.0]]
+    assert transform([[float("nan"), 0.0]], None) == [None]
+    # Hull x 0..4, y 0..2: rounded size 5 x 3, centre (2, 1). Stored V is in the recentred frame.
+    xy: list[list[float] | None] = [[0.0, 0.0], [4.0, 2.0]]
+    assert absolute_viewport(xy, [1.0, 1.0, 3.0, 2.0]) == [0.5, 0.5, 3.0, 2.0]
+    assert absolute_viewport(xy, None) == [-0.5, -0.5, 5, 3]
+
+
+def test_reference_style_chain_and_colour_collisions_are_visible() -> None:
+    styles = {
+        "main": {"A": [{"R": "-base"}, {"F": "#111111", "L": {"t": "Clade Q"}}]},
+        "-base": {"A": [{"F": "#111111", "L": {"t": "Clade P"}}, {"R": "-missing"}]},
+    }
+    assert len(style_chain(styles, "main")) == 2
+    assert colour_labels(styles, "main") == {"#111111": "Clade P | Clade Q"}
+
+
+def _checks(res: dict[str, Any]) -> list[dict[str, Any]]:
+    return map_checks(res, MapLimits(rotation_deg_max=1.0))
+
+
+def test_expected_difference_is_reported_and_a_stale_one_fails() -> None:
+    a = _cloud(30, 5)
+    turned = maps.compare(_map(a, ["X"] * 30), _map(_rotate(a, 8), ["X"] * 30))
+    same = maps.compare(_map(a, ["X"] * 30), _map(a, ["X"] * 30))
+    reason = [
+        Expected(
+            "map/test/all",
+            "rotation deg",
+            "deliberate hand rotation",
+            "a reviewer",
+            dt.date(2026, 9, 25),
+        )
+    ]
+    checks = _checks(turned)
+    assert slot_status(checks) == "FAIL"
+    apply_expected("map/test/all", checks, reason)
+    assert slot_status(checks) == "ok (expected differences)"
+    checks = _checks(same)
+    apply_expected("map/test/all", checks, reason)
+    assert slot_status(checks) == "FAIL"  # the reason no longer applies: stale
+    stale = next(c for c in checks if c["check"] == "rotation deg")
+    assert "STALE" in stale["expected"] and "a reviewer, 2026-09-25" in stale["expected"]
+
+
+def _geo(counts: dict[str, dict[str, int]]) -> dict[str, Any]:
+    return {
+        "periods": [
+            {
+                "period": month,
+                "locations": [
+                    {"name": loc, "points": [{"color": "#AA0000", "count": n}]}
+                    for loc, n in locs.items()
+                ],
+            }
+            for month, locs in counts.items()
+        ]
+    }
+
+
+def test_geo_counts_dot_differences_per_month() -> None:
+    ref = _geo({"2026-01": {"PLACE A": 3, "PLACE B": 1}, "2026-02": {"PLACE A": 2}})
+    new = _geo({"2026-01": {"PLACE A": 3, "PLACE C": 1}, "2026-03": {"PLACE A": 1}})
+    res = geo.compare(ref, new)
+    assert res["months_compared"] == ["2026-01"]
+    assert res["months_only_ref"] == ["2026-02"] and res["months_only_new"] == ["2026-03"]
+    jan = res["per_month"]["2026-01"]["location"]
+    assert jan["abs_diff"] == 2 and jan["frac_diff"] == 2 / 8
+    assert res["per_month"]["2026-01"]["clade"]["frac_diff"] == 0
+
+
+def test_expectation_without_approver_is_rejected(tmp_path: Path) -> None:
+    limits = tmp_path / "limits.toml"
+    limits.write_text(
+        '[adoption]\nstatus = "final"\nadopted_by = "a reviewer"\nadopted = 2026-09-25\n'
+        '[[expected]]\nslot = "map/test/all"\ncheck = "rotation deg"\nreason = "hand rotation"\n'
+    )
+    with pytest.raises(ConfigError, match="approved_by"):
+        load_config(limits, Limits)
+
+
+def test_limits_file_must_say_who_adopted_it() -> None:
+    with pytest.raises(ConfigError, match="adoption"):
+        parse_config({"map": {"p95_displacement_max": 0.5}}, Limits, base_dir=Path())
+
+
+def test_provisional_limits_must_name_their_review(tmp_path: Path) -> None:
+    limits = parse_config(
+        {
+            "adoption": {
+                "status": "provisional",
+                "adopted_by": "a reviewer",
+                "adopted": dt.date(2026, 9, 25),
+            }
+        },
+        Limits,
+        base_dir=tmp_path,
+    )
+    manifest = {"report": "r", "built": "", "figures": []}
+    with pytest.raises(ValueError, match="review"):
+        compare_report(manifest, tmp_path, limits, "name")
+
+
+def test_resolving_a_polytomy_keeps_reference_recovery_at_one() -> None:
+    """A new tree that resolves a star the reference left collapsed recovers every ref split."""
+    star = trees.Tree()
+    root = star.add(-1)
+    left, right = star.add(root), star.add(root)
+    names = [f"TEST/{i}/2025" for i in range(8)]
+    for i, name in enumerate(names):
+        leaf = star.add(left if i < 4 else right)
+        star.leaf_name[leaf] = name
+        star.leaf_clades[leaf] = ["C"]
+    resolved = _random_tree(names[:4], 7)  # a resolved left half, re-rooted under a new root
+    full = trees.Tree()
+    top = full.add(-1)
+    offset = full.add(top)
+    mapped: dict[int, int] = {}
+    for node, parent in enumerate(resolved.parent):
+        mapped[node] = full.add(offset if parent < 0 else mapped[parent])
+    for node, name in resolved.leaf_name.items():
+        full.leaf_name[mapped[node]] = name
+        full.leaf_clades[mapped[node]] = ["C"]
+    right_node = full.add(top)
+    for name in names[4:]:
+        leaf = full.add(right_node)
+        full.leaf_name[leaf] = name
+        full.leaf_clades[leaf] = ["C"]
+    res = trees.compare(star, full)["splits_by_size"][">=2"]
+    assert res["ref_recovered"] == 1.0 and res["rf"] > 0
+
+
+def test_newick_reader_and_zero_length_collapse(tmp_path: Path) -> None:
+    path = tmp_path / "t.nwk"
+    path.write_text("((leaf1:1,leaf2:1):0,('leaf 3':1,leaf4:1)0.9:1,leaf5:1);")
+    full = trees.read_newick(path)
+    assert sorted(full.leaf_name.values()) == ["leaf 3", "leaf1", "leaf2", "leaf4", "leaf5"]
+    assert len(full.parent) == 8
+    collapsed = trees.read_newick(path, collapse_at_most=0.0)
+    assert len(collapsed.parent) == 7  # the zero-length (1,2) node is gone
+    res = trees.compare(full, collapsed)["splits_by_size"][">=2"]
+    assert res["ref"] == 2 and res["new"] == 1 and res["shared"] == 1
+
+
+def test_newick_rejects_unbalanced(tmp_path: Path) -> None:
+    path = tmp_path / "bad.nwk"
+    path.write_text("((A:1,B:1);")
+    with pytest.raises(ValueError, match="unbalanced"):
+        trees.read_newick(path)

@@ -43,3 +43,11 @@ invented names, not committed as files.
 `tools/who-data-gate-allowlist.txt` holds only invented placeholders and published clade
 designations. A real strain name never goes there. `tools/who-data-gate-baseline.txt`
 starts empty. acmacs-f has no historic files to grandfather, and should stay that way.
+
+## Allowlist changes made in acmacs-f
+
+Any change that makes the gate match less must be narrow, deliberate and recorded here.
+
+| Date | Change | Why | Checked |
+|---|---|---|---|
+| 25 Sep 2026 | One `allow-regex` for the reserved EXAMPLE namespace: case-insensitive (scoped `(?i:…)` on this pattern only), `' '`, `'_'` or `'-'` between words, and every later word must start with EXAMPLE or be TOWN or CITY. The isolate may join parts with `-` or `_`, and each part must be all digits or contain EXAMPLE | Workstreams 2 and 3 unit-test name normalisation: lower-case input, hyphen → space, isolates joined from several fields | `tests/test_gate_allowlist.py`: 13 placeholder forms pass, and 12 possibly-real forms stay flagged (a real city after `EXAMPLE`, `TOWN` alone, a second strain on the line, real lab codes or isolates behind an EXAMPLE location). `--all` over the tree: clean, the same count as before |
