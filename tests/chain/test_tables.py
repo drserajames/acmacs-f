@@ -109,3 +109,65 @@ def test_store_exclusion_must_match(tmp_path):
     publish(tmp_path / "store", [make_table(0)])
     with pytest.raises(ChainConfigError):
         tables_from_store(tmp_path / "store", DATASET, tmp_path / "inputs", {"no-such-table"})
+
+
+def test_table_warnings_reach_the_review_without_rerunning(tmp_path):
+    from af.chain.review import build_review
+
+    opts = MapOptions(scratch_starts=3, incremental_starts=2, grid_test=False)
+
+    def run():
+        _, tables = tables_from_store(tmp_path / "store", DATASET, tmp_path / "inputs")
+        cfg = ChainConfig("h9-hi-turkey-testlab", tables, opts, seed=1)
+        return [r.reused for r in run_chain(cfg, tmp_path / "chains", optimiser=StubOptimiser())]
+
+    publish(tmp_path / "store", [make_table(k) for k in range(3)])
+    run()
+    tables = [make_table(k) for k in range(3)]
+    tables[1].warnings = ["name 'TEST-101': example problem"]
+    publish(tmp_path / "store", tables)
+    assert run() == [True, True, True]  # warnings are not map content
+    page = build_review(tmp_path / "chains" / "h9-hi-turkey-testlab").read_text()
+    assert "1 table warnings" in page and "example problem" in page
+
+
+def test_publish_versions_share_unchanged_steps(tmp_path):
+    from af.chain.publish import PublishError, publish_chain
+    from af.chain.review import build_review
+
+    opts = MapOptions(scratch_starts=3, incremental_starts=2, grid_test=False)
+    chain = tmp_path / "chains" / "h9-hi-turkey-testlab"
+    target = "testlab/h9-hi-turkey-testlab/main"
+
+    def run_and_publish():
+        _, tables = tables_from_store(tmp_path / "store", DATASET, tmp_path / "inputs")
+        cfg = ChainConfig("h9-hi-turkey-testlab", tables, opts, seed=1)
+        run_chain(cfg, tmp_path / "chains", optimiser=StubOptimiser())
+        build_review(chain)
+        return publish_chain(tmp_path / "store", target, chain)
+
+    publish(tmp_path / "store", [make_table(k) for k in range(3)])
+    first = run_and_publish()
+    store = Store.open(tmp_path / "store")
+    v1 = store.resolve(first, verify=True)
+    assert (v1 / "review" / "index.html").exists() and (
+        v1 / "steps" / "0002" / "chosen.ace"
+    ).exists()
+    assert (v1 / "steps" / "0000" / "chosen.ace").stat().st_ino == (
+        chain / "steps" / "0000" / "chosen.ace"
+    ).stat().st_ino
+
+    publish(tmp_path / "store", [make_table(k, titre_shift=1 if k == 2 else 0) for k in range(3)])
+    second = run_and_publish()  # the working area stays writable after a publish
+    v2 = store.resolve(second, verify=True)
+    assert second.version != first.version
+    ino = lambda v, s: (v / "steps" / s / "chosen.ace").stat().st_ino  # noqa: E731
+    assert ino(v1, "0001") == ino(v2, "0001") and ino(v1, "0002") != ino(v2, "0002")
+    history = store.history("chains", target)
+    assert history[-1]["summary"]["restarted_at_step"] == 2
+
+    doc = json.loads((chain / "chain.json").read_text())
+    doc["complete"] = False
+    (chain / "chain.json").write_text(json.dumps(doc))
+    with pytest.raises(PublishError):
+        publish_chain(tmp_path / "store", target, chain)
