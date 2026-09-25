@@ -223,3 +223,14 @@ def test_parsed_date_and_order_key(tmp_path):
     identity.assign(tables, None)
     by_suffix = sorted(tables, key=lambda t: t.order_key)
     assert [t.order_key for t in by_suffix] == [(dt.date(2030, 1, 2), 1), (dt.date(2030, 1, 2), 2)]
+
+
+def test_check_reports_bad_shapes_without_crashing(tmp_path):
+    (t,) = read(
+        tmp_path,
+        [row(), row(ag_position="2", ag_cdc_id="101", ag_strain_name="A/EXAMPLETOWN/2/2029")],
+    ).tables
+    t.titres = [[["40"]]]  # two antigens, one row
+    assert t.check() == ["1 titre rows for 2 antigens"]
+    t.titres = [[["40"]], []]  # a short row
+    assert t.check() == ["titre row 1: 0 cells for 1 sera"]

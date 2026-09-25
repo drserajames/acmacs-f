@@ -69,9 +69,16 @@ RULES: dict[str, list[str]] = {
 }
 
 
-def write_rules(directory: Path) -> Path:
+def write_rules(directory: Path, *, all_optional: bool = False) -> Path:
+    """``all_optional`` for tests whose tiny inputs can't exercise every rule, since a
+    non-optional rule that matches nothing fails a full re-read (design rule 1)."""
     directory.mkdir(parents=True, exist_ok=True)
     for name, lines in RULES.items():
+        if all_optional:
+            lines = [
+                lines[0],
+                *(line if line.endswith("\tyes") else line + "yes" for line in lines[1:]),
+            ]
         (directory / f"{name}.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return directory
 

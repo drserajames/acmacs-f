@@ -92,6 +92,7 @@ class Manifest:
         for t in tables:
             manifest.tables[t.table_id] = {
                 "table_id": t.table_id,
+                "lab": t.lab,
                 "hash": t.content_hash(),
                 "map_hash": t.map_hash(),
                 "source_key": t.source_key,
@@ -119,7 +120,7 @@ class Manifest:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("format") != MANIFEST_FORMAT:
             raise ValueError(f"{path}: not an {MANIFEST_FORMAT} file")
-        return cls(tables=data["tables"], retired=data["retired"], inputs=data["inputs"])
+        return cls(tables=data["tables"], retired=data["retired"], inputs=data.get("inputs", []))
 
 
 @dataclass
