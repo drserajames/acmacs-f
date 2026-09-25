@@ -106,10 +106,62 @@ class Scene:
     # Shown antigens that are sequenced but that no scheme row paints: a gap in the colour scheme
     # (a new clade, or a row that no longer matches), reported so it is never silent.
     sequenced_unpainted: int = 0
+    # Vaccines whose colour was taken from their cell counterpart, and vaccines that have no cell
+    # counterpart in this chart and so keep their own clade colour (reported, never silent).
+    vaccines_recoloured: int = 0
+    vaccines_without_cell: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     def xy(self) -> Array:
         return np.array([p.xy if p.xy is not None else (np.nan, np.nan) for p in self.points])
+
+
+def _colour_vaccines_by_cell(
+    points: Sequence[PointIn],
+    vaccines: dict[str, str],
+    rows: dict[str, ColourRow | None],
+    scheme: ColourScheme,
+) -> tuple[int, list[str]]:
+    """Colour every vaccine by its CELL preparation's clade colour (Sarah, 25 Sep 2026).
+
+    Why: a vaccine strain is one virus, and its egg-grown preparation often carries egg-adaptation
+    substitutions that put it in a different clade, so the pair would be drawn in two colours and
+    read as two different viruses. The cell preparation is the reference, so the egg one takes its
+    colour. A vaccine with no cell preparation in this chart keeps its own clade colour, and is
+    listed rather than passed over.
+
+    Mutates ``rows`` in place; returns (how many were recoloured, which had no cell counterpart).
+    """
+    by_strain: dict[str, dict[str, list[PointIn]]] = {}
+    for p in points:
+        if p.id in vaccines and p.kind == "antigen":
+            by_strain.setdefault(strain_of(p.name), {}).setdefault(
+                p.passage_class or "none", []
+            ).append(p)
+    recoloured, no_cell = 0, []
+    for _strain, by_class in sorted(by_strain.items()):
+        cell = by_class.get("cell")
+        if not cell:
+            no_cell.extend(sorted(p.id for group in by_class.values() for p in group))
+            continue
+        cell_row = rows[cell[0].id]
+        if cell_row is None:
+            continue
+        for cls, group in by_class.items():
+            if cls == "cell":
+                continue
+            for p in group:
+                if rows[p.id] is not cell_row:
+                    rows[p.id] = cell_row
+                    recoloured += 1
+    return recoloured, no_cell
+
+
+def strain_of(name: str) -> str:
+    """Strain name without its subtype prefix (the curated vaccine list's key)."""
+    from af.map.vaccines import strain_name
+
+    return strain_name(name)
 
 
 def style_points(
@@ -132,11 +184,13 @@ def style_points(
     unknown = set(vaccines) - {p.id for p in points}
     if unknown:
         raise ValueError(f"vaccine ids not among the points: {sorted(unknown)}")
+    rows = {p.id: (scheme.paint(p.labels) if p.kind == "antigen" else None) for p in points}
+    recoloured, no_cell = _colour_vaccines_by_cell(points, vaccines, rows, scheme)
     out: list[ScenePoint] = []
     counts = {row.legend: 0 for row in scheme.rows}
     undated = 0
     for p in points:
-        row = scheme.paint(p.labels) if p.kind == "antigen" else None
+        row = rows[p.id]
         shown = p.xy is not None and p.hide is None
         reason = None if shown else ("no_coordinates" if p.xy is None else f"override:{p.hide}")
         # Greyed means the window rule changed the drawn colour: only painted antigens can be
@@ -176,7 +230,19 @@ def style_points(
             )
         )
     legend = [(row.legend, row.colour, counts[row.legend]) for row in reversed(scheme.rows)]
+    scene_extra = (recoloured, no_cell)
+    del scene_extra
     unpainted = sum(
         1 for q in out if q.kind == "antigen" and q.shown and q.sequenced and q.colour is None
     )
-    return Scene(title, window, scheme.name, out, legend, undated, unpainted)
+    return Scene(
+        title,
+        window,
+        scheme.name,
+        out,
+        legend,
+        undated,
+        unpainted,
+        vaccines_recoloured=recoloured,
+        vaccines_without_cell=no_cell,
+    )

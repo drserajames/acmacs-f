@@ -124,6 +124,8 @@ def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
         "painted": 120,
         "sequenced_unpainted": 1,
         "unsequenced": 1,
+        "vaccines_recoloured_from_cell": 0,
+        "vaccines_without_cell_preparation": [],  # ag100 IS the cell preparation
     }
     hidden = [a for a in doc["map"]["antigens"] if not a["shown"]]
     assert {a["hidden_reason"] for a in hidden} == {"no_coordinates", "override:rule-1"}
@@ -186,3 +188,30 @@ def test_provenance_needs_hashes(tmp_path: Path) -> None:
             created=dt.datetime(2026, 9, 25, 12, 0, tzinfo=dt.UTC),
             provenance={"inputs": {"chain": {"name": "no hash"}}},
         )
+
+
+def test_vaccine_takes_its_cell_preparations_colour() -> None:
+    """Sarah, 25 Sep 2026: a vaccine is coloured by its cell preparation; the egg one follows it
+    even when egg-adaptation puts it in another clade."""
+    vac = strain("A(H3N2)", "VACVILLE")
+    lone = strain("A(H3N2)", "EGGONLY")
+    pts = [
+        PointIn("cell", vac, "antigen", (0.0, 0.0), frozenset({"A"}), passage_class="cell"),
+        PointIn("egg", vac, "antigen", (1.0, 0.0), frozenset({"B"}), passage_class="egg"),
+        PointIn("reass", vac, "antigen", (2.0, 0.0), frozenset({"B"}), passage_class="reassortant"),
+        PointIn("solo", lone, "antigen", (3.0, 0.0), frozenset({"B"}), passage_class="egg"),
+        PointIn("other", strain("A(H3N2)", "BYSTANDER"), "antigen", (4.0, 0.0), frozenset({"B"})),
+    ]
+    labels = {"cell": "Va/20-cell", "egg": "Va/20-egg", "reass": "Va/20-X", "solo": "Eg/20-egg"}
+    scene = style_points(pts, SCHEME, Window("all", None), title="t", vaccines=labels)
+    by = {p.id: p for p in scene.points}
+    assert by["cell"].colour == SCHEME.rows[0].colour  # group A
+    assert by["egg"].colour == by["cell"].colour  # follows its cell preparation
+    assert by["reass"].colour == by["cell"].colour
+    assert by["solo"].colour == SCHEME.rows[2].colour  # no cell counterpart: keeps group B
+    assert by["other"].colour == SCHEME.rows[2].colour  # not a vaccine: untouched
+    assert scene.vaccines_recoloured == 2
+    assert scene.vaccines_without_cell == ["solo"]
+    # the legend counts each shown antigen under the colour it is DRAWN in
+    counts = {t: n for t, _, n in scene.legend}
+    assert counts["group A"] == 3 and counts["group B"] == 2
