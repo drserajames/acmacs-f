@@ -29,6 +29,10 @@ to ``env/bin``). Launch runs with it, and every Python job
 they submit inherits it (``Job.python_module`` uses ``sys.executable``). Point tool paths
 in configs at ``<release>/env/bin/``.
 
+Run a release's python from outside any acmacs-f checkout (or with ``python -P``):
+``python -c``/``-m`` put the current directory first on sys.path, so inside a checkout it
+would import that checkout's af. af refuses that when its python is a release.
+
 Running it again for a commit that already has a release just verifies it and prints the
 python. A half-made release (no RELEASE.toml) is refused unless ``--replace-incomplete``.
 ``--link`` points a stable symlink (e.g. the laptop's ``~/AC/eu/af-env``) at the release.
