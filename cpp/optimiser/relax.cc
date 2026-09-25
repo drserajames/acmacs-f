@@ -112,8 +112,14 @@ namespace af::map
         if (!(max_distance > 0.0) || !std::isfinite(max_distance))
             throw std::invalid_argument{"cannot size random layouts: the largest table distance is " + std::to_string(max_distance)};
 
-        // The sizing map ignores unmovable points: it only measures how big a map is.
-        const Stress stress{table_distances(problem), problem.n_points()};
+        // Unmovable points stay where the random layout put them while the sizing map is
+        // minimised, as in ae (Sarah, 25 Sep 2026). Measured against sizing with every point
+        // free, on 6 real tables x steps 4, 8 x 3 seeds, in two cases (all placed points
+        // unmovable; placed antigens unmovable): the box diameter changes by 0.58-1.47x
+        // (median 1.01x), the best stress is the same in 63/72 runs and differs both ways in the
+        // rest (-1.7% to +0.3%), and the share of starts reaching the best is 0.49 vs 0.49.
+        // So this matches ae; it is not a measured improvement.
+        const Stress stress{table_distances(problem), problem.n_points(), problem.unmovable};
         SplitMix64 rng{seed};
         std::vector<double> layout(problem.n_points() * dimensions);
         for (std::size_t point = 0; point < problem.n_points(); ++point)

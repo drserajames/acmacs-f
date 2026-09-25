@@ -59,7 +59,8 @@ namespace af::map
 
     // The diameter of the random cube used for starts: a very rough map from a random layout
     // within the table's largest distance, its bounding-box diagonal times the multiplier
-    // (ae randomizer_plain_from_sample_optimization).
+    // (ae randomizer_plain_from_sample_optimization). Unmovable points are held during that
+    // rough map, as in ae.
     double randomisation_diameter(const Problem& problem, std::size_t dimensions, std::uint64_t seed, double multiplier);
 
 } // namespace af::map
