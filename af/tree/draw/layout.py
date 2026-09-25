@@ -11,7 +11,7 @@ because a stale name otherwise silently leaves the leaf drawn.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -33,10 +33,14 @@ class HideRules:
     ``min_edge``: a node whose branch is at least this long is hidden with its whole subtree
     (long-branch outliers); ``None`` switches the rule off.
     ``names``: hand overrides by leaf name, each must match a leaf.
+    ``flag_reasons``: tree-store flags (e.g. ``clock_outlier``) whose leaves a round chooses not
+    to draw. Off by default: flagged leaves are drawn and counted, and exclusion is a per-round
+    decision (Sarah, 25 Sep 2026). A reason that matches no leaf is an error.
     """
 
     min_edge: float | None = None
     names: frozenset[str] = frozenset()
+    flag_reasons: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -62,11 +66,15 @@ class Layout:
         return [str(tree.leaf_id[i]) for i in self.leaf_nodes]
 
 
-def shown_leaves(tree: DrawTree, rules: HideRules) -> tuple[np.ndarray, dict[str, int]]:
+def shown_leaves(
+    tree: DrawTree, rules: HideRules, flags: Mapping[str, list[str]] | None = None
+) -> tuple[np.ndarray, dict[str, int]]:
     """Per node, whether it is a drawn leaf; plus counts per rule (first matching rule wins)."""
     n = len(tree)
     leaf = np.array([tree.is_leaf(i) for i in range(n)])
     counts = {"long branch": 0, "named override": 0}
+    counts.update({f"flag: {r}": 0 for r in sorted(rules.flag_reasons)})
+    flags = flags or {}
     names = {tree.name[i] for i in range(n) if leaf[i]}
     missing = sorted(set(rules.names) - names)
     if missing:
@@ -81,14 +89,22 @@ def shown_leaves(tree: DrawTree, rules: HideRules) -> tuple[np.ndarray, dict[str
             counts["long branch"] += 1
         elif tree.name[i] in rules.names:
             counts["named override"] += 1
+        elif hit := sorted(rules.flag_reasons & set(flags.get(str(tree.leaf_id[i]), []))):
+            counts[f"flag: {hit[0]}"] += 1
         else:
             continue
         shown[i] = False
+    all_reasons = {r for reasons in flags.values() for r in reasons}
+    unmatched = sorted(rules.flag_reasons - all_reasons)
+    if unmatched:
+        raise HideRuleError(f"flag hide rule(s) match no leaf: {unmatched}")
     return shown, counts
 
 
-def compute_layout(tree: DrawTree, rules: HideRules | None = None) -> Layout:
-    shown, counts = shown_leaves(tree, rules or HideRules())
+def compute_layout(
+    tree: DrawTree, rules: HideRules | None = None, flags: Mapping[str, list[str]] | None = None
+) -> Layout:
+    shown, counts = shown_leaves(tree, rules or HideRules(), flags)
     n = len(tree)
     x = np.zeros(n)
     for i in range(1, n):  # pre-order: the parent is already placed

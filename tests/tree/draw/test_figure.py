@@ -83,3 +83,33 @@ def test_fixed_scale_for_side_by_side_figures(tmp_path):
     too_small = config(geometry=Geometry(row_capacity=10))
     with pytest.raises(ValueError, match="row_capacity"):
         make_figure(standard_tree(), PARENTS, too_small, tmp_path / "t.pdf", {})
+
+
+def test_unknown_continents_are_counted(tmp_path):
+    t = standard_tree()
+    t.continent[t.leaves()[0]] = "ATLANTIS"
+    report = make_figure(t, PARENTS, config(), tmp_path / "c.pdf", {})
+    assert report["continents_not_in_legend"] == {"ATLANTIS": 1}
+
+
+def test_flags_are_counted_not_acted_on(tmp_path):
+    flags = {
+        "EPI_ISL_0000001": ["clock_outlier"],
+        "EPI_ISL_0000002": ["clock_outlier", "long_branch"],
+    }
+    report = make_figure(standard_tree(), PARENTS, config(), tmp_path / "f.pdf", {}, flags)
+    assert report["flagged_drawn"] == {"clock_outlier": 2, "long_branch": 1}
+    assert report["rows"] == 50  # nothing excluded
+
+
+def test_hide_by_flag_reason_is_opt_in_and_counted(tmp_path):
+    from af.tree.draw.layout import HideRuleError, HideRules
+
+    flags = {"EPI_ISL_0000001": ["clock_outlier"], "EPI_ISL_0000002": ["long_branch"]}
+    cfg = config(hide=HideRules(flag_reasons=frozenset({"clock_outlier"})))
+    report = make_figure(standard_tree(), PARENTS, cfg, tmp_path / "h.pdf", {}, flags)
+    assert report["rows"] == 49 and report["hidden"]["flag: clock_outlier"] == 1
+    assert report["flagged_drawn"] == {"long_branch": 1}
+    wrong = config(hide=HideRules(flag_reasons=frozenset({"no_such_flag"})))
+    with pytest.raises(HideRuleError):
+        make_figure(standard_tree(), PARENTS, wrong, tmp_path / "w.pdf", {}, flags)
