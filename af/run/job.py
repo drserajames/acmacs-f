@@ -74,7 +74,7 @@ class Job:
         """
         return cls(
             name=name,
-            command=[sys.executable, "-m", module, *args],
+            command=[sys.executable, *_site_flags(), "-m", module, *args],
             cwd=cwd,
             log=log,
             outputs=outputs,
@@ -163,3 +163,13 @@ def log_tail(path: Path, lines: int = LOG_TAIL_LINES) -> list[str]:
 
 def now() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
+
+
+def _site_flags() -> list[str]:
+    """Start a child Python the way this one was started: ``-S`` if site was disabled.
+
+    Without this, a parent run with ``python -S`` (tools/check-committed.py does, so
+    that ``af`` comes from the exported tree) would start children that load the
+    environment's editable-install hook and import ``af`` from somewhere else.
+    """
+    return ["-S"] if sys.flags.no_site else []

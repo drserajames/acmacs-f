@@ -250,3 +250,16 @@ def test_real_slurm(tmp_path_factory: pytest.TempPathFactory) -> None:
     with pytest.raises(JobFailed):
         runner.run(shell_job(base, "fails", "exit 7", ["x.txt"]))
     assert runner.run(shell_job(base, "ok", "hostname > h.txt", ["h.txt"])).returncode == 0
+
+
+def test_python_module_keeps_the_no_site_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import af.run.job as job_module
+
+    class Flags:
+        no_site = 1
+
+    monkeypatch.setattr(job_module.sys, "flags", Flags())
+    job = Job.python_module("p", "af.run.smoke", [], cwd=tmp_path, log=tmp_path / "l", outputs=[])
+    assert job.argv()[1:4] == ["-S", "-m", "af.run.smoke"]
