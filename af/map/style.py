@@ -8,7 +8,9 @@ I7 JSON is written from it, so the picture and its description cannot disagree.
 
 Colours come from a user colour scheme (workstream 4). A scheme is an ordered list of rows; a point
 is painted by the *last* row whose labels it carries all of, as today's clade layers paint (later
-wins). The legend counts every shown antigen painted by a row, the same as today's report maps.
+wins). By default the legend counts, for each row, every shown antigen carrying that row's labels
+(so a parent clade's count includes its painted-over sub-clades), and lists rows last-first, as on
+today's report maps. ``legend_counts="painted"`` counts only points drawn in the row's colour.
 """
 
 from __future__ import annotations
@@ -111,6 +113,7 @@ def style_points(
     *,
     title: str,
     vaccines: dict[str, str] | None = None,
+    legend_counts: Literal["matched", "painted"] = "matched",
 ) -> Scene:
     """Build the :class:`Scene` for one map and window.
 
@@ -137,8 +140,14 @@ def style_points(
                 undated += 1
             else:
                 greyed = p.date < window.since
-        if shown and row is not None and p.kind == "antigen":
-            counts[row.legend] += 1
+        if shown and p.kind == "antigen":
+            if legend_counts == "painted":
+                if row is not None:
+                    counts[row.legend] += 1
+            else:
+                for r in scheme.rows:
+                    if r.labels <= p.labels:
+                        counts[r.legend] += 1
         out.append(
             ScenePoint(
                 id=p.id,
@@ -157,5 +166,5 @@ def style_points(
                 vaccine=vaccines.get(p.id),
             )
         )
-    legend = [(row.legend, row.colour, counts[row.legend]) for row in scheme.rows]
+    legend = [(row.legend, row.colour, counts[row.legend]) for row in reversed(scheme.rows)]
     return Scene(title, window, scheme.name, out, legend, undated)

@@ -66,7 +66,12 @@ def test_style_paints_last_matching_row_and_greys_old() -> None:
     assert by_id["ag-noxy"].hidden_reason == "no_coordinates"
     assert by_id["ag-hidden"].hidden_reason == "override:rule-1"
     counts = {t: n for t, _, n in scene.legend}
-    assert sum(counts.values()) == 120  # shown antigens only; hidden/no-xy excluded
+    assert [t for t, _, _ in scene.legend] == ["group B", "group A sub", "group A"]  # last first
+    assert counts["group A"] == 80  # matched: includes the sub-group painted over it
+    painted = style_points(
+        synthetic_points(), SCHEME, Window("12m", SINCE), title="t", legend_counts="painted"
+    )
+    assert sum(n for _, _, n in painted.legend) == 120  # shown antigens only, each counted once
 
 
 def strain(prefix: str, place: str) -> str:
@@ -97,6 +102,7 @@ def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
         window=Window("12m", SINCE),
         title="Synthetic by group",
         frame_size=14.0,
+        must_show_since=SINCE,
         vaccine_labels={"ag100": "Te/25-cell"},
         out_pdf=out,
         created=dt.datetime(2026, 9, 25, 12, 0, tzinfo=dt.UTC),
@@ -122,6 +128,7 @@ def test_i7_refuses_naive_timestamp(tmp_path: Path) -> None:
             window=Window("all", None),
             title="t",
             frame_size=14.0,
+            must_show_since=SINCE,
             vaccine_labels={},
             out_pdf=tmp_path / "f.pdf",
             created=dt.datetime(2026, 9, 25, 12, 0),

@@ -48,6 +48,7 @@ def finish_map(
     window: Window,
     title: str,
     frame_size: float,
+    must_show_since: dt.date,
     vaccine_labels: dict[str, str],
     out_pdf: Path,
     created: dt.datetime,
@@ -55,17 +56,30 @@ def finish_map(
     orientation: dict[str, object] | None = None,
     look: Look = DEFAULT_LOOK,
 ) -> FinishedMap:
-    """Produce ``out_pdf`` and its I7 for one chart and window. Raises rather than writing a map
-    that hides a recent antigen (``FrameError`` from the frame search)."""
+    """Produce ``out_pdf`` and its I7 for one chart and window.
+
+    ``must_show_since``: antigens isolated on or after this date must all be visible (not off the
+    page, not under the legend or title) in *every* window, including "all", where nothing is
+    greyed and older antigens may fall off the edge if the frame is too small for them. Raises
+    ``FrameError`` rather than writing a map that hides one. Vaccines come next: shown if at all
+    possible, but an old vaccine far from today's viruses may not fit (the I7 records
+    ``in_viewport`` for each), then antigens in the window, sera, and everything else."""
     scene = style_points(points, scheme, window, title=title, vaccines=vaccine_labels)
     furniture = (legend_box(scene, look), title_box(scene, look))
     xy = scene.xy()
     shown = np.array([p.shown for p in scene.points])
     antigen = np.array([p.kind == "antigen" for p in scene.points])
-    recent = shown & antigen & ~np.array([p.greyed for p in scene.points])
+    recent = (
+        shown
+        & antigen
+        & np.array([p.date is not None and p.date >= must_show_since for p in scene.points])
+    )
     vaccine = np.array([p.vaccine is not None for p in scene.points])
+    in_window = shown & antigen & ~np.array([p.greyed for p in scene.points])
     priorities = (
-        Priority("recent antigens", recent | (vaccine & shown)),
+        Priority("recent antigens", recent),
+        Priority("vaccines", vaccine & shown),
+        Priority("antigens in window", in_window),
         Priority("sera", shown & ~antigen),
         Priority("all antigens", shown & antigen),
     )
@@ -95,4 +109,6 @@ def finish_map(
         orientation=orientation,
     )
     i7 = write_i7(doc, out_pdf)
-    return FinishedMap(scene, choice, labels, out_pdf, i7, recent_hidden(scene, frame, furniture))
+    return FinishedMap(
+        scene, choice, labels, out_pdf, i7, recent_hidden(scene, frame, furniture, must_show_since)
+    )
