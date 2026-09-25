@@ -130,7 +130,7 @@ def _match_rows(
 ) -> None:
     """Run the matcher on every antigen row; store the answers as table ``antigen_matches``."""
     cursor = con.execute(
-        "SELECT a.*, t.subtype FROM antigens a JOIN tables t USING (table_id) "
+        "SELECT a.*, t.subtype, t.lab AS table_lab FROM antigens a JOIN tables t USING (table_id) "
         "ORDER BY a.table_id, a.position"
     )
     columns = [d[0] for d in cursor.description]
@@ -175,6 +175,7 @@ def _match_row(
             class_of(row),
             epi_isl=row.get("epi_isl") or "",
             reassortant=row.get("reassortant") or "",
+            lab=row.get("table_lab") or "",
         )
         for d in datasets
     ]
@@ -286,12 +287,15 @@ def link_from_store(
     passage_rules: Sequence[Any],
     *,
     with_clades: bool,
+    lab_submitters: Mapping[str, frozenset[str]] | None = None,
     class_of: ClassOf = passage_class_column,
 ) -> LinkCounts:
     """:func:`link_sequences` over the CURRENT ``sequences/*`` (and ``clades/*``) datasets.
 
     ``with_clades=False`` is the deliberate sequences-only join; with ``True`` a missing
-    clade dataset is an error, not an empty join.
+    clade dataset is an error, not an empty join. ``lab_submitters`` (lab -> the exact
+    GISAID submitting-lab names, :func:`af.seq.matching.read_lab_submitters`) lets the
+    matcher settle a name tie by the antigen's own lab; without it that rule never applies.
     """
     from af.seq.matching import index_from_store
 
@@ -301,6 +305,8 @@ def link_from_store(
     if missing:
         raise StoreError(f"sequence datasets missing from the store: {', '.join(missing)}")
     indexes = {d: index_from_store(store, [d], passage_rules) for d in datasets}
+    for index in indexes.values():
+        index.submitters = dict(lab_submitters or {})
     isolates = [
         path
         for d in datasets

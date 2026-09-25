@@ -144,3 +144,23 @@ def test_missing_inputs_and_duplicate_rows_are_refused(tmp_path: Path, syn: Any)
     )
     with pytest.raises(StoreError, match="more than one row"):
         link_sequences(con, {"h3": _index()}, [isolates], [doubled], class_of=cell)
+
+
+def test_a_name_tie_is_settled_by_the_antigens_own_lab(tmp_path: Path, syn: Any) -> None:
+    """ELSEWHERE/4 has two different cell sequences; only one was submitted by LABX."""
+    con = _store(tmp_path, syn)
+    isolates, clades = _isolates_and_clades(tmp_path)
+    index = SequenceIndex()
+    for epi, acc, seq, submitter in (
+        ("EPI_ISL_4", "ACC4", "s4a", "Lab X Institute"),
+        ("EPI_ISL_5", "ACC5", "s4b", "Another Institute"),
+    ):
+        index.add(Candidate(epi, acc, "h3", gisaid("A", "ELSEWHERE", 4), "P", "cell", seq,
+                            submitter))  # fmt: skip
+    index.submitters = {"LABX": frozenset({"Lab X Institute"})}
+    counts = link_sequences(con, {"h3": index}, [isolates], [clades], class_of=cell)
+    assert counts.by_flag["match.own-lab"] == 1
+    row = con.execute(
+        "SELECT status, accession FROM antigen_sequences WHERE position = 3"
+    ).fetchone()
+    assert row == ("matched", "ACC4")
