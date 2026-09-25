@@ -369,3 +369,22 @@ def test_build_record_says_which_af_built_it() -> None:
     assert record["version"] == af.__version__
     # In this checkout (editable install) the commit is known; from a wheel it would be null.
     assert record["commit"] is None or len(record["commit"]) == 40
+
+
+def test_build_record_uses_the_release_commit_when_not_a_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+    import sys
+    import types
+
+    def no_git(*args: object, **kwargs: object) -> None:
+        raise subprocess.CalledProcessError(128, "git")
+
+    monkeypatch.setattr(subprocess, "run", no_git)
+    fake = types.ModuleType("af.run.runtime")
+    fake.release_info = lambda: {"commit": "a" * 40, "rev": "HEAD"}  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "af.run.runtime", fake)
+    record = build.af_source()
+    assert record["commit"] == "a" * 40 and record["dirty"] is False
+    assert record["release"]["rev"] == "HEAD"
