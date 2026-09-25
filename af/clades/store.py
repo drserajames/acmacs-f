@@ -35,7 +35,8 @@ from pathlib import Path
 from typing import Any
 
 from af.clades.assign import Assignment
-from af.clades.nomenclature import CladeSet
+from af.clades.local import extend_from_file
+from af.clades.nomenclature import CladeSet, Pin, load_clade_set
 from af.store import ExternalInput, Provenance, Store, StoreRef
 from af.store.ref import Input
 
@@ -239,6 +240,57 @@ def read_report(store: Store, ref: StoreRef) -> dict[str, Any]:
     with (store.resolve(ref) / REPORT_FILE).open() as stream:
         report: dict[str, Any] = json.load(stream)
     return report
+
+
+def clade_set_for(
+    store: Store,
+    ref: StoreRef,
+    clones: Path,
+    *,
+    local: Path | None = None,
+    signatures: Mapping[str, Sequence[str]] | None = None,
+) -> CladeSet:
+    """The clade set a published ``clades/<subtype>`` version was built with.
+
+    A consumer that colours, groups or compares by clade must resolve names against the
+    same nomenclature the table was labelled from, or "is this within J.2?" gets answered
+    by a different revision than the one that assigned the label. So the pin is read from
+    the table itself — its ``clade_set_version``, ``<repository>@<commit>`` — and checked
+    against the clone, never configured a second time. ``clones`` is the directory holding
+    the nomenclature clones (from the consumer's config).
+
+    A table built with the local layer records a ``+local:<hash>`` suffix; then ``local``
+    (``clades/local.tsv``) and, for carried-over clades, ``signatures`` must be given and
+    must reproduce that exact version. Every mismatch is an error, never a quiet fallback
+    to whatever the clones hold today.
+    """
+    if ref.kind != "clades":
+        raise CladeStoreError(f"{ref}: expected a clades version, got kind {ref.kind!r}")
+    subtypes = {dataset: subtype for subtype, dataset in DATASETS.items()}
+    if ref.dataset not in subtypes:
+        raise CladeStoreError(f"{ref}: no clade set for dataset {ref.dataset!r}")
+    subtype = subtypes[ref.dataset]
+    recorded = str(read_report(store, ref)["clade_set_version"])
+    upstream, _, local_part = recorded.partition("+local:")
+    repository, at, commit = upstream.partition("@")
+    if not at or not repository or not commit:
+        raise CladeStoreError(f"{ref}: unreadable clade_set_version {recorded!r}")
+    clade_set = load_clade_set(
+        subtype, clones, Pin(subtype, repository, commit), repository=repository
+    )
+    if local_part:
+        if local is None:
+            raise CladeStoreError(
+                f"{ref}: built with local clades ({recorded}); give the local.tsv it used"
+            )
+        clade_set = extend_from_file(clade_set, local, signatures=signatures)
+    elif local is not None:
+        raise CladeStoreError(f"{ref}: built without local clades, but a local file was given")
+    if clade_set.version != recorded:
+        raise CladeStoreError(
+            f"{ref}: rebuilt clade set is {clade_set.version}, the table records {recorded}"
+        )
+    return clade_set
 
 
 def _duplicates(keys: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
