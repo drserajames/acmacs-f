@@ -221,7 +221,7 @@ def test_tables_dataset_must_match_the_path(tables, tmp_path):
 
     path = tmp_path / "chains" / "labx" / "h9" / "main.toml"
     path.parent.mkdir(parents=True)
-    path.write_text('name = "x"\nseed = 1\n[tables]\nstore = "s"\ndataset = "labx/h9"\n')
+    path.write_text('name = "x"\nseed = 1\n[tables]\ndataset = "labx/h9"\n')
     check_tables_dataset(path, "labx/h9/main")
     with pytest.raises(ChainConfigError, match="not this chain's"):
         check_tables_dataset(path, "laby/h9/main")
