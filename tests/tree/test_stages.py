@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from af.run import Job, LocalRunner, Resources
+from af.run.job import JobResult
 from af.store import Store
 from af.store.work import Work
 from af.tree import stages
@@ -39,6 +41,7 @@ if "--help" in sys.argv:
     print("CMAPLE version 0.0-stub")
     sys.exit(0)
 prefix = sys.argv[sys.argv.index("--prefix") + 1]
+open(prefix + ".argv", "w").write(" ".join(sys.argv[1:]) + "\\n")
 open(prefix + ".treefile", "w").write({NEWICK!r} + "\\n")
 """
 
@@ -78,8 +81,7 @@ leaves = "leaves.parquet"
 
 
 def statuses(config_path: Path) -> dict[str, str]:
-    config = stages.load_run_config(config_path)
-    return {o.name: o.status for o in stages.run(config)["h3"]}
+    return {o.name: o.status for o in stages.run(config_path)["h3"]}
 
 
 def test_the_stages_run_in_order_and_publish_an_i6_version(tmp_path: Path) -> None:
@@ -134,11 +136,11 @@ def test_leaf_metadata_re_runs_populate_but_not_the_build(tmp_path: Path) -> Non
 def test_a_changed_clock_threshold_re_runs_populate_not_asr(tmp_path: Path) -> None:
     config = make_project(tmp_path / "p")
     statuses(config)
-    parsed = stages.load_run_config(config)
-    h3 = dataclasses.replace(parsed.trees.subtypes["h3"], clock_z_threshold=5.0)
-    trees = dataclasses.replace(parsed.trees, subtypes={"h3": h3})
-    outcomes = stages.run(dataclasses.replace(parsed, trees=trees))["h3"]
-    assert {o.name: o.status for o in outcomes} == {
+    text = config.read_text().replace(
+        'asr_backend = "parsimony"', 'asr_backend = "parsimony"\nclock_z_threshold = 5.0'
+    )
+    config.write_text(text)
+    assert statuses(config) == {
         "build": "skipped",
         "asr": "skipped",
         "populate": "ran",
@@ -223,7 +225,7 @@ def test_a_pin_move_re_runs_populate_publish_and_clades_in_order(tmp_path: Path)
     (clone / "README.md").write_text("a commit that changes no clade\n")
     subprocess.run(["git", "-C", str(clone), "add", "README.md"], check=True)
     subprocess.run(commit_command(clone, "readme"), check=True)
-    outcomes = stages.run(stages.load_run_config(config))["h3"]
+    outcomes = stages.run(config)["h3"]
     assert [(o.name, o.status) for o in outcomes] == [
         ("build", "skipped"),
         ("asr", "skipped"),
@@ -238,7 +240,7 @@ def test_a_pin_the_clone_is_not_at_is_refused(tmp_path: Path) -> None:
     config = make_project(tmp_path / "p")
     with_clades(config, pin="0000000")
     with pytest.raises(Exception, match="not the pinned"):
-        stages.run(stages.load_run_config(config))
+        stages.run(config)
 
 
 def test_a_new_clade_file_re_runs_populate(tmp_path: Path) -> None:
@@ -253,5 +255,97 @@ def test_a_new_clade_file_re_runs_populate(tmp_path: Path) -> None:
     )
     subprocess.run(["git", "-C", str(clone), "add", "."], check=True)
     subprocess.run(commit_command(clone, "P.9"), check=True)
-    ran = {o.name for o in stages.run(stages.load_run_config(config))["h3"] if o.status == "ran"}
+    ran = {o.name for o in stages.run(config)["h3"] if o.status == "ran"}
     assert ran == {"populate", "publish", "clades"}
+
+
+class RecordingRunner(LocalRunner):
+    """Runs jobs locally, and keeps each one so a test can see what the scheduler would be asked."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.jobs: list[Job] = []
+
+    def run(self, job: Job) -> JobResult:
+        self.jobs.append(job)
+        return super().run(job)
+
+
+RESOURCES = """
+[trees.subtypes.h3.resources.build]
+threads = 3
+memory_gb = 8
+time_limit_minutes = 90
+
+[trees.subtypes.h3.resources.asr]
+threads = 1
+time_limit_minutes = 30
+"""
+
+
+def with_resources(config: Path) -> None:
+    text = config.read_text()
+    head, _, inputs = text.partition("[inputs.h3]")
+    config.write_text(head + RESOURCES + "\n[inputs.h3]" + inputs)
+
+
+def test_build_asr_and_populate_run_as_jobs_with_their_own_resources(tmp_path: Path) -> None:
+    config = make_project(tmp_path / "p")
+    with_resources(config)
+    runner = RecordingRunner()
+    stages.run(config, runner=runner)
+    by_stage = {
+        job.name.rsplit("-", 1)[1]: job for job in runner.jobs if job.name.startswith("tree-")
+    }
+    assert sorted(by_stage) == ["asr", "build", "populate"]
+    assert by_stage["build"].resources == Resources(threads=3, memory_gb=8, time_limit_minutes=90)
+    assert by_stage["asr"].resources.time_limit_minutes == 30
+    assert by_stage["populate"].resources == Resources(threads=1)  # [trees] threads = 1
+    assert "--job" in by_stage["asr"].argv()
+    assert by_stage["build"].env["PATH"].startswith(str(Path(sys.executable).parent))
+
+
+def test_cmaple_gets_the_build_jobs_threads(tmp_path: Path) -> None:
+    config = make_project(tmp_path / "p")
+    with_resources(config)
+    statuses(config)
+    argv = (tmp_path / "p/work/trees/h3/build/cmaple/cmaple.argv").read_text()
+    assert "-nt 3 " in argv
+
+
+def test_a_different_thread_count_alone_re_runs_nothing(tmp_path: Path) -> None:
+    """The laptop and o give CMAPLE and ASR different threads; that is not a reason to rebuild."""
+    config = make_project(tmp_path / "p")
+    statuses(config)
+    with_resources(config)
+    assert statuses(config) == dict.fromkeys(TREE_STEPS, "skipped")
+
+
+def test_subtypes_build_side_by_side(tmp_path: Path) -> None:
+    config = make_project(tmp_path / "p")
+    text = "max_parallel = 2\n" + config.read_text()
+    second = text[text.index("[trees.subtypes.h3]") : text.index("[inputs.h3]")]
+    text += second.replace("h3", "h1") + text[text.index("[inputs.h3]") :].replace("h3", "h1")
+    config.write_text(text)
+    outcomes = stages.run(config)
+    assert sorted(outcomes) == ["h1", "h3"]
+    assert all(o.status == "ran" for results in outcomes.values() for o in results)
+    store = Store.open(tmp_path / "p" / "store")
+    assert store.current("trees", "h1/weekly") is not None
+
+
+def test_resources_for_an_unknown_stage_are_refused(tmp_path: Path) -> None:
+    config = make_project(tmp_path / "p")
+    text = config.read_text().replace(
+        "[inputs.h3]", "[trees.subtypes.h3.resources.publish]\nthreads = 2\n\n[inputs.h3]"
+    )
+    config.write_text(text)
+    with pytest.raises(Exception, match="unknown stage"):
+        stages.load_run_config(config)
+
+
+def test_a_subtype_called_state_is_refused(tmp_path: Path) -> None:
+    config = make_project(tmp_path / "p")
+    config.write_text(config.read_text().replace("h3", "state"))
+    with pytest.raises(Exception, match="cannot be called 'state'"):
+        stages.load_run_config(config)
