@@ -23,14 +23,16 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from af.store import Provenance, Store, StoreRef
 from af.tree.io import newick
-from af.tree.populate import PopulatedTree
+
+if TYPE_CHECKING:  # af.tree.populate imports af.tree.asr, which imports this package's newick
+    from af.tree.populate import PopulatedTree
 
 FORMAT = "af-tree-i6/1"
 TREE_FILE = "tree.nwk"
