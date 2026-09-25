@@ -53,7 +53,7 @@ def sequence_version(
         return builder.publish(Provenance("seq.build", tuple(datasets), {}, STARTED, STARTED))
 
 
-def standard(store: Store, *, extra: list[tuple[str, str, str | None, str | None]] = ()):
+def standard(store: Store) -> tuple[StoreRef, StoreRef]:
     """The tree leaves as Nextclade sees them (P.2 where the tree says P.1 for leaf 2, a
     genuine disagreement; P where the tree says P.1 for leaf 1, merely less specific), plus
     three sequences off the tree: named, unassigned, no call."""
@@ -68,7 +68,6 @@ def standard(store: Store, *, extra: list[tuple[str, str, str | None, str | None
         ("EPI_ISL_900010", "EPI900010", "P.1.1", "bad"),
         ("EPI_ISL_900011", "EPI900011", "unassigned", "mediocre"),
         ("EPI_ISL_900012", "EPI900012", None, None),
-        *extra,
     ]
     return sequence_version(store, rows, dataset, empty), dataset
 
