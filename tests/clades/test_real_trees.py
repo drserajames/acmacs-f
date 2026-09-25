@@ -7,9 +7,12 @@ on H1 and 99.8% on B/Vic, against 93.0/88.8/94.9% for the labels ae produces tod
 
 The fixture is a subsample of the September 2026 round's trees, in acmacs-f-data
 (``fixtures/clades/``), so nothing real is in this public repo; these tests skip when that
-repo is absent. Because af labels a node from its own sequence and its parent's label, a
-leaf's label depends only on the path from the root, so the subsample reproduces the full
-tree's labels exactly — hence per-leaf equality below rather than a tolerance.
+repo is absent, but **fail** when it is present and no longer matches the nomenclature the
+clones are on, because that is precisely when the engine needs re-measuring.
+
+Because af labels a node from its own sequence and its parent's label, a leaf's label
+depends only on the path from the root, so the subsample reproduces the full tree's labels
+exactly — hence per-leaf equality below rather than a tolerance.
 """
 
 from __future__ import annotations
@@ -82,9 +85,17 @@ def run(af_data: Path, key: str) -> tuple[TreeAssignment, dict, dict[str, dict[s
         pytest.skip(f"nomenclature clones not found at {CLONES}")
     clade_set = load_clade_set(expected["subtype"], CLONES)
     if clade_set.version != expected["clade_set_version"]:
-        pytest.skip(
-            f"nomenclature moved: fixture was built at {expected['clade_set_version']}, "
-            f"clone is at {clade_set.version}"
+        # Not a skip. The day the pin moves is the day this test is most worth running,
+        # and a skipped test reads as a passing one: the fixture would sit unregenerated
+        # and unnoticed. Fail, and say exactly how to put it right.
+        raise AssertionError(
+            f"the clade fixture and the nomenclature clones disagree for {key}.\n"
+            f"  fixture built at: {expected['clade_set_version']}\n"
+            f"  clones now at:    {clade_set.version}\n"
+            "Regenerate the fixture and commit it to acmacs-f-data, recording in the commit "
+            "message what moved and why any number changed:\n"
+            "  python3 $AF_DATA/fixtures/clades/make_fixture.py\n"
+            "If the clones moved by accident, check out the pinned commit instead."
         )
     gaps = GapSupport(expected["gap_support"])
     result = assign_tree(build_nodes(directory, key, gaps), clade_set, require_gap_support=False)
