@@ -32,7 +32,7 @@ from af.seq import processed
 from af.seq.gisaid import SequenceRecord, join, read_fasta, read_workbook
 from af.seq.processed import PlacementRule
 from af.seq.pulls import find_pulls, import_pull, open_pull
-from af.store import PathsConfig, Store, Work
+from af.store import DatasetWork, PathsConfig, Store, Work
 from af.store.ref import StoreRef
 from af.util.config import ConfigError, load_config
 
@@ -70,6 +70,14 @@ class PlacementConfig:
 
 
 @dataclass(frozen=True)
+class LineageCheckConfig:
+    gisaid_subtype: str
+    candidates: dict[str, str]  # GISAID lineage -> dataset
+    min_margin: int
+    reason: str
+
+
+@dataclass(frozen=True)
 class SequencesConfig:
     paths: PathsConfig
     runner: RunnerSettings
@@ -80,6 +88,8 @@ class SequencesConfig:
     #: The extractor's subtype label → what the GISAID query asked for, in the name
     #: normaliser's terms ("A(H3N2)", "B"): a name that disagrees is flagged, not relabelled.
     source_subtypes: dict[str, str] = field(default_factory=dict)
+    #: Subtypes placed by alignment rather than GISAID's label (processed.LineageCheck).
+    lineage_check: list[LineageCheckConfig] = field(default_factory=list)
 
 
 def import_source(config: SequencesConfig, source: str) -> list[StoreRef]:
@@ -93,7 +103,7 @@ def store_pull(config: SequencesConfig, pull_id: str, runner: Runner) -> dict[st
     """Align one raw pull and publish its partitions; returns the ref per dataset."""
     started = datetime.datetime.now(datetime.UTC)
     store = Store.open(config.paths.store)
-    work = Work.open(config.paths.work)
+    area = Work.open(config.paths.work).dataset("sequences", f"{WORK_DATASET}/{pull_id}")
     raw = open_pull(store, pull_id)
     label = pull_id.rsplit("-", 1)[-1]
     if label not in config.source_subtypes:
@@ -106,53 +116,122 @@ def store_pull(config: SequencesConfig, pull_id: str, runner: Runner) -> dict[st
     rules = [
         PlacementRule(p.gisaid_subtype, p.lineage, p.dataset, p.reason) for p in config.placement
     ]
-    placed = processed.place(records, rules)
+    checks = _lineage_checks(config)
+    references = _References(config.nextclade, store)
+
+    alignments: dict[str, dict[str, nc.Aligned]] = {}
+    summaries: dict[str, dict[str, Any]] = {}
+    placed: dict[str, list[SequenceRecord]] = {}
+    lineage_flags: dict[str, dict[str, int]] = {}
+    for subtype, check in checks.items():
+        checked = [r for r in records if r.subtype == subtype]
+        if not checked:
+            continue
+        for dataset in sorted(set(check.candidates.values())):
+            summaries[dataset], alignments[dataset] = _align(
+                config.nextclade, references, dataset, checked, area, runner
+            )
+        groups, flags = processed.place_by_alignment(checked, rules, check, alignments)
+        lineage_flags[subtype] = dict(sorted(flags.items()))
+        _merge(placed, groups)
+    unchecked = processed.place([r for r in records if r.subtype not in checks], rules)
+    for dataset, group in sorted(unchecked.items()):
+        if dataset in alignments:
+            problem = f"placement: {dataset!r} is a lineage_check candidate and also receives"
+            raise ConfigError("<config>", [f"{problem} unchecked records"])
+        summaries[dataset], alignments[dataset] = _align(
+            config.nextclade, references, dataset, group, area, runner
+        )
+    _merge(placed, unchecked)
 
     refs: dict[str, StoreRef] = {}
     for dataset, group in sorted(placed.items()):
-        pin = config.nextclade.datasets.get(dataset)
-        if pin is None:
-            raise ConfigError("<config>", [f"nextclade.datasets: no dataset {dataset!r}"])
-        dataset_ref = nc.fetch_dataset(nc.DatasetPin(pin.path, pin.tag, pin.sha256), store)
-        dataset_dir = store.resolve(dataset_ref) / nc.DATASET_DIR
-        area = work.dataset("sequences", f"{WORK_DATASET}/{pull_id}")
-        summary, aligned = _align(
-            config.nextclade,
-            pin,
-            dataset_dir,
-            group,
-            area.tmp / dataset,
-            area.state / dataset,
-            runner,
-        )
         refs[dataset] = processed.publish_pull(
             store,
             dataset,
             pull_id,
             processed.isolates_table(group, dataset, pull_id),
-            processed.sequences_table(group, aligned, pull_id),
-            inputs=[raw.ref, dataset_ref],
+            processed.sequences_table(group, alignments[dataset], pull_id),
+            inputs=[raw.ref, *references.refs_for(dataset, checks)],
             parameters={
                 "pull": pull_id,
                 "read": counts.to_json(),
                 "workbook_line_breaks": dict(workbook.line_breaks),
                 "placement": _placement_used(config.placement, group, dataset),
-                "alignment": summary,
+                "lineage_check": lineage_flags,
+                "alignment": summaries[dataset],
             },
             started=started,
         )
     return refs
 
 
+def _lineage_checks(config: SequencesConfig) -> dict[str, processed.LineageCheck]:
+    checks = {}
+    for item in config.lineage_check:
+        if item.gisaid_subtype in checks:
+            raise ConfigError("<config>", [f"lineage_check: {item.gisaid_subtype!r} twice"])
+        missing = sorted(set(item.candidates.values()) - set(config.nextclade.datasets))
+        if missing:
+            raise ConfigError("<config>", [f"lineage_check: no Nextclade dataset for {missing}"])
+        checks[item.gisaid_subtype] = processed.LineageCheck(
+            item.gisaid_subtype, dict(item.candidates), item.min_margin, item.reason
+        )
+    for rule in config.placement:
+        check = checks.get(rule.gisaid_subtype)
+        if check is not None and rule.dataset not in check.candidates.values():
+            row = f"{rule.gisaid_subtype!r}/{rule.lineage!r} -> {rule.dataset!r}"
+            raise ConfigError("<config>", [f"placement: {row} is not a lineage_check candidate"])
+    return checks
+
+
+class _References:
+    """Each dataset's pinned Nextclade reference, fetched into the store once per run."""
+
+    def __init__(self, settings: NextcladeConfig, store: Store) -> None:
+        self.settings = settings
+        self.store = store
+        self._refs: dict[str, StoreRef] = {}
+
+    def get(self, dataset: str) -> tuple[DatasetConfig, StoreRef, Path]:
+        pin = self.settings.datasets.get(dataset)
+        if pin is None:
+            raise ConfigError("<config>", [f"nextclade.datasets: no dataset {dataset!r}"])
+        if dataset not in self._refs:
+            nc_pin = nc.DatasetPin(pin.path, pin.tag, pin.sha256)
+            self._refs[dataset] = nc.fetch_dataset(nc_pin, self.store)
+        ref = self._refs[dataset]
+        return pin, ref, self.store.resolve(ref) / nc.DATASET_DIR
+
+    def refs_for(
+        self, dataset: str, checks: Mapping[str, processed.LineageCheck]
+    ) -> list[StoreRef]:
+        """The dataset's own reference, and every reference its records were placed against."""
+        wanted = {dataset}
+        for check in checks.values():
+            if dataset in check.candidates.values():
+                wanted |= set(check.candidates.values())
+        return [self._refs[name] for name in sorted(wanted) if name in self._refs]
+
+
+def _merge(
+    into: dict[str, list[SequenceRecord]], groups: Mapping[str, list[SequenceRecord]]
+) -> None:
+    for dataset, group in groups.items():
+        into.setdefault(dataset, []).extend(group)
+
+
 def _align(
     settings: NextcladeConfig,
-    pin: DatasetConfig,
-    dataset_dir: Path,
+    references: _References,
+    dataset: str,
     group: Sequence[SequenceRecord],
-    out: Path,
-    state: Path,
+    area: DatasetWork,
     runner: Runner,
 ) -> tuple[dict[str, Any], dict[str, nc.Aligned]]:
+    """Align ``group`` against ``dataset``'s reference, as a resumable pipeline step."""
+    pin, _, dataset_dir = references.get(dataset)
+    out = area.tmp / dataset
     out.mkdir(parents=True, exist_ok=True)
     fasta = out / "input.fasta"
     nc.write_input(((processed.seq_id(r), r.nucleotides) for r in processed.by_key(group)), fasta)
@@ -171,11 +250,10 @@ def _align(
             "threads": settings.threads,
         },
     )
-    Pipeline([step], state_dir=state, runner=runner).run()
+    Pipeline([step], state_dir=area.state / dataset, runner=runner).run()
     reference = nc.read_reference(dataset_dir, pin.mature_nt)
     aligned = {record.seq_id: record for record in nc.read_alignment(result, reference)}
-    summary = json.loads((result / nc.SUMMARY).read_text())
-    return summary, aligned
+    return json.loads((result / nc.SUMMARY).read_text()), aligned
 
 
 def _placement_used(

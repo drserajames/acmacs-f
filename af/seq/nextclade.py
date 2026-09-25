@@ -362,6 +362,10 @@ class Aligned:
     #: tree); they depend on the dataset release, which provenance names.
     clade: str | None = None
     subclade: str | None = None
+    #: Nucleotide substitutions against the reference over the aligned range: how far the
+    #: sequence is from this reference, which is what places a B record whose lineage
+    #: GISAID does not state (af.seq.processed.choose_lineage).
+    substitutions: int | None = None
 
 
 def read_alignment(out_dir: Path, reference: Reference) -> Iterator[Aligned]:
@@ -420,6 +424,7 @@ def _reduce(
         qc_status=row.get("qc.overallStatus", ""),
         clade=row.get("clade") or None,
         subclade=row.get("subclade") or None,
+        substitutions=_int(row.get("totalSubstitutions")) if error is None else None,
     )
 
 

@@ -121,6 +121,13 @@ class TestRows:
             (None, "seed failed"),
         ]
 
+    def test_substitutions_are_stored(self) -> None:
+        r = record(1)
+        rows = processed.sequences_table(
+            [r], {processed.seq_id(r): aligned(r, substitutions=12)}, "p"
+        )
+        assert rows["substitutions"].to_pylist() == [12]
+
     def test_identical_sequences_share_a_hash_and_stay_two_rows(self) -> None:
         one, two = record(1), record(2)
         results = {processed.seq_id(r): aligned(r) for r in (one, two)}
@@ -271,13 +278,176 @@ def test_store_pull_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert build.store_pull(config, "definitive-2021-0312-h3n2", runner) == refs
 
 
-def _dataset_ref(store: Store, source: Path) -> StoreRef:
+def _dataset_ref(store: Store, source: Path, key: str = "nextclade/example/h3/t1") -> StoreRef:
     """Put an invented Nextclade dataset in raw/, as fetch_dataset would, without a download."""
     try:
-        return store.current("raw", "nextclade/example/h3/t1")
+        return store.current("raw", key)
     except StoreError:
         pass
-    with store.build("raw", "nextclade/example/h3/t1") as builder:
+    with store.build("raw", key) as builder:
         builder.link(source, "dataset")
         now = datetime.datetime.now(datetime.UTC)
         return builder.publish(Provenance("test", (), {}, now, now))
+
+
+# ---- B lineage by alignment -------------------------------------------------------------
+
+CHECK = processed.LineageCheck("B", {"Victoria": "bvic", "Yamagata": "byam"}, 30, "nearest ref")
+B_RULES = [
+    processed.PlacementRule("B", "Victoria", "bvic", "stated"),
+    processed.PlacementRule("B", "Yamagata", "byam", "stated"),
+    processed.PlacementRule("B", "", "bvic", "no evidence either way: kept with B/Vic, flagged"),
+]
+
+
+def distances(vic: int | None, yam: int | None) -> dict[str, Aligned]:
+    """One record's alignments against both references; None = did not align."""
+    r = record(1, subtype="B")
+    return {
+        dataset: aligned(r, substitutions=subs) if subs is not None
+        else aligned(r, error="seed failed", nucleotides=None, amino_acids=None)
+        for dataset, subs in (("bvic", vic), ("byam", yam))
+    }  # fmt: skip
+
+
+class TestChooseLineage:
+    @pytest.mark.parametrize(
+        ("stated", "vic", "yam", "expected"),
+        [
+            ("", 20, 160, ("bvic", "lineage.from-alignment")),
+            ("", 150, 12, ("byam", "lineage.from-alignment")),
+            ("Victoria", 20, 160, ("bvic", None)),
+            ("Yamagata", 20, 160, ("bvic", "lineage.disagrees")),
+            ("Yamagata-ish", 20, 160, ("bvic", "lineage.unknown-label")),
+            ("", 131, 122, (None, "lineage.ambiguous")),  # pre-split: far from both
+            ("Yamagata", 128, 130, (None, "lineage.unconfirmed")),
+            ("", 40, None, ("bvic", "lineage.from-alignment")),  # only one aligns
+            ("", None, None, (None, "lineage.unaligned")),
+        ],
+    )  # fmt: skip
+    def test_cases(self, stated: str, vic: int | None, yam: int | None,
+                   expected: tuple[str | None, str | None]) -> None:  # fmt: skip
+        assert processed.choose_lineage(stated, distances(vic, yam), CHECK) == expected
+
+    def test_the_margin_is_inclusive(self) -> None:
+        assert processed.choose_lineage("", distances(10, 40), CHECK) == (
+            "bvic", "lineage.from-alignment",
+        )  # fmt: skip
+        assert processed.choose_lineage("", distances(10, 39), CHECK)[0] is None
+
+
+class TestPlaceByAlignment:
+    def results(
+        self, *pairs: tuple[SequenceRecord, int | None, int | None]
+    ) -> dict[str, dict[str, Aligned]]:
+        out: dict[str, dict[str, Aligned]] = {"bvic": {}, "byam": {}}
+        for r, vic, yam in pairs:
+            for dataset, found in distances(vic, yam).items():
+                out[dataset][processed.seq_id(r)] = found
+        return out
+
+    def test_no_evidence_falls_back_to_the_row_and_keeps_the_flag(self) -> None:
+        clear = record(1, subtype="B", lineage="")
+        old = record(2, subtype="B", lineage="")
+        placed, flags = processed.place_by_alignment(
+            [clear, old], B_RULES, CHECK, self.results((clear, 150, 10), (old, 131, 122))
+        )
+        assert {k: [(r.epi_isl, r.problems[-1]) for r in v] for k, v in placed.items()} == {
+            "byam": [("EPI_ISL_1", "lineage.from-alignment")],
+            "bvic": [("EPI_ISL_2", "lineage.ambiguous")],
+        }
+        assert flags == {"lineage.from-alignment": 1, "lineage.ambiguous": 1}
+
+    def test_no_evidence_and_no_row_is_fatal(self) -> None:
+        r = record(1, subtype="B", lineage="")
+        with pytest.raises(processed.StoreBuildError, match="neither alignment nor"):
+            processed.place_by_alignment([r], B_RULES[:2], CHECK, self.results((r, None, None)))
+
+
+B_ROWS = [
+    {"Isolate_Id": f"EPI_ISL_{i}", "Collection_Date": "2021-03-01", "Subtype": "B",
+     "Lineage": lineage, "Host": "Human", "Passage_History": "MDCK1",
+     "Location": "Europe / Exampleland", "Submission_Date": "2021-04-01"}
+    for i, lineage in ((1, "Victoria"), (2, ""), (3, "Yamagata"))
+]  # fmt: skip
+
+
+def b_config(tmp_path: Path, root: Path, **over: object) -> build.SequencesConfig:
+    fields: dict[str, object] = dict(
+        paths=PathsConfig(store=tmp_path / "store", work=tmp_path / "work"),
+        runner=RunnerSettings(kind="local"),
+        nextclade=build.NextcladeConfig(
+            binary=fake_binary(tmp_path), version="9.9.9", max_unknown_aa=10, max_deleted_aa=6,
+            datasets={"bvic": build.DatasetConfig("example/bvic", "t1", "0" * 64, 597),
+                      "byam": build.DatasetConfig("example/byam", "t1", "0" * 64, 597)},
+        ),
+        placement=[build.PlacementConfig(r.gisaid_subtype, r.lineage, r.dataset, r.reason)
+                   for r in B_RULES],
+        sources={"definitive": root},
+        source_subtypes={"b": "B"},
+        lineage_check=[build.LineageCheckConfig("B", {"Victoria": "bvic", "Yamagata": "byam"},
+                                                30, "nearest reference")],
+    )  # fmt: skip
+    fields.update(over)
+    return build.SequencesConfig(**fields)  # type: ignore[arg-type]
+
+
+def b_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    rng = random.Random(9)
+    root = tmp_path / "set"
+    (root / "sequences").mkdir(parents=True)
+    (root / "raw").mkdir()
+    deflines = [DEFLINE.format(name=f"B/EXAMPLETOWN/{i}/2021", epi=f"EPI_ISL_{i}",
+                               acc=f"EPI{900000 + i}") for i in (1, 2, 3)]  # fmt: skip
+    text = "".join(
+        f">{d}\n" + "".join(rng.choice("ACGT") for _ in range(40)) + "\n" for d in deflines
+    )
+    (root / "raw" / "epiflu-b-20201213-20210312.fasta").write_text(text)
+    (root / "raw" / "epiflu-b-20201213-20210312-metadata.xls").write_bytes(b"workbook")
+    (root / "sequences" / "epiflu-2021-0312-b.fas.br").write_bytes(brotli.compress(text.encode()))
+    Store.create(tmp_path / "store")
+    Work.create(tmp_path / "work")
+    for name in ("bvic", "byam"):
+        make_dataset(tmp_path / f"ds-{name}", rng)
+    monkeypatch.setattr(
+        build.nc, "fetch_dataset",
+        lambda pin, store: _dataset_ref(store, tmp_path / f"ds-{pin.path.split('/')[-1]}",
+                                        f"nextclade/{pin.path}/{pin.tag}"),
+    )  # fmt: skip
+    monkeypatch.setattr(build, "read_workbook", lambda path: Workbook(rows=B_ROWS))
+    return root
+
+
+def test_b_pull_with_no_evidence_is_placed_by_rows_and_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stand-in Nextclade reports no substitutions, so nothing is placed by evidence."""
+    config = b_config(tmp_path, b_set(tmp_path, monkeypatch))
+    build.import_source(config, "definitive")
+    refs = build.store_pull(config, "definitive-2021-0312-b", build.make_runner(config.runner))
+    store = Store.open(tmp_path / "store")
+    placed = {
+        dataset: processed.read_table(store, ref, "isolates", ["epi_isl", "problems"]).to_pylist()
+        for dataset, ref in refs.items()
+    }
+    assert placed == {
+        "bvic": [{"epi_isl": "EPI_ISL_1", "problems": ["lineage.unaligned"]},
+                 {"epi_isl": "EPI_ISL_2", "problems": ["lineage.unaligned"]}],
+        "byam": [{"epi_isl": "EPI_ISL_3", "problems": ["lineage.unaligned"]}],
+    }  # fmt: skip
+    provenance = (store.resolve(refs["byam"]) / "PROVENANCE.json").read_text()
+    assert "nextclade/example/bvic/t1" in provenance  # both references it was placed against
+
+
+def test_a_placement_row_outside_the_candidates_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [*B_RULES[:2], processed.PlacementRule("B", "", "h3", "wrong")]
+    config = b_config(
+        tmp_path, b_set(tmp_path, monkeypatch),
+        placement=[build.PlacementConfig(r.gisaid_subtype, r.lineage, r.dataset, r.reason)
+                   for r in rows],
+    )  # fmt: skip
+    build.import_source(config, "definitive")
+    with pytest.raises(build.ConfigError, match="not a lineage_check candidate"):
+        build.store_pull(config, "definitive-2021-0312-b", build.make_runner(config.runner))

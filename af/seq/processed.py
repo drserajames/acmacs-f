@@ -24,7 +24,7 @@ import datetime
 import hashlib
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +94,8 @@ SEQUENCES = pa.schema(
         ("inserted_aa", pa.int32()),
         ("unknown_aa", pa.int32()),
         ("premature_stop", pa.bool_()),
+        # Against this dataset's reference, over the aligned range; what B placement compares.
+        ("substitutions", pa.int32()),
         ("nextclade_qc_status", pa.string()),  # reported, never used (see af.seq.nextclade)
         # Nextclade's clade calls from the pinned dataset, for af.clades' fallback only.
         ("nextclade_clade", pa.string()),
@@ -143,6 +145,84 @@ def place(
         shown = ", ".join(f"{s!r}/{lineage!r}: {n}" for (s, lineage), n in sorted(unplaced.items()))
         raise StoreBuildError(f"records no placement rule covers (subtype/lineage): {shown}")
     return placed
+
+
+@dataclass(frozen=True)
+class LineageCheck:
+    """Place records of one GISAID subtype by the reference they are nearest, not the label.
+
+    Every record of ``gisaid_subtype`` is aligned against each candidate dataset. The
+    nearest (fewest substitutions) wins when it is nearer by at least ``min_margin``; a
+    closer call is not evidence either way and falls back to the placement rules.
+    """
+
+    gisaid_subtype: str
+    candidates: Mapping[str, str]  # GISAID lineage -> dataset
+    min_margin: int
+    reason: str
+
+
+def choose_lineage(
+    stated: str, results: Mapping[str, Aligned], check: LineageCheck
+) -> tuple[str | None, str | None]:
+    """``(dataset, flag)`` for one record from its alignment against each candidate.
+
+    ``dataset`` None means "no evidence": the placement rules decide, and the flag says
+    why. A clear placement that contradicts GISAID's stated lineage follows the evidence
+    (the record is aligned against the reference it actually resembles) and is flagged.
+    """
+    distances = sorted(
+        (result.substitutions, dataset)
+        for dataset, result in results.items()
+        if result.error is None and result.substitutions is not None
+    )
+    if not distances:
+        return None, "lineage.unaligned"
+    best, dataset = distances[0]
+    margin = distances[1][0] - best if len(distances) > 1 else None
+    if margin is not None and margin < check.min_margin:
+        return None, "lineage.ambiguous" if not stated else "lineage.unconfirmed"
+    if not stated:
+        return dataset, "lineage.from-alignment"
+    if stated not in check.candidates:
+        return dataset, "lineage.unknown-label"
+    if check.candidates[stated] != dataset:
+        return dataset, "lineage.disagrees"
+    return dataset, None
+
+
+def place_by_alignment(
+    records: Iterable[SequenceRecord],
+    rules: Sequence[PlacementRule],
+    check: LineageCheck,
+    results: Mapping[str, Mapping[str, Aligned]],
+) -> tuple[dict[str, list[SequenceRecord]], Counter[str]]:
+    """Place checked records (see :class:`LineageCheck`); returns groups and flag counts.
+
+    ``results`` is dataset -> seq id -> alignment, for every candidate dataset. Where the
+    alignment gives no answer, the record's placement row decides, and its flag stays on
+    the record so a reader can see it was not placed by evidence.
+    """
+    by_rule = {(rule.gisaid_subtype, rule.lineage): rule.dataset for rule in rules}
+    placed: dict[str, list[SequenceRecord]] = {}
+    flags: Counter[str] = Counter()
+    unplaced: Counter[tuple[str, str]] = Counter()
+    for record in records:
+        per_dataset = {dataset: found[seq_id(record)] for dataset, found in results.items()}
+        dataset, flag = choose_lineage(record.lineage, per_dataset, check)
+        if dataset is None:
+            dataset = by_rule.get((record.subtype, record.lineage))
+        if dataset is None:
+            unplaced[(record.subtype, record.lineage)] += 1
+            continue
+        if flag:
+            flags[flag] += 1
+            record = replace(record, problems=(*record.problems, flag))
+        placed.setdefault(dataset, []).append(record)
+    if unplaced:
+        shown = ", ".join(f"{s!r}/{lineage!r}: {n}" for (s, lineage), n in sorted(unplaced.items()))
+        raise StoreBuildError(f"records neither alignment nor a placement rule places: {shown}")
+    return placed, flags
 
 
 def seq_id(record: SequenceRecord) -> str:
@@ -226,6 +306,7 @@ def _sequence_row(record: SequenceRecord, result: Aligned, pull_id: str) -> dict
         "inserted_aa": result.inserted_aa,
         "unknown_aa": result.unknown_aa,
         "premature_stop": result.premature_stop,
+        "substitutions": result.substitutions,
         "nextclade_qc_status": result.qc_status or None,
         "nextclade_clade": result.clade,
         "nextclade_subclade": result.subclade,
