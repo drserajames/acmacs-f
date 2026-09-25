@@ -17,11 +17,13 @@ silently.
 
 from __future__ import annotations
 
+import calendar
 import datetime
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from af.serology.query import Preparation
 
@@ -62,8 +64,8 @@ class GeoCounts:
 
     dots: Counter[tuple[str, Month, str]] = field(default_factory=Counter)
     months: list[Month] = field(default_factory=list)
-    undated: int = 0
-    no_location: Counter[str] = field(default_factory=Counter)  # name -> preparations
+    undated: Counter[str] = field(default_factory=Counter)  # subtype -> preparations
+    no_location: Counter[tuple[str, str]] = field(default_factory=Counter)  # (subtype, name)
 
 
 def geo_counts(
@@ -81,14 +83,48 @@ def geo_counts(
     result = GeoCounts(months=window)
     for prep in preparations:
         if prep.collection_date is None:
-            result.undated += 1
+            result.undated[prep.subtype] += 1
             continue
         month = Month.of(prep.collection_date)
         if month not in wanted:
             continue
         location = location_of(prep.name)
         if location is None:
-            result.no_location[prep.name] += 1
+            result.no_location[prep.subtype, prep.name] += 1
             continue
         result.dots[prep.subtype, month, location] += 1
     return result
+
+
+UNCOLOURED = "unassigned"
+
+
+def to_i7(counts: GeoCounts, subtype: str) -> dict[str, Any]:
+    """One subtype in the I7 ``geo`` shape (ae's ``geo/<st>-records.json``).
+
+    periods -> locations -> point groups with a count. Every month of the window is listed,
+    empty ones included, so a month with no data is still a map. Until clade colours are
+    joined (workstream 4) each location has one point group coloured ``"unassigned"``, and
+    ``af.report.compare.geo`` then compares locations only. What could not be placed is
+    listed with the document.
+    """
+    by_month: dict[Month, dict[str, int]] = {month: {} for month in counts.months}
+    for (s, month, location), n in counts.dots.items():
+        if s == subtype:
+            by_month[month][location] = n
+    return {
+        "subtype": subtype,
+        "periods": [
+            {
+                "period": str(month),
+                "title": f"{calendar.month_name[month.month]} {month.year}",
+                "locations": [
+                    {"name": name, "points": [{"color": UNCOLOURED, "count": n}]}
+                    for name, n in sorted(locations.items())
+                ],
+            }
+            for month, locations in by_month.items()
+        ],
+        "undated": counts.undated[subtype],
+        "no_location": sorted(name for s, name in counts.no_location if s == subtype),
+    }
