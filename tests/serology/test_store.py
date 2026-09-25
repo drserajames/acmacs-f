@@ -92,9 +92,14 @@ def test_queries(tmp_path: Path, syn: Any) -> None:
     # earliest table is LABY's (1 Feb) even though LABX sorts first alphabetically
     assert shared.first_lab == "LABY"
     assert shared.collection_date == datetime.date(2021, 1, 5)
-    sera = query.sera(con)
-    assert len(sera) == 1 and sera[0].first_lab == "LABY"
-    assert sera[0].strain_collection_date is None  # no antigen of that name
+    uses = query.serum_uses(con)
+    # one serum (same identity) used in all three tables
+    assert len({u.serum_key for u in uses}) == 1
+    assert sorted((u.lab, u.table_date) for u in uses) == [
+        ("LABX", datetime.date(2021, 3, 4)),
+        ("LABX", datetime.date(2022, 1, 10)),
+        ("LABY", datetime.date(2021, 2, 1)),
+    ]
     since = query.strains_with_titres(con, datetime.date(2021, 3, 1))
     assert {name for _, name in since} == {
         syn.virus("Somewhere", 1),

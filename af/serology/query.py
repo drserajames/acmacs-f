@@ -89,41 +89,38 @@ def preparations(con: Any) -> list[Preparation]:
 
 
 @dataclass(frozen=True)
-class SerumRecord:
-    """One serum across all tables (by chain identity, or per table when it has none)."""
+class SerumUse:
+    """One serum (by chain identity, or per table when it has none) used in one table."""
 
     subtype: str
     lineage: str
     serum_key: str
     name: str
-    first_lab: str
-    strain_collection_date: datetime.date | None  # earliest antigen of the same name
+    table_id: str
+    lab: str
+    table_date: datetime.date
+    date_suffix: int
 
 
-def sera(con: Any) -> list[SerumRecord]:
-    """Every serum, with its strain's isolation date taken from antigens of the same name.
+def serum_uses(con: Any) -> list[SerumUse]:
+    """Every (serum, table) pair where the serum has at least one reading.
 
-    Sarah (25 Sep 2026): a serum is counted by the isolation date of its strain. Where no
-    antigen of that name has a collection date the date is None, and stat reports it.
+    Stat counts sera two ways from this (Sarah, 25 Sep 2026): *new* sera, in the month of
+    their first use, and sera *used* in each month. A serum column with no readings is not
+    a titration and does not count.
     """
     rows = con.execute(
         f"""
-        WITH strain AS (
-            SELECT t.subtype, a.name, min(a.collection_date) AS collected
-            FROM antigens a JOIN tables t USING (table_id)
-            GROUP BY ALL
-        )
-        SELECT t.subtype, max(coalesce(s.lineage, '')), s.serum_key, any_value(s.name),
-               arg_min(t.lab, (t.date, coalesce(t.date_suffix, 0), t.lab, t.table_id)),
-               min(strain.collected)
+        SELECT DISTINCT t.subtype, coalesce(s.lineage, ''), s.serum_key, s.name, t.table_id,
+               t.lab, t.date, coalesce(t.date_suffix, 1)
         FROM sera s JOIN tables t USING (table_id)
-        LEFT JOIN strain ON strain.subtype = t.subtype AND strain.name = s.name
         WHERE NOT list_contains(s.annotations, '{DISTINCT}')
-        GROUP BY t.subtype, s.serum_key
+          AND EXISTS (SELECT 1 FROM titres x
+                      WHERE x.table_id = s.table_id AND x.serum_position = s.position)
         ORDER BY ALL
         """
     ).fetchall()
-    return [SerumRecord(*r) for r in rows]
+    return [SerumUse(*r) for r in rows]
 
 
 def strains_with_titres(con: Any, since: datetime.date) -> list[tuple[str, str]]:
