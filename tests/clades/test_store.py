@@ -78,7 +78,7 @@ def test_publishes_a_version(tmp_path: Path) -> None:
         SUBTYPE,
         rows(),
         clade_set(tmp_path),
-        sequences=sequences_ref(),
+        labelled=sequences_ref(),
         nomenclature=[nomenclature_input(tmp_path)],
         started=STARTED,
     )
@@ -101,7 +101,7 @@ def test_the_provenance_names_what_the_clades_were_built_from(tmp_path: Path) ->
         SUBTYPE,
         rows(),
         clade_set(tmp_path),
-        sequences=sequences_ref(),
+        labelled=sequences_ref(),
         nomenclature=[nomenclature_input(tmp_path)],
         started=STARTED,
     )
@@ -121,7 +121,7 @@ def test_the_table_is_readable_with_its_declared_types(tmp_path: Path) -> None:
         SUBTYPE,
         rows(),
         clade_set(tmp_path),
-        sequences=sequences_ref(),
+        labelled=sequences_ref(),
         nomenclature=[nomenclature_input(tmp_path)],
         started=STARTED,
     )
@@ -143,7 +143,7 @@ def test_an_unnamed_clade_stays_null_rather_than_empty(tmp_path: Path) -> None:
         SUBTYPE,
         rows(clade=None),
         clade_set(tmp_path),
-        sequences=sequences_ref(),
+        labelled=sequences_ref(),
         nomenclature=[nomenclature_input(tmp_path)],
         started=STARTED,
     )
@@ -164,7 +164,7 @@ def test_refuses_an_empty_table(tmp_path: Path) -> None:
             SUBTYPE,
             [],
             clade_set(tmp_path),
-            sequences=sequences_ref(),
+            labelled=sequences_ref(),
             nomenclature=[nomenclature_input(tmp_path)],
             started=STARTED,
         )
@@ -178,7 +178,7 @@ def test_refuses_a_repeated_sequence(tmp_path: Path) -> None:
             SUBTYPE,
             duplicated,
             clade_set(tmp_path),
-            sequences=sequences_ref(),
+            labelled=sequences_ref(),
             nomenclature=[nomenclature_input(tmp_path)],
             started=STARTED,
         )
@@ -192,7 +192,7 @@ def test_refuses_rows_of_another_subtype(tmp_path: Path) -> None:
             SUBTYPE,
             mixed,
             clade_set(tmp_path),
-            sequences=sequences_ref(),
+            labelled=sequences_ref(),
             nomenclature=[nomenclature_input(tmp_path)],
             started=STARTED,
         )
@@ -235,7 +235,7 @@ def test_report_is_readable_from_the_store(tmp_path: Path) -> None:
         SUBTYPE,
         rows(),
         clade_set(tmp_path),
-        sequences=sequences_ref(),
+        labelled=sequences_ref(),
         nomenclature=[nomenclature_input(tmp_path)],
         started=STARTED,
     )
