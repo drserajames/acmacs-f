@@ -49,14 +49,16 @@ class AALabel:
 
 @dataclass
 class LabelParams:
-    min_share: float = 0.00767  # used when target_labels is None
-    target_labels: int | None = None  # label count the size threshold is set to reach
-    min_rows_floor: int = 20  # with a target, never label a subtree smaller than this
-    max_share: float = 0.99
-    consensus: float = 0.6
-    backbone_reversion: float = 0.9
-    stem_overlap: float = 0.9
-    hide_aa: str = "X"
+    """Values and their reasons: defaults.toml [labels]."""
+
+    target_labels: int  # about this many labels; 0 = use min_share instead
+    min_rows_floor: int  # with a target, never label a subtree smaller than this
+    min_share: float  # without a target, a label needs this share of the drawn rows
+    max_share: float
+    consensus: float
+    backbone_reversion: float
+    stem_overlap: float
+    hide_aa: str
 
 
 def leaf_consensus(seqs: Sequence[str | None], pos1: int) -> tuple[str, float]:
@@ -78,10 +80,9 @@ def _overlap(a: tuple[int, int], b: tuple[int, int]) -> float:
 def select_labels(
     tree: DrawTree,
     layout: Layout,
-    clade_bands: Sequence[tuple[int, int]] = (),
-    p: LabelParams | None = None,
+    clade_bands: Sequence[tuple[int, int]],
+    p: LabelParams,
 ) -> tuple[list[AALabel], dict[str, int]]:
-    p = p or LabelParams()
     counts: Counter[str] = Counter()
     rows_aa = [tree.aa[i] for i in layout.leaf_nodes]
     by_pos: dict[int, list[int]] = {}
