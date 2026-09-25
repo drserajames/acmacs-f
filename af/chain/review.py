@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from af.chain.diagnostics import previous_in_current
+from af.chain.diagnostics import THRESHOLDS, Thresholds, flags, previous_in_current
 from af.chart.ace import read_chart
 from af.chart.model import Chart
 from af.chart.procrustes import procrustes
@@ -33,7 +33,8 @@ OLD, NEW, SERUM, FLAG = "#b8b7b0", "#eb6834", "#2a78d6", "#e34948"
 Step = tuple[dict[str, Any], dict[str, Any], Path]  # chain.json entry, step.json, thumbnail
 
 
-def build_review(chain_root: Path) -> Path:
+def build_review(chain_root: Path, thresholds: Thresholds = THRESHOLDS) -> Path:
+    """Flags are judged here from the recorded numbers, so thresholds can change freely."""
     chain_root = Path(chain_root)
     doc = json.loads((chain_root / "chain.json").read_text())
     out = chain_root / "review"
@@ -44,8 +45,11 @@ def build_review(chain_root: Path) -> Path:
     key = ""
     for s in doc["steps"]:
         d = chain_root / s["directory"]
+        names = ("merge.ace", "incremental.ace", "scratch.ace", "chosen.ace", "step.json")
+        s = {**s, "files": [n for n in names if (d / n).exists()]}
         record_text = (d / "step.json").read_text()
         record = json.loads(record_text)
+        record["flags"] = flags(record["diagnostics"], thresholds)  # in memory only
         key = _sha(key, sha256_path(d / "chosen.ace"), _sha(record_text))
         thumb = out / "thumbs" / f"{s['index']:04d}-{key[:16]}.png"
         chart = read_chart(d / "chosen.ace")
@@ -229,11 +233,11 @@ def _step_info(s: dict, r: dict) -> list[str]:
 
 def _step_row(s: dict, r: dict, thumb: Path) -> str:
     d = r["diagnostics"]
-    flags = d.get("flags", [])
+    step_flags = r["flags"]
     details = "".join(
         [
             _details(
-                "moved far",
+                "moved > 0.5 since the previous step",
                 [f"{_e(x['point'])} — {x['distance']:.2f}" for x in d.get("moved_far", [])],
             ),
             _details(
@@ -251,15 +255,14 @@ def _step_row(s: dict, r: dict, thumb: Path) -> str:
             _details("disconnected", [_e(x) for x in d.get("disconnected", [])]),
         ]
     )
-    flag_html = "".join(f'<span class="flag">{_e(f)}</span>' for f in flags)
-    names = ("merge.ace", "incremental.ace", "scratch.ace", "chosen.ace", "step.json")
-    files = " · ".join(f'<a href="../{_e(s["directory"])}/{n}">{n}</a>' for n in names)
+    flag_html = "".join(f'<span class="flag">{_e(f)}</span>' for f in step_flags)
+    files = " · ".join(f'<a href="../{_e(s["directory"])}/{n}">{n}</a>' for n in s["files"])
     image = (
         f'<img src="{_e(thumb)}" width="200" height="200" '
         f'alt="map, step {s["index"]}" loading="lazy">'
     )
     return (
-        f'<tr id="step-{s["index"]}" class="{"flagged" if flags else ""}"><td>{image}</td>'
+        f'<tr id="step-{s["index"]}" class="{"flagged" if step_flags else ""}"><td>{image}</td>'
         f"<td>{'<br>'.join(_step_info(s, r))}<div>{flag_html}</div>{details}"
         f'<div class="files">{files}</div></td></tr>'
     )
@@ -267,10 +270,10 @@ def _step_row(s: dict, r: dict, thumb: Path) -> str:
 
 def _page(doc: dict, steps: list[Step]) -> str:
     name = doc["config"]["name"]
-    flagged = [(s, r) for s, r, _ in steps if r["diagnostics"].get("flags")]
+    flagged = [(s, r) for s, r, _ in steps if r["flags"]]
     summary = "".join(
         f'<li><a href="#step-{s["index"]}">step {s["index"]} · {_e(s["table_id"])}</a>: '
-        f"{_e('; '.join(r['diagnostics']['flags']))}</li>"
+        f"{_e('; '.join(r['flags']))}</li>"
         for s, r in flagged
     )
     opts = doc["config"]["options"]
