@@ -61,6 +61,14 @@ class TestFasta:
         path.write_text(">one\nACGT\n\n")
         assert list(read_fasta(path)) == [("one", "ACGT")]
 
+    def test_brotli_fasta_is_read_without_decompressing_to_disk(self, tmp_path) -> None:
+        import brotli
+
+        path = tmp_path / "in.fas.br"
+        path.write_bytes(brotli.compress(b">one\r\nACGT\r\nAC\r\n>two\nTT\n"))
+        assert list(read_fasta(path)) == [("one", "ACGTAC"), ("two", "TT")]
+        assert list(tmp_path.iterdir()) == [path]
+
 
 class TestJoin:
     def test_metadata_comes_from_the_workbook(self) -> None:
@@ -100,6 +108,13 @@ class TestJoin:
         assert records[0].collection_date is None
         assert "date.unreadable" in records[0].problems
         assert counts.unreadable_date == 1
+
+    def test_an_excel_serial_date_is_flagged_and_kept_as_stated(self) -> None:
+        """A bare year typed into an Excel date cell: 2024 shows as 1905-07-16."""
+        records, counts = join([(DEFLINE, "ACGT")], [row(Collection_Date="1905-07-16")])
+        assert str(records[0].collection_date) == "1905-07-16"
+        assert "date.excel-serial" in records[0].problems
+        assert counts.excel_serial_date == 1
 
     def test_uracil_is_converted_and_counted(self) -> None:
         """Nextclade drops a sequence containing U from every output while exiting 0."""
