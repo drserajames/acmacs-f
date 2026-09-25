@@ -30,9 +30,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from af.pipeline.record import (
+    Inputs,
     check_up_to_date,
     fingerprint,
     forget,
+    input_roles,
+    output_roles,
     save_record,
 )
 from af.run.job import Runner, now
@@ -49,10 +52,17 @@ class StepContext:
 
 @dataclass(frozen=True)
 class Step:
+    """One step. ``inputs`` is either a list of paths or a mapping of role name to path.
+
+    Named inputs (``{"table": path, "previous": path}``) make the step's record
+    independent of where the files live. A list of paths gets roles relative to the
+    pipeline's ``root``.
+    """
+
     name: str
     action: Callable[[StepContext], None]
     outputs: Sequence[Artefact]
-    inputs: Sequence[Path] = ()
+    inputs: Inputs = ()
     parameters: Mapping[str, Any] = field(default_factory=dict)
     after: Sequence[str] = ()
 
@@ -69,10 +79,21 @@ class PipelineError(ValueError):
 
 
 class Pipeline:
-    def __init__(self, steps: Sequence[Step], *, state_dir: Path, runner: Runner) -> None:
+    def __init__(
+        self,
+        steps: Sequence[Step],
+        *,
+        state_dir: Path,
+        runner: Runner,
+        root: Path | None = None,
+    ) -> None:
+        """``root``: unnamed inputs and outputs under it are recorded relative to it, so
+        the whole tree can move (or sync to another machine) without re-running steps.
+        """
         self.steps = {step.name: step for step in steps}
         self.state_dir = state_dir
         self.runner = runner
+        self.root = root
         if len(self.steps) != len(steps):
             raise PipelineError(f"duplicate step names in {[step.name for step in steps]}")
         self._producer = self._output_producers(steps)
@@ -120,11 +141,16 @@ class Pipeline:
         return outcomes
 
     def _run_step(self, step: Step, *, forced: bool) -> StepOutcome:
-        current = fingerprint(step.name, step.inputs, step.parameters)
+        try:
+            inputs = input_roles(step.name, step.inputs, self.root)
+            outputs = output_roles(step.name, step.outputs, self.root)
+        except ValueError as error:
+            raise PipelineError(str(error)) from error
+        current = fingerprint(step.name, inputs, step.parameters)
         if forced:
             reason = "forced"
         else:
-            up_to_date, reason = check_up_to_date(self.state_dir, step.name, current, step.outputs)
+            up_to_date, reason = check_up_to_date(self.state_dir, step.name, current, outputs)
             if up_to_date:
                 return StepOutcome(step.name, "skipped", reason)
         forget(self.state_dir, step.name)
@@ -136,12 +162,13 @@ class Pipeline:
             write_provenance(
                 step.name,
                 output,
-                inputs=step.inputs,
+                inputs=list(inputs.values()),
                 parameters=current.parameters,
                 started=started,
                 finished=finished,
             )
-        save_record(self.state_dir, step.name, current, checked, started, finished)
+        by_role = dict(zip(outputs, checked, strict=True))
+        save_record(self.state_dir, step.name, current, by_role, started, finished)
         return StepOutcome(step.name, "ran", reason)
 
     @staticmethod
@@ -161,7 +188,8 @@ class Pipeline:
         unknown = [name for name in step.after if name not in self.steps]
         if unknown:
             raise PipelineError(f"step {step.name!r}: 'after' names unknown step(s) {unknown}")
-        produced = {self._producer[path] for path in step.inputs if path in self._producer}
+        paths = step.inputs.values() if isinstance(step.inputs, Mapping) else step.inputs
+        produced = {self._producer[path] for path in paths if path in self._producer}
         dependencies = set(step.after) | produced
         if step.name in dependencies:
             raise PipelineError(f"step {step.name!r} depends on itself")

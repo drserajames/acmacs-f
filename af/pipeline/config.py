@@ -9,6 +9,7 @@ Example (all paths relative to the config file)::
 
     [pipeline]
     state_dir = "state"
+    root = "."                # record paths relative to the config's directory
     steps = ["export", "build-tree"]
 
     [runner]
@@ -65,6 +66,10 @@ class RunnerSettings:
 class PipelineSettings:
     state_dir: Path
     steps: list[str]
+    # Unnamed step inputs/outputs under `root` are recorded relative to it, so the tree
+    # can move or sync to another machine without re-running. Omit it only for pipelines
+    # that never move (their records then hold absolute paths).
+    root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -115,7 +120,10 @@ def build_pipeline(
                 config_path, [f"factory for {name!r} built a step named {step.name!r}"]
             )
     runner = make_runner(config.runner, config_path)
-    return Pipeline(steps, state_dir=config.pipeline.state_dir, runner=runner), config
+    pipeline = Pipeline(
+        steps, state_dir=config.pipeline.state_dir, runner=runner, root=config.pipeline.root
+    )
+    return pipeline, config
 
 
 def run_from_config(
