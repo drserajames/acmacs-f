@@ -28,7 +28,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-geo = ["cartopy>=0.23"]  # geographic maps only; pulls in GEOS/PROJ wheels
+geo = [
+  "cartopy>=0.23",  # geographic maps only; pulls in GEOS/PROJ wheels
+  "pyshp>=2.3",     # shapefiles: cartopy reads them with it, and the geo tests write them
+]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
 
 [project.urls]
