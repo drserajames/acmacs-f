@@ -60,6 +60,7 @@ addopts = ["--import-mode=importlib", "-ra"]
 pythonpath = ["."]
 markers = [
   "slurm: needs a real SLURM cluster (sbatch/srun on PATH); skipped otherwise",
+  "tool(*names): needs these external tools on PATH; skipped without them, failed under --require-tools (CI's tools job)",
 ]
 
 [tool.ruff]

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import random
-import shutil
 from pathlib import Path
 
 import pytest
@@ -98,7 +97,7 @@ def test_a_non_positive_minimum_branch_length_is_rejected() -> None:
 # ---- CMAPLE itself -----------------------------------------------------------------
 
 
-@pytest.mark.skipif(shutil.which("cmaple") is None, reason="cmaple is not installed")
+@pytest.mark.tool("cmaple")
 def test_cmaple_builds_a_tree_with_every_sequence(tmp_path) -> None:
     alignment, sequences = alignment_of(tmp_path)
     result = build.build(
@@ -113,7 +112,7 @@ def test_cmaple_builds_a_tree_with_every_sequence(tmp_path) -> None:
     assert "outgroup" in {child.name for child in result.tree.root.children}
 
 
-@pytest.mark.skipif(shutil.which("cmaple") is None, reason="cmaple is not installed")
+@pytest.mark.tool("cmaple")
 def test_identical_sequences_are_all_kept(tmp_path) -> None:
     """Sarah's requirement: no deduplication. Every EPI id has to reach the tree."""
     _, sequences = alignment_of(tmp_path, n_leaves=6)
@@ -131,7 +130,7 @@ def test_identical_sequences_are_all_kept(tmp_path) -> None:
     assert sorted(leaf.name or "" for leaf in result.tree.leaves()) == sorted(sequences)
 
 
-@pytest.mark.skipif(shutil.which("cmaple") is None, reason="cmaple is not installed")
+@pytest.mark.tool("cmaple")
 def test_an_incremental_build_starts_from_the_previous_tree(tmp_path) -> None:
     alignment, sequences = alignment_of(tmp_path, n_leaves=12)
     first = build.build(

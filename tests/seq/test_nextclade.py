@@ -319,7 +319,7 @@ class TestStep:
         assert not stale.exists()
 
 
-@pytest.mark.skipif(shutil.which("nextclade") is None, reason="nextclade not on PATH")
+@pytest.mark.tool("nextclade")
 def test_real_nextclade_end_to_end(tmp_path: Path) -> None:
     """The real binary on an invented reference: a copy, a codon deletion, and junk."""
     rng = random.Random(4)
