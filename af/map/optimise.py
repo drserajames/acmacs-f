@@ -166,6 +166,11 @@ def relax(
     split into jobs, run each job with ``precision="rough"``, combine the projections, and
     call :func:`refine` once on the combination: refining each job's own best five would
     make the result depend on how the run was split.
+
+    Random positions are drawn from a cube sized by a very rough map of the table. As in
+    ae, ``unmovable`` points are held in that map (Sarah, 25 Sep 2026). Against sizing with
+    every point free, this changed the best stress in only 9 of 72 incremental runs on real
+    tables, in both directions (-1.7% to +0.3%): it matches ae rather than improving on it.
     """
     _require_positive("n_starts", n_starts)
     _require_seed(seed)
