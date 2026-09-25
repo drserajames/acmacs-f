@@ -179,18 +179,22 @@ def publish(
     rows: Sequence[CladeRow],
     clade_set: CladeSet,
     *,
-    sequences: StoreRef,
+    labelled: StoreRef,
     nomenclature: Iterable[ExternalInput],
     started: datetime.datetime,
     engine: str = "tree",
     extra_inputs: Iterable[Input] = (),
+    extra_report: Mapping[str, Any] | None = None,
 ) -> StoreRef:
     """Write one version of ``clades/<subtype>`` and make it current.
 
-    ``sequences`` is the sequence-store version these clades label, and ``nomenclature``
-    the pinned upstream inputs. Both go into the provenance, which is what makes a stale
-    clade table detectable: if either moves, a consumer can see that the clades were
-    built from something else.
+    ``labelled`` is the store version whose sequences these clades label: a tree version
+    for the tree engine (whose own provenance names the sequence version it was built
+    from), or the sequence store for the fallback. ``nomenclature`` is the pinned upstream
+    inputs. Both go into the provenance, which is what makes a stale clade table
+    detectable: if either moves, a consumer can see that the clades were built from
+    something else. ``extra_report`` is merged into ``report.json``; it may not replace
+    the standard counts.
     """
     if not rows:
         raise CladeStoreError(
@@ -207,12 +211,16 @@ def publish(
         )
     dataset = dataset_for(subtype)
     report = build_report(rows, clade_set)
+    clash = sorted(set(extra_report or {}) & set(report))
+    if clash:
+        raise CladeStoreError(f"{subtype}: extra report keys would replace standard ones: {clash}")
+    report.update(extra_report or {})
     with store.build("clades", dataset) as builder:
         _write_parquet(builder.path / ASSIGNMENTS_FILE, [row.to_record() for row in rows])
         (builder.path / REPORT_FILE).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
         provenance = Provenance(
             step=STEP,
-            inputs=(sequences, *tuple(nomenclature), *tuple(extra_inputs)),
+            inputs=(labelled, *tuple(nomenclature), *tuple(extra_inputs)),
             parameters={
                 "subtype": subtype,
                 "engine": engine,
