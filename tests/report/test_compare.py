@@ -332,3 +332,21 @@ def test_amendments_are_printed_with_the_status(tmp_path: Path) -> None:
     )  # fmt: skip
     text = markdown({"report": "r", "built": "b"}, [], "l.toml", "name", limits.adoption)
     assert "amended 2026-09-26 by a reviewer: tree limit withdrawn" in text
+
+
+def test_excused_points_are_removed_and_a_stale_list_fails(tmp_path: Path) -> None:
+    from af.report.compare.run import Excused, excuse_points
+
+    pts = [(float(i), float(i % 3)) for i in range(12)]
+    ref = _map(pts[:10], ["X"] * 10)
+    new = _map(pts, ["X"] * 12)  # new shows two extra points
+    keys = {maps.point_key(p, "name") for p in new["map"]["antigens"][10:]}
+    keys_file = tmp_path / "keys.txt"
+    keys_file.write_text("# dropped hide rule\n" + "\n".join(sorted(keys)) + "\n")
+    entry = Excused(["map/x/all"], keys_file, "rule dropped", "a reviewer", dt.date(2026, 9, 25))
+    notes = excuse_points("map/x/all", ref, new, [(entry, keys)], "name")
+    assert notes[0]["stale"] == 0
+    assert maps.compare(ref, new)["antigens"]["jaccard"] == 1.0
+    again = _map(pts, ["X"] * 12)  # both sides now show them: the excuse no longer applies
+    notes = excuse_points("map/x/all", _map(pts, ["X"] * 12), again, [(entry, keys)], "name")
+    assert notes[0]["stale"] == 2 and "STALE" in notes[0]["note"]
