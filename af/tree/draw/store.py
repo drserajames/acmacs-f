@@ -24,6 +24,7 @@ class StoreTree:
     parents: dict[str, str | None]
     clade_set_version: str
     titrated_by: dict[str, list[str]]  # leaf id -> centre ids
+    flags: dict[str, list[str]]  # leaf id -> reasons (e.g. clock outlier); reported, not excluded
     inputs: dict[str, str]  # for the I7 provenance: item -> content hash
 
     def centre_leaves(self, centre: str) -> frozenset[str]:
@@ -48,16 +49,16 @@ def load_version(directory: Path) -> StoreTree:
             raise StoreInputError(f"{directory}: tree.json has no {key!r}")
     tree = DrawTree(**i6.draw_columns(directory))
     parents = {str(k): (str(v) if v else None) for k, v in meta["clade_parents"].items()}
-    table = i6.read_nodes(directory, columns=["leaf_id", "titrated_by"])
-    titrated = {
-        leaf: list(labs or [])
-        for leaf, labs in zip(
-            table["leaf_id"].to_pylist(), table["titrated_by"].to_pylist(), strict=True
-        )
-        if leaf is not None
-    }
+    table = i6.read_nodes(directory, columns=["leaf_id", "titrated_by", "flags"])
+    leaf_ids = table["leaf_id"].to_pylist()
+
+    def per_leaf(column: str) -> dict[str, list[str]]:
+        values = table[column].to_pylist()
+        return {leaf: list(v or []) for leaf, v in zip(leaf_ids, values, strict=True) if leaf}
+
+    titrated, flags = per_leaf("titrated_by"), per_leaf("flags")
     inputs = {
         "tree_nodes": _sha256(directory / "nodes.parquet"),
         "tree_metadata": _sha256(directory / "tree.json"),
     }
-    return StoreTree(tree, parents, str(meta["clade_set_version"]), titrated, inputs)
+    return StoreTree(tree, parents, str(meta["clade_set_version"]), titrated, flags, inputs)

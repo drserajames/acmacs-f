@@ -66,8 +66,13 @@ def make_figure(
     config: FigureConfig,
     pdf: Path,
     inputs: Mapping[str, str],
+    flags: Mapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
-    """Render ``pdf`` and write its I7 and draw report; return the draw report."""
+    """Render ``pdf`` and write its I7 and draw report; return the draw report.
+
+    ``flags`` (leaf id -> reasons, from the tree store) are counted, never acted on: whether a
+    flagged leaf is drawn is a hide rule's decision, not the flag's.
+    """
     hide = HideRules(config.hide.min_edge, config.hide.names | config.overrides.hide_leaves)
     layout = compute_layout(tree, hide)
     ts = compute_timeseries(
@@ -150,6 +155,9 @@ def make_figure(
         "aa_label_placement": drawn.label_metrics,
         "strains": drawn.strains,
         "continents_not_in_legend": drawn.continents_not_in_legend,
+        "flagged_drawn": _count_flags(
+            flags or {}, [str(tree.leaf_id[i]) for i in layout.leaf_nodes]
+        ),
         "marked_rows": int(marked.sum()) if marked is not None else None,
         "overrides": {k: len(v) for k, v in asdict(config.overrides).items()},
     }
@@ -163,3 +171,12 @@ def _rows_of_names(tree: DrawTree, layout, names: frozenset[str]) -> set[int]:
     if missing:
         raise SectionOverrideError(f"hz override(s) name no drawn leaf: {missing[:5]}")
     return {row_of[n] for n in names}
+
+
+def _count_flags(flags: Mapping[str, list[str]], drawn_ids: list[str]) -> dict[str, int]:
+    """Drawn rows per flag reason."""
+    out: dict[str, int] = {}
+    for leaf in drawn_ids:
+        for reason in flags.get(leaf, []):
+            out[reason] = out.get(reason, 0) + 1
+    return dict(sorted(out.items()))

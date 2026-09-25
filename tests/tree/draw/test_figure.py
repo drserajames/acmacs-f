@@ -90,3 +90,13 @@ def test_unknown_continents_are_counted(tmp_path):
     t.continent[t.leaves()[0]] = "ATLANTIS"
     report = make_figure(t, PARENTS, config(), tmp_path / "c.pdf", {})
     assert report["continents_not_in_legend"] == {"ATLANTIS": 1}
+
+
+def test_flags_are_counted_not_acted_on(tmp_path):
+    flags = {
+        "EPI_ISL_0000001": ["clock_outlier"],
+        "EPI_ISL_0000002": ["clock_outlier", "long_branch"],
+    }
+    report = make_figure(standard_tree(), PARENTS, config(), tmp_path / "f.pdf", {}, flags)
+    assert report["flagged_drawn"] == {"clock_outlier": 2, "long_branch": 1}
+    assert report["rows"] == 50  # nothing excluded
