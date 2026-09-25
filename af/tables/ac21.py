@@ -236,6 +236,7 @@ class SheetReader:
                 name=name.name,
                 raw_name=raw,
                 serum_id=f"{self.lab} {serum_id}",
+                passage_class="unknown",  # AC Excel 2.1 gives no serum passage
                 reassortant=name.reassortant,
                 annotations=name.annotations,
                 lineage=lineage,
@@ -339,6 +340,7 @@ class SheetReader:
                 name=name.name,
                 raw_name=raw,
                 passage=passage.text,
+                passage_class=self.passages.passage_class(passage.text),
                 date=self._date(collected, r, date_col, test_date) if collected else None,
                 lab_ids=[f"{self.lab}#{self.s.cell(r, id_col)}"] if self.s.cell(r, id_col) else [],
                 reassortant=name.reassortant,

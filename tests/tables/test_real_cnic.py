@@ -46,7 +46,7 @@ def tables(fixture: Path, af_data: Path) -> dict[str, Table]:
 def test_tables_match_the_golden_record(tables: dict[str, Table], expected: dict) -> None:
     got = {
         i: {
-            "content_hash": t.content_hash(),
+            "content_hash": t.content_hash_as(expected.get("format", "af-table-1")),
             "map_hash": t.map_hash(),
             "antigens": len(t.antigens),
             "sera": len(t.sera),

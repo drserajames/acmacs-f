@@ -19,7 +19,11 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-FORMAT = "af-table-1"
+FORMAT = "af-table-2"
+OLD_FORMATS = ("af-table-1",)  # read, never written; see Table.from_json
+# map_hash's own format marker: it changes only when what a map is built from changes, so a
+# new metadata field (af-table-2 added passage_class) does not restart every chain
+MAP_FORMAT = "af-table-1"
 
 
 @dataclass
@@ -28,6 +32,7 @@ class Antigen:
     raw_name: str  # exactly as the lab wrote it
     passage: str = ""
     passage_date: str | None = None  # CDC harvest date (ISO); kept apart from the passage
+    passage_class: str = ""  # egg/cell/original/unknown (af.tables.passage.class_of); "" = not set
     date: str | None = None  # collection date (ISO)
     lab_ids: list[str] = field(default_factory=list)  # e.g. ["CDC#3000415788"]
     reassortant: str = ""
@@ -52,6 +57,7 @@ class Serum:
     serum_id: str = ""  # "CDC <lot>" for CDC
     passage: str = ""
     passage_date: str | None = None
+    passage_class: str = ""  # egg/cell/original/unknown (af.tables.passage.class_of); "" = not set
     species: str = ""  # "" = the lab's default (ferret); "MOUSE" etc. when a rule says so
     lineage: str = ""
     reassortant: str = ""
@@ -107,14 +113,21 @@ class Table:
     def content_hash(self) -> str:
         return hashlib.sha256(canonical_json(self.content()).encode()).hexdigest()
 
+    def content_hash_as(self, fmt: str) -> str:
+        """The hash this table would have had written in ``fmt`` (an older format: the
+        fields added since left out). Lets a golden record made before a format change
+        still check everything the older format covered."""
+        return self.content_hash() if fmt == FORMAT else _legacy_hash(self, fmt)
+
     def map_content(self) -> dict[str, Any]:
         """The part of the table a map depends on (see the module docstring)."""
         d = self.content()
+        d["format"] = MAP_FORMAT
         for key in ("meta", "warnings", "dropped", "source_key"):
             d.pop(key)
         for item in (*d["antigens"], *d["sera"]):
-            for key in ("source", "raw_name", "epi_isl", "sequence_pairing"):
-                item.pop(key)  # sequence links: CDC fills them in later; no map depends on them
+            for key in ("source", "raw_name", "epi_isl", "sequence_pairing", "passage_class"):
+                item.pop(key)  # sequence links (filled in later) and what is derived from passage
         return d
 
     def map_hash(self) -> str:
@@ -128,14 +141,21 @@ class Table:
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> Table:
-        if d.get("format") != FORMAT:
-            raise ValueError(f"not an {FORMAT} table: format={d.get('format')!r}")
+        """Reads the current format and the older ones. An older table is checked against
+        its own hash (computed as it was written) and comes back with the fields added since
+        at their defaults, so ``content_hash`` of the result is the current format's."""
+        fmt = d.get("format")
+        if fmt != FORMAT and fmt not in OLD_FORMATS:
+            raise ValueError(f"not an {FORMAT} table: format={fmt!r}")
         kw = {k: v for k, v in d.items() if k not in ("format", "content_hash")}
         kw["antigens"] = [Antigen(**a) for a in d["antigens"]]
         kw["sera"] = [Serum(**s) for s in d["sera"]]
         table = cls(**kw)
-        if (h := table.content_hash()) != d["content_hash"]:
-            raise ValueError(f"{table.table_id}: stored hash {d['content_hash']} != content {h}")
+        stored = table.content_hash_as(fmt)
+        if stored != d["content_hash"]:
+            raise ValueError(
+                f"{table.table_id}: stored hash {d['content_hash']} != content {stored}"
+            )
         return table
 
     def check(self) -> list[str]:
@@ -159,6 +179,17 @@ class Table:
             if all(not row[no] for row in self.titres):
                 errors.append(f"serum {no} {sr.name} has no titres")
         return errors
+
+
+def _legacy_hash(table: Table, fmt: str) -> str:
+    """content_hash as an ``fmt`` table was hashed: af-table-1 had no passage_class."""
+    if fmt not in OLD_FORMATS:
+        raise ValueError(f"unknown table format {fmt!r}")
+    d = table.content()
+    d["format"] = fmt
+    for item in (*d["antigens"], *d["sera"]):
+        item.pop("passage_class")
+    return hashlib.sha256(canonical_json(d).encode()).hexdigest()
 
 
 def canonical_json(data: Any) -> str:
