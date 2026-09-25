@@ -14,6 +14,9 @@ Two differences from production, both deliberate:
   comparison against the delivered trees is like for like.
 
 raxml-ng reconstructs no gaps at all, so it is refused where deletions define clades.
+
+It also refuses a multifurcating tree ("Binary tree expected"), which af's finished trees normally
+are, so it is given a zero-length-resolved copy; the count is in the reconstruction's parameters.
 """
 
 from __future__ import annotations
@@ -66,7 +69,12 @@ class RaxmlBackend:
         work_dir = Path(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
         tree_path = work_dir / "input.nwk"
-        newick.dump(tree, tree_path, with_internal_labels=True)
+        # raxml-ng refuses a multifurcating tree, and af's finished trees usually are one (zero-
+        # length branches are collapsed, as the delivered trees do). The extra nodes sit on
+        # zero-length branches and are dropped again by the clade matching below, which keys on
+        # leaf sets. Production never hit this: it fed raxml its own binary best tree.
+        binary, resolved = tree.binary_copy()
+        newick.dump(binary, tree_path, with_internal_labels=True)
         prefix = work_dir / "raxml"
 
         command = [
@@ -120,5 +128,6 @@ class RaxmlBackend:
                 "model": self.model,
                 "seed": self.seed,
                 "branch_lengths": "optimised" if self.optimise_branches else "fixed",
+                "multifurcations_resolved": resolved,
             },
         )

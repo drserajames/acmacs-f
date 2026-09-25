@@ -238,6 +238,34 @@ class Tree:
             self._by_id = {}
         return collapsed
 
+    def binary_copy(self) -> tuple[Tree, int]:
+        """A copy with every multifurcation split into zero-length bifurcations, and the count.
+
+        For tools that refuse a non-binary tree. raxml-ng is one: it answers "Binary tree expected,
+        but a tree with multifurcations provided" and exits 1. af's finished trees are routinely
+        multifurcating, because collapsing exactly-zero branches is what the delivered trees do
+        (:meth:`collapse_short_branches`), so such a tool cannot be handed a finished tree directly.
+
+        The extra nodes hang on zero-length branches, so they add no evolutionary distance. Each
+        original node keeps a node with the same leaf set, which is what
+        :func:`af.tree.asr.matching.match_states_by_clade` matches on; the added nodes have leaf
+        sets the original tree does not contain, and are dropped there.
+        """
+        copy, _ = self.copy()
+        added = 0
+        for node in list(copy.postorder()):
+            while len(node.children) > 2:
+                first, second = node.children[0], node.children[1]
+                spare = Node(branch_length=0.0, children=[first, second], parent=node)
+                first.parent = spare
+                second.parent = spare
+                node.children[0:2] = [spare]
+                added += 1
+        if added:
+            copy._by_id = {}
+            copy.assign_ids()
+        return copy, added
+
     def reroot_on_outgroup(self, outgroup: str) -> None:
         """Root the tree on the branch above the named leaf.
 
