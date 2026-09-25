@@ -120,6 +120,27 @@ PYBIND11_MODULE(_core, m)
 {
     m.doc() = "af map optimiser core (C++, alglib). Use af.map.optimise rather than this module directly.";
 
+    // Translate our own exceptions here, in this module. pybind11's built-in translation
+    // goes through a registry shared by every pybind11 module in the process; when one of
+    // matplotlib's modules had been imported first, std::invalid_argument from this module
+    // was not recognised there and reached Python as "RuntimeError: Caught an unknown
+    // exception!". A local translator runs first for this module's functions only.
+    py::register_local_exception_translator([](std::exception_ptr error) {
+        try {
+            if (error)
+                std::rethrow_exception(error);
+        }
+        catch (const py::builtin_exception& err) { // pybind11's own (type_error, index_error, ...)
+            err.set_error();
+        }
+        catch (const std::invalid_argument& err) {
+            PyErr_SetString(PyExc_ValueError, err.what());
+        }
+        catch (const std::exception& err) {
+            PyErr_SetString(PyExc_RuntimeError, err.what());
+        }
+    });
+
     py::class_<Problem>(m, "Problem")
         .def(py::init(&make_problem), py::arg("titre_value"), py::arg("titre_type"), py::arg("column_bases"), py::arg("disconnected"), py::kw_only(), py::arg("dodgy_is_regular"),
              py::arg("weights") = py::none(), py::arg("avidity_adjust") = py::none(), py::arg("gradient_multipliers") = py::none(), py::arg("unmovable") = py::none())
