@@ -7,6 +7,8 @@ import pytest
 from af.tree.io import newick
 from af.tree.model import Tree, TreeError, leaf_id
 
+from .tree_fixtures import built
+
 
 def tree_of(text: str) -> Tree:
     tree = newick.loads(text)
@@ -140,3 +142,56 @@ def test_prune_to_a_single_clade_leaves_a_usable_tree() -> None:
     tree.assign_ids()
     assert sorted(leaf.name or "" for leaf in tree.leaves()) == ["a", "b"]
     assert all(len(node.children) != 1 for node in tree.internal())
+
+
+def _clades(tree) -> set[frozenset[str]]:
+    """Every internal node's leaf set."""
+    out = set()
+    for node in tree.internal():
+        stack, leaves = [node], set()
+        while stack:
+            current = stack.pop()
+            if current.is_leaf:
+                leaves.add(current.name)
+            else:
+                stack.extend(current.children)
+        out.add(frozenset(leaves))
+    return out
+
+
+def test_binary_copy_resolves_multifurcations_without_changing_the_leaf_sets() -> None:
+    """raxml-ng refuses a multifurcating tree, and af's finished trees usually are one."""
+    tree, _ = built()
+    tree.collapse_short_branches(1.0)  # force a multifurcation
+    assert max(len(node.children) for node in tree.preorder()) > 2
+    binary, added = tree.binary_copy()
+    assert added > 0
+    assert max(len(node.children) for node in binary.preorder()) == 2
+    assert {leaf.name for leaf in binary.leaves()} == {leaf.name for leaf in tree.leaves()}
+    # Every original clade survives, so match_states_by_clade maps the states back.
+    assert _clades(tree) <= _clades(binary)
+    # The nodes it added carry no distance.
+    original = _clades(tree)
+    added_nodes = [
+        n
+        for n in binary.internal()
+        if frozenset(leaf.name for leaf in binary.leaves() if _under(n, leaf)) not in original
+    ]
+    assert all(node.branch_length == 0.0 for node in added_nodes)
+
+
+def _under(node, leaf) -> bool:
+    current = leaf
+    while current is not None:
+        if current is node:
+            return True
+        current = current.parent
+    return False
+
+
+def test_binary_copy_leaves_an_already_binary_tree_alone() -> None:
+    tree, _ = built()
+    assert max(len(node.children) for node in tree.preorder()) == 2
+    binary, added = tree.binary_copy()
+    assert added == 0
+    assert newick.dumps(binary) == newick.dumps(tree)
