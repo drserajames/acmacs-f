@@ -8,9 +8,10 @@ I7 JSON is written from it, so the picture and its description cannot disagree.
 
 Colours come from a user colour scheme (workstream 4). A scheme is an ordered list of rows; a point
 is painted by the *last* row whose labels it carries all of, as today's clade layers paint (later
-wins). By default the legend counts, for each row, every shown antigen carrying that row's labels
-(so a parent clade's count includes its painted-over sub-clades), and lists rows last-first, as on
-today's report maps. ``legend_counts="painted"`` counts only points drawn in the row's colour.
+wins). The legend lists rows last-first, as on today's report maps, and by default counts each
+shown antigen once, under the colour it is drawn in (Sarah, 25 Sep 2026), so the counts add up to
+the antigens shown. ``legend_counts="matched"`` gives today's numbers instead: every antigen
+carrying a row's labels, so a parent clade's count includes its painted-over sub-clades.
 """
 
 from __future__ import annotations
@@ -113,7 +114,7 @@ def style_points(
     *,
     title: str,
     vaccines: dict[str, str] | None = None,
-    legend_counts: Literal["matched", "painted"] = "matched",
+    legend_counts: Literal["painted", "matched"] = "painted",
 ) -> Scene:
     """Build the :class:`Scene` for one map and window.
 

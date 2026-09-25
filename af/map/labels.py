@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from af.map.vaccines import strain_name
+from af.map.vaccines import VaccineMark, strain_name
 from af.map.viewport import Box
 
 Array = NDArray[np.float64]
@@ -47,6 +47,42 @@ def label_text(
         else passage_class
     )
     return f"{abbr}/{year[-2:]}-{suffix}"
+
+
+@dataclass(frozen=True)
+class LabelRule:
+    """A vaccine to label: strain name and passage class (``any`` = every class)."""
+
+    name: str
+    passage: str  # "cell", "egg", "reassortant" or "any"
+
+
+def vaccines_to_label(
+    marks: Sequence[VaccineMark],
+    *,
+    subtype_list: Sequence[LabelRule] | None,
+    lab_list: Sequence[LabelRule] | None,
+) -> list[VaccineMark]:
+    """Which marked vaccines get a label (Sarah, 25 Sep 2026): all of them by default; a
+    per-subtype list replaces that; a per lab+subtype list replaces both. The most specific list
+    given wins outright (lists are not merged). Unlabelled vaccines are still drawn as vaccines.
+    Every rule in the list that wins must match a marked vaccine, or it is an error.
+    """
+    rules = lab_list if lab_list is not None else subtype_list
+    if rules is None:
+        return list(marks)
+    chosen: list[VaccineMark] = []
+    for rule in rules:
+        hits = [
+            m
+            for m in marks
+            if strain_name(m.row.name) == strain_name(rule.name)
+            and rule.passage in ("any", m.passage_class)
+        ]
+        if not hits:
+            raise ValueError(f"vaccine label rule {rule} matches no marked vaccine")
+        chosen.extend(h for h in hits if h not in chosen)
+    return chosen
 
 
 @dataclass(frozen=True)

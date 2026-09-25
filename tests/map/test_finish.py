@@ -65,13 +65,12 @@ def test_style_paints_last_matching_row_and_greys_old() -> None:
     assert not by_id["ag119"].greyed
     assert by_id["ag-noxy"].hidden_reason == "no_coordinates"
     assert by_id["ag-hidden"].hidden_reason == "override:rule-1"
-    counts = {t: n for t, _, n in scene.legend}
     assert [t for t, _, _ in scene.legend] == ["group B", "group A sub", "group A"]  # last first
-    assert counts["group A"] == 80  # matched: includes the sub-group painted over it
-    painted = style_points(
-        synthetic_points(), SCHEME, Window("12m", SINCE), title="t", legend_counts="painted"
+    assert sum(n for _, _, n in scene.legend) == 120  # painted: shown antigens, each counted once
+    matched = style_points(
+        synthetic_points(), SCHEME, Window("12m", SINCE), title="t", legend_counts="matched"
     )
-    assert sum(n for _, _, n in painted.legend) == 120  # shown antigens only, each counted once
+    assert {t: n for t, _, n in matched.legend}["group A"] == 80  # includes the painted-over sub
 
 
 def strain(prefix: str, place: str) -> str:
@@ -134,3 +133,20 @@ def test_i7_refuses_naive_timestamp(tmp_path: Path) -> None:
             created=dt.datetime(2026, 9, 25, 12, 0),
             provenance={},
         )
+
+
+def test_vaccines_to_label_most_specific_list_wins() -> None:
+    from af.map.labels import LabelRule, vaccines_to_label
+    from af.map.vaccines import VaccineMark, VaccineRow
+
+    names = ["/".join((p, "1", "2020")) for p in ("ALPHA", "BETA", "GAMMA")]
+    marks = [
+        VaccineMark(VaccineRow(n, None, "2020"), "cell", i, 1, "rule") for i, n in enumerate(names)
+    ]
+    assert vaccines_to_label(marks, subtype_list=None, lab_list=None) == marks
+    sub = [LabelRule(names[0], "any"), LabelRule(names[1], "cell")]
+    assert [m.antigen for m in vaccines_to_label(marks, subtype_list=sub, lab_list=None)] == [0, 1]
+    lab = [LabelRule(names[2], "any")]
+    assert [m.antigen for m in vaccines_to_label(marks, subtype_list=sub, lab_list=lab)] == [2]
+    with pytest.raises(ValueError, match="matches no marked vaccine"):
+        vaccines_to_label(marks, subtype_list=[LabelRule(names[0], "egg")], lab_list=None)
