@@ -411,6 +411,7 @@ class _Canonical:
             labels.update(section["clade"] for section in doc["tree"]["sections"])
         self.map = canonical_labels(sorted(labels, key=str), clade_set, allow_unmapped=True)
         self.clade_set = clade_set
+        self.ambiguous: dict[str, int] = {}  # "a|b" -> leaves whose labels disagree on the lineage
 
     def _one(self, label: str | None) -> str | None:
         """Canonical name, or None: unnamed (outside every clade) or unmapped (listed apart)."""
@@ -419,10 +420,26 @@ class _Canonical:
         return self.map.clade(label)
 
     def leaf(self, leaf: dict[str, Any]) -> str:
+        """The leaf's deepest canonical clade, when all its labels agree on one lineage.
+
+        A leaf whose labels do not lie on one lineage (e.g. ae tags that name both H.2 and a group
+        under J.2, siblings at equal depth) has no single answer: it becomes
+        "ambiguous:<a|b>" (its own group), is counted, and is never resolved by picking one.
+        """
         tags = leaf.get("clade_tags") or [leaf["clade"]]
-        mapped = [c for c in (self._one(t) for t in tags) if c]
+        mapped = {c for c in (self._one(t) for t in tags) if c}
         if mapped:
-            return str(max(mapped, key=self.clade_set.depth))
+            deepest = max(self.clade_set.depth(c) for c in mapped)
+            tips = {c for c in mapped if self.clade_set.depth(c) == deepest}
+            tip = next(iter(tips))
+            lineage = len(tips) == 1 and all(self.clade_set.is_within(tip, c) for c in mapped)
+            if lineage:
+                return str(tip)
+            heads = sorted(c for c in mapped if not any(
+                d != c and self.clade_set.is_within(d, c) for d in mapped))  # fmt: skip
+            key = "|".join(heads)
+            self.ambiguous[key] = self.ambiguous.get(key, 0) + 1
+            return f"ambiguous:{key}"
         raw = [t for t in tags if t is not None and t in self.map.unmapped]
         return f"unmapped:{raw[-1]}" if raw else "unnamed"
 
@@ -430,4 +447,10 @@ class _Canonical:
         return self._one(label) or f"unmapped:{label}"
 
     def summary(self) -> dict[str, Any]:
-        return {"counts": self.map.counts(), "unmapped": dict(self.map.unmapped)}
+        return {
+            "counts": self.map.counts(),
+            "unmapped": dict(self.map.unmapped),
+            # Leaf counts over both sides' mapped leaves (each leaf is mapped once per side).
+            "ambiguous_leaves": sum(self.ambiguous.values()),
+            "ambiguous": dict(sorted(self.ambiguous.items(), key=lambda x: -x[1])),
+        }
