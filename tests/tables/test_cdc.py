@@ -276,3 +276,21 @@ def test_rule_locations_name_the_real_file_line(rules_dir):
     path = rules_dir / "titre_tokens.tsv"
     path.write_text("# a comment\n\n" + path.read_text())
     assert [r.where for r in Rules(rules_dir).titre_tokens.rules][:1] == ["titre_tokens.tsv:4"]
+
+
+def test_sequence_link_fields(tmp_path):
+    rows = [
+        row(
+            ag_epi_isolate_id="EPI_ISL_1",
+            ag_pairing_status="isolate proxy",
+            sr_pairing_status="exact",
+        )
+    ]
+    (t,) = read(tmp_path, rows).tables
+    assert (t.antigens[0].epi_isl, t.antigens[0].sequence_pairing) == ("EPI_ISL_1", "proxy")
+    assert (t.sera[0].epi_isl, t.sera[0].sequence_pairing) == ("", "exact")
+    assert "epi_isl" not in t.map_content()["antigens"][0]  # a later link restarts no chain
+
+
+def test_bad_epi_isl_is_an_error(tmp_path):
+    assert "not an EPI_ISL id" in read(tmp_path, [row(ag_epi_isolate_id="EPI123")]).errors[0]

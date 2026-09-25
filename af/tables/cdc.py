@@ -105,6 +105,8 @@ FLAGS = {
     "titer_error": "TRUE",
 }
 BOOLEAN = ("TRUE", "FALSE")
+PAIRING = {"exact": "exact", "isolate proxy": "proxy", "": ""}  # ag/sr_pairing_status
+EPI_ISL = re.compile(r"EPI_ISL_[0-9]+")
 HA_TYPES = {
     "VIC": "VICTORIA",
     "YAM": "YAMAGATA",
@@ -360,6 +362,8 @@ def _antigen(
         reassortant=name.reassortant,
         annotations=name.annotations,
         lineage=_lineage(row, "ag_ha_type"),
+        epi_isl=_epi_isl(row, "ag_epi_isolate_id"),
+        sequence_pairing=_pairing(row, "ag_pairing_status"),
         reference=row["ag_type"] == "reference",
         source={c: row[c] for c in AG_SOURCE},
     )
@@ -399,6 +403,8 @@ def _serum(
         reassortant=name.reassortant,
         annotations=name.annotations + (["BOOSTED"] if boosted == "TRUE" else []),
         lineage=_lineage(row, "sr_ha_type"),
+        epi_isl=_epi_isl(row, "sr_epi_isolate_id"),
+        sequence_pairing=_pairing(row, "sr_pairing_status"),
         source={c: row[c] for c in SR_SOURCE},
     )
     if renamed:
@@ -413,6 +419,19 @@ def _serum(
         elif action != "drop":
             raise ValueError(f"{rule.where}: unknown action {action!r}")
     return serum, (row["sr_strain_name"], serum.serum_id, boosted), action
+
+
+def _epi_isl(row: dict[str, str], column: str) -> str:
+    value = row[column]
+    if value and not EPI_ISL.fullmatch(value):
+        raise CDCFormatError(f"line {row['_line']}: {column} = {value!r} is not an EPI_ISL id")
+    return value
+
+
+def _pairing(row: dict[str, str], column: str) -> str:
+    if row[column] not in PAIRING:
+        raise CDCFormatError(f"line {row['_line']}: {column} = {row[column]!r}")
+    return PAIRING[row[column]]
 
 
 def _lineage(row: dict[str, str], column: str) -> str:
