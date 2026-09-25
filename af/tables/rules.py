@@ -62,12 +62,19 @@ class RuleTable:
         self.scope = scope
         self.rules: list[Rule] = []
         with path.open(newline="", encoding="utf-8") as f:
-            lines = [ln for ln in f if ln.strip() and not ln.startswith("#")]
+            numbered = [
+                (no, ln)
+                for no, ln in enumerate(f, start=1)
+                if ln.strip() and not ln.startswith("#")
+            ]
+        lines = [ln for _, ln in numbered]
+        file_line = [no for no, _ in numbered]  # rule messages name the real line in the file
         reader = csv.DictReader(lines, delimiter="\t")
         missing = [c for c in (*scope, *required, *REQUIRED) if c not in (reader.fieldnames or [])]
         if missing:
             raise ValueError(f"{path}: missing columns {missing}")
-        for no, row in enumerate(reader, start=2):
+        for index, row in enumerate(reader, start=1):
+            no = file_line[index]
             values = {k: (v or "").strip() for k, v in row.items() if k is not None}
             if None in row:
                 raise ValueError(f"{path}:{no}: more cells than columns")
@@ -143,6 +150,16 @@ class Rules:
         self.lab_conventions = RuleTable(
             directory / "lab_conventions.tsv", scope=("lab",), required=("date_order",)
         )
+        self.strain_aliases = RuleTable(
+            directory / "strain_aliases.tsv",
+            scope=("lab", "subtype", "applies_to"),
+            required=("kind", "pattern", "canonical", "min_titre", "min_fraction"),
+        )
+        self.season_files = RuleTable(
+            directory / "season_files.tsv",
+            scope=("lab",),
+            required=("file", "subtype", "date_from", "date_to", "table_key"),
+        )
 
     def tables(self) -> list[RuleTable]:
         return [
@@ -153,6 +170,8 @@ class Rules:
             self.passage_tokens,
             self.control_antigens,
             self.lab_conventions,
+            self.strain_aliases,
+            self.season_files,
         ]
 
     def usage_report(self) -> list[str]:

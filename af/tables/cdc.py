@@ -23,7 +23,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import names
+from . import aliases
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
 from .rules import Rules
@@ -180,7 +180,7 @@ def read(path: Path, rules: Rules, *, drop_flagged: bool = True) -> ReadResult:
         if table is None:
             continue
         table.provenance = dict(provenance)
-        if problems := table.check():
+        if problems := table.check() or aliases.check_titres(table, rules):
             result.errors.extend(f"test_id {test_id}: {p}" for p in problems)
         result.tables.append(table)
     return result
@@ -333,9 +333,16 @@ def _make_table(
 def _antigen(
     row: dict[str, str], subtype: str, rules: Rules, passages: PassageParser, warnings: list[str]
 ) -> tuple[Antigen, tuple[str, ...]]:
-    name = names.parse(row["ag_strain_name"], subtype, rules.reassortants, LAB)
+    name, renamed = aliases.parse_name(
+        rules,
+        row["ag_strain_name"],
+        lab=LAB,
+        subtype=subtype,
+        applies_to="antigen",
+        warnings=warnings,
+    )
     passage = passages.parse(row["ag_passage"])
-    warnings.extend(name.problems + passage.problems)
+    warnings.extend(passage.problems)
     harvest = (
         _iso_date(row["ag_date_harvested"], "ag_date_harvested")
         if row["ag_date_harvested"]
@@ -356,15 +363,24 @@ def _antigen(
         reference=row["ag_type"] == "reference",
         source={c: row[c] for c in AG_SOURCE},
     )
+    if renamed:
+        antigen.source[aliases.SOURCE_KEY] = renamed
     return antigen, (row["ag_strain_name"], row["ag_passage"], harvest or "", row["ag_cdc_id"])
 
 
 def _serum(
     row: dict[str, str], subtype: str, rules: Rules, passages: PassageParser, warnings: list[str]
 ) -> tuple[Serum, tuple[str, ...], str]:
-    name = names.parse(row["sr_strain_name"], subtype, rules.reassortants, LAB)
+    name, renamed = aliases.parse_name(
+        rules,
+        row["sr_strain_name"],
+        lab=LAB,
+        subtype=subtype,
+        applies_to="serum",
+        warnings=warnings,
+    )
     passage = passages.parse(row["sr_passage"])
-    warnings.extend(name.problems + passage.problems)
+    warnings.extend(passage.problems)
     lot = row["sr_lot"].replace(", ", ",")
     boosted = row["sr_boosted"].upper()
     if boosted not in BOOLEAN:
@@ -385,6 +401,8 @@ def _serum(
         lineage=_lineage(row, "sr_ha_type"),
         source={c: row[c] for c in SR_SOURCE},
     )
+    if renamed:
+        serum.source[aliases.SOURCE_KEY] = renamed
     action = ""
     if (rule := rules.control_sera.find(row["sr_lot"], lab=LAB)) is not None and rule[
         "field"
