@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from af.run import Runner
 from af.tree.build.cmaple import (
@@ -26,6 +27,7 @@ from af.tree.build.cmaple import (
     version,
 )
 from af.tree.model import Tree
+from af.tree.prebuild import ExclusionPlan, apply_plan
 
 
 @dataclass
@@ -33,7 +35,7 @@ class BuildResult:
     """The tree, and what each step did to it."""
 
     tree: Tree
-    counts: dict[str, int | float | str] = field(default_factory=dict)
+    counts: dict[str, Any] = field(default_factory=dict)
 
 
 def finish_tree(
@@ -48,7 +50,7 @@ def finish_tree(
     because it is presentation. Ids are assigned at the end and are unaffected by the ladderizing
     (that is the point of them), so the same tree drawn differently keeps its labels.
     """
-    counts: dict[str, int | float | str] = {}
+    counts: dict[str, Any] = {}
     leaves_before, internal_before = tree.count()
     counts["leaves"] = leaves_before
     counts["internal_nodes_before"] = internal_before
@@ -79,20 +81,34 @@ def build(
     starting_tree: Path | None = None,
     collapse_tolerance: float = 0.0,
     runner: Runner | None = None,
+    exclude: ExclusionPlan | None = None,
 ) -> BuildResult:
-    """CMAPLE, then finish. The whole build step."""
+    """CMAPLE, then finish. The whole build step.
+
+    ``exclude`` drops sequences from the alignment **before** CMAPLE runs (Sarah, 25 Sep 2026:
+    long branches go before the tree is made, for topology and speed). The filtered alignment is
+    written beside the output, not over the input, so the export stays the export.
+    """
     settings = settings or CmapleSettings()
+    counts_before: dict[str, object] = {}
+    if exclude is not None and exclude.drop:
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        filtered = Path(out_dir) / "input.filtered.fasta"
+        counts_before = apply_plan(alignment, filtered, exclude)
+        alignment = filtered
     tree = run_cmaple(alignment, out_dir, settings, starting_tree, runner)
     result = finish_tree(tree, outgroup, collapse_tolerance)
     result.counts["builder"] = version(settings.executable)
     result.counts["search"] = settings.search
     result.counts["seed"] = settings.seed
     result.counts["from_scratch"] = "no" if starting_tree else "yes"
+    result.counts.update({f"prebuild_{k}": v for k, v in counts_before.items()})
     return result
 
 
 __all__ = [
     "BuildResult",
+    "ExclusionPlan",
     "CmapleSettings",
     "build",
     "build_job",

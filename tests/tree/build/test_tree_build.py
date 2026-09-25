@@ -106,7 +106,7 @@ def test_cmaple_builds_a_tree_with_every_sequence(tmp_path) -> None:
         settings=CmapleSettings(threads=2),
     )
     assert sorted(leaf.name or "" for leaf in result.tree.leaves()) == sorted(sequences)
-    assert result.counts["builder"].startswith("cmaple/")  # type: ignore[union-attr]
+    assert result.counts["builder"].startswith("cmaple/")
     assert result.counts["from_scratch"] == "yes"
     assert "outgroup" in {child.name for child in result.tree.root.children}
 
