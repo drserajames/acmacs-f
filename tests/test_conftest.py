@@ -3,7 +3,8 @@
 from pathlib import Path
 
 import pytest
-from conftest import REPO_ROOT, resolve_af_data
+
+from tests.helpers import REPO_ROOT, resolve_af_data
 
 
 def test_default_is_sibling_of_repo(monkeypatch: pytest.MonkeyPatch) -> None:

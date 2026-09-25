@@ -8,7 +8,8 @@ import shutil
 import subprocess
 
 import pytest
-from conftest import REPO_ROOT
+
+from tests.helpers import REPO_ROOT
 
 SKIP_PARTS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 

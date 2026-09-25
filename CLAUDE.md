@@ -37,6 +37,17 @@ The build is scikit-build-core + CMake. With no `cpp/optimiser/` it is pure Pyth
 `cpp/CMakeLists.txt` fetches alglib 3.19.0 (hash-checked). Offline, pass
 `-Ccmake.define.AF_ALGLIB_URL=/path/to/alglib-3.19.0.cpp.gpl.tgz`.
 
+## Tests
+
+- `tests/` is a package: **every directory under it has an `__init__.py`**. Add one when you
+  add a directory.
+- **Import test helpers relatively** (`from .synthetic import make_tree`) or as
+  `tests.<...>`, never by a bare top-level name. A bare name makes one file two modules, which
+  a clean checkout rejects. Shared helpers are in `tests/helpers.py`; never import `conftest`.
+- Before asking for a merge, run `python tools/check-committed.py`. It runs ruff, mypy and
+  pytest on exactly what is committed, as CI does. A worktree's untracked files, caches and
+  editable install can make local runs pass where CI fails.
+
 ## Design rules
 
 1. A rule or selector that **matches nothing is an error** unless marked optional; report counts.
