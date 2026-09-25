@@ -86,6 +86,13 @@ class RuleTable:
                 re.compile(values["pattern"])  # fail at load, not at first use
             self.rules.append(rule)
 
+    @classmethod
+    def empty(cls, path: Path, scope: tuple[str, ...]) -> RuleTable:
+        """A table with no rules, for a rule file a data checkout does not have yet."""
+        table = cls.__new__(cls)
+        table.name, table.path, table.scope, table.rules = path.stem, path, scope, []
+        return table
+
     def in_scope(self, rule: Rule, **scope: str) -> bool:
         return all(
             rule[k] == WILDCARD or rule[k].casefold() == v.casefold() for k, v in scope.items()
@@ -178,8 +185,19 @@ class Rules:
             required=("file", "subtype", "date_from", "date_to", "table_key"),
         )
 
+        # Hand repairs to single workbook cells, as named data (af.tables.sheet.apply_cell_fixes).
+        # Absent in data checkouts that predate it: then there are none.
+        fixes = directory / "cell_fixes.tsv"
+        cell_scope, cell_required = ("lab",), ("file", "sheet", "cell", "raw", "value")
+        self.cell_fixes = (
+            RuleTable(fixes, scope=cell_scope, required=cell_required)
+            if fixes.exists()
+            else RuleTable.empty(fixes, cell_scope)
+        )
+
     def tables(self) -> list[RuleTable]:
         return [
+            self.cell_fixes,
             self.titre_tokens,
             self.control_sera,
             self.table_defaults,
