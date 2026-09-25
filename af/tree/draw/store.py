@@ -47,7 +47,20 @@ def load_version(directory: Path) -> StoreTree:
     for key in ("clade_parents", "clade_set_version"):
         if key not in meta:
             raise StoreInputError(f"{directory}: tree.json has no {key!r}")
-    tree = DrawTree(**i6.draw_columns(directory))
+    cols = i6.draw_columns(directory)
+    tree = DrawTree(
+        parent=cols["parent"],
+        edge=cols["edge"],
+        leaf_id=cols["leaf_id"],
+        name=cols["name"],
+        date=cols["date"],
+        date_precision=cols["date_precision"],
+        continent=cols["continent"],
+        clade=cols["clade"],
+        aa=cols["aa"],
+        aa_subs=cols["aa_subs"],
+        subtype=str(meta["subtype"]),
+    )
     parents = {str(k): (str(v) if v else None) for k, v in meta["clade_parents"].items()}
     table = i6.read_nodes(directory, columns=["leaf_id", "titrated_by", "flags"])
     leaf_ids = table["leaf_id"].to_pylist()
