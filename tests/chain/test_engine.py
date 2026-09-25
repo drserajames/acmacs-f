@@ -158,20 +158,41 @@ def test_split_starts_give_the_same_chain(tables, tmp_path):
 
 def test_command_line(tables, tmp_path):
     from af.chain.__main__ import main
+    from af.store.store import Store
+    from af.store.work import Work
 
+    Work.create(tmp_path / "work")
+    Store.create(tmp_path / "store")
     (tmp_path / "chain.toml").write_text(
         f'name = "{GROUP}"\nseed = 3\n[tables]\ndirectory = "tables"\ngroup = "{GROUP}"\n'
         "[options]\nscratch_starts = 4\nincremental_starts = 3\ngrid_test = false\n"
     )
     (tmp_path / "run.toml").write_text(
-        'store_root = "store"\noptimiser = "stub"\n[runner]\nkind = "local"\n'
-        '[split]\nchunks = 2\nwork_dir = "work"\n'
+        'dataset = "testlab/h9/main"\noptimiser = "stub"\n'
+        '[paths]\nstore = "store"\nwork = "work"\n[runner]\nkind = "local"\n[split]\nchunks = 2\n'
     )
     assert main([str(tmp_path / "chain.toml"), str(tmp_path / "run.toml")]) == 0
-    doc = json.loads((tmp_path / "store" / GROUP / "chain.json").read_text())
+    root = tmp_path / "work" / "chains" / "testlab" / "h9" / "main"
+    doc = json.loads((root / "chain.json").read_text())
     assert doc["complete"] and len(doc["steps"]) == 4
-    assert (tmp_path / "store" / GROUP / "review" / "index.html").exists()
+    assert (root / "state").is_dir() and (root / "review" / "index.html").exists()
+    ref = Store.open(tmp_path / "store").current("chains", "testlab/h9/main")
+    assert (Store.open(tmp_path / "store").resolve(ref) / "steps" / "0003" / "chosen.ace").exists()
     assert main([str(tmp_path / "chain.toml"), str(tmp_path / "run.toml"), "--review"]) == 0
+
+
+def test_command_line_refuses_a_missing_work_area(tables, tmp_path):
+    from af.chain.__main__ import main
+    from af.store.ref import StoreError
+
+    (tmp_path / "chain.toml").write_text(
+        f'name = "{GROUP}"\nseed = 3\n[tables]\ndirectory = "tables"\ngroup = "{GROUP}"\n'
+    )
+    (tmp_path / "run.toml").write_text(
+        'dataset = "testlab/h9/main"\noptimiser = "stub"\n[paths]\nstore = "store"\nwork = "typo"\n'
+    )
+    with pytest.raises(StoreError):
+        main([str(tmp_path / "chain.toml"), str(tmp_path / "run.toml")])
 
 
 def test_moved_store_and_tables_rerun_nothing(tables, tmp_path):
