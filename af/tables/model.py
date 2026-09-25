@@ -13,6 +13,7 @@ passage, pairing status) long after a test; that changes ``content_hash`` only.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field
@@ -81,6 +82,16 @@ class Table:
     dropped: dict[str, int] = field(default_factory=dict)  # counts, by reason
     warnings: list[str] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)  # excluded from the hash
+
+    @property
+    def test_date(self) -> dt.date:
+        """The test date, parsed. Consumers use this (or ``order_key``), never the id string."""
+        return dt.date.fromisoformat(self.date)
+
+    @property
+    def order_key(self) -> tuple[dt.date, int]:
+        """Chronological order of tables in a group: date, then the same-day number (1, 2, ...)."""
+        return self.test_date, self.date_suffix
 
     def content(self) -> dict[str, Any]:
         """Everything that the hash covers: the table minus its provenance."""

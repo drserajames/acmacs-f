@@ -22,7 +22,9 @@ from .rules import RuleTable
 _SPACES = re.compile(r"\s+")
 _YEAR_AND_EXTRA = re.compile(r"(\d{4})(?:[\s-]+(.+))?")  # "2019", "2019 X-345", "2019-CDC-LV25B"
 _PAREN = re.compile(r"\((.*)\)")
-_TRAILING_PAREN = re.compile(r"\s*\(([^()]*)\)\s*$")  # "B/EXAMPLETOWN/1/2021 (23/228)": may contain '/'
+_TRAILING_PAREN = re.compile(
+    r"\s*\(([^()]*)\)\s*$"
+)  # "B/EXAMPLETOWN/1/2021 (23/228)": may contain '/'
 
 
 @dataclass

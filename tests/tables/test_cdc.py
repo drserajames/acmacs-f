@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 
 import pytest
@@ -215,3 +216,10 @@ def test_metadata_only_change_does_not_restart(tmp_path):
     identity.assign(new, m_old)
     d = identity.diff(m_old, identity.Manifest.from_tables(new, [], m_old))
     assert (d.changed, d.metadata, d.restart) == ([], ["h3-hi-guinea-pig-cdc-20300102"], {})
+
+
+def test_parsed_date_and_order_key(tmp_path):
+    tables = read(tmp_path, [row(test_id="2"), row(test_id="1", titer_value="320")]).tables
+    identity.assign(tables, None)
+    by_suffix = sorted(tables, key=lambda t: t.order_key)
+    assert [t.order_key for t in by_suffix] == [(dt.date(2030, 1, 2), 1), (dt.date(2030, 1, 2), 2)]
