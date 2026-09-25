@@ -11,10 +11,14 @@ Two ways in, in this order:
 A name often has several sequences: one virus deposited more than once, typically as the
 original specimen and as an egg or cell isolate (about 4,000 shared names per A subtype in
 the definitive set). The antigen's passage chooses among them: an egg antigen takes an egg
-sequence, a cell antigen a cell sequence, and failing that the original specimen. What
-cannot be chosen by those rules is **flagged, never taken silently** (T31): an egg antigen
-with only cell sequences is still matched, but flagged doubtful; a tie between different
-sequences is not matched at all.
+sequence, a cell antigen a cell sequence, and failing that the original specimen. A tie
+left after that is often one virus registered as a separate isolate by each centre that
+grew it; when exactly one sequence of the tie was submitted by the antigen's own lab, that
+one is taken and flagged ``match.own-lab``. Labs map to GISAID submitters through a named
+table (``lab_submitters.tsv``, acmacs-f-data), never a pattern: submitters rename (NIID is
+now JIHS) and similar names belong to other institutes. What cannot be chosen by those
+rules is **flagged, never taken silently** (T31): an egg antigen with only cell sequences is
+still matched, but flagged doubtful; a tie between different sequences is not matched.
 
 Passage classes of GISAID's free-text passages come from a rule table
 (``gisaid_passage_classes.tsv``, acmacs-f-data); table antigens bring their own class from
@@ -44,6 +48,7 @@ EGG_WITHOUT_EGG_SEQUENCE = "match.egg-antigen-non-egg-sequence"
 CELL_FROM_ORIGINAL = "match.cell-antigen-original-sequence"
 IDENTICAL_DUPLICATES = "match.identical-duplicates"
 AMBIGUOUS = "match.ambiguous"
+OWN_LAB = "match.own-lab"
 REASSORTANT = "match.reassortant"
 NO_MATCH = "match.none"
 DOUBTFUL = frozenset({EPI_NAME_DIFFERS, SEVERAL_ACCESSIONS, EGG_WITHOUT_EGG_SEQUENCE,
@@ -94,6 +99,7 @@ class Candidate:
     passage: str
     passage_class: str
     seq_hash: str
+    submitting_lab: str = ""
 
     @property
     def key(self) -> tuple[str, str]:
@@ -121,6 +127,7 @@ class SequenceIndex:
         default_factory=lambda: defaultdict(list)
     )
     counts: Counter[str] = field(default_factory=Counter)
+    submitters: dict[str, frozenset[str]] = field(default_factory=dict)  # lab -> GISAID names
 
     def add(self, candidate: Candidate) -> None:
         self.by_epi[candidate.epi_isl].append(candidate)
@@ -129,9 +136,19 @@ class SequenceIndex:
             self.by_name[key].append(candidate)
 
     def match(
-        self, name: str, antigen_class: str, *, epi_isl: str = "", reassortant: str = ""
+        self,
+        name: str,
+        antigen_class: str,
+        *,
+        epi_isl: str = "",
+        reassortant: str = "",
+        lab: str = "",
     ) -> Match:
-        """The sequence for one antigen; ``antigen_class`` is egg, cell, original or unknown."""
+        """The sequence for one antigen; ``antigen_class`` is egg, cell, original or unknown.
+
+        ``lab`` is the lab whose table the antigen is in; it breaks a name tie only through
+        ``submitters``.
+        """
         flags: list[str] = [REASSORTANT] if reassortant else []
         if epi_isl:
             found = self.by_epi.get(epi_isl, [])
@@ -142,7 +159,7 @@ class SequenceIndex:
             flags.append(EPI_NOT_IN_STORE)
         key = name_key(name)
         found = self.by_name.get(key, []) if key is not None else []
-        result = self._from_name(found, antigen_class, flags)
+        result = self._from_name(found, antigen_class, flags, self.submitters.get(lab, frozenset()))
         self.counts.update(result.flags or ["match.clean"])
         return result
 
@@ -152,10 +169,16 @@ class SequenceIndex:
         chosen = _one_sequence(found, flags, SEVERAL_ACCESSIONS)
         return Match("epi_isl", chosen, tuple(found), tuple(flags))
 
-    def _from_name(self, found: list[Candidate], antigen_class: str, flags: list[str]) -> Match:
+    def _from_name(
+        self, found: list[Candidate], antigen_class: str, flags: list[str], own: frozenset[str]
+    ) -> Match:
         if not found:
             return Match(None, None, (), (*flags, NO_MATCH))
         tier = _preferred(found, antigen_class, flags)
+        mine = [c for c in tier if c.submitting_lab in own]
+        if len({c.seq_hash for c in tier}) > 1 and len({c.seq_hash for c in mine}) == 1:
+            flags.append(OWN_LAB)  # a tie only the antigen's own lab's submission settles
+            tier = mine
         chosen = _one_sequence(tier, flags, AMBIGUOUS)
         return Match("name", chosen, tuple(found), tuple(flags))
 
@@ -199,13 +222,51 @@ def index_from_store(
     for dataset in datasets:
         version = store.resolve(store.current("sequences", dataset))
         rows = duckdb.execute(
-            "select i.epi_isl, i.accession, i.name, i.passage, s.seq_hash"
+            "select i.epi_isl, i.accession, i.name, i.passage, s.seq_hash,"
+            " coalesce(i.submitting_lab, '')"
             " from read_parquet(?) i join read_parquet(?) s using (epi_isl, accession)",
             [str(version / "isolates" / "*" / "*.parquet"),
              str(version / "sequences" / "*" / "*.parquet")],
         ).fetchall()  # fmt: skip
-        for epi_isl, accession, name, passage, seq_hash in rows:
+        for epi_isl, accession, name, passage, seq_hash, submitter in rows:
             kind = passage_class(passage, passage_rules)
             index.counts[f"passage.{kind}"] += 1
-            index.add(Candidate(epi_isl, accession, dataset, name, passage, kind, seq_hash))
+            index.add(
+                Candidate(epi_isl, accession, dataset, name, passage, kind, seq_hash, submitter)
+            )
     return index
+
+
+def read_lab_submitters(path: Path) -> dict[str, frozenset[str]]:
+    """``lab_submitters.tsv``: lab, the exact GISAID submitting-lab name, and a reason."""
+    lines = [line for line in path.read_text().splitlines() if not line.startswith("#")]
+    rows = list(csv.DictReader(lines, delimiter="\t"))
+    if unexplained := [r["submitting_lab"] for r in rows if not (r.get("reason") or "").strip()]:
+        raise ValueError(f"{path}: rows without a reason: {unexplained}")
+    out: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        out[row["lab"].strip().lower()].add(row["submitting_lab"])
+    return {lab: frozenset(names) for lab, names in out.items()}
+
+
+def check_lab_submitters(
+    store: Store, datasets: Iterable[str], submitters: dict[str, frozenset[str]]
+) -> None:
+    """Every submitter named in the table must submit something in these store datasets.
+
+    A name that matches nothing has been renamed or mistyped, and would silently stop
+    breaking ties.
+    """
+    paths = [
+        str(store.resolve(store.current("sequences", d)) / "isolates" / "*" / "*.parquet")
+        for d in datasets
+    ]
+    seen = {
+        name
+        for (name,) in duckdb.execute(
+            "select distinct submitting_lab from read_parquet(?)", [paths]
+        ).fetchall()
+    }
+    missing = sorted(n for names in submitters.values() for n in names if n not in seen)
+    if missing:
+        raise ValueError(f"lab submitters not in the sequence store: {missing}")

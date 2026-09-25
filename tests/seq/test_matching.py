@@ -115,3 +115,53 @@ def test_passage_rules_file_with_an_unknown_class_is_refused(tmp_path: Path) -> 
     path.write_text("# comment\npattern\tclass\treason\nX\tbanana\twhy\n")
     with pytest.raises(ValueError, match="banana"):
         M.read_passage_rules(path)
+
+
+class TestOwnLab:
+    SUBMITTERS = {"lab-a": frozenset({"Example Centre A"})}
+
+    def tie(self, *cands: M.Candidate) -> M.SequenceIndex:
+        idx = index(*cands)
+        idx.submitters = dict(self.SUBMITTERS)
+        return idx
+
+    def test_a_tie_is_settled_by_the_antigens_own_lab_and_flagged(self) -> None:
+        own = M.Candidate("EPI_ISL_1", "EPI1", "h3", ANTIGEN, "MDCK1", M.CELL, "a",
+                          "Example Centre A")  # fmt: skip
+        other = M.Candidate("EPI_ISL_2", "EPI2", "h3", ANTIGEN, "SIAT1", M.CELL, "b",
+                            "Example Centre B")  # fmt: skip
+        match = self.tie(own, other).match(ANTIGEN, M.CELL, lab="lab-a")
+        assert match.chosen == own and match.flags == (M.OWN_LAB,) and not match.doubtful
+
+    def test_another_lab_or_no_lab_leaves_the_tie(self) -> None:
+        own = M.Candidate("EPI_ISL_1", "EPI1", "h3", ANTIGEN, "MDCK1", M.CELL, "a",
+                          "Example Centre A")  # fmt: skip
+        other = M.Candidate("EPI_ISL_2", "EPI2", "h3", ANTIGEN, "SIAT1", M.CELL, "b",
+                            "Example Centre B")  # fmt: skip
+        for lab in ("lab-b", ""):
+            match = self.tie(own, other).match(ANTIGEN, M.CELL, lab=lab)
+            assert match.chosen is None and match.flags == (M.AMBIGUOUS,)
+
+    def test_own_lab_with_two_different_sequences_is_still_a_tie(self) -> None:
+        cands = [M.Candidate(f"EPI_ISL_{n}", f"EPI{n}", "h3", ANTIGEN, "MDCK1", M.CELL, seq,
+                             "Example Centre A") for n, seq in ((1, "a"), (2, "b"))]  # fmt: skip
+        match = self.tie(*cands).match(ANTIGEN, M.CELL, lab="lab-a")
+        assert match.chosen is None and M.AMBIGUOUS in match.flags
+
+    def test_own_lab_does_not_override_the_passage_tier(self) -> None:
+        egg = M.Candidate("EPI_ISL_1", "EPI1", "h3", ANTIGEN, "E3", M.EGG, "a", "Example Centre B")
+        own_cell = M.Candidate("EPI_ISL_2", "EPI2", "h3", ANTIGEN, "MDCK1", M.CELL, "b",
+                               "Example Centre A")  # fmt: skip
+        match = self.tie(egg, own_cell).match(ANTIGEN, M.EGG, lab="lab-a")
+        assert match.chosen == egg and M.OWN_LAB not in match.flags
+
+
+def test_lab_submitters_need_a_reason(tmp_path: Path) -> None:
+    path = tmp_path / "lab_submitters.tsv"
+    header = "# invented\nlab\tsubmitting_lab\treason\n"
+    path.write_text(header + "LAB-A\tExample Centre A\tits GISAID name\n"
+                    "lab-a\tExample Centre A2\t \n")  # fmt: skip
+    with pytest.raises(ValueError, match="without a reason"):
+        M.read_lab_submitters(path)
+    path.write_text("lab\tsubmitting_lab\treason\nLAB-A\tExample Centre A\tits GISAID name\n")
+    assert M.read_lab_submitters(path) == {"lab-a": frozenset({"Example Centre A"})}
