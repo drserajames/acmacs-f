@@ -332,3 +332,86 @@ def test_amendments_are_printed_with_the_status(tmp_path: Path) -> None:
     )  # fmt: skip
     text = markdown({"report": "r", "built": "b"}, [], "l.toml", "name", limits.adoption)
     assert "amended 2026-09-26 by a reviewer: tree limit withdrawn" in text
+
+
+def test_excused_points_are_removed_and_a_stale_list_fails(tmp_path: Path) -> None:
+    from af.report.compare.run import Excused, excuse_points
+
+    pts = [(float(i), float(i % 3)) for i in range(12)]
+    ref = _map(pts[:10], ["X"] * 10)
+    new = _map(pts, ["X"] * 12)  # new shows two extra points
+    keys = {maps.point_key(p, "name") for p in new["map"]["antigens"][10:]}
+    keys_file = tmp_path / "keys.txt"
+    keys_file.write_text("# dropped hide rule\n" + "\n".join(sorted(keys)) + "\n")
+    entry = Excused(["map/x/all"], keys_file, "rule dropped", "a reviewer", dt.date(2026, 9, 25))
+    notes = excuse_points("map/x/all", ref, new, [(entry, keys)], "name")
+    assert notes[0]["stale"] == 0
+    assert maps.compare(ref, new)["antigens"]["jaccard"] == 1.0
+    again = _map(pts, ["X"] * 12)  # both sides now show them: the excuse no longer applies
+    notes = excuse_points("map/x/all", _map(pts, ["X"] * 12), again, [(entry, keys)], "name")
+    assert notes[0]["stale"] == 2 and "STALE" in notes[0]["note"]
+
+
+def test_one_sided_points_are_listed_even_when_the_slot_passes(tmp_path: Path) -> None:
+    from af.report.compare.run import markdown
+
+    pts = [(float(i), float(i % 3)) for i in range(200)]
+    res = maps.compare(_map(pts[:199], ["X"] * 199), _map(pts, ["X"] * 200))
+    checks = map_checks(res, MapLimits(antigens_jaccard_min=0.99))
+    row = {"slot": "map/x/all", "status": slot_status(checks), "checks": checks, "detail": res}
+    limits = parse_config(
+        {"adoption": {"status": "final", "adopted_by": "a reviewer",
+                      "adopted": dt.date(2026, 9, 25)}},
+        Limits, base_dir=tmp_path,
+    )  # fmt: skip
+    text = markdown({"report": "r", "built": "b"}, [row], "l.toml", "name", limits.adoption)
+    assert row["status"] == "ok"  # Jaccard 0.995 passes the limit ...
+    assert "antigens only in new (1)" in text  # ... but the point is still listed
+
+
+def test_a_point_outside_one_frame_is_a_frame_difference_not_a_missing_virus() -> None:
+    pts = [(float(i), float(i % 3)) for i in range(10)]
+    ref, new = _map(pts, ["X"] * 10), _map(pts, ["X"] * 10)
+    ref["map"]["antigens"][4]["in_viewport"] = False  # the reference frame cuts it off
+    res = maps.compare(ref, new)["antigens"]
+    assert res["jaccard"] == 1.0 and res["only_new"] == 0
+    assert res["in_frame_only_new_keys"] == [maps.point_key(new["map"]["antigens"][4], "name")]
+
+
+def test_map_flags_are_printed(tmp_path: Path) -> None:
+    from af.report.compare.run import markdown
+
+    pts = [(float(i), float(i % 3)) for i in range(10)]
+    res = maps.compare(_map(pts, ["X"] * 10), _map(pts, ["X"] * 10))
+    checks = map_checks(res, MapLimits())
+    row = {"slot": "map/x/all", "status": "ok", "checks": checks, "detail": res,
+           "flags": ["move refused: guard 4.5 u > cap 4.0 u"]}  # fmt: skip
+    limits = parse_config(
+        {"adoption": {"status": "final", "adopted_by": "a reviewer",
+                      "adopted": dt.date(2026, 9, 25)}},
+        Limits, base_dir=tmp_path,
+    )  # fmt: skip
+    text = markdown({"report": "r", "built": "b"}, [row], "l.toml", "name", limits.adoption)
+    assert "- map/x/all: move refused: guard 4.5 u > cap 4.0 u" in text
+
+
+def test_orientation_is_of_the_bulk_not_pulled_by_moved_points() -> None:
+    a = _cloud(200, 11)
+    b = list(a)
+    for i in range(20):  # 10% of points move 6 units: a real change in the map
+        b[i] = (b[i][0] + 6.0, b[i][1] + 2.0)
+    res = maps.compare(_map(a, ["X"] * 200), _map(b, ["X"] * 200))["procrustes"]
+    assert abs(res["rotation_deg"]) < 1e-6  # the bulk is not turned at all
+    assert abs(res["rotation_deg_all_points"]) > abs(res["rotation_deg"])
+
+
+def test_loose_matching_ignores_spelling_but_keeps_distinct_points_apart() -> None:
+    ref = _map([(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)], ["X"] * 3)
+    new = _map([(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)], ["X"] * 3)
+    ref["map"]["antigens"][0]["name"] = "PORT-TOWN ONE"
+    new["map"]["antigens"][0]["name"] = "PORT TOWN ONE"
+    assert maps.compare(ref, new, "name")["antigens"]["jaccard"] < 1.0
+    assert maps.compare(ref, new, "loose")["antigens"]["jaccard"] == 1.0
+    assert maps.normalise_key("PORT TOWN ONE|cell", "loose") == maps.point_key(
+        ref["map"]["antigens"][0], "loose"
+    )
