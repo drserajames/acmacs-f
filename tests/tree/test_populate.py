@@ -23,7 +23,8 @@ from af.tree.populate import (
     nucleotide_changes,
     populate,
 )
-from tree.tree_fixtures import KEYS, GapBlind, built, records, states_for
+
+from .tree_fixtures import KEYS, GapBlind, built, records, states_for
 
 
 def test_changes_ignore_gaps_and_ambiguities() -> None:

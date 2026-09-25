@@ -9,7 +9,8 @@ import pytest
 from af.tables.model import Antigen, Table
 from af.tree.populate import CladeCall, CladeResult, populate
 from af.tree.report_filter import TitratedIndex, collected_before, report_tree
-from tree.tree_fixtures import KEYS, built, records, states_for
+
+from .tree_fixtures import KEYS, built, records, states_for
 
 CUTOFF = datetime.date(2023, 6, 1)
 
