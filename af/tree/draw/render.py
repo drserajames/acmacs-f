@@ -274,6 +274,7 @@ def _draw_matrix(ax: Axes, spec: FigureSpec, pg: _Page, colours: np.ndarray) -> 
 
 def _draw_brackets(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> float:
     g, sel = pg.g, spec.selection
+    names: list[tuple[float, float, str]] = []
     for cs in sel.shown:
         x = left + sel.slots[cs.clade] * g.clade_slot + 2
         for b in cs.bands:
@@ -292,17 +293,36 @@ def _draw_brackets(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> float:
             )
             for yy in (y0, y1):
                 ax.plot([x - 2.5, x], [yy, yy], color="black", lw=0.5)
-            ax.text(
-                x + 1.2,
-                (y0 + y1) / 2,
-                cs.clade,
-                rotation=-90,
-                ha="center",
-                va="bottom",
-                fontsize=7,
-                rotation_mode="anchor",
-            )
+            names.append((x, (y0 + y1) / 2, cs.clade))
+    _place_clade_names(ax, names)
     return left + (max(sel.slots.values(), default=0) + 1) * g.clade_slot + 8
+
+
+def _place_clade_names(ax: Axes, names: list[tuple[float, float, str]], size: float = 7) -> None:
+    """Write each clade's name beside its bracket, centred on the band.
+
+    Two small bands next to each other in one column would print their names on top of each
+    other; a name that would overlap the one above slides down just past it, with a thin
+    leader back to its band's middle, so every name stays readable.
+    """
+    width = _text_width(FontProperties(size=size))
+    last_end: dict[float, float] = {}
+    for x, mid, text in sorted(names, key=lambda t: (t[0], t[1])):
+        half = width(text) / 2 + 3  # a clear gap between stacked names
+        centre = max(mid, last_end.get(x, -1e9) + half)
+        last_end[x] = centre + half
+        if centre != mid:
+            ax.plot([x, x + 3.2], [mid, centre - half + 1], color="#7f7f7f", lw=0.3)
+        ax.text(
+            x + 1.2,
+            centre,
+            text,
+            rotation=-90,
+            ha="center",
+            va="bottom",
+            fontsize=size,
+            rotation_mode="anchor",
+        )
 
 
 def _draw_hz_rules(ax: Axes, spec: FigureSpec, pg: _Page, right: float) -> None:
