@@ -74,6 +74,7 @@ class MoveResult:
     stress_before: float
     stress_after: float
     target: tuple[float, float]
+    movers_moved: float  # how far the furthest mover actually travelled
     mover_rows: tuple[int, ...]
     target_points: int
     worst_from_target: float
@@ -88,6 +89,7 @@ class MoveResult:
             "target_points": self.target_points,
             "stress_before": round(float(self.stress_before), 4),
             "stress_after": round(float(self.stress_after), 4),
+            "movers_moved": round(float(self.movers_moved), 4),
             "worst_from_target": round(float(self.worst_from_target), 4),
             "largest_other_move": round(float(self.largest_other_move), 4),
         }
@@ -136,6 +138,7 @@ def apply_move(
     start[rows] = target
     out, stress_after = relax(start, has_xy)
     worst = float(np.linalg.norm(out[rows] - target, axis=1).max())
+    moved = float(np.linalg.norm(out[rows] - layout[rows], axis=1).max())
     others = np.array(
         [i for i in range(len(layout)) if i not in movers and has_xy[i]], dtype=np.intp
     )
@@ -151,14 +154,15 @@ def apply_move(
             f"(cap {rule.max_from_target}); layout left unchanged"
         )
     return MoveResult(
-        out,
-        stress_before,
-        stress_after,
-        (float(target[0]), float(target[1])),
-        tuple(rows),
-        len(group),
-        worst,
-        largest_other,
+        layout=out,
+        stress_before=stress_before,
+        stress_after=stress_after,
+        target=(float(target[0]), float(target[1])),
+        movers_moved=moved,
+        mover_rows=tuple(rows),
+        target_points=len(group),
+        worst_from_target=worst,
+        largest_other_move=largest_other,
     )
 
 
