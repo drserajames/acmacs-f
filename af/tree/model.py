@@ -155,6 +155,30 @@ class Tree:
     def ids_assigned(self) -> bool:
         return bool(self._by_id)
 
+    def copy(self) -> tuple[Tree, dict[int, Node]]:
+        """An independent copy, and a map from ``id(original node)`` to its copy.
+
+        Iterative, because ``copy.deepcopy`` recurses through parent and child links and exceeds
+        the recursion limit on a real tree. Ids are carried over as they are.
+        """
+        mapping: dict[int, Node] = {}
+        for node in self.preorder():
+            parent = mapping[id(node.parent)] if node.parent is not None else None
+            twin = Node(
+                name=node.name,
+                branch_length=node.branch_length,
+                parent=parent,
+                node_id=node.node_id,
+                annotations=dict(node.annotations),
+            )
+            if parent is not None:
+                parent.children.append(twin)
+            mapping[id(node)] = twin
+        twin_tree = Tree(mapping[id(self.root)])
+        if self._by_id:
+            twin_tree._by_id = {key: mapping[id(value)] for key, value in self._by_id.items()}
+        return twin_tree, mapping
+
     # ---- shape --------------------------------------------------------------------
 
     def remove_unary(self) -> int:

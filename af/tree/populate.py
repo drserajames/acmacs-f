@@ -147,6 +147,7 @@ def populate(
     collapse_unchanged: bool | None = None,
     assign_clades: CladeAssigner | None = None,
     continent_of: Callable[[LeafRecord], str | None] | None = None,
+    outgroup: str | None = None,
 ) -> PopulatedTree:
     """Attach everything I6 carries to a finished tree (see the module docstring).
 
@@ -171,6 +172,10 @@ def populate(
     if collapse_unchanged is None:
         collapse_unchanged = branch_scale == "mutations"
     counts: dict[str, Any] = {}
+    if outgroup is not None:
+        if not any(leaf.name == outgroup for leaf in tree.root.children):
+            raise PopulateError(f"outgroup {outgroup!r} is not a child of the root")
+        counts["outgroup"] = outgroup
 
     tree_keys = [leaf.name or "" for leaf in tree.leaves()]
     missing = [key for key in tree_keys if key not in leaves]
