@@ -11,7 +11,13 @@ from typing import Any
 import pytest
 
 from af.report.compare import geo, maps, trees
-from af.report.compare.reference_ae import absolute_viewport, colour_labels, style_chain, transform
+from af.report.compare.reference_ae import (
+    absolute_viewport,
+    colour_labels,
+    style_chain,
+    transform,
+    window_rules,
+)
 from af.report.compare.run import (
     Expected,
     Limits,
@@ -286,3 +292,43 @@ def test_newick_rejects_unbalanced(tmp_path: Path) -> None:
     path.write_text("((A:1,B:1);")
     with pytest.raises(ValueError, match="unbalanced"):
         trees.read_newick(path)
+
+
+def test_reference_greying_comes_from_the_window_rule_not_the_colour() -> None:
+    styles = {
+        "clades-12m": {"A": [{"R": "-clades"}, {"R": "-o12m-grey"}]},
+        "clades": {"A": [{"R": "-clades"}]},
+        "-clades": {"A": [{"T": {"C": "X"}, "F": "#111111", "L": {"t": "X"}}]},
+        "-o12m-grey": {"A": [{"T": {"o12m": True}, "F": "grey"}]},
+    }
+    assert window_rules(styles, "clades-12m") == {"o12m": "grey"}
+    assert window_rules(styles, "clades") == {}
+
+
+def test_i7_rejects_a_drawn_point_without_colour() -> None:
+    from af.report.i7 import I7Error, validate
+
+    point = {"id": "p", "name": "point one", "passage_class": "cell", "xy": [0.0, 0.0],
+             "shown": True, "in_viewport": True, "clade": None, "colour": None}  # fmt: skip
+    doc = {
+        "i7_version": 1, "kind": "map", "title": "t", "placeholder": False,
+        "figure": {"pdf": "figure.pdf", "sha256": "0", "pages": 1}, "provenance": {},
+        "map": {"chart": "c", "window": {"name": "all"}, "viewport": [0, 0, 1, 1],
+                "clade_scheme": "s", "antigens": [point], "sera": [], "legend": []},
+    }  # fmt: skip
+    with pytest.raises(I7Error, match="drawn but colour is None"):
+        validate(doc)
+
+
+def test_amendments_are_printed_with_the_status(tmp_path: Path) -> None:
+    from af.report.compare.run import markdown
+
+    limits = parse_config(
+        {"adoption": {"status": "provisional", "adopted_by": "a reviewer",
+                      "adopted": dt.date(2026, 9, 25), "review": "later",
+                      "amendments": [{"date": dt.date(2026, 9, 26), "by": "a reviewer",
+                                      "change": "tree limit withdrawn"}]}},
+        Limits, base_dir=tmp_path,
+    )  # fmt: skip
+    text = markdown({"report": "r", "built": "b"}, [], "l.toml", "name", limits.adoption)
+    assert "amended 2026-09-26 by a reviewer: tree limit withdrawn" in text

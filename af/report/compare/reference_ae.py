@@ -12,6 +12,9 @@ ae semantics reproduced here, cited so they can be checked:
 - a point with no coordinates (disconnected) is not drawn;
 - drawn coordinates are the layout times the stored 2x2 ``t = [a, b, c, d]``:
   ``x' = a*x + c*y``, ``y' = b*x + d*y`` (ae cc/chart/v3/transformation.hh:189-193);
+- "greyed" (outside the window) means the style's ``o12m``/``o6m`` rule applies to the antigen and
+  it is drawn in that rule's colour: antigens with no clade are grey too, and ``-vaccines``
+  recolours some old ones after the rule;
 - the frame is the style's ``V`` in kateri's recentred frame, shifted back to absolute
   coordinates (ae cc/map-draw/styled-draw.cc:731-760).
 
@@ -37,7 +40,22 @@ from af.report.i7 import I7_VERSION
 from af.util.artefacts import sha256_path
 
 WINDOW_SUFFIX = {"all": "", "12m": "-12m", "6m": "-6m"}
-GREYS = {"grey", "gray", "#808080", "#bebebe", "grey80", "gray80", "lightgrey", "lightgray"}
+
+
+def window_rules(styles: dict[str, Any], name: str) -> dict[str, str]:
+    """Attribute -> fill colour of the style's "outside the window" rules (e.g. ``o12m`` -> grey).
+
+    ae greys old antigens with a modifier selecting ``{"o12m": true}`` (the ``-o12m-grey``
+    style). A later modifier can recolour some of them (``-vaccines`` comes after it), and
+    antigens with no clade are grey in the base colour anyway. So an antigen counts as greyed
+    only when it has the attribute *and* is drawn in that rule's colour.
+    """
+    return {
+        key: str(modifier.get("F", "")).lower()
+        for modifier in style_chain(styles, name)
+        for key, value in (modifier.get("T") or {}).items()
+        if key in ("o6m", "o12m") and value is True
+    }
 
 
 def style_chain(
@@ -143,6 +161,7 @@ def map_i7(
     xy = transform(proj["l"], proj.get("t"))
     viewport = absolute_viewport(xy, style_viewport(styles, style))
     labels = colour_labels(styles, style)
+    grey_rules = window_rules(styles, style)
     n_antigens = len(c["a"])
 
     def point(i: int, entry: dict[str, Any], serum: bool) -> dict[str, Any]:
@@ -152,13 +171,15 @@ def map_i7(
             viewport[0] <= p[0] <= viewport[0] + viewport[2]
             and viewport[1] <= p[1] <= viewport[1] + viewport[3]
         )
-        colour = (plot.get("F") or "").lower()
+        colour = (plot.get("F") or "transparent").lower()  # no fill = outline only
+        attrs = entry.get("T", {})
         rec: dict[str, Any] = {
             "id": designation(entry), "name": entry["N"], "passage_class": passage_class(entry),
             "date": entry.get("D"), "xy": p,
             "shown": plot.get("+", True) is not False and p is not None,
             "in_viewport": inside, "colour": colour, "clade": labels.get(colour),
-            "greyed": colour in GREYS, "vaccine": bool(entry.get("T", {}).get("V")),
+            "greyed": any(attrs.get(key) and colour == fill for key, fill in grey_rules.items()),
+            "vaccine": bool(attrs.get("V")),
             "reference": None if serum else bool(entry.get("T", {}).get("R")),
         }  # fmt: skip
         if serum:
