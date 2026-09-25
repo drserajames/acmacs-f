@@ -17,6 +17,7 @@ Run: ``python -m af.report.compare.run MANIFEST REFERENCE_DIR --limits L.toml --
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import math
 import sys
@@ -53,9 +54,14 @@ class GeoLimits:
 
 @dataclass(frozen=True)
 class Expected:
+    """A named, approved known difference. Who approved it and when are required: an
+    expectation without them is how exception lists rot."""
+
     slot: str
     check: str
     reason: str
+    approved_by: str
+    decided: dt.date
 
 
 @dataclass(frozen=True)
@@ -100,17 +106,30 @@ def map_checks(res: dict[str, Any], lim: MapLimits) -> list[dict[str, Any]]:
 
 
 def apply_expected(slot: str, checks: list[dict[str, Any]], expected: list[Expected]) -> None:
-    """Mark checks covered by an expectation: "expected" if failing, "stale" if passing."""
+    """Mark checks covered by an expectation: "expected" if failing, "stale" if passing.
+
+    The note says what was expected and what was found, so a stale entry reads as "this known
+    difference has changed", not as a new bug.
+    """
     for exp in expected:
         if exp.slot != slot:
             continue
         for check in checks:
-            if check["check"] == exp.check:
-                check["expected"] = exp.reason
-                if check["ok"] is False:
-                    check["ok"] = "expected"
-                elif check["ok"] is True:
-                    check["ok"] = "stale"
+            if check["check"] != exp.check:
+                continue
+            origin = f"{exp.reason} (approved by {exp.approved_by}, {exp.decided.isoformat()})"
+            found = f"{check['value']:.3f} against limit {check['limit']}"
+            if check["ok"] is False:
+                check["ok"] = "expected"
+                check["expected"] = f"expected difference: {origin}; found {found}"
+            elif check["ok"] is True:
+                check["ok"] = "stale"
+                check["expected"] = (
+                    f"STALE: expected this check to fail because {origin}, but found {found}, "
+                    "within the limit. The known difference has changed; review the entry."
+                )
+            else:
+                check["expected"] = f"{origin}; check is not gated, so nothing to compare"
 
 
 def slot_status(checks: list[dict[str, Any]]) -> str:
@@ -178,7 +197,7 @@ def markdown(
         else:
             lines.append(f"| {row['slot']} | {row['status']} |" + " |" * len(MAP_CHECKS))
     if notes:
-        lines += ["", "Expected differences:", *notes]
+        lines += ["", "Named differences:", *notes]
     return "\n".join(lines) + "\n"
 
 

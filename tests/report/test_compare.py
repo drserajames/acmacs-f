@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 import random
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -18,6 +20,7 @@ from af.report.compare.run import (
     map_checks,
     slot_status,
 )
+from af.util.config import ConfigError, load_config
 
 
 def _rotate(points: list[tuple[float, float]], degrees: float) -> list[tuple[float, float]]:
@@ -157,7 +160,15 @@ def test_expected_difference_is_reported_and_a_stale_one_fails() -> None:
     a = _cloud(30, 5)
     turned = maps.compare(_map(a, ["X"] * 30), _map(_rotate(a, 8), ["X"] * 30))
     same = maps.compare(_map(a, ["X"] * 30), _map(a, ["X"] * 30))
-    reason = [Expected("map/test/all", "rotation deg", "deliberate hand rotation")]
+    reason = [
+        Expected(
+            "map/test/all",
+            "rotation deg",
+            "deliberate hand rotation",
+            "a reviewer",
+            dt.date(2026, 9, 25),
+        )
+    ]
     checks = _checks(turned)
     assert slot_status(checks) == "FAIL"
     apply_expected("map/test/all", checks, reason)
@@ -165,6 +176,8 @@ def test_expected_difference_is_reported_and_a_stale_one_fails() -> None:
     checks = _checks(same)
     apply_expected("map/test/all", checks, reason)
     assert slot_status(checks) == "FAIL"  # the reason no longer applies: stale
+    stale = next(c for c in checks if c["check"] == "rotation deg")
+    assert "STALE" in stale["expected"] and "a reviewer, 2026-09-25" in stale["expected"]
 
 
 def _geo(counts: dict[str, dict[str, int]]) -> dict[str, Any]:
@@ -191,3 +204,12 @@ def test_geo_counts_dot_differences_per_month() -> None:
     jan = res["per_month"]["2026-01"]["location"]
     assert jan["abs_diff"] == 2 and jan["frac_diff"] == 2 / 8
     assert res["per_month"]["2026-01"]["clade"]["frac_diff"] == 0
+
+
+def test_expectation_without_approver_is_rejected(tmp_path: Path) -> None:
+    limits = tmp_path / "limits.toml"
+    limits.write_text(
+        '[[expected]]\nslot = "map/test/all"\ncheck = "rotation deg"\nreason = "hand rotation"\n'
+    )
+    with pytest.raises(ConfigError, match="approved_by"):
+        load_config(limits, Limits)
