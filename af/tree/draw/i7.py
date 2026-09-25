@@ -20,7 +20,7 @@ import af
 
 from .layout import Layout
 from .model import DrawTree
-from .sections import Selection
+from .sections import HzBand
 from .timeseries import TimeSeries
 
 I7_VERSION = 1
@@ -33,11 +33,16 @@ def _sha256(path: Path) -> str:
 def tree_block(
     tree: DrawTree,
     layout: Layout,
-    selection: Selection,
+    hz: list[HzBand],
     ts: TimeSeries,
     marked_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """The I7 `tree` block. Every leaf is listed, drawn or not (`order` is null if not drawn)."""
+    """The I7 `tree` block. Every leaf is listed, drawn or not (`order` is null if not drawn).
+
+    ``sections`` are the lettered bands (the reference extractor reads the same from the shipped
+    trees), each named by its first and last leaf's strain name so the two sides compare like
+    for like; the clade brackets are in the draw report.
+    """
     order = {int(node): row for row, node in enumerate(layout.leaf_nodes)}
     leaves = []
     for i in tree.leaves():
@@ -54,17 +59,16 @@ def tree_block(
                 "marked": leaf_id in marked_ids,
             }
         )
-    sections = []
-    for cs in selection.shown:
-        for b in cs.bands:
-            sections.append(
-                {
-                    "clade": cs.clade,
-                    "first_leaf": str(tree.leaf_id[layout.leaf_nodes[b.first]]),
-                    "last_leaf": str(tree.leaf_id[layout.leaf_nodes[b.last]]),
-                    "n_leaves": b.span,
-                }
-            )
+    sections = [
+        {
+            "clade": band.clade,
+            "prefix": band.letter,
+            "first_leaf": str(tree.name[layout.leaf_nodes[band.first]]),
+            "last_leaf": str(tree.name[layout.leaf_nodes[band.last]]),
+            "n_leaves": band.last - band.first + 1,
+        }
+        for band in hz
+    ]
     first, last = ts.months[0], ts.months[-1]
     return {
         "subtype": tree.subtype,
