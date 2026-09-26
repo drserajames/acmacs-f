@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from af.report.compare import geo, maps, trees
-from af.util.config import load_config
+from af.store.work import PathsConfig
+from af.util.config import ConfigError, load_config
 
 
 @dataclass(frozen=True)
@@ -124,10 +125,18 @@ class CladesConfig:
     different nomenclature from the tree it compares.
     """
 
-    clones: Path  # the pinned upstream nomenclature clones
+    paths: PathsConfig  # [paths]: nomenclature (the upstream clones) is required here
     local: Path  # acmacs-f-data clades/local.tsv (local sub-groups under their upstream parent)
     clades_json: Path  # acmacs-data clades.json: the local groups' signatures, until switch-over
     subtypes: dict[str, str]  # tree I7 subtype -> clade-set subtype, e.g. h3 = "A(H3N2)"
+
+
+def load_clades(path: Path) -> CladesConfig:
+    """Load a clades config; ``[paths] nomenclature`` must be set, since every mapping reads it."""
+    cfg = load_config(path, CladesConfig)
+    if cfg.paths.nomenclature is None:
+        raise ConfigError(path, ["[paths] nomenclature (the nomenclature clones) is required"])
+    return cfg
 
 
 def clade_set_for(tree_doc: dict[str, Any], cfg: CladesConfig, cache: dict[str, Any]) -> Any:
@@ -147,7 +156,8 @@ def clade_set_for(tree_doc: dict[str, Any], cfg: CladesConfig, cache: dict[str, 
         return cache[pin_text]
     name = cfg.subtypes[subtype]
     repository, commit = pin_text.rsplit("@", 1)
-    clade_set = load_clade_set(name, cfg.clones, Pin(name, repository, commit))
+    assert cfg.paths.nomenclature is not None  # load_clades checks it
+    clade_set = load_clade_set(name, cfg.paths.nomenclature, Pin(name, repository, commit))
     signatures = clades_json_signatures(cfg.clades_json).get(name, {})
     cache[pin_text] = extend_from_file(clade_set, cfg.local, signatures=signatures)
     return cache[pin_text]
@@ -562,7 +572,7 @@ def main(argv: list[str] | None = None) -> int:
     )  # fmt: skip
     args = parser.parse_args(argv)
     limits = load_config(args.limits, Limits)
-    clades = load_config(args.clades, CladesConfig) if args.clades else None
+    clades = load_clades(args.clades) if args.clades else None
     manifest = json.loads(args.record.read_text())
     rows, failed = compare_report(manifest, args.reference, limits, args.match, clades)
     args.out.mkdir(parents=True, exist_ok=True)
