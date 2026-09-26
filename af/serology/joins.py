@@ -28,7 +28,7 @@ it means the clade store is behind the sequence store, or cannot align the seque
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -302,6 +302,8 @@ def link_from_store(
     *,
     with_clades: bool,
     lab_submitters: Mapping[str, frozenset[str]] | None = None,
+    number_rules: Mapping[str, Any] | None = None,
+    lab_codes: Collection[str] | None = None,
     class_of: ClassOf = passage_class_column,
 ) -> LinkCounts:
     """:func:`link_sequences` over the CURRENT ``sequences/*`` (and ``clades/*``) datasets.
@@ -310,9 +312,24 @@ def link_from_store(
     clade dataset is an error, not an empty join. ``lab_submitters`` (lab -> the exact
     GISAID submitting-lab names, :func:`af.seq.matching.read_lab_submitters`) lets the
     matcher settle a name tie by the antigen's own lab; without it that rule never applies.
+    ``number_rules`` (lab -> :class:`af.seq.matching.NumberRule`, from config) let a lab's
+    antigens match its own deposits by isolate number when the name does not. Both tables
+    are keyed by the tables' own lab codes, exactly, checked against ``lab_codes`` (every lab
+    code the table readers use, from config) with :func:`af.seq.matching.check_lab_codes`.
+    ``lab_codes`` is required with either table: the labs merely present in the store would
+    refuse a lab whose tables have not arrived yet.
     """
-    from af.seq.matching import check_lab_submitters, index_from_store
+    from af.seq.matching import check_lab_codes, check_lab_submitters, index_from_store
 
+    # configuration first, before the store is read: a bad rule table fails fast
+    if (lab_submitters is not None or number_rules is not None) and lab_codes is None:
+        raise StoreError("lab_codes (from config) are needed to check lab_submitters/number_rules")
+    if lab_submitters is not None:
+        assert lab_codes is not None
+        check_lab_codes(dict(lab_submitters), lab_codes, "lab_submitters")
+    if number_rules is not None:
+        assert lab_codes is not None
+        check_lab_codes(dict(number_rules), lab_codes, "number_rules")
     datasets = sorted({d for group in DATASETS_FOR.values() for d in group})
     present = {ref.dataset for ref in store.list_datasets("sequences")}
     missing = [d for d in datasets if d not in present]
@@ -325,6 +342,7 @@ def link_from_store(
     indexes = {d: index_from_store(store, [d], passage_rules) for d in datasets}
     for index in indexes.values():
         index.submitters = dict(lab_submitters or {})
+        index.number_rules = dict(number_rules or {})
     isolates = [
         path
         for d in datasets
