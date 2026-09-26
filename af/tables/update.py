@@ -45,7 +45,7 @@ from af.store import ExternalInput, PathsConfig, Provenance, Store, Work
 from af.util.artefacts import Artefact
 from af.util.config import load_config, parse_config
 
-from . import cdc, identity
+from . import cdc, identity, ids
 from .model import Table
 from .rules import Rules
 from .store import KIND, current_tables, previous_index, publish
@@ -131,7 +131,12 @@ def update(
     previous = previous_index(store)
     tables, report, errors = _read_all(settings, rules)
     errors.extend(identity.assign(tables, previous))
+    shape_counts, shape_flags = ids.check(tables, rules)
     report.extend(rules.usage_report())
+    report.append(
+        "lab id shapes: " + ", ".join(f"{k} {v}" for k, v in sorted(shape_counts.items()))
+    )
+    report.extend(f"  {line}" for line in shape_flags)
     merged = [w for t in tables for w in t.warnings if w.startswith(cdc.MERGED_ISOLATES)]
     report.append(f"flagged ({cdc.MERGED_ISOLATES}; kept merged, Q13): {len(merged)}")
     report.extend(f"  {w}" for w in merged)
