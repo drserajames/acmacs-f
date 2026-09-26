@@ -263,3 +263,67 @@ def test_python_module_keeps_the_no_site_flag(
     monkeypatch.setattr(job_module.sys, "flags", Flags())
     job = Job.python_module("p", "af.run.smoke", [], cwd=tmp_path, log=tmp_path / "l", outputs=[])
     assert job.argv()[1:4] == ["-S", "-m", "af.run.smoke"]
+
+
+def test_jobs_get_omp_num_threads_from_their_resources(
+    runner: Runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preset OMP_NUM_THREADS=1 (CSD3's login env) must not starve a job of its threads."""
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    job = Job(
+        "threads",
+        ["/bin/sh", "-c", 'printf "%s" "$OMP_NUM_THREADS" > t.txt'],
+        tmp_path,
+        tmp_path / "t.log",
+        [Artefact(tmp_path / "t.txt")],
+        resources=Resources(threads=3),
+    )
+    runner.run(job)
+    assert (tmp_path / "t.txt").read_text() == "3"
+
+
+def test_explicit_env_overrides_omp_num_threads(runner: Runner, tmp_path: Path) -> None:
+    job = Job(
+        "override",
+        ["/bin/sh", "-c", 'printf "%s" "$OMP_NUM_THREADS" > t.txt'],
+        tmp_path,
+        tmp_path / "t.log",
+        [Artefact(tmp_path / "t.txt")],
+        resources=Resources(threads=3),
+        env={"OMP_NUM_THREADS": "2"},
+    )
+    runner.run(job)
+    assert (tmp_path / "t.txt").read_text() == "2"
+
+
+def test_slurm_time_limit_kill_is_not_a_failed_submission(
+    fake_sbatch: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job killed at its limit makes sbatch --wait exit nonzero with no status file.
+
+    It was submitted (sbatch printed a job id), so it must be reported as killed, not as
+    "sbatch failed", with SLURM's state when sacct can say.
+    """
+    monkeypatch.setenv("KILL_TASKS", "0")
+    sacct = tmp_path / "sacct"
+    sacct.write_text('#!/bin/sh\nprintf "12345|TIMEOUT\\n12345_0|TIMEOUT\\n"\n')
+    sacct.chmod(0o755)
+    runner = SlurmRunner(work_dir=tmp_path / "slurm", sbatch=str(fake_sbatch), sacct=str(sacct))
+    with pytest.raises(JobFailed) as caught:
+        runner.run(shell_job(tmp_path, "slow", "echo x > x.txt", ["x.txt"]))
+    reason = caught.value.failures[0].reason
+    assert "sbatch failed" not in reason
+    assert (
+        reason == "no exit status recorded (killed, or hit its time limit?) [SLURM state TIMEOUT]"
+    )
+
+
+def test_slurm_kill_without_sacct_still_fails_plainly(
+    fake_sbatch: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KILL_TASKS", "0")
+    runner = SlurmRunner(
+        work_dir=tmp_path / "slurm", sbatch=str(fake_sbatch), sacct="/nonexistent/sacct"
+    )
+    with pytest.raises(JobFailed, match=r"no exit status recorded \(killed"):
+        runner.run(shell_job(tmp_path, "slow", "echo x > x.txt", ["x.txt"]))
