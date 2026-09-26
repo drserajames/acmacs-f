@@ -17,7 +17,7 @@ purpose; a subtype missing from it is uncoloured too, and the report says so.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -79,6 +79,8 @@ def make_geo_and_stat(
     colouring: Mapping[str, SubtypeColouring] | None = None,
     passage_rules: Path | None = None,
     lab_submitters: Path | None = None,
+    number_rules: Mapping[str, Any] | None = None,
+    lab_codes: Sequence[str] | None = None,
     split_by_lineage: tuple[str, ...] = ("B",),
 ) -> OutputsReport:
     """Write ``geo/<st>-records.json``, ``geo/<st>-YYYY-MM.pdf`` and ``stat/`` for a window."""
@@ -92,7 +94,10 @@ def make_geo_and_stat(
     if colouring is not None:
         if passage_rules is None:
             raise ValueError("colouring needs passage_rules (the matcher's passage classes)")
-        style_of = _styles(store, con, preps, colouring, passage_rules, lab_submitters, report)
+        style_of = _styles(
+            store, con, preps, colouring, passage_rules, lab_submitters, number_rules, lab_codes,
+            report,
+        )  # fmt: skip
     geo = geo_counts(preps, first, last, locations.name_location, style_of=style_of)
     geo_dir = out_dir / "geo"
     geo_dir.mkdir(parents=True, exist_ok=True)
@@ -131,6 +136,8 @@ def _styles(
     colouring: Mapping[str, SubtypeColouring],
     passage_rules: Path,
     lab_submitters: Path | None,
+    number_rules: Mapping[str, Any] | None,
+    lab_codes: Sequence[str] | None,
     report: OutputsReport,
 ) -> Any:
     """Match antigens to sequences and clades, and give each preparation its dot style."""

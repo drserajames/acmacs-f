@@ -175,3 +175,21 @@ def test_submitters_keyed_by_another_spelling_of_the_labs_are_refused(
     _check_submitter_labs(con, {"LABX": frozenset({"Lab X Institute"})})
     with pytest.raises(StoreError, match="name none of the store's table labs"):
         _check_submitter_labs(con, {"labx": frozenset({"Lab X Institute"})})
+
+
+def test_rule_tables_need_lab_codes_and_must_use_them_exactly(tmp_path: Path, syn: Any) -> None:
+    """Lab codes come from config, not from the labs that happen to be in the store."""
+    from af.seq.matching import NumberRule
+    from af.serology.joins import link_from_store
+
+    con = _store(tmp_path, syn)
+    store: Any = None  # the checks run before the store is read
+    with pytest.raises(StoreError, match="lab_codes"):
+        link_from_store(
+            con, store, [], with_clades=False, number_rules={"LABX": NumberRule("LABX")}
+        )
+    with pytest.raises(ValueError, match="not table lab codes"):
+        link_from_store(
+            con, store, [], with_clades=False,
+            number_rules={"labx": NumberRule("labx")}, lab_codes=["LABX", "LABY"],
+        )  # fmt: skip
