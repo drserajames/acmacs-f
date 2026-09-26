@@ -63,6 +63,9 @@ def write_result(path: Path, maps: list[MapResult]) -> Path:
     if "rng_seed" in maps[0]:
         data["rng_seed"] = np.array([m["rng_seed"] for m in maps], dtype=np.uint64)
         data["termination"] = np.array([m["termination"] for m in maps])
+    if "threads" in maps[0]:  # measured in this task: the driver cannot see the node's CPUs
+        data["threads"] = np.array([m["threads"] for m in maps])
+        data["cpus"] = np.array([m["cpus"] for m in maps])
     tmp = path.with_name(path.name + ".tmp.npz")
     np.savez(tmp, **data)
     tmp.replace(path)
@@ -84,6 +87,9 @@ def read_result(path: Path) -> list[MapResult]:
             if "rng_seed" in f:
                 m["rng_seed"] = int(f["rng_seed"][i])
                 m["termination"] = int(f["termination"][i])
+            if "threads" in f:
+                m["threads"] = int(f["threads"][i])
+                m["cpus"] = int(f["cpus"][i])
             maps.append(m)
         return maps
 

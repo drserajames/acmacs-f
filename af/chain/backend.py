@@ -8,6 +8,7 @@ back together (`combine`) so that the result is the same however the starts were
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any, Protocol
 
 import numpy as np
@@ -73,8 +74,11 @@ class CoreOptimiser:
         )
 
     @staticmethod
-    def _as_dict(p: Any) -> MapResult:
-        return {
+    def _as_dict(p: Any, threads: int | None = None) -> MapResult:
+        """`threads` is what the relax that made `p` ran on; with it go the CPUs this process
+        may use, read here because a split chunk runs in its own SLURM task. None for maps
+        that are re-read or refined, which keep what their relax recorded."""
+        out: MapResult = {
             "layout": p.layout,
             "stress": p.stress,
             "dimensions": p.dimensions,
@@ -83,6 +87,12 @@ class CoreOptimiser:
             "rng_seed": p.start_seed,
             "termination": p.termination,
         }
+        if threads is not None:
+            from af.map.optimise import available_cpus
+
+            out["threads"] = int(threads)
+            out["cpus"] = available_cpus()
+        return out
 
     @staticmethod
     def _as_projection(r: MapResult) -> Any:
@@ -111,7 +121,8 @@ class CoreOptimiser:
             keep=None,
             threads=self.threads,
         )
-        return self._resolve(problem, [self._as_dict(p) for p in result.projections], move_groups)
+        maps = [self._as_dict(p, result.threads) for p in result.projections]
+        return self._resolve(problem, maps, move_groups)
 
     def relax_chunk(self, arrays, first_start, n_starts, dim, seed, start_layout):
         """One job's share of a map's starts. Incremental chunks stay rough: the fine stage
@@ -129,7 +140,7 @@ class CoreOptimiser:
             keep=None,
             threads=self.threads,
         )
-        return [self._as_dict(p) for p in result.projections]
+        return [self._as_dict(p, result.threads) for p in result.projections]
 
     def combine(self, arrays, chunks, incremental, move_groups=False):
         from af.map.optimise import refine, sort_projections
@@ -138,11 +149,23 @@ class CoreOptimiser:
         projections = sort_projections([self._as_projection(r) for r in chunks])
         if incremental:
             projections = refine(problem, projections, n_best=5, threads=self.threads)
-        return self._resolve(problem, [self._as_dict(p) for p in projections], move_groups)
+        # the relax threads of the chunks, whatever order the maps are in now
+        relax = [{"threads": r["threads"], "cpus": r["cpus"]} for r in chunks if "threads" in r]
+        return self._resolve(problem, [self._as_dict(p) for p in projections], move_groups, relax)
 
-    def _resolve(self, problem: Any, maps: list[MapResult], move_groups: bool) -> list[MapResult]:
-        from af.map.optimise import resolve_trapped
+    def _resolve(
+        self,
+        problem: Any,
+        maps: list[MapResult],
+        move_groups: bool,
+        relax: list[dict] | None = None,
+    ) -> list[MapResult]:
+        """`relax` is the threads/CPUs of each split chunk's starts; unsplit, the maps carry
+        their own."""
+        from af.map.optimise import available_cpus, resolve_trapped
 
+        if relax is None:
+            relax = [{"threads": m["threads"], "cpus": m["cpus"]} for m in maps if "threads" in m]
         fixed = resolve_trapped(
             problem, maps[0]["layout"], threads=self.threads, move_groups=move_groups
         )
@@ -153,9 +176,16 @@ class CoreOptimiser:
                 "stress_before": float(g.stress_before),
                 "stress_after": float(g.stress_after),
                 "kept": bool(g.kept),
+                "n_antigens": int(g.n_antigens),
+                "n_sera": int(g.n_sera),
+                "mixed": bool(g.mixed),
             }
             for g in fixed.groups
         ]
+        run_threads = {
+            "relax": _count_runs(relax),
+            "trapped": {"threads": int(fixed.threads), "cpus": available_cpus()},
+        }
         if fixed.moved or any(g["kept"] for g in groups):
             p = fixed.projection
             maps[0] = {
@@ -166,8 +196,9 @@ class CoreOptimiser:
                 "resolved_moves": fixed.moved,
             }
             maps.sort(key=lambda r: r["stress"])
+        best = min(range(len(maps)), key=lambda i: maps[i]["stress"])
+        maps[best] = {**maps[best], "run_threads": run_threads}
         if move_groups:  # recorded on the best map, also when no group was found
-            best = min(range(len(maps)), key=lambda i: maps[i]["stress"])
             maps[best] = {**maps[best], "resolved_groups": groups}
         return maps
 
@@ -185,6 +216,13 @@ class CoreOptimiser:
             for g in results
             if g.diagnosis in ("trapped", "hemisphering")
         ]
+
+
+def _count_runs(runs: list[dict]) -> list[dict]:
+    """Distinct (threads, CPUs) among a map's starts, with how many starts ran on each: one
+    entry unsplit, one per kind of SLURM node when split."""
+    counts = Counter((r["threads"], r["cpus"]) for r in runs)
+    return [{"threads": t, "cpus": c, "starts": n} for (t, c), n in sorted(counts.items())]
 
 
 class StubOptimiser:

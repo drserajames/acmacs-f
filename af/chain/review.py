@@ -268,7 +268,7 @@ def _step_row(s: dict, r: dict, thumb: Path) -> str:
             _details(
                 "group moves (points moved together)",
                 [
-                    ("MIXED antigens and sera: " if g.get("antigens") and g.get("sera") else "")
+                    ("MIXED antigens and sera: " if g.get("mixed") else "")
                     + f"{g['size']} points, {g['distance']:.2f} "
                     f"({'kept' if g['kept'] else 'not kept'}), stress "
                     f"{g['stress_before']:.2f} → {g['stress_after']:.2f}: "

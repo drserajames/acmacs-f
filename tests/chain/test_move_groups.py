@@ -66,6 +66,9 @@ def test_group_moves_names_the_points():
             "stress_before": 9.0,
             "stress_after": 7.5,
             "kept": True,
+            "n_antigens": 1,
+            "n_sera": 1,
+            "mixed": True,
         }
     ]
     [g] = group_moves(chart, groups)
@@ -82,6 +85,7 @@ def fake_resolution(layout, groups, moved=0):
         rounds=1,
         moved=moved,
         groups=[SimpleNamespace(**g) for g in groups],
+        threads=4,
     )
 
 
@@ -97,6 +101,9 @@ def test_core_keeps_a_kept_group_move_and_records_every_group(monkeypatch, kept)
         "stress_before": 2.0,
         "stress_after": 1.0,
         "kept": kept,
+        "n_antigens": 1,
+        "n_sera": 0,
+        "mixed": False,
     }
     monkeypatch.setattr(
         optimise, "resolve_trapped", lambda *a, **k: fake_resolution(moved_layout, [group])
@@ -110,6 +117,9 @@ def test_core_keeps_a_kept_group_move_and_records_every_group(monkeypatch, kept)
             "stress_before": 2.0,
             "stress_after": 1.0,
             "kept": kept,
+            "n_antigens": 1,
+            "n_sera": 0,
+            "mixed": False,
         }
     ]
     assert np.array_equal(out[0]["layout"], moved_layout if kept else np.array([[0.0, 0.0]]))

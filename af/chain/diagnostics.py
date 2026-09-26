@@ -67,16 +67,36 @@ def flags(d: dict[str, Any], t: Thresholds = THRESHOLDS) -> list[str]:
         if g["kept"]:
             # Sarah, 26 Sep 2026: groups may mix antigens and sera, but a mixed one is flagged as
             # such: a serum carried along by antigens whose titres to it are being fitted.
-            mixed = (
-                f"MIXED ({g['antigens']} antigens, {g['sera']} sera) "
-                if g.get("sera") and g.get("antigens")
-                else ""
-            )
+            mixed = f"MIXED ({g['antigens']} antigens, {g['sera']} sera) " if g.get("mixed") else ""
             out.append(
                 f"{mixed}group of {g['size']} moved {g['distance']:.2f} "
                 f"(stress {g['stress_after'] - g['stress_before']:+.2f})"
             )
+    if single := _single_threaded(d.get("threads", {})):
+        # A relax or grid test that ran on one thread where more CPUs were free: a slow step,
+        # usually an inherited OMP_NUM_THREADS=1 (measured on an HPC: 7.2 s instead of 0.95 s).
+        out.append("single-threaded with CPUs free: " + ", ".join(single))
     return out  # hemisphering is listed in the details but not flagged: most maps have some
+
+
+def _single_threaded(threads: dict[str, dict]) -> list[str]:
+    """`<map> <stage> (N CPUs)` for each stage that ran on one thread with more CPUs free."""
+    out = []
+    for kind, stages in threads.items():
+        runs = [("relax", r) for r in stages["relax"]] + [("trapped", stages["trapped"])]
+        out += [f"{kind} {stage} ({r['cpus']} CPUs)" for stage, r in runs if _wasted(r)]
+    return out
+
+
+def _wasted(run: dict) -> bool:
+    return bool(run["threads"] == 1 and run["cpus"] > 1)
+
+
+def run_threads(by_map: dict[str, dict | None]) -> dict[str, Any]:
+    """`{"threads": {map: {"relax": [...], "trapped": {...}}}}` for the maps that recorded
+    them; empty when none did (the stand-in optimiser), so old and stub steps read the same."""
+    recorded = {kind: t for kind, t in by_map.items() if t is not None}
+    return {"threads": recorded} if recorded else {}
 
 
 def _cell_readings(chart: Chart, i: int, j: int) -> list[Titre]:
@@ -154,12 +174,14 @@ def control_flags(chart: Chart, min_n: int = CONTROL_MIN_N) -> list[dict]:
 
 def group_moves(chart: Chart, groups: list[dict] | None) -> list[dict]:
     """The trapped loop's group moves (`move_groups`), in reader's terms: which points, how far
-    they moved together, and what it did to the stress. Kept moves changed the map."""
+    they moved together, and what it did to the stress. Kept moves changed the map. The
+    composition is the optimiser's (`GroupMove`), not recounted here."""
     return [
         {
             "size": len(g["members"]),
-            "antigens": sum(1 for m in g["members"] if m < chart.n_antigens),
-            "sera": sum(1 for m in g["members"] if m >= chart.n_antigens),
+            "antigens": g["n_antigens"],
+            "sera": g["n_sera"],
+            "mixed": g["mixed"],
             "distance": math.hypot(*g["shift"]),
             "shift": g["shift"],
             "stress_before": g["stress_before"],
