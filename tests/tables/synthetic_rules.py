@@ -106,6 +106,8 @@ RULES: dict[str, list[str]] = {
     "cell_fixes": [
         "lab\tfile\tsheet\tcell\traw\tvalue\tevidence\tadded_by\tadded_on\toptional",
         "LABV\tlabv-fix-20300102.xlsx\tWorksheet\tE11\t604\t640" + META + "yes",
+        "CDC\tfix.xlsx\tRUN 1\tB9\tS1(07/19/2030)<NY>\tS1(07/18/2030)<NY>" + META + "yes",
+        "CDC\tfix.xlsx\tRUN 1\tH9\tS1(07/19/2030)\tS1(07/18/2030)" + META + "yes",
     ],
     "lab_conventions": [
         "lab\tdate_order\tpassage_plus\tevidence\tadded_by\tadded_on\toptional",

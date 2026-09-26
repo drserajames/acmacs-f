@@ -181,3 +181,10 @@ def test_a_repeated_row_merges_into_one_antigen(tmp_path: Path, rules: Rules):
     assert table.titres[i] == [["320", "640"], ["160", "320"]]
     assert table.dropped["antigens: repeated rows merged"] == 1
     assert any("readings merged" in w for w in table.warnings)
+
+
+def test_a_cell_fix_repairs_a_passage_date(tmp_path: Path, rules: Rules):
+    """A named repair of one cell (cell_fixes), e.g. a harvest date typed day-first."""
+    (table,) = cdc_xlsx.read([workbook(tmp_path / "fix.xlsx")], rules).tables
+    assert table.antigens[0].passage_date == "2030-07-18"
+    assert any("fixed as" in w for w in table.warnings)
