@@ -491,3 +491,84 @@ def test_exception_types_survive_matplotlib_loaded_first():
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert result.stdout.strip() == "ok"
+
+
+# ---------------------------------------------------------------------------------------
+# groups stuck together (resolve_trapped move_groups)
+
+
+def stuck_block(seed: int = 11, copies: int = 6):
+    """Antigen 0 repeated `copies` times (identical titres against three sera only), all
+    copies reflected together across the line through the first two sera and re-minimised.
+    Measured (seed 11, 6 copies): each copy alone is only hemisphering, so the plain loop
+    moves nothing (stress 6.708); moved together they return to the best map (6.065)."""
+    problem, _ = synthetic_table(
+        n_antigens=20, n_sera=6, noise=0.0, thresholds=False, missing=0.0, seed=seed
+    )
+    value, kind = problem.titre_value.copy(), problem.titre_type.copy()
+    value[0, 3:] = np.nan
+    kind[0, 3:] = TitreType.MISSING
+    value = np.vstack([np.repeat(value[:1], copies, axis=0), value[1:]])
+    kind = np.vstack([np.repeat(kind[:1], copies, axis=0), kind[1:]])
+    n_points = value.shape[0] + value.shape[1]
+    block = MapProblem(
+        value, kind, problem.column_bases, np.zeros(n_points, dtype=bool), dodgy_is_regular=False
+    )
+    best = opt.relax(block, n_starts=10, seed=1).best
+    n_ag = value.shape[0]
+    a, b = best.layout[n_ag], best.layout[n_ag + 1]
+    along = (b - a) / np.linalg.norm(b - a)
+    layout = best.layout.copy()
+    for i in range(copies):
+        offset = layout[i] - a
+        layout[i] = a + 2.0 * (offset @ along) * along - offset
+    return block, best, opt.optimise(block, layout), list(range(copies))
+
+
+def test_group_pass_moves_a_block_the_plain_loop_leaves():
+    block, best, stuck, copies = stuck_block()
+    plain = opt.resolve_trapped(block, stuck.layout)
+    assert plain.moved == 0 and plain.groups == []
+    assert plain.projection.stress > best.stress + 0.5
+    assert {plain.last_grid[i].diagnosis for i in copies} == {"hemisphering"}
+
+    grouped = opt.resolve_trapped(block, stuck.layout, move_groups=True)
+    kept = [g for g in grouped.groups if g.kept]
+    assert len(kept) == 1
+    assert kept[0].members == copies
+    assert kept[0].stress_before == pytest.approx(plain.projection.stress)
+    assert kept[0].stress_after == pytest.approx(grouped.projection.stress)
+    assert len(kept[0].shift) == 2
+    assert grouped.projection.stress == pytest.approx(best.stress, rel=1e-4)
+    # last_grid describes the returned map
+    fresh = opt.grid_test(block, grouped.projection.layout)
+    assert [(r.diagnosis, r.stress_diff) for r in grouped.last_grid] == [
+        (r.diagnosis, r.stress_diff) for r in fresh
+    ]
+
+
+def test_move_groups_is_off_by_default_and_changes_nothing_then():
+    block, _, stuck, _ = stuck_block()
+    default = opt.resolve_trapped(block, stuck.layout)
+    off = opt.resolve_trapped(block, stuck.layout, move_groups=False)
+    np.testing.assert_array_equal(default.projection.layout, off.projection.layout)
+    assert default.groups == off.groups == []
+
+
+@pytest.mark.parametrize("seed", [3, 5, 9, 12])
+def test_group_pass_never_raises_the_stress(seed):
+    problem, _ = synthetic_table(n_antigens=25, n_sera=6, noise=0.8, seed=seed)
+    for projection in opt.relax(problem, n_starts=20, seed=seed, keep=5).projections:
+        plain = opt.resolve_trapped(problem, projection.layout)
+        grouped = opt.resolve_trapped(problem, projection.layout, move_groups=True)
+        assert grouped.projection.stress <= plain.projection.stress
+        for group in grouped.groups:
+            assert group.kept == (group.stress_after < group.stress_before - opt.GROUP_MIN_GAIN)
+        if not any(g.kept for g in grouped.groups):
+            np.testing.assert_array_equal(grouped.projection.layout, plain.projection.layout)
+
+
+def test_group_tolerance_is_checked():
+    problem, truth = synthetic_table(n_antigens=6, n_sera=3)
+    with pytest.raises(ValueError, match="group_tolerance"):
+        opt.resolve_trapped(problem, truth, move_groups=True, group_tolerance=0.0)

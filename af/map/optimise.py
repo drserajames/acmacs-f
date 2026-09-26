@@ -295,14 +295,31 @@ def grid_test(
 
 
 @dataclass(frozen=True)
+class GroupMove:
+    """One group tried by :func:`resolve_trapped` with ``move_groups=True``: points whose
+    grid-test better positions share a displacement, shifted together."""
+
+    members: list[int]  # point indices
+    shift: tuple[float, ...]  # the rigid displacement tried
+    stress_before: float
+    stress_after: float  # after moving the group and re-minimising
+    kept: bool  # only a move that lowers the stress is kept
+
+
+@dataclass(frozen=True)
 class TrappedResolution:
     """Result of :func:`resolve_trapped`."""
 
     projection: Projection
     rounds: int  # grid tests run
-    moved: int  # point moves applied in total
-    last_grid: list[GridResult]  # the final grid test: no trapped points, unless rounds ran out
-    # or the trapped points left all have a worse position (stress_diff > 0) and were not moved
+    moved: int  # single-point moves applied in total
+    last_grid: list[GridResult]  # the grid test of the returned map: no trapped points, unless
+    # rounds ran out or the trapped points left all have a worse position (stress_diff > 0)
+    groups: list[GroupMove] = field(default_factory=list)  # empty unless move_groups=True
+
+
+GROUP_TOLERANCE = 0.5  # moves within this distance of each other form one group
+GROUP_MIN_GAIN = 1e-6  # a group move must lower the stress by more than this to be kept
 
 
 def resolve_trapped(
@@ -313,6 +330,8 @@ def resolve_trapped(
     method: Method = "cg",
     step: float = 0.1,
     threads: int = 0,
+    move_groups: bool = False,
+    group_tolerance: float = GROUP_TOLERANCE,
 ) -> TrappedResolution:
     """Grid-test, move the points that have a better place, re-minimise; repeat until no
     point is trapped or ``max_rounds`` grid tests have run (ae ``chart-relax-grid``: 20).
@@ -322,26 +341,101 @@ def resolve_trapped(
     its move changes the stress by more than 0.25 either way; one whose move would *raise*
     the stress is reported but never moved. ae then repeats the loop on an unchanged map
     until the rounds run out; here a round that moves nothing ends the loop.
+
+    ``move_groups`` (off by default; on is Sarah's decision) adds one pass at the end for a
+    blind spot ae shares: several points stuck together in a worse place. Each point's own
+    gain is below the trap threshold, so none is trapped and the loop above never moves them.
+    Points whose better positions share a displacement (within ``group_tolerance``) are
+    shifted together and the map re-minimised; a move is kept only if the stress drops, so
+    the map can only improve. Measured (notes/optimiser/GROUP-TRAPS.md): on a CDC B/Vic map
+    it found the misplaced block of six antigens unprompted, and three more, moved them to
+    within 0.07 of ae's positions (map RMSD to ae 0.156 -> 0.063); it found no group in 72
+    other real maps; it costs about 0.1% of a chain step.
     """
     _require_positive("max_rounds", max_rounds)
+    if not group_tolerance > 0:
+        raise ValueError(f"group_tolerance must be positive, not {group_tolerance!r}")
     # The layout is taken as given (normally the best projection of a relax), as ae does.
     start = _layout(problem, layout)
     current = Projection(start, stress(problem, start), start.shape[1], 0, 0, 0, 0)
     moved = 0
     grid: list[GridResult] = []
+    rounds = max_rounds
+    grid_is_stale = False  # rounds ran out: grid describes the map before the last move
     for round_no in range(1, max_rounds + 1):
         grid = grid_test(problem, current.layout, step=step, threads=threads)
-        if not any(result.diagnosis == "trapped" for result in grid):
-            return TrappedResolution(current, round_no, moved, grid)
-        new_layout = current.layout.copy()
         moves = [r for r in grid if r.position is not None and r.stress_diff < 0.0]
-        if not moves:
-            return TrappedResolution(current, round_no, moved, grid)
+        if not any(result.diagnosis == "trapped" for result in grid) or not moves:
+            rounds = round_no
+            break
+        new_layout = current.layout.copy()
         for result in moves:
             new_layout[result.point] = result.position
         moved += len(moves)
         current = optimise(problem, new_layout, method=method, precision="fine")
-    return TrappedResolution(current, max_rounds, moved, grid)
+    else:
+        grid_is_stale = True
+    if not move_groups:
+        return TrappedResolution(current, rounds, moved, grid)
+    if grid_is_stale:
+        grid = grid_test(problem, current.layout, step=step, threads=threads)
+    current, groups = _move_groups(problem, current, grid, group_tolerance, method)
+    if any(g.kept for g in groups):
+        grid = grid_test(problem, current.layout, step=step, threads=threads)
+    return TrappedResolution(current, rounds, moved, grid, groups)
+
+
+def _move_groups(
+    problem: MapProblem,
+    current: Projection,
+    grid: list[GridResult],
+    tolerance: float,
+    method: Method,
+) -> tuple[Projection, list[GroupMove]]:
+    """Shift each group of points with a shared better displacement; keep improvements."""
+    tried: list[GroupMove] = []
+    for members, shift in _displacement_groups(grid, current.layout, tolerance):
+        trial = current.layout.copy()
+        trial[members] += shift
+        result = optimise(problem, trial, method=method, precision="fine")
+        kept = result.stress < current.stress - GROUP_MIN_GAIN
+        tried.append(
+            GroupMove(members, tuple(float(x) for x in shift), current.stress, result.stress, kept)
+        )
+        if kept:
+            current = result
+    return current, tried
+
+
+def _displacement_groups(
+    grid: list[GridResult], layout: FloatArray, tolerance: float
+) -> list[tuple[list[int], FloatArray]]:
+    """Points with a better position (stress_diff < 0, a real move) grouped by displacement:
+    connected components of "moves within ``tolerance``", two points or more, largest first
+    (ties by lowest point index, so the order is deterministic)."""
+    moves = {
+        r.point: np.asarray(r.position) - layout[r.point]
+        for r in grid
+        if r.position is not None and r.stress_diff < 0.0 and r.distance > 0.0
+    }
+    points = sorted(moves)
+    group_of: dict[int, int] = {}
+    groups: list[list[int]] = []
+    for point in points:
+        if point in group_of:
+            continue
+        component, queue = [point], [point]
+        group_of[point] = len(groups)
+        while queue:
+            here = queue.pop()
+            for other in points:
+                if other not in group_of and np.linalg.norm(moves[here] - moves[other]) < tolerance:
+                    group_of[other] = len(groups)
+                    component.append(other)
+                    queue.append(other)
+        groups.append(sorted(component))
+    result = [(g, np.mean([moves[p] for p in g], axis=0)) for g in groups if len(g) >= 2]
+    return sorted(result, key=lambda item: (-len(item[0]), item[0][0]))
 
 
 def stress(problem: MapProblem, layout: FloatArray) -> float:
