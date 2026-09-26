@@ -195,9 +195,19 @@ class Rules:
             else RuleTable.empty(fixes, cell_scope)
         )
 
+        # Allowed shapes of lab ids, by lab, field and test-date range (af.tables.ids).
+        shapes = directory / "id_shapes.tsv"
+        shape_required = ("field", "kind", "pattern", "date_from", "date_to")
+        self.id_shapes = (
+            RuleTable(shapes, scope=("lab",), required=shape_required)
+            if shapes.exists()
+            else RuleTable.empty(shapes, ("lab",))
+        )
+
     def tables(self) -> list[RuleTable]:
         return [
             self.cell_fixes,
+            self.id_shapes,
             self.titre_tokens,
             self.control_sera,
             self.table_defaults,
