@@ -68,7 +68,11 @@ def sequence_version(
 
 def leaf_sequences(store: Store) -> StoreRef:
     """The sequence version the fixture tree's leaves come from, as a real tree's do."""
-    return sequence_version(store, [(*key.split("|"), None, None) for key in KEYS.values()])
+    rows: list[tuple[str, str, str | None, str | None]] = []
+    for key in KEYS.values():
+        epi_isl, accession = key.split("|")
+        rows.append((epi_isl, accession, None, None))
+    return sequence_version(store, rows)
 
 
 def tree_version(
