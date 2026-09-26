@@ -11,8 +11,6 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from af.clades.fallback import FallbackError, assign_from_store, dataset_for_calls
@@ -20,7 +18,14 @@ from af.clades.from_tree import publish_clades
 from af.clades.store import ASSIGNMENTS_FILE, CladeStoreError, read_report
 from af.store import Provenance, Store, StoreRef
 
-from .test_from_tree import STARTED, SUBTYPE, clade_set, nomenclature_input, tree_version
+from .test_from_tree import (
+    STARTED,
+    SUBTYPE,
+    clade_set,
+    nomenclature_input,
+    sequence_version,
+    tree_version,
+)
 
 #: (epi_isl, accession, nextclade_subclade, qc). The first five are the tree fixture's
 #: leaves; the stub tree engine calls them P, P.1, P.1, P, None.
@@ -35,22 +40,6 @@ def raw_dataset(store: Store, name: str, *clades: str) -> StoreRef:
         tree = {"tree": {"node_attrs": {}, "children": children}}
         (directory / "tree.json").write_text(json.dumps(tree))
         return builder.publish(Provenance("test", (), {}, STARTED, STARTED))
-
-
-def sequence_version(
-    store: Store, rows: list[tuple[str, str, str | None, str | None]], *datasets: StoreRef
-) -> StoreRef:
-    columns: dict[str, list[Any]] = {
-        name: [row[index] for row in rows]
-        for index, name in enumerate(
-            ["epi_isl", "accession", "nextclade_subclade", "nextclade_qc_status"]
-        )
-    }
-    with store.build("sequences", "h3") as builder:
-        part = builder.path / "sequences" / "pull=test"
-        part.mkdir(parents=True)
-        pq.write_table(pa.table(columns), part / "part-0.parquet")
-        return builder.publish(Provenance("seq.build", tuple(datasets), {}, STARTED, STARTED))
 
 
 def standard(store: Store) -> tuple[StoreRef, StoreRef]:
@@ -145,8 +134,8 @@ def test_before_the_tree_every_sequence_is_labelled_by_the_fallback(tmp_path: Pa
 def test_one_table_tree_calls_for_leaves_fallback_for_the_rest(tmp_path: Path) -> None:
     clades = clade_set(tmp_path)
     store = Store.create(tmp_path / "store")
-    tree = tree_version(store, clades.version)
     sequences, _ = standard(store)
+    tree = tree_version(store, clades.version, sequences=sequences)
     ref = publish_clades(
         store,
         SUBTYPE,

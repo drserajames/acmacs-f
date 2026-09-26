@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from af.clades.from_tree import publish_from_tree, rows_from_tree
@@ -51,15 +53,46 @@ def stub_engine(version: str, *, deeper: str = "P.1"):
     return engine
 
 
-def tree_version(
-    store: Store, version: str | None, *, excluded: list[dict[str, Any]] | None = None, **kw: Any
+def sequence_version(
+    store: Store, rows: list[tuple[str, str, str | None, str | None]], *inputs: StoreRef
 ) -> StoreRef:
+    """A sequence-store version: (epi_isl, accession, nextclade_subclade, qc) per row."""
+    names = ["epi_isl", "accession", "nextclade_subclade", "nextclade_qc_status"]
+    columns = {name: [row[index] for row in rows] for index, name in enumerate(names)}
+    with store.build("sequences", "h3") as builder:
+        part = builder.path / "sequences" / "pull=test"
+        part.mkdir(parents=True)
+        pq.write_table(pa.table(columns), part / "part-0.parquet")
+        return builder.publish(Provenance("seq.build", tuple(inputs), {}, STARTED, STARTED))
+
+
+def leaf_sequences(store: Store) -> StoreRef:
+    """The sequence version the fixture tree's leaves come from, as a real tree's do."""
+    rows: list[tuple[str, str, str | None, str | None]] = []
+    for key in KEYS.values():
+        epi_isl, accession = key.split("|")
+        rows.append((epi_isl, accession, None, None))
+    return sequence_version(store, rows)
+
+
+def tree_version(
+    store: Store,
+    version: str | None,
+    *,
+    excluded: list[dict[str, Any]] | None = None,
+    sequences: StoreRef | None = None,
+    cite: bool = True,
+    **kw: Any,
+) -> StoreRef:
+    """The fixture tree, published citing the sequence version its leaves were read from
+    (``sequences``, or one holding exactly its leaves); ``cite=False`` cites none."""
     tree, ids = built()
     engine = None if version is None else stub_engine(version, **kw)
     populated = populate(
         tree, "h3", records(), states_for(ids), assign_clades=engine, excluded=excluded
     )
-    provenance = Provenance("trees.populate", (), {"backend": "stub"}, STARTED, STARTED)
+    inputs = (sequences or leaf_sequences(store),) if cite else ()
+    provenance = Provenance("trees.populate", inputs, {"backend": "stub"}, STARTED, STARTED)
     return i6.publish(store, populated, "report", provenance)
 
 
@@ -172,3 +205,41 @@ def test_extra_report_keys_cannot_replace_the_standard_counts(tmp_path: Path) ->
             started=STARTED,
             extra_report={"unnamed": 0},
         )
+
+
+def publish_tree(store: Store, tree: StoreRef, tmp_path: Path, clades: CladeSet) -> StoreRef:
+    return publish_from_tree(
+        store, tree, SUBTYPE, clades, nomenclature=[nomenclature_input(tmp_path)], started=STARTED
+    )
+
+
+def test_a_tree_citing_no_sequence_version_is_refused(tmp_path: Path) -> None:
+    """Its leaf ids were never taken from the sequence store, so nothing vouches for them."""
+    clades = clade_set(tmp_path)
+    store = Store.create(tmp_path / "store")
+    tree = tree_version(store, clades.version, cite=False)
+    with pytest.raises(CladeStoreError, match="'inputs' must name exactly one store input of kind"):
+        publish_tree(store, tree, tmp_path, clades)
+    assert not store.list_datasets("clades")
+
+
+def test_a_tree_citing_a_sequence_version_the_store_lacks_is_refused(tmp_path: Path) -> None:
+    clades = clade_set(tmp_path)
+    store = Store.create(tmp_path / "store")
+    gone = StoreRef("sequences", "h3", "c" * 16, "c" * 64)
+    tree = tree_version(store, clades.version, sequences=gone)
+    with pytest.raises(CladeStoreError, match="its sequences input h3@cccccccccccccccc is not in"):
+        publish_tree(store, tree, tmp_path, clades)
+
+
+def test_a_tree_with_stand_in_leaf_ids_is_refused(tmp_path: Path) -> None:
+    """The failure this guard exists for: a tree whose leaves are keyed by ids that are not
+    sequences of the version it cites (an imported tree's placeholder labels, say). Its
+    ids are well formed, so only the join against the sequence store catches it."""
+    clades = clade_set(tmp_path)
+    store = Store.create(tmp_path / "store")
+    other = sequence_version(store, [("EPI_ISL_1", "EPI1", None, None)])
+    tree = tree_version(store, clades.version, sequences=other)
+    with pytest.raises(CladeStoreError, match="5 of 5 leaves are not sequences of h3@"):
+        publish_tree(store, tree, tmp_path, clades)
+    assert not store.list_datasets("clades")
