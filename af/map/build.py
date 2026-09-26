@@ -22,7 +22,7 @@ import json
 import re
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -85,12 +85,14 @@ def table_counts(chart: Chart) -> tuple[list[int], list[dt.date | None]]:
     n = chart.n_antigens
     counts = [0] * n
     latest: list[dt.date | None] = [None] * n
-    seen_per_layer: set[tuple[int, int]] = set()
-    del seen_per_layer
     sources = chart.info.get("S") or []
     for k, layer in enumerate(chart.titres.layers):
         when = _compact(sources[k]) if k < len(sources) else None
-        for i, _j in layer:
+        # ONE per table, not one per titre: this decides which preparation of a vaccine strain is
+        # marked, and counting titres would let a strain tested against many sera in one table
+        # outrank one tested in many tables.
+        in_this_table = {i for i, _j in layer}
+        for i in in_this_table:
             counts[i] += 1
             previous = latest[i]
             if when is not None and (previous is None or when > previous):
@@ -332,7 +334,7 @@ def build_map(
     *,
     store: Store | None,
     out_root: Path,
-    vaccine_table: Sequence[Any],
+    vaccine_table: Mapping[str, Sequence[Any]] | Sequence[Any],
     vaccine_defaults: dict[str, tuple[VaccineDisable, ...]],
     created: dt.datetime,
 ) -> MapResult:
@@ -370,10 +372,13 @@ def build_map(
     # clade step carries neither. Workstream 4's assignment replaces both.
     labels_of = _labels_by_designation(scheme_chart) if cfg.scheme_stand_in else None
 
-    def labels_for(index: int, antigen: Any) -> frozenset[str]:
-        if labels_of is None:
-            return clade_labels(antigen)
-        return labels_of.get(designation(antigen), frozenset())
+    # Resolved ONCE, for every antigen, and used for both the colours and the points. Computing
+    # it in two places is how the substitution-qualified clades ("K 96R") were lost from the
+    # points while the colours still had them: one call site was updated and the other was not.
+    labels: list[frozenset[str]] = [
+        clade_labels(a) if labels_of is None else labels_of.get(designation(a), frozenset())
+        for a in chart.antigens
+    ]
 
     inputs["colour_scheme"] = {
         "name": scheme.name,
@@ -384,8 +389,8 @@ def build_map(
     }
     layout = chart.projections[0].layout.copy()
     painted = [
-        (lambda row: row.colour if row else None)(scheme.paint(labels_for(i, a)))
-        for i, a in enumerate(chart.antigens)
+        (lambda row: row.colour if row else None)(scheme.paint(labels[i]))
+        for i in range(chart.n_antigens)
     ]
     relax, stress = relaxer_for(chart)
     layout, flags, move_reports = apply_moves(chart, layout, cfg, scheme, painted, relax, stress)
@@ -434,7 +439,9 @@ def build_map(
         VaccineChoice(c.name, _class(c.passage_class), c.passage, c.reason, c.optional)
         for c in cfg.vaccine_choose
     ]
-    vrep = select_vaccines(ags, vaccine_table, disable=disable, choose=choose)
+    vrep = select_vaccines(
+        ags, vaccine_table_for(vaccine_table, subtype), disable=disable, choose=choose
+    )
     ids = [f"ag{i}" for i in range(chart.n_antigens)] + [f"sr{j}" for j in range(chart.n_sera)]
     vlabels = {
         ids[m.antigen]: label_text(
@@ -457,7 +464,7 @@ def build_map(
                 a.name,
                 "antigen",
                 (float(xy[i, 0]), float(xy[i, 1])) if ok else None,
-                clade_labels(a),
+                labels[i],
                 parse_date(a.date),
                 passage_class(a.passage, a.reassortant),
                 bool((a.extra.get("T") or {}).get("R")),
@@ -541,7 +548,7 @@ def build(
     *,
     store_root: Path | None,
     out_root: Path,
-    vaccine_list: Sequence[Any],
+    vaccine_list: Mapping[str, Sequence[Any]] | Sequence[Any],
     vaccine_defaults: dict[str, tuple[VaccineDisable, ...]],
     only: Sequence[str] = (),
     created: dt.datetime | None = None,
@@ -600,6 +607,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(f"{len(results)} map(s), {sum(len(r.figures) for r in results)} figures -> {args.out}")
     return 0
+
+
+# The transition-period curated list keys B/Victoria as "BV", and carries "-disabled",
+# "-seasonal" and historical tables that are NOT the vaccines of a current map. Both quirks
+# belong to that file; they go when the curated list moves into af's own data.
+_VACCINE_TABLE_FOR_SUBTYPE = {"A(H1N1)": "A(H1N1)", "A(H3N2)": "A(H3N2)", "B": "BV"}
+
+
+def vaccine_table_for(
+    tables: Mapping[str, Sequence[Any]] | Sequence[Any], subtype: str
+) -> Sequence[Any]:
+    """The curated rows for one subtype. A subtype with no table is an error, not an empty map."""
+    if not isinstance(tables, Mapping):
+        return list(tables)  # already a flat list (a caller that selected for us)
+    key = _VACCINE_TABLE_FOR_SUBTYPE.get(subtype)
+    if key is None or key not in tables:
+        raise BuildError(
+            f"the curated vaccine list has no table for subtype {subtype!r} "
+            f"(it has {', '.join(sorted(tables))})"
+        )
+    return tables[key]
 
 
 def _passage(word: str) -> Any:
