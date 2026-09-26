@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from af.clades.coordinates import Position
-from af.clades.labels import LabelError, canonical_labels, older_names
+from af.clades.labels import LabelError, Resolved, canonical_labels, older_names
 from af.clades.local import LocalClade, extend
 from af.clades.nomenclature import CladeSet
 
@@ -110,3 +110,41 @@ def test_an_unaliased_legacy_file_a_subclade_claims_is_that_subclade(tmp_path: P
     result = canonical_labels(["legacy-1"], clade_set(tmp_path, extra_legacy={"legacy-1": own}))
     assert result.resolved["legacy-1"].clade == "P.1"
     assert result.resolved["legacy-1"].route == "legacy"
+
+
+#: A subclade upstream revoked and renamed: same unaliased name as P.1, and it carries
+#: P.1's older name too, as a revoked upstream alias keeps the older name of its successor.
+RENAMED = """
+name: X
+unaliased_name: P.1
+parent: P
+revoked: true
+comment: "revoked and renamed to something else entirely"
+defining_mutations: []
+clade: legacy-1
+"""
+
+
+def with_revoked(tmp_path: Path) -> CladeSet:
+    clone = build_clone(tmp_path / "clone")
+    write_clade(clone / "subclades", "X", RENAMED)
+    return load_synthetic(clone.parent)
+
+
+def test_a_revoked_name_resolves_to_its_successor(tmp_path: Path) -> None:
+    """By unaliased name, not by the comment (which here names the wrong clade)."""
+    result = canonical_labels(["X", "X (legacy-1)"], with_revoked(tmp_path))
+    assert result.resolved["X"] == Resolved("X", "P.1", "revoked")
+    assert result.clade("X (legacy-1)") == "P.1"
+
+
+def test_a_revoked_clades_older_name_is_not_ambiguous_with_its_successor(tmp_path: Path) -> None:
+    clades = with_revoked(tmp_path)
+    assert older_names(clades)["legacy-1"] == ("P.1",)
+    assert canonical_labels(["legacy-1"], clades).clade("legacy-1") == "P.1"
+
+
+def test_a_revoked_name_without_a_successor_is_unmapped(tmp_path: Path) -> None:
+    """P.3 is revoked in the synthetic set and nothing live shares its unaliased name."""
+    result = canonical_labels(["P.3"], clade_set(tmp_path), allow_unmapped=True)
+    assert "no live subclade has its unaliased name" in result.unmapped["P.3"]

@@ -12,6 +12,12 @@ the subclade hierarchy does not contain. The routes, tried in order:
 
 ``subclade``
     The label is an upstream subclade name.
+``revoked``
+    The label is a subclade upstream has revoked and renamed. It resolves to the live
+    subclade with the same ``unaliased_name`` — the same clade under its current name
+    (upstream renames an alias, and its children, this way). The structured
+    field is used, not the revocation comment, which can be wrong. Also applied inside the
+    ``display`` form and to the older names a revoked subclade claims.
 ``local``
     The label is a local clade (:mod:`af.clades.local`); it folds to its deepest upstream
     ancestor, because a local name refines a published clade and never replaces it. A
@@ -41,7 +47,7 @@ from dataclasses import dataclass, field
 
 from af.clades.nomenclature import CladeSet
 
-ROUTES = ("unnamed", "subclade", "local", "display", "legacy", "outside")
+ROUTES = ("unnamed", "subclade", "revoked", "local", "display", "legacy", "outside")
 
 #: ``name (bracketed)`` with exactly one bracket, as figures write a clade and its old name.
 _DISPLAY = re.compile(r"^(?P<name>[^\s()]+) \((?P<bracket>[^()]+)\)$")
@@ -121,9 +127,10 @@ def older_names(clade_set: CladeSet) -> dict[str, tuple[str, ...] | None]:
     files' ``alias_of``, keyed by their full name (their short names, such as a bare digit,
     are display abbreviations too short to identify anything).
 
-    A name may be claimed by more than one subclade: upstream gives two sibling subclades
-    the same older name where the old clade covered both. Such a name is ambiguous at the
-    canonical granularity, and :func:`canonical_labels` reports it rather than choosing.
+    Claims by a revoked subclade count for its successor (:func:`successor`), so a clade
+    renamed upstream claims its older name once, under its current name. A name still
+    claimed by more than one subclade is ambiguous at the canonical granularity, and
+    :func:`canonical_labels` reports it rather than choosing.
     A legacy file without an alias is the old clade's own definition, not a pointer; it
     maps to ``None`` ("outside") only when no subclade claims the name. An alias naming a
     clade that does not exist is a defect in the clade set and is fatal.
@@ -133,7 +140,9 @@ def older_names(clade_set: CladeSet) -> dict[str, tuple[str, ...] | None]:
     problems: list[str] = []
     for subclade in clade_set:
         if subclade.clade and subclade.clade not in clade_set:
-            claims.setdefault(subclade.clade, set()).add(subclade.name)
+            current = successor(subclade.name, clade_set)
+            if current is not None:  # a revoked clade with no successor claims nothing
+                claims.setdefault(subclade.clade, set()).add(current)
     for legacy in clade_set.legacy_clades.values():
         if legacy.name in clade_set:
             continue  # a current subclade name always means that subclade
@@ -142,7 +151,9 @@ def older_names(clade_set: CladeSet) -> dict[str, tuple[str, ...] | None]:
         elif legacy.alias_of not in clade_set:
             problems.append(f"{legacy.name!r} aliases {legacy.alias_of!r}, which is not defined")
         else:
-            claims.setdefault(legacy.name, set()).add(legacy.alias_of)
+            current = successor(legacy.alias_of, clade_set)
+            if current is not None:
+                claims.setdefault(legacy.name, set()).add(current)
     if problems:
         raise LabelError(f"{clade_set.version}: " + "; ".join(problems))
     older: dict[str, tuple[str, ...] | None] = {
@@ -160,6 +171,11 @@ def _resolve(
     if label in clade_set:
         if clade_set.is_local(label):
             return Resolved(label, _upstream_anchor(label, clade_set), "local")
+        if clade_set[label].revoked:
+            current = successor(label, clade_set)
+            if current is None:
+                return f"{label!r} is revoked and no live subclade has its unaliased name"
+            return Resolved(label, current, "revoked")
         return Resolved(label, label, "subclade")
     display = _DISPLAY.fullmatch(label)
     if display is not None:
@@ -169,7 +185,10 @@ def _resolve(
         expected = clade_set.legacy_name(name)
         if bracket != expected:
             return f"the bracket {bracket!r} is not {name!r}'s older name ({expected!r})"
-        return Resolved(label, _upstream_anchor(name, clade_set), "display")
+        current = successor(name, clade_set)
+        if current is None:
+            return f"{name!r} is revoked and no live subclade has its unaliased name"
+        return Resolved(label, _upstream_anchor(current, clade_set), "display")
     if label in older:
         targets = older[label]
         if targets is None:
@@ -178,6 +197,25 @@ def _resolve(
             return f"an older name shared by {', '.join(targets)}; it names none of them alone"
         return Resolved(label, targets[0], "legacy")
     return "not a subclade, a local clade, or an older name upstream publishes"
+
+
+def successor(name: str, clade_set: CladeSet) -> str | None:
+    """``name``, or for a revoked subclade the live one with the same ``unaliased_name``.
+
+    ``None`` when a revoked subclade has no such successor, or more than one: then there is
+    no single current name for it, and guessing one would hide that.
+    """
+    clade = clade_set[name]
+    if not clade.revoked:
+        return name
+    if not clade.unaliased_name:
+        return None
+    live = [
+        other.name
+        for other in clade_set
+        if not other.revoked and other.unaliased_name == clade.unaliased_name
+    ]
+    return live[0] if len(live) == 1 else None
 
 
 def _upstream_anchor(name: str, clade_set: CladeSet) -> str | None:
