@@ -25,6 +25,9 @@ RULES: dict[str, list[str]] = {
         "CDC\tlot\tregex\t.*POOL.*\tdrop\thuman pool" + META,
         "CDC\tlot\tregex\t[0-9]{2}MouseS[0-9]+\tspecies\tMOUSE" + META + "yes",
         "LABN\tname\tregex\tHuman pool .*\tdrop\thuman pool" + META + "yes",
+        "LABV\tid\tregex\tSH\\s*[0-9]{4}.*\tdrop\thuman pool" + META + "yes",
+        "LABV\tname\tregex\t.*pool.*\tdrop\thuman pool" + META + "yes",
+        "LABV\tpassage\tregex\tpos(t)?\\s*vax\tdrop\thuman pool" + META + "yes",
     ],
     "table_defaults": [
         "lab\tsubtype\tassay\trbc\tevidence\tadded_by\tadded_on\toptional",
@@ -39,6 +42,7 @@ RULES: dict[str, list[str]] = {
         "*\tregex\t(IVR|CVR)-?([0-9]+[A-Z]?)\t\\1-\\2" + META + "yes",
         "*\tregex\tCNIC-?([0-9]+[A-Z]?)\tCNIC-\\1" + META + "yes",
         "*\tregex\tSAN-?([0-9]+[A-Z]?)\tSAN-\\1" + META + "yes",
+        "*\tregex\tBVR-?([0-9]+[A-Z]?)\tBVR-\\1" + META + "yes",
     ],
     "passage_tokens": [
         "lab\tkind\tpattern\tcanonical\tclass\tevidence\tadded_by\tadded_on\toptional",
@@ -59,6 +63,7 @@ RULES: dict[str, list[str]] = {
                 ("X", "X", "unknown"),
                 ("AX-4", "AX4", "cell"),
                 ("SPE", "SPE", "egg"),
+                ("SIAT", "SIAT", "cell"),
             ]
         ),
     ],
@@ -83,6 +88,9 @@ RULES: dict[str, list[str]] = {
         "lab\tkind\tpattern\treplacement\tevidence\tadded_by\tadded_on\toptional",
         "LABX\tregex\tBX/(.*)\tB/\\1" + META + "yes",
         "LABN\tregex\t(.*/[0-9]{4})\\s*pdm\\b\\s*(.*)\t\\1 \\2" + META + "yes",
+        "LABV\tregex\t^((?:IVR|BVR)-?[0-9]+[A-Z]*)\\s*\\(\\s*([AB]/[^()]*?)\\s*\\)?$\t\\2 \\1"
+        + META
+        + "yes",
     ],
     "flu_types": [
         "lab\tkind\tpattern\tsubtype\tlineage\tevidence\tadded_by\tadded_on\toptional",
@@ -95,11 +103,16 @@ RULES: dict[str, list[str]] = {
         "\tevidence\tadded_by\tadded_on\toptional",
         "CDC\tregex\tNo Lot .*\tF0-TEST1\tT29-777\t40\t0.5" + META + "yes",
     ],
+    "cell_fixes": [
+        "lab\tfile\tsheet\tcell\traw\tvalue\tevidence\tadded_by\tadded_on\toptional",
+        "LABV\tlabv-fix-20300102.xlsx\tWorksheet\tE11\t604\t640" + META + "yes",
+    ],
     "lab_conventions": [
         "lab\tdate_order\tpassage_plus\tevidence\tadded_by\tadded_on\toptional",
         "CDC\tMDY\t" + META + "yes",
         "LABX\tYMD\trepeat-previous" + META + "yes",
         "LABN\tYMD\trepeat-previous" + META + "yes",
+        "LABV\tDMY\t" + META + "yes",
     ],
 }
 

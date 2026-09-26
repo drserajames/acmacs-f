@@ -265,7 +265,10 @@ class SheetReader:
     def _reads_as_passage(self, text: str) -> bool:
         if not re.search(r"\d", text) or "/" in text and text.count("/") >= 3:
             return False
-        return not self.passages.parse(_passage_text(text)).problems
+        try:
+            return not self.passages.parse(_passage_text(text, self.passages)).problems
+        except ValueError:
+            return False
 
     def _name_column(self) -> int:
         h = self.header
@@ -500,7 +503,10 @@ class SheetReader:
     def _passage(self, raw: str, r: int, c: int | None) -> str:
         """VIDRL separates passage steps with ',' as well as '/' ("MDCK3, MDCK1") and puts
         a space before a count ("MDCK 1")."""
-        read = self.passages.parse(_passage_text(raw))
+        try:
+            read = self.passages.parse(_passage_text(raw, self.passages))
+        except ValueError as err:
+            raise self.fail(r, c, str(err)) from err
         where = self.s.where(r, c)
         self.warnings.extend(f"{where}: {p}" for p in read.problems)
         return read.text
@@ -525,9 +531,11 @@ class SheetReader:
         if (rule := self.rules.titre_tokens.find(raw, lab=self.lab, assay="*")) is not None:
             return [] if rule["titre"] == "*" else [rule["titre"]]
         text = _clean_titre(raw)
-        if TITRE.fullmatch(text) and (text[0] in "<>" or int(text) >= 10):
+        if TITRE.fullmatch(text) and _is_dilution(int(text.lstrip("<>"))):
             return [text]
-        raise self.fail(r, c, f"titre {raw!r} matches no titre_tokens rule")
+        raise self.fail(
+            r, c, f"titre {raw!r} is not a dilution (10, 20, 40...) nor a titre_tokens rule"
+        )
 
 
 @dataclass
@@ -570,9 +578,35 @@ def _in_order(letters: str, word: str) -> bool:
     return all(ch in it for ch in letters)
 
 
-def _passage_text(raw: str) -> str:
-    text = re.sub(r"(?<=[A-Za-z])\s+(?=\d)", "", raw.strip())
-    return re.sub(r"\s*[,/]\s*", "/", text)
+def _passage_text(raw: str, parser: PassageParser | None = None) -> str:
+    """VIDRL's passage notation in the form the passage parser reads. VIDRL separates steps
+    with ',' as well as '/' and '+' ("MDCK3, MDCK1", "C1+1"), writes counts after a space,
+    hyphen or '#' ("MDCK 1", "MDCK-1", "MDCK#1") or before the name ("P1 SIAT"), marks QMC
+    passages for HI ("QMC2-HI"), and writes a bare count for another passage of the previous
+    step ("C2, 2") and a bare name for an unknown count ("X, SIAT1")."""
+    text = raw.strip()
+    text = re.sub(r"-HI\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bP(\d+)\s+([A-Za-z]+)", r"\2\1", text)
+    text = re.sub(r"(?<=[A-Za-z])\s*[-#]?\s*(?=\d)", "", text)
+    parts = [q.strip() for q in re.split(r"\s*[,/+]\s*|(?<=\d)\s+(?=[A-Za-z])", text) if q.strip()]
+    if parser is None:
+        return "/".join(parts)
+    out: list[str] = []
+    for part in parts:
+        if re.fullmatch(r"\d+", part):
+            name = parser.last_step_name(out[-1]) if out else None
+            if name is None:
+                raise ValueError(f"passage {raw!r}: nothing before {part!r} to repeat")
+            part = name + part
+        elif parser.is_step_name(part):
+            part += "X"  # a step with no count: an unknown number of passages
+        out.append(part)
+    return "/".join(out)
+
+
+def _is_dilution(n: int) -> bool:
+    """10 x 2^k: a value off the series is a typing error (604 for 640, 2506 for 2560)."""
+    return n >= 10 and n % 10 == 0 and (n // 10) & (n // 10 - 1) == 0
 
 
 def _is_label(text: str) -> bool:
