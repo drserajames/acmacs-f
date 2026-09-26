@@ -12,6 +12,7 @@ from the run config's `[paths] store`; a chain file that names a store is refuse
 `run.toml` says where and how chains run on one machine, so one file serves every chain
 there, and the same chain runs on a laptop, the HPC or `o`:
 
+    python = "/syn/.../releases/<sha12>/bin/python"   # optional: refuse any other interpreter
     optimiser = "core"            # "core" (af.map.optimise) or "stub"
     threads = 0                   # per process; 0 = all cores
     publish = true                # publish the finished chain to the store
@@ -50,6 +51,7 @@ from af.chain.engine import SplitStarts, run_chain
 from af.chain.publish import publish_chain
 from af.chain.review import build_review
 from af.pipeline.config import RunnerSettings, make_runner
+from af.run.runtime import release_info, require_python
 from af.store.work import PathsConfig, Work
 from af.util.config import load_config
 
@@ -64,6 +66,9 @@ class SplitSettings:
 class RunSettings:
     optimiser: str
     paths: PathsConfig
+    # A frozen af release (tools/make-release.py) this machine's chains must run on. SLURM
+    # tasks start with the driver's interpreter, so pinning the driver pins them all.
+    python: Path | None = None
     threads: int = 0
     publish: bool = True
     runner: RunnerSettings = field(default_factory=lambda: RunnerSettings(kind="local"))
@@ -109,6 +114,12 @@ def main(argv: list[str]) -> int:
     dataset = dataset_from_path(args.chain)
     check_tables_dataset(args.chain, dataset)
     run = load_config(args.run, RunSettings)
+    if run.python is not None:
+        require_python(run.python)
+    release = release_info()
+    logging.info(
+        "%s: af %s", dataset, release["commit"] if release else f"not a release ({sys.executable})"
+    )
     work = Work.open(run.paths.work).dataset("chains", dataset)
     cfg = load_chain_config(
         args.chain, inputs_dir=work.root / "inputs", tables_store=run.paths.store
