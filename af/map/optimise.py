@@ -15,7 +15,10 @@ between threads, so its seeded runs were not reproducible.
 from __future__ import annotations
 
 import dataclasses
+import functools
+import logging
 import math
+import os
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Literal
@@ -24,6 +27,8 @@ import numpy as np
 import numpy.typing as npt
 
 from af.map import _core
+
+log = logging.getLogger(__name__)
 
 Method = Literal["cg", "lbfgs"]
 Precision = Literal["fine", "rough", "very_rough"]
@@ -120,6 +125,7 @@ class RelaxResult:
 
     projections: list[Projection]
     column_bases: FloatArray
+    threads: int  # threads the starts ran on (resolved from the `threads` argument)
 
     @property
     def best(self) -> Projection:
@@ -215,7 +221,11 @@ def relax(
             projections = refine(problem, projections, method=method, threads=threads)
             if keep_n:
                 projections = projections[:keep_n]
-    return RelaxResult(projections=projections, column_bases=np.array(core.column_bases))
+    return RelaxResult(
+        projections=projections,
+        column_bases=np.array(core.column_bases),
+        threads=threads_used("relax", threads),
+    )
 
 
 def refine(
@@ -304,6 +314,11 @@ class GroupMove:
     stress_before: float
     stress_after: float  # after moving the group and re-minimising
     kept: bool  # only a move that lowers the stress is kept
+    n_antigens: int  # members that are antigens (point index < MapProblem.n_antigens)
+    n_sera: int  # members that are sera
+    # Antigens and sera moved together. Allowed, but flagged for review (Sarah, 26 Sep 2026):
+    # the groups measured so far were all antigens.
+    mixed: bool
 
 
 @dataclass(frozen=True)
@@ -316,6 +331,7 @@ class TrappedResolution:
     last_grid: list[GridResult]  # the grid test of the returned map: no trapped points, unless
     # rounds ran out or the trapped points left all have a worse position (stress_diff > 0)
     groups: list[GroupMove] = field(default_factory=list)  # empty unless move_groups=True
+    threads: int = 1  # threads the grid tests ran on (resolved from the `threads` argument)
 
 
 GROUP_TOLERANCE = 0.5  # moves within this distance of each other form one group
@@ -342,7 +358,8 @@ def resolve_trapped(
     the stress is reported but never moved. ae then repeats the loop on an unchanged map
     until the rounds run out; here a round that moves nothing ends the loop.
 
-    ``move_groups`` (off by default; on is Sarah's decision) adds one pass at the end for a
+    ``move_groups`` (off by default here; the chains turn it on through their options, as
+    Sarah decided, 26 Sep 2026) adds one pass at the end for a
     blind spot ae shares: several points stuck together in a worse place. Each point's own
     gain is below the trap threshold, so none is trapped and the loop above never moves them.
     Points whose better positions share a displacement (within ``group_tolerance``) are
@@ -350,7 +367,9 @@ def resolve_trapped(
     the map can only improve. Measured (notes/optimiser/GROUP-TRAPS.md): on a CDC B/Vic map
     it found the misplaced block of six antigens unprompted, and three more, moved them to
     within 0.07 of ae's positions (map RMSD to ae 0.156 -> 0.063); it found no group in 72
-    other real maps; it costs about 0.1% of a chain step.
+    other real maps; it costs about 0.1% of a chain step. Each group tried is reported as a
+    :class:`GroupMove`, with ``mixed`` set when it holds both antigens and sera: allowed, but
+    to be flagged for review (Sarah); every group measured so far was all antigens.
     """
     _require_positive("max_rounds", max_rounds)
     if not group_tolerance > 0:
@@ -376,13 +395,17 @@ def resolve_trapped(
     else:
         grid_is_stale = True
     if not move_groups:
-        return TrappedResolution(current, rounds, moved, grid)
+        return TrappedResolution(
+            current, rounds, moved, grid, threads=threads_used("grid test", threads)
+        )
     if grid_is_stale:
         grid = grid_test(problem, current.layout, step=step, threads=threads)
     current, groups = _move_groups(problem, current, grid, group_tolerance, method)
     if any(g.kept for g in groups):
         grid = grid_test(problem, current.layout, step=step, threads=threads)
-    return TrappedResolution(current, rounds, moved, grid, groups)
+    return TrappedResolution(
+        current, rounds, moved, grid, groups, threads_used("grid test", threads)
+    )
 
 
 def _move_groups(
@@ -399,12 +422,32 @@ def _move_groups(
         trial[members] += shift
         result = optimise(problem, trial, method=method, precision="fine")
         kept = result.stress < current.stress - GROUP_MIN_GAIN
-        tried.append(
-            GroupMove(members, tuple(float(x) for x in shift), current.stress, result.stress, kept)
-        )
+        tried.append(_group_move(problem, members, shift, current.stress, result.stress, kept))
         if kept:
             current = result
     return current, tried
+
+
+def _group_move(
+    problem: MapProblem,
+    members: list[int],
+    shift: FloatArray,
+    stress_before: float,
+    stress_after: float,
+    kept: bool,
+) -> GroupMove:
+    n_antigens = sum(1 for point in members if point < problem.n_antigens)
+    n_sera = len(members) - n_antigens
+    return GroupMove(
+        members=members,
+        shift=tuple(float(x) for x in shift),
+        stress_before=stress_before,
+        stress_after=stress_after,
+        kept=kept,
+        n_antigens=n_antigens,
+        n_sera=n_sera,
+        mixed=n_antigens > 0 and n_sera > 0,
+    )
 
 
 def _displacement_groups(
@@ -436,6 +479,39 @@ def _displacement_groups(
         groups.append(sorted(component))
     result = [(g, np.mean([moves[p] for p in g], axis=0)) for g in groups if len(g) >= 2]
     return sorted(result, key=lambda item: (-len(item[0]), item[0][0]))
+
+
+def threads_used(what: str, threads: int) -> int:
+    """The threads a call with ``threads`` runs on, logged. ``threads=0`` means OpenMP's
+    default, which honours an inherited ``OMP_NUM_THREADS``: a login environment that sets it to
+    1 makes every run single-threaded, silently (measured on an HPC: 7.2 s instead of 0.95 s).
+    So the resolved count is recorded in every result and a shortfall is warned about."""
+    resolved = _core.resolve_threads(threads)
+    log.info("%s: %d thread(s) (requested %d)", what, resolved, threads)
+    available = available_cpus()
+    # without OpenMP a run is single-threaded by build, not by environment (CMake warns then)
+    if threads == 0 and _core.openmp and resolved < available:
+        _warn_fewer_threads(resolved, available, os.environ.get("OMP_NUM_THREADS"))
+    return resolved
+
+
+def available_cpus() -> int:
+    """CPUs this process may run on: its affinity mask (what SLURM or a cgroup allows) where
+    the platform reports one, otherwise all CPUs."""
+    affinity = getattr(os, "sched_getaffinity", None)
+    return len(affinity(0)) if affinity is not None else (os.cpu_count() or 1)
+
+
+@functools.cache
+def _warn_fewer_threads(resolved: int, available: int, omp_num_threads: str | None) -> None:
+    # Once per combination, so a loop of grid tests does not repeat it.
+    log.warning(
+        "threads=0 resolved to %d thread(s) but %d CPUs are available (OMP_NUM_THREADS=%s); "
+        "pass threads explicitly or unset OMP_NUM_THREADS",
+        resolved,
+        available,
+        omp_num_threads,
+    )
 
 
 def stress(problem: MapProblem, layout: FloatArray) -> float:

@@ -68,7 +68,7 @@ class LocalRunner:
 
     def _run_one(self, job: Job) -> JobResult | Failure:
         job.log.parent.mkdir(parents=True, exist_ok=True)
-        env = {**os.environ, **job.env} if job.env else None
+        env = {**os.environ, **job.environment()}
         log.info("%s: running %s", job.name, subprocess.list2cmdline(job.argv()))
         started = now()
         try:

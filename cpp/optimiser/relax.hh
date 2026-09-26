@@ -57,6 +57,10 @@ namespace af::map
     // Minimises one given layout (no randomisation): ae Projection::relax.
     Projection optimise(const Problem& problem, std::span<const double> layout, std::size_t dimensions, Method method, Precision precision);
 
+    // Threads a run will use: `requested` if > 0, otherwise OpenMP's default
+    // (omp_get_max_threads(), which honours OMP_NUM_THREADS); 1 without OpenMP.
+    int resolve_threads(int requested);
+
     // The diameter of the random cube used for starts: a very rough map from a random layout
     // within the table's largest distance, its bounding-box diagonal times the multiplier
     // (ae randomizer_plain_from_sample_optimization). Unmovable points are held during that

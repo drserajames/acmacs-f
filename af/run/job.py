@@ -55,6 +55,16 @@ class Job:
     def argv(self) -> list[str]:
         return [str(part) for part in self.command]
 
+    def environment(self) -> dict[str, str]:
+        """Variables to add for this job: OMP_NUM_THREADS from ``resources.threads``, then ``env``.
+
+        OpenMP programs asked for "all threads" (af's threads=0) use OMP_NUM_THREADS when it
+        is set, and login environments often preset it to 1 (CSD3 does, and SLURM passes it
+        on): a job then runs single-threaded while holding the CPUs it asked for. Setting
+        it from the job's own request makes the two agree. An explicit ``env`` value wins.
+        """
+        return {"OMP_NUM_THREADS": str(self.resources.threads), **self.env}
+
     @classmethod
     def python_module(
         cls,

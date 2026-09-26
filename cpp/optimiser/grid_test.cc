@@ -11,6 +11,7 @@
 #endif
 
 #include "minimise.hh"
+#include "relax.hh"
 #include "stress.hh"
 
 namespace af::map
@@ -151,11 +152,7 @@ namespace af::map
 
         std::vector<GridResult> results(problem.n_points());
         std::vector<std::string> errors(problem.n_points());
-#ifdef _OPENMP
-        const int n_threads = threads > 0 ? threads : omp_get_max_threads();
-#else
-        (void)threads;
-#endif
+        [[maybe_unused]] const int n_threads = resolve_threads(threads);
 #pragma omp parallel for num_threads(n_threads) schedule(dynamic, 1)
         for (std::size_t point = 0; point < problem.n_points(); ++point) {
             try {

@@ -53,16 +53,6 @@ namespace af::map
                 throw std::invalid_argument{"cannot relax: fewer than 3 connected points"};
         }
 
-        int thread_count(int requested)
-        {
-#ifdef _OPENMP
-            return requested > 0 ? requested : omp_get_max_threads();
-#else
-            (void)requested;
-            return 1;
-#endif
-        }
-
         // Stable order: stress ascending, NaN last, ties by start index, so the result does
         // not depend on which thread finished first.
         void sort_by_stress(std::vector<Projection>& projections)
@@ -89,7 +79,7 @@ namespace af::map
         template <typename Body> void for_each_start(std::size_t n, int threads, Body body)
         {
             std::vector<std::string> errors(n);
-            [[maybe_unused]] const int n_threads = thread_count(threads);
+            [[maybe_unused]] const int n_threads = resolve_threads(threads);
 #pragma omp parallel for num_threads(n_threads) schedule(dynamic, 1)
             for (std::size_t i = 0; i < n; ++i) {
                 try {
@@ -105,6 +95,16 @@ namespace af::map
             }
         }
     } // namespace
+
+    int resolve_threads(int requested)
+    {
+#ifdef _OPENMP
+        return requested > 0 ? requested : omp_get_max_threads();
+#else
+        (void)requested;
+        return 1;
+#endif
+    }
 
     double randomisation_diameter(const Problem& problem, std::size_t dimensions, std::uint64_t seed, double multiplier)
     {

@@ -34,7 +34,7 @@ from .locations import ChineseLocations
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
 from .rules import Rules
-from .sheet import Sheet, SheetError, load
+from .sheet import Sheet, SheetError, apply_cell_fixes, load
 
 FORMAT_LABEL = "AC Excel format 2.1"
 ASSAYS = {"HI": "HI"}
@@ -87,7 +87,8 @@ class SheetReader:
             raise AC21Error(f"no lab_conventions rule for {lab}")
         self.date_order = convention["date_order"]
         self.passage_plus = convention["passage_plus"]
-        self.warnings: list[str] = []
+        # hand repairs to single cells, named and checked (af.tables.sheet.apply_cell_fixes)
+        self.warnings: list[str] = apply_cell_fixes(sheet, rules.cell_fixes, lab)
         self.dropped: Counter[str] = Counter()
         self.index_reordered = False
         self.test_year: int | None = None

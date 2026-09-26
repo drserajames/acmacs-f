@@ -50,7 +50,7 @@ from .cdc import ReadResult
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
 from .rules import Rules
-from .sheet import Sheet, SheetError, load
+from .sheet import Sheet, SheetError, apply_cell_fixes, load
 
 LAB_ID = r"\s*NIID-ID\s*"
 COLUMNS = ("Strains", "Passage History", "Sample date")
@@ -189,7 +189,8 @@ class SheetReader:
         if convention is None:
             raise NIIDError(f"no lab_conventions rule for {lab}")
         self.date_order = convention["date_order"]
-        self.warnings: list[str] = []
+        # hand repairs to single cells, named and checked (af.tables.sheet.apply_cell_fixes)
+        self.warnings: list[str] = apply_cell_fixes(sheet, rules.cell_fixes, lab)
         self.dropped: Counter[str] = Counter()
         self.no_year: dict[int, str] = {}  # serum column -> name written without a year
 

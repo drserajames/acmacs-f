@@ -30,7 +30,7 @@ from .cdc import LAB, ReadResult, _titre_order
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
 from .rules import Rules
-from .sheet import Sheet, SheetError, load
+from .sheet import Sheet, SheetError, apply_cell_fixes, load
 
 TITLE = r"HEMAGGLUTINATION INHIBITION REACTIONS OF INFLUENZA (.+) VIRUSES"
 TITLE_SUBTYPES = {
@@ -89,7 +89,8 @@ class SheetReader:
         self.s = sheet
         self.rules = rules
         self.passages = PassageParser(rules.passage_tokens, LAB)
-        self.warnings: list[str] = []
+        # hand repairs to single cells, named and checked (af.tables.sheet.apply_cell_fixes)
+        self.warnings: list[str] = apply_cell_fixes(sheet, rules.cell_fixes, LAB)
         self.dropped: Counter[str] = Counter()
         order = rules.lab_conventions.lookup(lab=LAB)
         if order is None:

@@ -267,3 +267,10 @@ def test_passage_count_with_nothing_to_repeat(rules):
     parser = PassageParser(rules.passage_tokens, "LABN")
     with pytest.raises(ValueError, match="nothing before"):
         niid.niid_passage("+1", parser)
+
+
+def test_cell_fixes_apply(tmp_path, rules):
+    """cell_fixes apply in the NIID reader too (a named, checked repair of one cell)."""
+    t = one_table(read(workbook(tmp_path / "labn-fix-20300102.xlsx"), rules))
+    assert t.titres[0][0] == ["1280"]
+    assert any("fixed as '1280'" in w for w in t.warnings)
