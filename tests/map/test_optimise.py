@@ -540,6 +540,8 @@ def test_group_pass_moves_a_block_the_plain_loop_leaves():
     assert kept[0].stress_after == pytest.approx(grouped.projection.stress)
     assert len(kept[0].shift) == 2
     assert grouped.projection.stress == pytest.approx(best.stress, rel=1e-4)
+    # the block is all antigens: composition reported, not flagged as mixed
+    assert (kept[0].n_antigens, kept[0].n_sera, kept[0].mixed) == (len(copies), 0, False)
     # last_grid describes the returned map
     fresh = opt.grid_test(block, grouped.projection.layout)
     assert [(r.diagnosis, r.stress_diff) for r in grouped.last_grid] == [
@@ -572,3 +574,39 @@ def test_group_tolerance_is_checked():
     problem, truth = synthetic_table(n_antigens=6, n_sera=3)
     with pytest.raises(ValueError, match="group_tolerance"):
         opt.resolve_trapped(problem, truth, move_groups=True, group_tolerance=0.0)
+
+
+def _groups_from(problem: MapProblem, layout: np.ndarray, members: list[int], shift: np.ndarray):
+    """Run the real grouping and move code on hand-made grid results in which `members` all
+    have a better position at the same displacement (a mixed trap is hard to build from a
+    table: a serum stuck with its antigens holds them in place, so their own grid tests
+    find nothing)."""
+    current = opt.Projection(layout, opt.stress(problem, layout), layout.shape[1], 0, 0, 0, 0)
+    grid = [
+        opt.GridResult(
+            point=i,
+            diagnosis="hemisphering",
+            position=layout[i] + shift,
+            distance=float(np.linalg.norm(shift)),
+            stress_diff=-0.1,
+        )
+        for i in members
+    ]
+    _, tried = opt._move_groups(problem, current, grid, opt.GROUP_TOLERANCE, "cg")
+    return tried
+
+
+def test_group_with_antigens_and_sera_is_flagged_mixed():
+    problem, _ = synthetic_table(n_antigens=10, n_sera=4, seed=3)
+    layout = opt.relax(problem, n_starts=5, seed=1).best.layout
+    antigens_and_serum = [2, 3, problem.n_antigens + 1]
+    (group,) = _groups_from(problem, layout, antigens_and_serum, np.array([1.0, -0.5]))
+    assert group.members == antigens_and_serum
+    assert (group.n_antigens, group.n_sera, group.mixed) == (2, 1, True)
+
+
+def test_group_of_antigens_only_is_not_flagged():
+    problem, _ = synthetic_table(n_antigens=10, n_sera=4, seed=3)
+    layout = opt.relax(problem, n_starts=5, seed=1).best.layout
+    (group,) = _groups_from(problem, layout, [2, 3, 7], np.array([1.0, -0.5]))
+    assert (group.n_antigens, group.n_sera, group.mixed) == (3, 0, False)

@@ -304,6 +304,11 @@ class GroupMove:
     stress_before: float
     stress_after: float  # after moving the group and re-minimising
     kept: bool  # only a move that lowers the stress is kept
+    n_antigens: int  # members that are antigens (point index < MapProblem.n_antigens)
+    n_sera: int  # members that are sera
+    # Antigens and sera moved together. Allowed, but flagged for review (Sarah, 26 Sep 2026):
+    # the groups measured so far were all antigens.
+    mixed: bool
 
 
 @dataclass(frozen=True)
@@ -342,7 +347,8 @@ def resolve_trapped(
     the stress is reported but never moved. ae then repeats the loop on an unchanged map
     until the rounds run out; here a round that moves nothing ends the loop.
 
-    ``move_groups`` (off by default; on is Sarah's decision) adds one pass at the end for a
+    ``move_groups`` (off by default here; the chains turn it on through their options, as
+    Sarah decided, 26 Sep 2026) adds one pass at the end for a
     blind spot ae shares: several points stuck together in a worse place. Each point's own
     gain is below the trap threshold, so none is trapped and the loop above never moves them.
     Points whose better positions share a displacement (within ``group_tolerance``) are
@@ -350,7 +356,9 @@ def resolve_trapped(
     the map can only improve. Measured (notes/optimiser/GROUP-TRAPS.md): on a CDC B/Vic map
     it found the misplaced block of six antigens unprompted, and three more, moved them to
     within 0.07 of ae's positions (map RMSD to ae 0.156 -> 0.063); it found no group in 72
-    other real maps; it costs about 0.1% of a chain step.
+    other real maps; it costs about 0.1% of a chain step. Each group tried is reported as a
+    :class:`GroupMove`, with ``mixed`` set when it holds both antigens and sera: allowed, but
+    to be flagged for review (Sarah); every group measured so far was all antigens.
     """
     _require_positive("max_rounds", max_rounds)
     if not group_tolerance > 0:
@@ -399,12 +407,32 @@ def _move_groups(
         trial[members] += shift
         result = optimise(problem, trial, method=method, precision="fine")
         kept = result.stress < current.stress - GROUP_MIN_GAIN
-        tried.append(
-            GroupMove(members, tuple(float(x) for x in shift), current.stress, result.stress, kept)
-        )
+        tried.append(_group_move(problem, members, shift, current.stress, result.stress, kept))
         if kept:
             current = result
     return current, tried
+
+
+def _group_move(
+    problem: MapProblem,
+    members: list[int],
+    shift: FloatArray,
+    stress_before: float,
+    stress_after: float,
+    kept: bool,
+) -> GroupMove:
+    n_antigens = sum(1 for point in members if point < problem.n_antigens)
+    n_sera = len(members) - n_antigens
+    return GroupMove(
+        members=members,
+        shift=tuple(float(x) for x in shift),
+        stress_before=stress_before,
+        stress_after=stress_after,
+        kept=kept,
+        n_antigens=n_antigens,
+        n_sera=n_sera,
+        mixed=n_antigens > 0 and n_sera > 0,
+    )
 
 
 def _displacement_groups(
