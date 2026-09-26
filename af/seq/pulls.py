@@ -39,8 +39,18 @@ SOURCE = "gisaid"
 #: The extractor's names: ``sequences/epiflu-<YYYY-MMDD>-<subtype>.fas.br`` for the kept
 #: FASTA, ``raw/epiflu-<subtype>-<YYYYMMDD>-<YYYYMMDD>.fasta`` and ``…-metadata.xls``
 #: for what GISAID delivered, and ``metadata/epiflu-<YYYY-MMDD>-<subtype>.rejoined.tsv``.
+#:
+#: A **targeted** fetch (named isolates, e.g. the tree outgroups) has no submission window, so
+#: its names carry a label instead: ``sequences/epiflu-<YYYY-MMDD>-targeted-<label>-<subtype>
+#: .fas.br``, ``raw/epiflu-targeted-<label>-<YYYYMMDD>-<subtype>.fasta`` and ``…-metadata.xls``,
+#: ``metadata/epiflu-<YYYY-MMDD>-targeted-<label>-<subtype>.rejoined.tsv``. The date is the
+#: run date, not a window, and nothing here treats it as one.
 _KEPT = re.compile(r"epiflu-(\d{4}-\d{4})-([a-z0-9]+)\.fas\.br")
+_KEPT_TARGETED = re.compile(
+    r"epiflu-(\d{4}-\d{4})-targeted-([a-z0-9]+(?:-[a-z0-9]+)*)-([a-z0-9]+)\.fas\.br"
+)
 _DELIVERED = "epiflu-{subtype}-*-{last}.fasta"
+_DELIVERED_TARGETED = "epiflu-targeted-{label}-{last}-{subtype}.fasta"
 _WORKBOOK_SUFFIX = "-metadata.xls"
 
 
@@ -73,21 +83,29 @@ def find_pulls(set_dir: Path, set_name: str) -> list[PullFiles]:
     """
     found = []
     for path in sorted((set_dir / "sequences").glob("*.fas.br")):
-        match = _KEPT.fullmatch(path.name)
-        if match is None:
+        if match := _KEPT.fullmatch(path.name):
+            stem, subtype = match.groups()
+            found.append(_pull_files(set_dir, set_name, stem, subtype, path))
+        elif match := _KEPT_TARGETED.fullmatch(path.name):
+            stem, label, subtype = match.groups()
+            found.append(_pull_files(set_dir, set_name, stem, subtype, path, label))
+        else:
             raise PullFilesError(f"{path}: not an extractor sequence file name")
-        stem, subtype = match.groups()
-        found.append(_pull_files(set_dir, set_name, stem, subtype, path))
     if not found:
         raise PullFilesError(f"{set_dir}/sequences: no .fas.br pulls")
     return found
 
 
 def _pull_files(
-    set_dir: Path, set_name: str, stem: str, subtype: str, sequences: Path
+    set_dir: Path, set_name: str, stem: str, subtype: str, sequences: Path, label: str = ""
 ) -> PullFiles:
     last = stem.replace("-", "")
-    delivered = sorted((set_dir / "raw").glob(_DELIVERED.format(subtype=subtype, last=last)))
+    pattern = (
+        _DELIVERED_TARGETED.format(label=label, last=last, subtype=subtype)
+        if label
+        else _DELIVERED.format(subtype=subtype, last=last)
+    )
+    delivered = sorted((set_dir / "raw").glob(pattern))
     if len(delivered) != 1:
         raise PullFilesError(
             f"{sequences.name}: expected one delivered FASTA ending {last} in {set_dir / 'raw'},"
@@ -96,9 +114,11 @@ def _pull_files(
     workbook = delivered[0].with_name(delivered[0].stem + _WORKBOOK_SUFFIX)
     if not workbook.is_file():
         raise PullFilesError(f"{sequences.name}: no metadata workbook {workbook}")
-    rejoined = set_dir / "metadata" / f"epiflu-{stem}-{subtype}.rejoined.tsv"
+    middle = f"targeted-{label}-" if label else ""
+    rejoined = set_dir / "metadata" / f"epiflu-{stem}-{middle}{subtype}.rejoined.tsv"
     return PullFiles(
-        pull_id=f"{set_name}-{stem}-{subtype}",
+        # the subtype stays the last token: af.seq.build reads it from there
+        pull_id=f"{set_name}-{stem}-{label + '-' if label else ''}{subtype}",
         subtype=subtype,
         sequences=sequences,
         delivered_fasta=delivered[0],

@@ -212,6 +212,30 @@ class TestRawPulls:
             ("definitive-2021-0312-h3n2", "epiflu-h3n2-20201213-20210312-metadata.xls", None)
         ]
 
+    def test_a_targeted_pull_is_found_by_its_label(self, tmp_path: Path) -> None:
+        root = extractor_set(tmp_path / "set", random.Random(1))
+        text = ">" + DEFLINE.format(name="A/EXAMPLETOWN/99/2010", epi="EPI_ISL_99", acc="EPI99")
+        text += "\nACGT\n"
+        (root / "raw" / "epiflu-targeted-example-roots-20260925-h3n2.fasta").write_text(text)
+        (root / "raw" / "epiflu-targeted-example-roots-20260925-h3n2-metadata.xls").write_bytes(
+            b"workbook"
+        )
+        (root / "sequences" / "epiflu-2026-0925-targeted-example-roots-h3n2.fas.br").write_bytes(
+            brotli.compress(text.encode())
+        )
+        found = {p.pull_id: p for p in pulls.find_pulls(root, "targeted")}
+        assert sorted(found) == ["targeted-2021-0312-h3n2", "targeted-2026-0925-example-roots-h3n2"]
+        pull = found["targeted-2026-0925-example-roots-h3n2"]
+        assert pull.subtype == "h3n2" and pull.pull_id.rsplit("-", 1)[-1] == "h3n2"
+        assert pull.workbook.name == "epiflu-targeted-example-roots-20260925-h3n2-metadata.xls"
+
+    def test_a_targeted_pull_without_its_workbook_is_fatal(self, tmp_path: Path) -> None:
+        root = extractor_set(tmp_path / "set", random.Random(1))
+        (root / "raw" / "epiflu-targeted-roots-20260925-b.fasta").write_text(">x\nACGT\n")
+        (root / "sequences" / "epiflu-2026-0925-targeted-roots-b.fas.br").write_bytes(b"")
+        with pytest.raises(pulls.PullFilesError, match="no metadata workbook"):
+            pulls.find_pulls(root, "targeted")
+
     def test_a_pull_without_its_delivered_fasta_is_fatal(self, tmp_path: Path) -> None:
         root = extractor_set(tmp_path / "set", random.Random(1))
         (root / "raw" / "epiflu-h3n2-20201213-20210312.fasta").unlink()
