@@ -527,15 +527,12 @@ def _one_sided(slot: str, antigens: dict[str, Any], sera: dict[str, Any]) -> lis
     out = []
     for group, g in (("antigens", antigens), ("sera", sera)):
         for side in ("ref", "new"):
-            kinds = (
+            kinds = [
                 (f"only_{side}_keys", f"only in {side}"),
                 (f"in_frame_only_{side}_keys", f"inside the frame only in {side}"),
-            )
+            ]
             if group == "antigens":
-                kinds = (
-                    *kinds,
-                    (f"vaccine_only_{side}_keys", f"marked as a vaccine only in {side}"),
-                )
+                kinds.append((f"vaccine_only_{side}_keys", f"marked as a vaccine only in {side}"))
             for field_name, what in kinds:
                 keys = g.get(field_name, [])
                 if keys:
