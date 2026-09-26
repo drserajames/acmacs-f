@@ -83,12 +83,26 @@ class AC21Inputs:
 
 
 @dataclass(frozen=True)
+class VIDRLInputs:
+    """A folder of VIDRL workbooks: as AC21Inputs, plus the flu type, which VIDRL's sheets do
+    not state (``subtype`` "A(H1N1)", "A(H3N2)" or "B"; ``lineage`` for B)."""
+
+    lab: str
+    dir: Path
+    start: str  # ISO date
+    subtype: str
+    lineage: str = ""
+    exclude: list[str] = field(default_factory=list)  # file names
+
+
+@dataclass(frozen=True)
 class TablesSettings:
     rules: Path
     run: str  # work-area key for this run's state, e.g. "cdc/all" (one run publishes many groups)
     cdc: CDCInputs | None = None
     ac21: list[AC21Inputs] = field(default_factory=list)
     niid: list[AC21Inputs] = field(default_factory=list)  # NIID's own layout (af.tables.niid)
+    vidrl: list[VIDRLInputs] = field(default_factory=list)  # VIDRL's layout (af.tables.vidrl)
     locations: LocationSources | None = None
 
 
@@ -169,11 +183,19 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
         _add_workbooks(
             inputs, files, niid.read(files, rules, lab=inputs.lab), tables, report, errors
         )
+    for vinputs in settings.vidrl:
+        from . import vidrl
+
+        files = _dated_files(vinputs)
+        result = vidrl.read(
+            files, rules, lab=vinputs.lab, subtype=vinputs.subtype, lineage=vinputs.lineage
+        )
+        _add_workbooks(vinputs, files, result, tables, report, errors)
     return tables, report, errors
 
 
 def _add_workbooks(
-    inputs: AC21Inputs,
+    inputs: AC21Inputs | VIDRLInputs,
     files: list[Path],
     result: cdc.ReadResult,
     tables: list[Table],
@@ -205,7 +227,7 @@ def _file_date(path: Path) -> str | None:
     return dt.date(int(m[1]), int(m[2]), int(m[3])).isoformat() if m else None
 
 
-def _dated_files(inputs: AC21Inputs) -> list[Path]:
+def _dated_files(inputs: AC21Inputs | VIDRLInputs) -> list[Path]:
     """Workbooks in the folder dated on or after ``start``; Excel lock files (~$) are not
     workbooks. A workbook whose name carries no date is an error, not silently skipped."""
     if not inputs.dir.is_dir():
@@ -263,7 +285,8 @@ def _input_files(settings: TablesSettings) -> list[Path]:
         files += [settings.cdc.tsv, *settings.cdc.xlsx, *settings.cdc.season]
     if settings.locations:
         files += [settings.locations.locdb, settings.locations.chinese_aliases]
-    for inputs in [*settings.ac21, *settings.niid]:
+    folders: list[AC21Inputs | VIDRLInputs] = [*settings.ac21, *settings.niid, *settings.vidrl]
+    for inputs in folders:
         files += _dated_files(inputs)
     return files
 

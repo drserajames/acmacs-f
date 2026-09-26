@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .rules import RuleTable
+
 _WS = re.compile(r"\s+")
 
 
@@ -55,6 +57,47 @@ class Sheet:
 
 class SheetError(ValueError):
     pass
+
+
+def apply_cell_fixes(sheet: Sheet, fixes: RuleTable, lab: str) -> list[str]:
+    """Apply ``cell_fixes`` rows for this workbook and sheet; return one warning per fix.
+
+    A fix names the cell (``B12``) and what it must hold now (``raw``): when the cell holds
+    something else, the workbook has changed under the rule and that is an error, not a
+    silent overwrite. Each row is a hand repair someone would otherwise have made in the
+    file itself, kept where it can be counted and reviewed."""
+    warnings = []
+    for rule in fixes.rules:
+        if not fixes.in_scope(rule, lab=lab):
+            continue
+        if rule["file"] != sheet.path.name or rule["sheet"] != sheet.name:
+            continue
+        r, c = _cell_ref(rule["cell"])
+        if sheet.cell(r, c) != rule["raw"]:
+            raise SheetError(
+                f"{sheet.where(r, c)}: {rule.where} expects {rule['raw']!r}, "
+                f"the cell holds {sheet.cell(r, c)!r}"
+            )
+        while len(sheet.rows) <= r:
+            sheet.rows.append([])
+        row = sheet.rows[r]
+        row.extend([""] * (c + 1 - len(row)))
+        row[c] = rule["value"]
+        rule.hits += 1
+        warnings.append(
+            f"{sheet.where(r, c)}: {rule['raw']!r} fixed as {rule['value']!r} by {rule.where}"
+        )
+    return warnings
+
+
+def _cell_ref(ref: str) -> tuple[int, int]:
+    m = re.fullmatch(r"([A-Z]+)([1-9]\d*)", ref.strip().upper())
+    if m is None:
+        raise SheetError(f"not a cell reference: {ref!r}")
+    c = 0
+    for ch in m[1]:
+        c = c * 26 + ord(ch) - ord("A") + 1
+    return int(m[2]) - 1, c - 1
 
 
 def load(path: Path) -> list[Sheet]:

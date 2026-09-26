@@ -87,7 +87,7 @@ def parse(
     else:
         problems.append(f"name {raw!r}: {len(middle)} fields between type and year")
         location, isolate = middle[0], "-".join(middle[1:])
-    location = location.replace("-", " ").strip()
+    location = re.sub(r"[-_]", " ", location).strip()  # "-" and "_" (GISAID-style) as spaces
     isolate = isolate.lstrip("0") or isolate  # "02" -> "2"
     name = Name("/".join((prefix, location, isolate, year)), problems=problems)
     for part in (extra, paren):
