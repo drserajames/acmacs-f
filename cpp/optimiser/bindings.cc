@@ -280,6 +280,10 @@ PYBIND11_MODULE(_core, m)
         py::arg("titre_value"), py::arg("titre_type"), py::arg("minimum") = 0.0, "Column bases as ae computes them unforced (tests only).");
 
     m.def(
+        "resolve_threads", [](int requested) { return resolve_threads(requested); }, py::arg("requested"),
+        "Threads a run with `threads=requested` uses (0: OpenMP's default, which honours OMP_NUM_THREADS).");
+
+    m.def(
         "start_seed", [](std::uint64_t seed, std::uint64_t index) { return start_seed(seed, index); }, py::arg("seed"), py::arg("index"));
 
 #ifdef _OPENMP
