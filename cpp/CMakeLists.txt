@@ -61,5 +61,23 @@ endif()
 find_package(Python 3.11 REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 CONFIG REQUIRED)
 
+# --- OpenMP from a given prefix (macOS) ----------------------------------------
+# A process must hold ONE OpenMP runtime: a second libomp aborts it ("OMP: Error #15").
+# In a conda env, numpy's OpenBLAS already uses the env's libomp (llvm-openmp), so the
+# optimiser must link that same one, not Homebrew's. AF_OPENMP_PREFIX (set by
+# tools/make-release.py to the release's env) is searched first; when it is set and
+# OpenMP isn't there, that is an error, not a silent fallback to another copy.
+set(AF_OPENMP_PREFIX "" CACHE PATH "prefix holding include/omp.h and lib/libomp (macOS)")
+if(APPLE AND AF_OPENMP_PREFIX)
+  if(NOT EXISTS "${AF_OPENMP_PREFIX}/include/omp.h")
+    message(FATAL_ERROR "AF_OPENMP_PREFIX=${AF_OPENMP_PREFIX} has no include/omp.h")
+  endif()
+  set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp -I${AF_OPENMP_PREFIX}/include")
+  set(OpenMP_CXX_LIB_NAMES "omp")
+  set(OpenMP_omp_LIBRARY "${AF_OPENMP_PREFIX}/lib/libomp.dylib")
+  find_package(OpenMP REQUIRED COMPONENTS CXX)
+  message(STATUS "af: OpenMP from AF_OPENMP_PREFIX (${OpenMP_omp_LIBRARY})")
+endif()
+
 # --- the optimiser (workstream 6) ----------------------------------------------
 add_subdirectory(optimiser)
