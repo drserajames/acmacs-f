@@ -251,3 +251,10 @@ def test_no_excluded_file_is_written_when_nothing_was_dropped(tmp_path: Path) ->
     i6.write(populate(tree, "h3", records(), states_for(ids)), tmp_path, "weekly")
     assert not (tmp_path / i6.EXCLUDED_FILE).exists()
     assert i6.read_excluded(tmp_path) == []
+
+
+def test_a_continent_outside_the_legend_is_refused() -> None:
+    """GISAID's region names are not the figure's vocabulary; grey without a word is a bug."""
+    tree, ids = built()
+    with pytest.raises(PopulateError, match="outside the figure's legend"):
+        populate(tree, "h3", records(), states_for(ids), continent_of=lambda r: r.region)

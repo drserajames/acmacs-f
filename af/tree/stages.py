@@ -33,10 +33,12 @@ places change often (a corrected date, a new location alias) and none of them af
 they are an input of populate, not of build. The pre-build drops are recorded by leaf key and named
 at populate, which does read the metadata.
 
-Task 5.1 (export) is blocked on the sequence store, so the pipeline starts from its two outputs,
-given in config: the aligned FASTA keyed by leaf key (:func:`af.tree.populate.leaf_key`), and the
-leaf records as Parquet (:func:`write_leaves` defines the columns). When export exists it becomes
-the producer of those two files, and nothing downstream changes.
+The pipeline starts from export's files (:mod:`af.tree.export`, task 5.1): the aligned FASTA keyed
+by leaf key (:func:`af.tree.populate.leaf_key`), the leaf records as Parquet (:func:`write_leaves`
+defines the columns), and ``export.json``. Given ``export``, the build checks the other two are its
+files and records the sequence-store version it names; that version is an input of the published
+tree and is what the clades step's fallback labels from. Without it (hand-made inputs) the tree
+records no sequence version and the clades step labels the tree's leaves only.
 """
 
 from __future__ import annotations
@@ -68,6 +70,7 @@ from af.tree.asr.base import AncestralStates
 from af.tree.build import build, prune_starting_tree
 from af.tree.clock import apply_flags, find_outliers
 from af.tree.config import JOB_STAGES, SubtypeSettings, TreeSettings
+from af.tree.export import check_matches, read_export
 from af.tree.io import i6, newick
 from af.tree.io.fasta import read_alignment, write_alignment
 from af.tree.model import Tree
@@ -90,6 +93,16 @@ the tree version (workstream 4's af.clades.from_tree), reading the clades popula
 
 STATE_DIR = "state"
 
+CONTINENT_NOT_ASSIGNED = (
+    "no country -> continent table yet (workstream 2, rules/locations/countries.tsv); every leaf's "
+    "continent is null and draws grey"
+)
+"""Recorded in tree.json's counts, so a figure with no continent colours says why."""
+
+TEST_PURPOSE = "test"
+"""A test-only export (a stand-in outgroup) publishes only under a purpose starting with this:
+weekly and report trees are read by people, and must never be rooted on a stand-in."""
+
 CODE_VERSION = 1
 """Bump when a stage's code changes what it writes, so existing records stop counting."""
 
@@ -110,6 +123,12 @@ class SubtypeInputs:
     """Aligned FASTA keyed by leaf key: export's output (task 5.1)."""
     leaves: Path
     """Leaf records, Parquet, as :func:`write_leaves` writes them: export's other output."""
+    export: Path | None = None
+    """``export.json`` from :mod:`af.tree.export`, which wrote ``alignment`` and ``leaves``. The
+    build checks both are its files, and the sequence-store version it names goes into build.json,
+    the tree's provenance and the clades step (whose fallback labels the sequences not on the
+    tree from that same version). Absent: hand-made inputs, and the tree records no sequence
+    version, which build.json says."""
     previous: Path | None = None
     """The last finished tree. The long-branch rule is measured on it (Sarah, 25 Sep: long
     branches leave before the build), and with ``incremental`` CMAPLE starts from it. Absent on a
@@ -180,6 +199,7 @@ LEAF_SCHEMA = pa.schema(
         ("collection_date_last", pa.date32()),
         ("country", pa.string()),
         ("region", pa.string()),
+        ("embargoed", pa.bool_()),
     ]
 )
 """The leaf records export hands to populate. The sequence is not here: it is in the alignment,
@@ -414,6 +434,8 @@ def _build_step(
     layout: Layout,
 ) -> Step:
     named: dict[str, Path] = {"alignment": inputs.alignment}
+    if inputs.export is not None:
+        named["export"] = inputs.export
     if inputs.previous is not None:
         named["previous"] = inputs.previous
     cmaple = settings.cmaple_for(subtype)
@@ -437,6 +459,7 @@ def _build_step(
     def action(context: StepContext) -> None:
         out = layout.stage(BUILD)
         out.mkdir(parents=True, exist_ok=True)
+        source = _checked_export(subtype, sub, inputs)
         exclude, not_dropped = _prebuild(sub, inputs, rule)
         starting = None
         if inputs.incremental:
@@ -465,6 +488,7 @@ def _build_step(
             "prebuild": exclude.counts,
             "prebuild_not_applied": not_dropped,
             "excluded": exclude.records(),
+            "source": source,
         }
         layout.build_meta.write_text(json.dumps(meta, indent=1, default=str) + "\n")
 
@@ -479,6 +503,49 @@ def _build_step(
             Artefact(layout.build_meta, parse=_parse_json),
         ],
     )
+
+
+def _checked_export(
+    subtype: str, sub: SubtypeSettings, inputs: SubtypeInputs
+) -> dict[str, Any] | None:
+    """What build.json records about the export, after checking the inputs are its files."""
+    if inputs.export is None:
+        return None
+    record = read_export(inputs.export)
+    check_matches(record, inputs.alignment, inputs.leaves)
+    if record.outgroup != sub.outgroup:
+        raise StageError(
+            f"{subtype}: the export's outgroup {record.outgroup!r} is not the tree config's "
+            f"{sub.outgroup!r}; the tree would be rooted on a sequence the rules did not pin"
+        )
+    _refuse_test_only(subtype, {"test_only": record.test_only}, inputs.purpose)
+    return {
+        "sequences": record.sequences.to_json(),
+        "leaves": record.leaves,
+        "embargoed": record.embargoed,
+        "test_only": record.test_only,
+        "export": str(inputs.export),
+    }
+
+
+def _refuse_test_only(subtype: str, source: Mapping[str, Any] | None, purpose: str) -> None:
+    """Checked at build, so a mislabelled run fails before CMAPLE, and again at publish."""
+    if source is not None and source["test_only"] and not purpose.startswith(TEST_PURPOSE):
+        raise StageError(
+            f"{subtype}: a test-only export ({source['test_only']}) publishes only under a "
+            f"purpose starting with {TEST_PURPOSE!r}, not {purpose!r}"
+        )
+
+
+def build_source(layout: Layout) -> dict[str, Any] | None:
+    """build.json's record of the export (None for hand-made inputs)."""
+    source: dict[str, Any] | None = json.loads(layout.build_meta.read_text()).get("source")
+    return source
+
+
+def _source_sequences(layout: Layout) -> StoreRef | None:
+    source = build_source(layout)
+    return None if source is None else StoreRef.from_json(source["sequences"])
 
 
 def _prebuild(
@@ -613,12 +680,16 @@ def _populate_step(
             branch_scale=sub.scale,
             backend=get_backend(sub.asr_backend),
             assign_clades=None if clades is None else af_clades_assigner(clades.load()),
-            continent_of=lambda record: record.region,
+            # No continent until WS2's country -> continent table exists (rules/locations/
+            # countries.tsv, Q55-Q57): GISAID's region is not the legend's vocabulary, and a
+            # region -> legend map would still misplace Russia, the Middle East and Central America.
+            continent_of=None,
             outgroup=sub.outgroup,
             excluded=excluded,
         )
+        populated.counts["continent_not_assigned"] = CONTINENT_NOT_ASSIGNED
         apply_flags(populated, find_outliers(populated, clock))
-        i6.write(populated, out, inputs.purpose)
+        i6.write(populated, out, inputs.purpose, build_source(layout))
 
     return Step(
         name=POPULATE,
@@ -649,7 +720,15 @@ def _publish_step(
     def action(_: StepContext) -> None:
         started = datetime.datetime.now(datetime.UTC)
         store = Store.open(store_root)
-        provenance_inputs = [ExternalInput.of(inputs.alignment), ExternalInput.of(inputs.leaves)]
+        source = build_source(layout)
+        _refuse_test_only(subtype, source, inputs.purpose)
+        provenance_inputs: list[StoreRef | ExternalInput] = [
+            ExternalInput.of(inputs.alignment),
+            ExternalInput.of(inputs.leaves),
+        ]
+        sequences = _source_sequences(layout)
+        if sequences is not None:
+            provenance_inputs.append(sequences)
         if clades is not None:
             provenance_inputs.append(clades.provenance())
         with store.build(KIND, f"{subtype}/{inputs.purpose}") as builder:
@@ -659,6 +738,8 @@ def _publish_step(
                 "leaves": meta["leaves"],
                 "internal_nodes": meta["internal_nodes"],
                 "branch_scale": meta["branch_scale"],
+                "embargoed_leaves": meta["embargoed_leaves"],
+                "test_only": None if source is None else source["test_only"],
             }
             provenance = Provenance(
                 step=f"{KIND}.{PUBLISH}",
@@ -674,7 +755,7 @@ def _publish_step(
     return Step(
         name=PUBLISH,
         action=action,
-        inputs={"i6": layout.i6},
+        inputs={"i6": layout.i6, "build_meta": layout.build_meta},
         parameters={"code_version": CODE_VERSION, "purpose": inputs.purpose},
         # The I6 directory is not itself a declared output, so the driver cannot infer this.
         after=[POPULATE],
@@ -697,6 +778,7 @@ def _clades_step(clades: CladeSource, layout: Layout, store_root: Path) -> Step:
             clades.load(),
             nomenclature=[clades.provenance()],
             started=started,
+            sequences=_source_sequences(layout),
         )
         written.parent.mkdir(parents=True, exist_ok=True)
         written.write_text(json.dumps(ref.to_json(), indent=1, sort_keys=True) + "\n")
@@ -704,7 +786,11 @@ def _clades_step(clades: CladeSource, layout: Layout, store_root: Path) -> Step:
     return Step(
         name=CLADES,
         action=action,
-        inputs={"tree_ref": layout.published, "clades": clades.subclades},
+        inputs={
+            "tree_ref": layout.published,
+            "clades": clades.subclades,
+            "build_meta": layout.build_meta,
+        },
         parameters={"code_version": CODE_VERSION, "clade_set_version": clades.version},
         outputs=[Artefact(written, parse=_parse_json)],
     )

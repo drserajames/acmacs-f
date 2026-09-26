@@ -64,6 +64,7 @@ NODE_SCHEMA = pa.schema(
         ("country", pa.string()),
         ("region", pa.string()),
         ("continent", pa.string()),
+        ("embargoed", pa.bool_()),  # leaf under a GISAID publishing embargo (null: not recorded)
         ("clade", pa.string()),  # every node, from workstream 4's engine
         ("clade_support", pa.int32()),
         ("clade_unobservable", pa.int32()),
@@ -118,6 +119,7 @@ def node_table(populated: PopulatedTree) -> pa.Table:
         rows["country"].append(record.country if record else None)
         rows["region"].append(record.region if record else None)
         rows["continent"].append(populated.continents.get(key) if key else None)
+        rows["embargoed"].append(record.embargoed if record else None)
         rows["clade"].append(call.clade if call else None)
         rows["clade_support"].append(call.support if call else None)
         rows["clade_unobservable"].append(call.unobservable if call else None)
@@ -131,8 +133,12 @@ def node_table(populated: PopulatedTree) -> pa.Table:
     return pa.table(rows, schema=NODE_SCHEMA)
 
 
-def metadata(populated: PopulatedTree, purpose: str) -> dict[str, Any]:
+def metadata(
+    populated: PopulatedTree, purpose: str, source: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """tree.json. ``source``: where the leaves came from (af.tree.export's record), or None."""
     leaves, internal = populated.tree.count()
+    on_tree = [populated.leaves.get(leaf.name or "") for leaf in populated.tree.leaves()]
     states = populated.states
     return {
         "format": FORMAT,
@@ -158,10 +164,17 @@ def metadata(populated: PopulatedTree, purpose: str) -> dict[str, Any]:
         "clade_set_version": populated.clade_set_version,
         "clade_parents": dict(sorted(populated.clade_parents.items())),
         "counts": dict(sorted(populated.counts.items())),
+        "embargoed_leaves": sum(1 for record in on_tree if record and record.embargoed),
+        "source": None if source is None else dict(source),
     }
 
 
-def write(populated: PopulatedTree, directory: Path, purpose: str) -> list[Path]:
+def write(
+    populated: PopulatedTree,
+    directory: Path,
+    purpose: str,
+    source: Mapping[str, Any] | None = None,
+) -> list[Path]:
     """Write one version's files into ``directory`` (which must exist). Returns the paths."""
     directory = Path(directory)
     tree_path = directory / TREE_FILE
@@ -188,7 +201,9 @@ def write(populated: PopulatedTree, directory: Path, purpose: str) -> list[Path]
         excluded_path.write_text(json.dumps(populated.excluded, indent=1, default=str) + "\n")
         written.append(excluded_path)
     meta_path = directory / META_FILE
-    meta_path.write_text(json.dumps(metadata(populated, purpose), indent=1, default=str) + "\n")
+    meta_path.write_text(
+        json.dumps(metadata(populated, purpose, source), indent=1, default=str) + "\n"
+    )
     written.append(meta_path)
     return written
 
