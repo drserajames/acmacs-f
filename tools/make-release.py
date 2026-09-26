@@ -130,14 +130,21 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
     for tool in ("cmake", "ninja"):
         run([str(env / "bin" / tool), "--version"], build_env)
     step(f"installing af (non-editable, extras {args.extras}) with {build_env.get('CXX', 'c++')}")
+    # On macOS, link the optimiser to the env's own libomp: numpy's OpenBLAS already loads
+    # it, and a second libomp copy (e.g. Homebrew's) aborts the process at run time.
+    openmp: list[str] = []
+    if platform.system() == "Darwin":
+        openmp = [f"--config-settings=cmake.define.AF_OPENMP_PREFIX={env}"]
     run(
-        [python, "-m", "pip", "install", "--no-build-isolation", f"{src}[{args.extras}]"],
+        [python, "-m", "pip", "install", "--no-build-isolation", *openmp, f"{src}[{args.extras}]"],
         build_env,
         cwd=release,
     )
 
     step("verifying")
     verify_imports(release)
+    verify_linkage(release)
+    verify_one_openmp(python, build_env)
     with tempfile.TemporaryDirectory() as scratch:
         smoke = [python, "-m", "af.run.smoke", "--local", "--work-dir", scratch]
         run(smoke, build_env, cwd=scratch)
@@ -184,6 +191,79 @@ def verify_imports(release: Path) -> None:
     outside = [line for line in lines if not Path(line).resolve().is_relative_to(release)]
     if len(lines) != 2 or outside:
         raise SystemExit(f"af does not import from inside {release}: {lines}")
+
+
+def verify_linkage(release: Path) -> None:
+    """af's compiled extensions may link nothing outside the release or the operating system.
+
+    A library from anywhere else (e.g. /opt/homebrew) means the release is not
+    self-contained, and may be a second copy of something the env already provides.
+    A scan that finds no extension, or reads no libraries from one, fails: a check that
+    examined nothing must not pass.
+    """
+    extensions = sorted((release / "env" / "lib").glob("python3.*/site-packages/af/**/*.so"))
+    if not extensions:
+        raise SystemExit(f"no compiled af extension found in {release}: cannot check linkage")
+    darwin = platform.system() == "Darwin"
+    system = (
+        ("/usr/lib/", "/System/", "@rpath/", "@loader_path/")
+        if darwin
+        else ("/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/")
+    )
+    for extension in extensions:
+        libraries = _linked_libraries(extension, darwin)
+        if not libraries:
+            raise SystemExit(f"read no linked libraries from {extension}: cannot check linkage")
+        foreign = [
+            lib
+            for lib in libraries
+            if not lib.startswith(system) and not Path(lib).resolve().is_relative_to(release)
+        ]
+        if foreign:
+            raise SystemExit(
+                f"{extension.name} links libraries from outside the release: {foreign}"
+            )
+
+
+def _linked_libraries(extension: Path, darwin: bool) -> list[str]:
+    tool = ["otool", "-L"] if darwin else ["ldd"]
+    lines = capture([*tool, str(extension)], {"PATH": "/usr/bin:/bin"}).splitlines()
+    if darwin:
+        return [line.split()[0] for line in lines[1:] if line.strip()]
+    paths = [line.split("=>")[-1].split()[0] for line in lines if "=>" in line]
+    return [path for path in paths if path.startswith("/")]
+
+
+OPENMP_PROBE = """
+import numpy as np
+from af.map.optimise import MapProblem, TitreType, relax
+a = np.random.default_rng(0).random((600, 600)); a @ a   # numpy's BLAS starts its threads
+rng = np.random.default_rng(1)
+truth = rng.uniform(-4, 4, (30, 2)); d = np.linalg.norm(truth[:24, None] - truth[None, 24:], axis=2)
+cb = rng.uniform(6, 9, 6); v = np.round(cb[None] - d)
+t = np.full(v.shape, TitreType.REGULAR, dtype=np.int8)
+p = MapProblem(titre_value=v, titre_type=t, column_bases=cb,
+               disconnected=np.zeros(30, dtype=bool), dodgy_is_regular=False)
+relax(p, n_starts=8, seed=1, threads=4)                  # and the optimiser starts its own
+print("one OpenMP runtime")
+"""
+
+
+def verify_one_openmp(python: str, env: dict[str, str]) -> None:
+    """numpy's BLAS threads and the optimiser's threads in one process must not abort.
+
+    Two OpenMP runtimes in one process abort it ("OMP: Error #15", exit 134). Imports
+    alone don't show it; only running both thread pools does, so run both.
+    """
+    with tempfile.TemporaryDirectory() as scratch:
+        result = subprocess.run(
+            [python, "-I", "-c", OPENMP_PROBE], env=env, cwd=scratch, capture_output=True, text=True
+        )
+    if result.returncode != 0:
+        raise SystemExit(
+            f"numpy + optimiser threads in one process failed (exit {result.returncode}); "
+            f"two OpenMP runtimes? {result.stderr.strip()[-400:]}"
+        )
 
 
 def write_release_file(
