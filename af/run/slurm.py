@@ -78,6 +78,7 @@ class SlurmRunner:
     max_array_size: int | None = None
     sbatch: str = "sbatch"
     scancel: str = "scancel"
+    sacct: str = "sacct"
     _active: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
     _lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False, compare=False
@@ -150,17 +151,62 @@ class SlurmRunner:
                 self._active.discard(name)
         (batch / "sbatch.out").write_text(submitted.stdout + submitted.stderr)
         log.info("sbatch exited %d for %s", submitted.returncode, batch.name)
-        if submitted.returncode != 0 and not any(
-            _status_path(batch, i).exists() for i in range(len(jobs))
-        ):
-            # sbatch itself failed (rejected, or not installed): no task ran.
+        job_id = _job_id(submitted.stdout)
+        if submitted.returncode != 0 and job_id is None:
+            # No job id printed: sbatch itself failed (rejected, or not installed), no task ran.
+            # (With a job id, a nonzero exit means a task failed or was killed, e.g. at its
+            # time limit, which SLURM reports this way without any status file.)
             reason = f"sbatch failed ({submitted.returncode}): {submitted.stderr.strip()}"
             return [Failure(job, reason) for job in jobs]
         self._wait_for_files(batch, jobs)
-        return [
+        outcomes = [
             finish(job, _read_status(_status_path(batch, index)), started)
             for index, job in enumerate(jobs)
         ]
+        return self._explain_kills(outcomes, job_id)
+
+    def _explain_kills(
+        self, outcomes: list[JobResult | Failure], job_id: str | None
+    ) -> list[JobResult | Failure]:
+        """Add SLURM's own state (TIMEOUT, OUT_OF_MEMORY, …) to tasks that left no status.
+
+        Best effort: without sacct, or when accounting doesn't answer, the reason stays
+        "no exit status recorded", which is still a failure.
+        """
+        killed = [
+            i
+            for i, o in enumerate(outcomes)
+            if isinstance(o, Failure) and o.reason.startswith("no exit status")
+        ]
+        if not killed or job_id is None:
+            return outcomes
+        states = self._task_states(job_id)
+        for index in killed:
+            state = states.get(index)
+            if state:
+                failure = outcomes[index]
+                assert isinstance(failure, Failure)
+                outcomes[index] = Failure(failure.job, f"{failure.reason} [SLURM state {state}]")
+        return outcomes
+
+    def _task_states(self, job_id: str) -> dict[int, str]:
+        """Array task index -> SLURM state, from sacct; empty if it can't be read."""
+        try:
+            result = subprocess.run(
+                [self.sacct, "-X", "-n", "-P", "-j", job_id, "--format=JobID,State"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return {}
+        states: dict[int, str] = {}
+        for line in result.stdout.splitlines():
+            ident, _, state = line.partition("|")
+            head, _, index = ident.partition("_")
+            if head == job_id and index.isdigit():
+                states[int(index)] = state.split()[0] if state else ""
+        return states
 
     def _sbatch_argv(self, jobs: list[Job], batch: Path, script: Path) -> list[str]:
         resources = jobs[0].resources
@@ -202,6 +248,15 @@ class SlurmRunner:
             time.sleep(1)
 
 
+def _job_id(stdout: str) -> str | None:
+    """The job id sbatch --parsable prints on submission ("123" or "123;cluster")."""
+    for line in stdout.splitlines():
+        head = line.strip().split(";")[0]
+        if head.isdigit():
+            return head
+    return None
+
+
 def _job_name(jobs: list[Job], batch: Path) -> str:
     """Unique per submission (the batch id), so scancel --name hits exactly these jobs."""
     first = jobs[0].name if len(jobs) == 1 else f"{jobs[0].name}+{len(jobs) - 1}"
@@ -211,7 +266,9 @@ def _job_name(jobs: list[Job], batch: Path) -> str:
 def _write_task_script(batch: Path, index: int, job: Job) -> None:
     """The wrapper: run the command with its log, then record its exit status."""
     status = _status_path(batch, index)
-    exports = "".join(f"export {name}={shlex.quote(value)}\n" for name, value in job.env.items())
+    exports = "".join(
+        f"export {name}={shlex.quote(value)}\n" for name, value in job.environment().items()
+    )
     script = (
         "#!/bin/sh\n"
         f"# af job: {job.name}\n"
