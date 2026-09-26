@@ -18,6 +18,7 @@ def workbook(
     letters_above: bool = False,
     pool_serum: bool = False,
     serum_label: str = "REFERENCE ANTISERA",
+    repeat: bool = False,
 ) -> Path:
     """A 'RUN' sheet: title, date, serum letters, antigen block, antisera block, RBC footer."""
     wb = openpyxl.Workbook()
@@ -53,6 +54,15 @@ def workbook(
         (4, "S2(04/23/2030)", "A/EXAMPLEOTHER/03/2030", 9000000003, "2030-03-19", [320, 320, 20]),
         (5, "", "KIT-1820 CONTROL ANTIGEN", None, None, ["<20", "<20", "<20"]),
     ]
+    if repeat:  # the test virus again on the next row, as CDC sheets sometimes list it
+        rows[-1] = (
+            5,
+            "S2(04/23/2030)",
+            "A/EXAMPLEOTHER/03/2030",
+            9000000003,
+            "2030-03-19",
+            [640, 160, 20],
+        )
     for r, (no, passage, name, cdc_id, collected, titres) in enumerate(rows, start=9):
         ws.cell(r, 1, no)
         ws.cell(r, 2, passage)
@@ -157,3 +167,17 @@ def test_non_titre_sheet_is_reported_not_silently_skipped(tmp_path: Path, rules:
     assert len(res.tables) == 1 and res.skipped_tests == [
         "run.xlsx[Sheet1]!1: no REFERENCE VIRUSES label, not a titre sheet"
     ]
+
+
+def test_a_repeated_row_merges_into_one_antigen(tmp_path: Path, rules: Rules):
+    """As the TSV reader does: one antigen, every row's readings (a chart cannot hold two
+    points with one identity)."""
+    res = cdc_xlsx.read([workbook(tmp_path / "t.xlsx", repeat=True)], rules)
+    assert res.errors == []
+    (table,) = res.tables
+    names = [a.name for a in table.antigens]
+    assert names.count("A(H3N2)/EXAMPLEOTHER/3/2030") == 1
+    i = names.index("A(H3N2)/EXAMPLEOTHER/3/2030")
+    assert table.titres[i] == [["320", "640"], ["160", "320"]]
+    assert table.dropped["antigens: repeated rows merged"] == 1
+    assert any("readings merged" in w for w in table.warnings)
