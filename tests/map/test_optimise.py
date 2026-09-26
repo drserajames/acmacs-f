@@ -610,3 +610,47 @@ def test_group_of_antigens_only_is_not_flagged():
     layout = opt.relax(problem, n_starts=5, seed=1).best.layout
     (group,) = _groups_from(problem, layout, [2, 3, 7], np.array([1.0, -0.5]))
     assert (group.n_antigens, group.n_sera, group.mixed) == (3, 0, False)
+
+
+# ---------------------------------------------------------------------------------------
+# threads actually used
+
+
+def test_resolved_thread_count_is_recorded():
+    problem, truth = synthetic_table(n_antigens=10, n_sera=4)
+    expected = 2 if opt._core.openmp else 1
+    assert opt.relax(problem, n_starts=4, seed=1, threads=2).threads == expected
+    assert opt.resolve_trapped(problem, truth, threads=2).threads == expected
+    assert opt.threads_used("test", 0) >= 1
+
+
+_INHERITED_ONE_THREAD = """
+import logging, sys
+import numpy as np
+from af.map import optimise as opt
+from af.map.optimise import MapProblem
+logging.basicConfig(level=logging.WARNING, stream=sys.stderr, format="%(levelname)s %(message)s")
+rng = np.random.default_rng(1)
+value = np.round(rng.uniform(0, 6, (8, 4)))
+kind = np.ones((8, 4), dtype=np.int8)
+problem = MapProblem(value, kind, np.full(4, 7.0), np.zeros(12, dtype=bool), dodgy_is_regular=False)
+print("threads=0", opt.relax(problem, n_starts=2, seed=1, threads=0).threads)
+print("threads=2", opt.relax(problem, n_starts=2, seed=1, threads=2).threads)
+"""
+
+
+def test_inherited_omp_num_threads_is_warned_about():
+    """An HPC login environment with OMP_NUM_THREADS=1, inherited by jobs, made threads=0 run
+    single-threaded with no sign. It must show in the result and in a warning; an explicit
+    thread count must still win."""
+    if not opt._core.openmp or opt.available_cpus() < 2:
+        pytest.skip("needs an OpenMP build and at least 2 CPUs")
+    env = dict(os.environ, OMP_NUM_THREADS="1")
+    result = subprocess.run(
+        [sys.executable, "-c", _INHERITED_ONE_THREAD], capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.split() == ["threads=0", "1", "threads=2", "2"]
+    assert "threads=0 resolved to 1 thread(s)" in result.stderr
+    assert "OMP_NUM_THREADS=1" in result.stderr
+    assert result.stderr.count("WARNING") == 1
