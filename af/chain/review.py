@@ -44,6 +44,8 @@ def build_review(chain_root: Path, thresholds: Thresholds = THRESHOLDS) -> Path:
     prev_chart: Chart | None = None
     key = ""
     warnings = {t["table_id"]: t.get("warnings", []) for t in doc["config"]["tables"]}
+    repeat_drops = {t["table_id"]: t.get("repeat_drops", []) for t in doc["config"]["tables"]}
+    dropped_before: set[str] = set()
     for s in doc["steps"]:
         d = chain_root / s["directory"]
         names = ("merge.ace", "incremental.ace", "scratch.ace", "chosen.ace", "step.json")
@@ -54,6 +56,15 @@ def build_review(chain_root: Path, thresholds: Thresholds = THRESHOLDS) -> Path:
         record["table_warnings"] = warnings.get(s["table_id"], [])  # current, not from the step
         if record["table_warnings"]:
             record["flags"].append(f"{len(record['table_warnings'])} table warnings")
+        # Missing titres a merge rule made (sd_limit, `<` meeting `>`): within the table's own
+        # repeats, and across tables where first dropped at this step. Reported, not changed.
+        record["repeat_drops"] = repeat_drops.get(s["table_id"], [])
+        if record["repeat_drops"]:
+            record["flags"].append(f"{len(record['repeat_drops'])} cells dropped within the table")
+        dropped_now = {c["cell"] for c in record["diagnostics"].get("dropped_cells", [])}
+        if newly := dropped_now - dropped_before:
+            record["flags"].append(f"{len(newly)} cells newly dropped by the merge")
+        dropped_before = dropped_now
         key = _sha(key, sha256_path(d / "chosen.ace"), _sha(record_text))
         thumb = out / "thumbs" / f"{s['index']:04d}-{key[:16]}.png"
         chart = read_chart(d / "chosen.ace")
@@ -271,6 +282,26 @@ def _step_row(s: dict, r: dict, thumb: Path) -> str:
             ),
             _details("disconnected", [_e(x) for x in d.get("disconnected", [])]),
             _details("table warnings", [_e(x) for x in r["table_warnings"]]),
+            _details("cells dropped within the table", [_e(x) for x in r.get("repeat_drops", [])]),
+            _details(
+                "cells dropped by the merge",
+                [
+                    _e(f"{c['cell']}: {' '.join(c['readings'])} → * ({c['outcome']})")
+                    for c in d.get("dropped_cells", [])
+                ],
+            ),
+            _details(
+                "control-chart flags new at this step (hicontrol)",
+                [
+                    _e(f"{c['rule']}: {c['cell']}: {' '.join(c['readings'])}")
+                    + (
+                        " (continuous titres: trend/alternation not tested)"
+                        if c["continuous"]
+                        else ""
+                    )
+                    for c in d.get("control_flags", [])
+                ],
+            ),
         ]
     )
     flag_html = "".join(f'<span class="flag">{_e(f)}</span>' for f in step_flags)

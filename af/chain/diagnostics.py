@@ -9,13 +9,16 @@ fact: the measurement.
 from __future__ import annotations
 
 import math
+import statistics
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
+import af.chart.control as control
 from af.chart.model import Chart
 from af.chart.procrustes import procrustes
+from af.chart.titre import Titre, TitreType
 
 # what a step records (lower than any sensible flag threshold)
 RECORD_MOVED = 0.5  # map units between consecutive steps
@@ -58,6 +61,8 @@ def flags(d: dict[str, Any], t: Thresholds = THRESHOLDS) -> list[str]:
         out.append(f"{len(slack)} sera with column-basis slack ≥ {t.column_basis_slack}")
     if trapped := d.get("trapped"):  # after the core's trapped-point loop, any left is a problem
         out.append(f"{trapped} trapped")
+    if new_control := d.get("control_flags"):  # already only the ones this step completes
+        out.append(f"{len(new_control)} new control-chart flags")
     for g in d.get("group_moves", []):  # a group move changed the map: say so, one flag each
         if g["kept"]:
             # Sarah, 26 Sep 2026: groups may mix antigens and sera, but a mixed one is flagged as
@@ -72,6 +77,79 @@ def flags(d: dict[str, Any], t: Thresholds = THRESHOLDS) -> list[str]:
                 f"(stress {g['stress_after'] - g['stress_before']:+.2f})"
             )
     return out  # hemisphering is listed in the details but not flagged: most maps have some
+
+
+def _cell_readings(chart: Chart, i: int, j: int) -> list[Titre]:
+    """One cell's readings, one per layer (table) that has it, in table order."""
+    return [layer[(i, j)] for layer in chart.titres.layers or [] if (i, j) in layer]
+
+
+def _dropped_cells(chart: Chart, dropped: list[tuple[int, int, str]]) -> list[dict]:
+    """Cells the layer merge turned into `*` although they have readings, and why."""
+    return [
+        {
+            "cell": f"{_names(chart, [i])[0]} × {_names(chart, [chart.n_antigens + j])[0]}",
+            "readings": [str(t) for t in _cell_readings(chart, i, j)],
+            "outcome": outcome,
+        }
+        for i, j, outcome in dropped
+    ]
+
+
+# hicontrol (af.chart.control) on the series of readings of a cell across tables. Measurement
+# only (Sarah, Q64, 26 Sep 2026: "just measure at present, keep sd_limit"): nothing here changes
+# a titre. As in hicontrol's ref_panel_plot: centre = median, threshold = 1 log2 unit.
+CONTROL_MIN_N = 5
+# Trend 4 and alternation 10 compare successive readings exactly; continuous titres (off the
+# two-fold series, e.g. HINT) almost never tie, so these fire by chance there (CONTROL-VS-SD.md).
+EXACT_COMPARISON_RULES = (5, 6)  # indices into control.RULE_NAMES: "alt 10", "trend 4"
+# Rules that flag single readings ("1 >=3", "2/3 >=2", "diff of 3") are new whenever their count
+# rises: each new outlier is news. Run rules are new only when they first fire for the cell, or a
+# run that grows by one point would be reported again at every step.
+POINT_RULES = (0, 1, 7)
+
+
+def _two_fold(t: Titre) -> bool:
+    return t.type != TitreType.REGULAR or math.log2(t.value / 10).is_integer()
+
+
+def _rules_firing(series: list[Titre], skip: tuple[int, ...]) -> dict[int, int]:
+    dat = control.log_num([str(t) for t in series])
+    finite = [v for v in dat if not math.isnan(v)]
+    result = control.hi_rules(dat, statistics.median(finite) if finite else 0.0, 1.0)
+    return {k: c for k, c in enumerate(result.counts) if c and k not in skip}
+
+
+def control_flags(chart: Chart, min_n: int = CONTROL_MIN_N) -> list[dict]:
+    """Control-chart rules this step's table newly completes: fired on the cell's series with
+    the new table's reading, not without it. Each flag is reported once, where it appears."""
+    layers = chart.titres.layers or []
+    if len(layers) < 2:
+        return []
+    out = []
+    for i, j in sorted(layers[-1]):
+        series = _cell_readings(chart, i, j)
+        if len(series) < min_n:
+            continue
+        continuous = not all(_two_fold(t) for t in series)
+        skip = EXACT_COMPARISON_RULES if continuous else ()
+        now = _rules_firing(series, skip)
+        before = _rules_firing(series[:-1], skip) if len(series) - 1 >= min_n else {}
+        new = [
+            k
+            for k, count in now.items()
+            if k not in before or (k in POINT_RULES and count > before[k])
+        ]
+        for k in sorted(new):
+            out.append(
+                {
+                    "rule": control.RULE_NAMES[k],
+                    "cell": f"{_names(chart, [i])[0]} × {_names(chart, [chart.n_antigens + j])[0]}",
+                    "readings": [str(t) for t in series],
+                    "continuous": continuous,
+                }
+            )
+    return out
 
 
 def group_moves(chart: Chart, groups: list[dict] | None) -> list[dict]:
@@ -148,6 +226,9 @@ def step_diagnostics(
             {"serum": n, "slack": slack[j]} for j, n in zip(slack, names, strict=True)
         ]
         d["sd_too_big_cells"] = report.outcomes.get("sd-too-big", 0)
+        d["dropped_cells"] = _dropped_cells(chosen, report.dropped)
+        if not report.cheating_assay:  # a skipped table adds no layer, so no new readings
+            d["control_flags"] = control_flags(chosen)
     if optimiser is not None and arrays is not None and cfg.options.grid_test:
         gt = optimiser.grid_test(best.layout, arrays)
         d["grid_test"] = [{**g, "name": _names(chosen, [g["point"]])[0]} for g in gt]
