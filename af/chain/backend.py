@@ -20,7 +20,13 @@ class Optimiser(Protocol):
     key: str  # the name `python -m af.chain.starts` knows it by
 
     def optimise(
-        self, arrays: dict, n_starts: int, dim: int, seed: int, start_layout: np.ndarray | None
+        self,
+        arrays: dict,
+        n_starts: int,
+        dim: int,
+        seed: int,
+        start_layout: np.ndarray | None,
+        move_groups: bool = False,
     ) -> list[MapResult]: ...
 
     def relax_chunk(
@@ -34,7 +40,7 @@ class Optimiser(Protocol):
     ) -> list[MapResult]: ...
 
     def combine(
-        self, arrays: dict, chunks: list[MapResult], incremental: bool
+        self, arrays: dict, chunks: list[MapResult], incremental: bool, move_groups: bool = False
     ) -> list[MapResult]: ...
 
     def grid_test(self, layout: np.ndarray, arrays: dict) -> list[dict]: ...
@@ -92,7 +98,7 @@ class CoreOptimiser:
             termination=r["termination"],
         )
 
-    def optimise(self, arrays, n_starts, dim, seed, start_layout):
+    def optimise(self, arrays, n_starts, dim, seed, start_layout, move_groups=False):
         from af.map.optimise import relax
 
         problem = self._problem(arrays)
@@ -105,7 +111,7 @@ class CoreOptimiser:
             keep=None,
             threads=self.threads,
         )
-        return self._resolve(problem, [self._as_dict(p) for p in result.projections])
+        return self._resolve(problem, [self._as_dict(p) for p in result.projections], move_groups)
 
     def relax_chunk(self, arrays, first_start, n_starts, dim, seed, start_layout):
         """One job's share of a map's starts. Incremental chunks stay rough: the fine stage
@@ -125,20 +131,32 @@ class CoreOptimiser:
         )
         return [self._as_dict(p) for p in result.projections]
 
-    def combine(self, arrays, chunks, incremental):
+    def combine(self, arrays, chunks, incremental, move_groups=False):
         from af.map.optimise import refine, sort_projections
 
         problem = self._problem(arrays)
         projections = sort_projections([self._as_projection(r) for r in chunks])
         if incremental:
             projections = refine(problem, projections, n_best=5, threads=self.threads)
-        return self._resolve(problem, [self._as_dict(p) for p in projections])
+        return self._resolve(problem, [self._as_dict(p) for p in projections], move_groups)
 
-    def _resolve(self, problem: Any, maps: list[MapResult]) -> list[MapResult]:
+    def _resolve(self, problem: Any, maps: list[MapResult], move_groups: bool) -> list[MapResult]:
         from af.map.optimise import resolve_trapped
 
-        fixed = resolve_trapped(problem, maps[0]["layout"], threads=self.threads)
-        if fixed.moved:
+        fixed = resolve_trapped(
+            problem, maps[0]["layout"], threads=self.threads, move_groups=move_groups
+        )
+        groups = [
+            {
+                "members": [int(m) for m in g.members],
+                "shift": [float(x) for x in g.shift],
+                "stress_before": float(g.stress_before),
+                "stress_after": float(g.stress_after),
+                "kept": bool(g.kept),
+            }
+            for g in fixed.groups
+        ]
+        if fixed.moved or any(g["kept"] for g in groups):
             p = fixed.projection
             maps[0] = {
                 **maps[0],
@@ -148,6 +166,9 @@ class CoreOptimiser:
                 "resolved_moves": fixed.moved,
             }
             maps.sort(key=lambda r: r["stress"])
+        if move_groups:  # recorded on the best map, also when no group was found
+            best = min(range(len(maps)), key=lambda i: maps[i]["stress"])
+            maps[best] = {**maps[best], "resolved_groups": groups}
         return maps
 
     def grid_test(self, layout, arrays):
@@ -172,7 +193,7 @@ class StubOptimiser:
     name = "stub-numpy-gradient-descent"
     key = "stub"
 
-    def optimise(self, arrays, n_starts, dim, seed, start_layout):
+    def optimise(self, arrays, n_starts, dim, seed, start_layout, move_groups=False):
         return self.relax_chunk(arrays, 0, n_starts, dim, seed, start_layout)
 
     def relax_chunk(self, arrays, first_start, n_starts, dim, seed, start_layout):
@@ -188,7 +209,7 @@ class StubOptimiser:
             first_start=first_start,
         )
 
-    def combine(self, arrays, chunks, incremental):
+    def combine(self, arrays, chunks, incremental, move_groups=False):
         return sorted(chunks, key=lambda r: (r["stress"], r["start_seed"]))
 
     def grid_test(self, layout, arrays):

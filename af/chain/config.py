@@ -51,9 +51,26 @@ class MapOptions:
     sd_limit: float = 1.0
     grid_test: bool = True
     code_version: int = 1  # bump to force every step to be remade after a code change
+    # Group-aware trap pass after the trapped-point loop (af.map.optimise.resolve_trapped;
+    # Sarah, Q61, 26 Sep 2026). Moves points stuck together in a worse place; changes maps.
+    move_groups: bool = False
 
     def __post_init__(self) -> None:
         ColumnBasisConvention(self.column_bases)  # raises on an unknown convention
+
+
+# Options added after chains were first published, with the value that reproduces them. They
+# enter a step's parameters (and chain.json) only when set otherwise, so adding one neither
+# reruns nor republishes existing chains.
+LATER_OPTIONS = {"move_groups": False}
+
+
+def option_parameters(options: MapOptions) -> dict[str, Any]:
+    params = asdict(options)
+    for name, old in LATER_OPTIONS.items():
+        if params[name] == old:
+            del params[name]
+    return params
 
 
 @dataclass(frozen=True)
@@ -195,7 +212,7 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
         "seed": cfg.seed,
         "first_map": None if cfg.first_map is None else str(cfg.first_map),
         "tables_source": cfg.tables_source,
-        "options": asdict(cfg.options),
+        "options": option_parameters(cfg.options),
         "tables": [
             {
                 "table_id": t.table_id,

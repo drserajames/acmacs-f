@@ -8,6 +8,7 @@ fact: the measurement.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,7 +58,39 @@ def flags(d: dict[str, Any], t: Thresholds = THRESHOLDS) -> list[str]:
         out.append(f"{len(slack)} sera with column-basis slack ≥ {t.column_basis_slack}")
     if trapped := d.get("trapped"):  # after the core's trapped-point loop, any left is a problem
         out.append(f"{trapped} trapped")
+    for g in d.get("group_moves", []):  # a group move changed the map: say so, one flag each
+        if g["kept"]:
+            # Sarah, 26 Sep 2026: groups may mix antigens and sera, but a mixed one is flagged as
+            # such: a serum carried along by antigens whose titres to it are being fitted.
+            mixed = (
+                f"MIXED ({g['antigens']} antigens, {g['sera']} sera) "
+                if g.get("sera") and g.get("antigens")
+                else ""
+            )
+            out.append(
+                f"{mixed}group of {g['size']} moved {g['distance']:.2f} "
+                f"(stress {g['stress_after'] - g['stress_before']:+.2f})"
+            )
     return out  # hemisphering is listed in the details but not flagged: most maps have some
+
+
+def group_moves(chart: Chart, groups: list[dict] | None) -> list[dict]:
+    """The trapped loop's group moves (`move_groups`), in reader's terms: which points, how far
+    they moved together, and what it did to the stress. Kept moves changed the map."""
+    return [
+        {
+            "size": len(g["members"]),
+            "antigens": sum(1 for m in g["members"] if m < chart.n_antigens),
+            "sera": sum(1 for m in g["members"] if m >= chart.n_antigens),
+            "distance": math.hypot(*g["shift"]),
+            "shift": g["shift"],
+            "stress_before": g["stress_before"],
+            "stress_after": g["stress_after"],
+            "kept": g["kept"],
+            "points": _names(chart, g["members"]),
+        }
+        for g in groups or []
+    ]
 
 
 def _names(chart: Chart, points: Any) -> list[str]:

@@ -26,15 +26,15 @@ import logging
 import shutil
 import sys
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from af.chain.backend import Optimiser, default_optimiser
-from af.chain.config import ChainConfig, TableRef, config_to_json
-from af.chain.diagnostics import step_diagnostics
+from af.chain.config import ChainConfig, TableRef, config_to_json, option_parameters
+from af.chain.diagnostics import group_moves, step_diagnostics
 from af.chain.starts import read_result, write_problem
 from af.chart.ace import read_chart, read_json, write_chart
 from af.chart.merge import ColumnBasisConvention, MergeOptions, MergeType, merge
@@ -95,9 +95,12 @@ class Mapper:
         dim: int,
         seed: int,
         start_layout: np.ndarray | None,
+        move_groups: bool = False,
     ) -> list[dict]:
         if self.split is None or self.split.chunks <= 1:
-            return self.optimiser.optimise(arrays, n_starts, dim, seed, start_layout)
+            return self.optimiser.optimise(
+                arrays, n_starts, dim, seed, start_layout, move_groups=move_groups
+            )
         work = self.split.work_dir / label
         if work.exists():
             shutil.rmtree(work)
@@ -134,7 +137,9 @@ class Mapper:
             )
         runner.run_many(jobs)
         chunks = [m for job in jobs for m in read_result(Path(job.outputs[0].path))]
-        return self.optimiser.combine(arrays, chunks, incremental=start_layout is not None)
+        return self.optimiser.combine(
+            arrays, chunks, incremental=start_layout is not None, move_groups=move_groups
+        )
 
 
 def _chunks(n: int, k: int) -> list[tuple[int, int]]:
@@ -170,7 +175,7 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
     merged_tables = cfg.tables if cfg.first_map else cfg.tables[1:]
     common = {
         "chain": cfg.name,
-        "options": asdict(cfg.options),
+        "options": option_parameters(cfg.options),
         "optimiser": mapper.optimiser.name,
         "seed": cfg.seed,
     }
@@ -328,7 +333,10 @@ def _map_chart(chart: Chart, projections: list[Projection]) -> Chart:
 
 def _loop(maps: list[dict]) -> dict:
     best = min(maps, key=lambda r: r["stress"])
-    return {"rounds": best.get("resolved_rounds", 0), "moves": best.get("resolved_moves", 0)}
+    loop = {"rounds": best.get("resolved_rounds", 0), "moves": best.get("resolved_moves", 0)}
+    if "resolved_groups" in best:
+        loop["groups"] = best["resolved_groups"]
+    return loop
 
 
 def _write_step_record(directory: Path, record: dict) -> None:
@@ -370,7 +378,14 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
     )
     seed = _step_seed(cfg, 0, [t.path])
     all_maps = mapper.make(
-        runner, f"{cfg.name}/0000/scratch", arrays, o.scratch_starts, o.dimensions, seed, None
+        runner,
+        f"{cfg.name}/0000/scratch",
+        arrays,
+        o.scratch_starts,
+        o.dimensions,
+        seed,
+        None,
+        move_groups=o.move_groups,
     )
     chart = _map_chart(
         table,
@@ -390,7 +405,10 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
         "start_stresses": {"scratch": [r["stress"] for r in all_maps]},
         "trapped_loop": {"scratch": _loop(all_maps)},
     }
-    record["diagnostics"] = step_diagnostics(chart, None, None, None, arrays, optimiser, cfg)
+    diagnostics = step_diagnostics(chart, None, None, None, arrays, optimiser, cfg)
+    if o.move_groups:
+        diagnostics["group_moves"] = group_moves(chart, _loop(all_maps).get("groups"))
+    record["diagnostics"] = diagnostics
     _write_step_record(directory, record)
 
 
@@ -417,10 +435,24 @@ def _merge_step(
     start[arrays["disconnected"]] = np.nan
     label = f"{cfg.name}/{index:04d}"
     all_incremental = mapper.make(
-        runner, f"{label}/incremental", arrays, o.incremental_starts, o.dimensions, seed, start
+        runner,
+        f"{label}/incremental",
+        arrays,
+        o.incremental_starts,
+        o.dimensions,
+        seed,
+        start,
+        move_groups=o.move_groups,
     )
     all_scratch = mapper.make(
-        runner, f"{label}/scratch", arrays, o.scratch_starts, o.dimensions, seed ^ 0x5DEECE66D, None
+        runner,
+        f"{label}/scratch",
+        arrays,
+        o.scratch_starts,
+        o.dimensions,
+        seed ^ 0x5DEECE66D,
+        None,
+        move_groups=o.move_groups,
     )
     inc_chart = _map_chart(
         merged,
@@ -467,9 +499,13 @@ def _merge_step(
             "column_basis_slack": {str(k): v for k, v in report.column_basis_slack.items()},
         },
     }
-    record["diagnostics"] = step_diagnostics(
+    diagnostics = step_diagnostics(
         chosen, previous, inc_chart, scr_chart, arrays, optimiser, cfg, report
     )
+    if o.move_groups:
+        chosen_maps = all_incremental if chosen_name == "incremental" else all_scratch
+        diagnostics["group_moves"] = group_moves(chosen, _loop(chosen_maps).get("groups"))
+    record["diagnostics"] = diagnostics
     _write_step_record(directory, record)
 
 
