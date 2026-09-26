@@ -37,7 +37,7 @@ from __future__ import annotations
 import csv
 import re
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -308,8 +308,19 @@ def read_lab_submitters(path: Path) -> dict[str, frozenset[str]]:
         raise ValueError(f"{path}: rows without a reason: {unexplained}")
     out: dict[str, set[str]] = defaultdict(set)
     for row in rows:
-        out[row["lab"].strip().lower()].add(row["submitting_lab"])
+        out[row["lab"].strip()].add(row["submitting_lab"])  # the tables' lab code, exactly
     return {lab: frozenset(names) for lab, names in out.items()}
+
+
+def check_lab_codes(table: Mapping[str, object], labs: Iterable[str], what: str) -> None:
+    """Every lab a rule table names must be a lab code the tables use, exactly as written.
+
+    A lab key the tables never use (a different case, a typo) makes its rule silently do
+    nothing: the matcher looks the antigen's lab up exactly.
+    """
+    known = set(labs)
+    if unknown := sorted(set(table) - known):
+        raise ValueError(f"{what}: lab(s) {unknown} are not table lab codes {sorted(known)}")
 
 
 def check_lab_submitters(
