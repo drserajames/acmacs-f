@@ -85,6 +85,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+JOB_MODULE = "af.tree.stages"
+"""What a stage job runs with ``python -m``. Not ``__name__``: a driver started as
+``python -m af.tree.stages`` is ``__main__``, and a job told ``-m __main__`` fails at once."""
+
 KIND = "trees"
 BUILD, ASR, POPULATE, PUBLISH, CLADES = "build", "asr", "populate", "publish", "clades"
 STAGES = (BUILD, ASR, POPULATE, PUBLISH, CLADES)
@@ -406,7 +410,7 @@ def _as_job(step: Step, subtype: str, settings: TreeSettings, layout: Layout, co
         directory.mkdir(parents=True, exist_ok=True)
         job = Job.python_module(
             f"tree-{subtype}-{stage}",
-            __name__,
+            JOB_MODULE,
             ["--job", stage, "--subtype", subtype, config],
             cwd=directory,
             log=directory / "job.log",
