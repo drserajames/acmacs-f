@@ -24,7 +24,8 @@ Refusals, each because the alternative is a table that looks right and is not:
 from __future__ import annotations
 
 import datetime
-from collections.abc import Iterable, Mapping
+import json
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,9 @@ from af.clades.assign import Assignment
 from af.clades.fallback import StoreFallback, assign_from_store, disagreements
 from af.clades.nomenclature import CladeSet
 from af.clades.store import CladeRow, CladeStoreError, dataset_for, publish, rows_from_assignments
+from af.seq.processed import read_table
 from af.store import ExternalInput, Store, StoreRef
+from af.store.ref import StoreError
 from af.tree.io import i6
 from af.tree.populate import leaf_key
 
@@ -147,6 +150,7 @@ def publish_clades(
             raise CladeStoreError(f"{tree}: expected a tree-store version, got kind {tree.kind!r}")
         directory = store.resolve(tree, verify=True)
         rows = rows_from_tree(directory, subtype, clade_set)
+        check_tree_identities(store, tree, rows)
         report = _tree_report(tree, i6.read_metadata(directory), i6.read_excluded(directory))
         inputs.append(tree)
     if sequences is not None:
@@ -171,6 +175,48 @@ def publish_clades(
         extra_inputs=inputs[1:],
         extra_report=report,
     )
+
+
+def check_tree_identities(store: Store, tree: StoreRef, rows: Sequence[CladeRow]) -> StoreRef:
+    """Refuse a tree whose leaf ids were never taken from the sequence store.
+
+    Leaf ids that merely look well formed prove nothing: a tree imported from outside af
+    can carry stand-in ids, and a clade table keyed by them would replace the real one
+    and match nothing in any join. So the tree must name, in its ``PROVENANCE.json``
+    ``inputs``, a store input of kind ``sequences``; that version must still be in this
+    store; and every leaf must be one of its sequences. Returns that sequence version.
+    """
+    provenance = json.loads((store.resolve(tree) / "PROVENANCE.json").read_text())
+    named = [
+        StoreRef.from_json(item["store"])
+        for item in provenance.get("inputs", [])
+        if isinstance(item, dict) and item.get("store", {}).get("kind") == "sequences"
+    ]
+    if len(named) != 1:
+        raise CladeStoreError(
+            f"{tree}: PROVENANCE.json 'inputs' must name exactly one store input of kind "
+            f"'sequences' (the version its leaves were read from); found {len(named)}. "
+            "A tree not built from the sequence store has no checked sequence identities."
+        )
+    sequences = named[0]
+    try:
+        store.resolve(sequences)
+    except StoreError as error:
+        raise CladeStoreError(
+            f"{tree}: its sequences input {sequences.dataset}@{sequences.version} is not in "
+            f"this store ({error})"
+        ) from error
+    table = read_table(store, sequences, "sequences", ["epi_isl", "accession"])
+    known = set(zip(table["epi_isl"].to_pylist(), table["accession"].to_pylist(), strict=True))
+    unknown = [
+        (row.epi_isl, row.accession) for row in rows if (row.epi_isl, row.accession) not in known
+    ]
+    if unknown:
+        raise CladeStoreError(
+            f"{tree}: {len(unknown)} of {len(rows)} leaves are not sequences of "
+            f"{sequences.dataset}@{sequences.version}, e.g. {unknown[:3]}"
+        )
+    return sequences
 
 
 def _with_fallback(

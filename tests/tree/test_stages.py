@@ -8,6 +8,7 @@ for real.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import json
 import shutil
 import stat
@@ -19,12 +20,18 @@ import pytest
 
 from af.run import Job, LocalRunner, Resources
 from af.run.job import JobResult
-from af.store import Store
+from af.seq import processed
+from af.seq import select as S
+from af.seq.dates import parse as parse_date
+from af.store import Store, StoreRef
 from af.store.work import Work
+from af.tree import export as E
 from af.tree import stages
 from af.tree.io import i6
 from af.tree.io.fasta import write_alignment
 from tests.clades.synthetic import build_clone, commit_command, write_clade
+from tests.clades.test_fallback_store import raw_dataset
+from tests.seq.test_store_build import aligned, record
 
 from .tree_fixtures import KEYS, LEAF_SEQ, records
 
@@ -78,6 +85,58 @@ leaves = "leaves.parquet"
 """
     )
     return root / "trees.toml"
+
+
+OUTGROUP = S.Outgroup("EPI_ISL_900000", "EPI900000", "invented outgroup")
+
+
+def fill(store: Store, *, ragged: bool = False, nextclade: StoreRef | None = None) -> None:
+    """The five fixture leaves as a sequence-store version; ``c`` embargoed, ``b`` year-only."""
+    recs, found = [], {}
+    for index, name in enumerate("oabcd"):
+        rec = record(
+            index,
+            epi_isl=f"EPI_ISL_90000{index}",
+            accession=f"EPI90000{index}",
+            collection_date=parse_date("2021" if name == "b" else f"202{index}-01-15"),
+            embargoed_until="2031-01-01" if name == "c" else "",
+        )
+        recs.append(rec)
+        sequence = LEAF_SEQ[name] + ("A" if ragged and name == "d" else "")
+        found[rec.epi_isl] = aligned(rec, nucleotides=sequence, clade="P", subclade="P")
+    found = {processed.seq_id(r): found[r.epi_isl] for r in recs}
+    processed.publish_pull(
+        store, "h3", "p1", processed.isolates_table(recs, "h3", "p1"),
+        processed.sequences_table(recs, found, "p1"), inputs=[nextclade] if nextclade else [],
+        parameters={}, started=datetime.datetime.now(datetime.UTC),
+    )  # fmt: skip
+
+
+def rules(outgroup: S.Outgroup = OUTGROUP) -> S.SubtypeRules:
+    return S.SubtypeRules(
+        "h3", outgroup, [S.Rule("host", "host", "human only", optional=True, allow=["Human"])]
+    )
+
+
+def exported_project(root: Path, *, test_only: bool = False, purpose: str | None = None) -> Path:
+    """make_project's config, its inputs replaced by an export from its own store."""
+    config = make_project(root)
+    store = Store.open(root / "store")
+    # The dataset the clades step's fallback reads the stored calls from (tests/clades/synthetic).
+    fill(store, nextclade=raw_dataset(store, "synthetic", "P"))
+    extra = {}
+    if test_only:
+        extra["test_only"] = E.TestOnly(OUTGROUP, "stand-in for the test")
+    E.export(store, "h3", rules(), root / "export", **extra)
+    text = config.read_text().replace(
+        'alignment = "alignment.fasta"\nleaves = "leaves.parquet"\n',
+        'alignment = "export/alignment.fasta"\nleaves = "export/leaves.parquet"\n'
+        'export = "export/export.json"\n',
+    )
+    if purpose is not None:
+        text += f'purpose = "{purpose}"\n'
+    config.write_text(text)
+    return config
 
 
 def statuses(config_path: Path) -> dict[str, str]:
@@ -207,7 +266,8 @@ def with_clades(config: Path, pin: str | None = None) -> None:
 
 
 def test_the_clades_step_publishes_clades_from_the_tree_version(tmp_path: Path) -> None:
-    config = make_project(tmp_path / "p")
+    # WS4 labels only a tree whose leaves it can find in a sequence version.
+    config = exported_project(tmp_path / "p")
     with_clades(config)
     assert statuses(config) == dict.fromkeys((*TREE_STEPS, "clades"), "ran")
     store = Store.open(tmp_path / "p" / "store")
@@ -221,7 +281,8 @@ def test_a_pin_move_re_runs_populate_publish_and_clades_in_order(tmp_path: Path)
 
     The new commit changes no subclade file, so only the pin (a parameter) says anything moved.
     """
-    config = make_project(tmp_path / "p")
+    # WS4 labels only a tree whose leaves it can find in a sequence version.
+    config = exported_project(tmp_path / "p")
     with_clades(config)
     statuses(config)
     clone = tmp_path / "p" / "clones" / "synthetic_HA"
@@ -240,14 +301,16 @@ def test_a_pin_move_re_runs_populate_publish_and_clades_in_order(tmp_path: Path)
 
 
 def test_a_pin_the_clone_is_not_at_is_refused(tmp_path: Path) -> None:
-    config = make_project(tmp_path / "p")
+    # WS4 labels only a tree whose leaves it can find in a sequence version.
+    config = exported_project(tmp_path / "p")
     with_clades(config, pin="0000000")
     with pytest.raises(Exception, match="not the pinned"):
         stages.run(config)
 
 
 def test_a_new_clade_file_re_runs_populate(tmp_path: Path) -> None:
-    config = make_project(tmp_path / "p")
+    # WS4 labels only a tree whose leaves it can find in a sequence version.
+    config = exported_project(tmp_path / "p")
     with_clades(config)
     statuses(config)
     clone = tmp_path / "p" / "clones" / "synthetic_HA"

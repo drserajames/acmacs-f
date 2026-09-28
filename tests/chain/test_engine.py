@@ -244,3 +244,19 @@ def test_moved_store_and_tables_rerun_nothing(tables, tmp_path):
     shutil.move(tables, tmp_path / "moved-tables")
     again = run(config(tmp_path / "moved-tables"), tmp_path / "moved-store")
     assert reused(again) == [True] * 4
+
+
+def test_run_toml_can_pin_the_interpreter(tables, tmp_path):
+    import sys
+
+    from af.chain.__main__ import main
+    from af.run.runtime import WrongInterpreter, require_python
+    from af.store.work import Work
+
+    Work.create(tmp_path / "work")
+    other = tmp_path / "python"
+    other.write_text("")
+    (tmp_path / "run.toml").write_text(f'python = "{other}"\n' + RUN_TOML)
+    with pytest.raises(WrongInterpreter):
+        main([str(chain_toml(tmp_path)), str(tmp_path / "run.toml")])
+    require_python(sys.executable)  # the interpreter running this test passes its own pin

@@ -650,3 +650,41 @@ def test_sibling_clade_tags_are_ambiguous_not_picked(monkeypatch: pytest.MonkeyP
     canon = res["clade"]["canonical"]
     assert canon["ambiguous"] == {"H.2|J.2": 4} and canon["ambiguous_leaves"] == 4
     assert res["clade"]["label_agreement"] == 6 / 10  # the 4 are not silently counted as H.2 or J.2
+
+
+def test_vaccine_marked_on_one_side_only_is_listed(tmp_path: Path) -> None:
+    from af.report.compare.run import markdown
+
+    pts = [(float(i), float(i % 3)) for i in range(10)]
+    ref, new = _map(pts, ["X"] * 10), _map(pts, ["X"] * 10)
+    ref["map"]["antigens"][2]["vaccine"] = True  # the reference marks preparation 2
+    new["map"]["antigens"][3]["vaccine"] = True  # af marks preparation 3 of the same strain
+    res = maps.compare(ref, new)
+    assert res["antigens"]["vaccine_only_ref_keys"] == [
+        maps.point_key(ref["map"]["antigens"][2], "name")
+    ]
+    checks = {c["check"]: c for c in map_checks(res, MapLimits())}
+    assert (
+        checks["vaccine marks differ"]["value"] == 2.0
+        and checks["vaccine marks differ"]["ok"] is None
+    )
+    row = {"slot": "map/x/all", "status": "ok", "checks": list(checks.values()), "detail": res}
+    adoption = {"status": "final", "adopted_by": "a reviewer", "adopted": dt.date(2026, 9, 25)}
+    limits = parse_config({"adoption": adoption}, Limits, base_dir=tmp_path)
+    text = markdown({"report": "r", "built": "b"}, [row], "l", "name", limits.adoption)
+    assert "marked as a vaccine only in new (1)" in text
+
+
+def test_clades_config_reads_nomenclature_from_paths(tmp_path: Path) -> None:
+    from af.report.compare.run import load_clades
+    from af.util.config import ConfigError
+
+    body = (
+        'local = "l.tsv"\nclades_json = "c.json"\n'
+        '[subtypes]\nx = "X"\n[paths]\nstore = "s"\nwork = "w"\n'
+    )
+    (tmp_path / "bare.toml").write_text(body)
+    with pytest.raises(ConfigError, match="nomenclature"):
+        load_clades(tmp_path / "bare.toml")
+    (tmp_path / "ok.toml").write_text(body + 'nomenclature = "n"\n')
+    assert load_clades(tmp_path / "ok.toml").paths.nomenclature is not None

@@ -230,12 +230,16 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
     )
 
 
-def load_vaccine_list(path: Path) -> list[Any]:
-    """The curated vaccine list. A `.py` path is the transition-period org-table importer."""
+def load_vaccine_list(path: Path) -> dict[str, list[Any]]:
+    """The curated vaccine list, as its tables.
+
+    Kept as a mapping rather than flattened: the transition-period file holds a table per subtype
+    plus "-disabled", "-seasonal" and historical tables, and flattening them marks superseded and
+    other-subtype strains as vaccines. The caller picks the table for the chart's subtype.
+    """
     from af.map.vaccines import read_org_vaccine_tables
 
     path = Path(path)
     if path.suffix == ".py":
-        tables = read_org_vaccine_tables(path.read_text())
-        return [row for rows in tables.values() for row in rows]
+        return {k: list(v) for k, v in read_org_vaccine_tables(path.read_text()).items()}
     raise ConfigError(f"{path}: unsupported vaccine list format")

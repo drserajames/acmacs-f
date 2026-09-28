@@ -217,6 +217,14 @@ def _group(ref: list[Point], new: list[Point], how: str, clades: bool) -> dict[s
         }  # fmt: skip
         grey = [bool(ri[k].get("greyed")) == bool(ni[k].get("greyed")) for k in common]
         out["greyed_agreement"] = sum(grey) / len(grey) if grey else float("nan")
+        # Vaccine marks: an antigen drawn on both sides but marked as a vaccine on one only (e.g.
+        # the wrong preparation of a vaccine strain marked). Listed, like one-sided points.
+        out["vaccine_only_ref_keys"] = sorted(
+            _label(ri[k]) for k in common if ri[k].get("vaccine") and not ni[k].get("vaccine")
+        )
+        out["vaccine_only_new_keys"] = sorted(
+            _label(ni[k]) for k in common if ni[k].get("vaccine") and not ri[k].get("vaccine")
+        )
     out["_pairs"] = [(k, ri[k], ni[k]) for k in common]
     return out
 

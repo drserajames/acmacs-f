@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from af.report.compare import geo, maps, trees
-from af.util.config import load_config
+from af.store.work import PathsConfig
+from af.util.config import ConfigError, load_config
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class MapLimits:
     frac_moved_gt_1_max: float | None = None
     centroid_diff_max: float | None = None
     rotation_deg_max: float | None = None
+    vaccine_differences_max: float | None = None  # antigens marked as a vaccine on one side only
 
 
 @dataclass(frozen=True)
@@ -123,10 +125,18 @@ class CladesConfig:
     different nomenclature from the tree it compares.
     """
 
-    clones: Path  # the pinned upstream nomenclature clones
+    paths: PathsConfig  # [paths]: nomenclature (the upstream clones) is required here
     local: Path  # acmacs-f-data clades/local.tsv (local sub-groups under their upstream parent)
     clades_json: Path  # acmacs-data clades.json: the local groups' signatures, until switch-over
     subtypes: dict[str, str]  # tree I7 subtype -> clade-set subtype, e.g. h3 = "A(H3N2)"
+
+
+def load_clades(path: Path) -> CladesConfig:
+    """Load a clades config; ``[paths] nomenclature`` must be set, since every mapping reads it."""
+    cfg = load_config(path, CladesConfig)
+    if cfg.paths.nomenclature is None:
+        raise ConfigError(path, ["[paths] nomenclature (the nomenclature clones) is required"])
+    return cfg
 
 
 def clade_set_for(tree_doc: dict[str, Any], cfg: CladesConfig, cache: dict[str, Any]) -> Any:
@@ -146,7 +156,8 @@ def clade_set_for(tree_doc: dict[str, Any], cfg: CladesConfig, cache: dict[str, 
         return cache[pin_text]
     name = cfg.subtypes[subtype]
     repository, commit = pin_text.rsplit("@", 1)
-    clade_set = load_clade_set(name, cfg.clones, Pin(name, repository, commit))
+    assert cfg.paths.nomenclature is not None  # load_clades checks it
+    clade_set = load_clade_set(name, cfg.paths.nomenclature, Pin(name, repository, commit))
     signatures = clades_json_signatures(cfg.clades_json).get(name, {})
     cache[pin_text] = extend_from_file(clade_set, cfg.local, signatures=signatures)
     return cache[pin_text]
@@ -166,7 +177,8 @@ ONE_SIDED_LISTED = 25  # per slot, group and side, in COMPARISON.md; the JSON ha
 
 MAP_CHECKS = (
     "antigens jaccard", "sera jaccard", "clade ARI", "p95 displacement", "frac moved > 1",
-    "clade centroid max diff", "rotation deg", "reflected", "RMSD (not gated)",
+    "clade centroid max diff", "rotation deg", "reflected", "vaccine marks differ",
+    "RMSD (not gated)",
 )  # fmt: skip
 
 
@@ -193,6 +205,14 @@ def map_checks(res: dict[str, Any], lim: MapLimits) -> list[dict[str, Any]]:
         _check("rotation deg", rotation, "<=", lim.rotation_deg_max),
         # A mirrored map is always a difference when orientation is gated at all.
         _check("reflected", reflected, "<=", 0.0 if lim.rotation_deg_max is not None else None),
+        _check(
+            "vaccine marks differ",
+            float(
+                len(a.get("vaccine_only_ref_keys", [])) + len(a.get("vaccine_only_new_keys", []))
+            ),
+            "<=",
+            lim.vaccine_differences_max,
+        ),  # fmt: skip
         _check("RMSD (not gated)", p.get("rmsd", nan), "<=", None),
     ]
     if p.get("identical_layout"):
@@ -517,10 +537,12 @@ def _one_sided(slot: str, antigens: dict[str, Any], sera: dict[str, Any]) -> lis
     out = []
     for group, g in (("antigens", antigens), ("sera", sera)):
         for side in ("ref", "new"):
-            kinds = (
+            kinds = [
                 (f"only_{side}_keys", f"only in {side}"),
                 (f"in_frame_only_{side}_keys", f"inside the frame only in {side}"),
-            )
+            ]
+            if group == "antigens":
+                kinds.append((f"vaccine_only_{side}_keys", f"marked as a vaccine only in {side}"))
             for field_name, what in kinds:
                 keys = g.get(field_name, [])
                 if keys:
@@ -550,7 +572,7 @@ def main(argv: list[str] | None = None) -> int:
     )  # fmt: skip
     args = parser.parse_args(argv)
     limits = load_config(args.limits, Limits)
-    clades = load_config(args.clades, CladesConfig) if args.clades else None
+    clades = load_clades(args.clades) if args.clades else None
     manifest = json.loads(args.record.read_text())
     rows, failed = compare_report(manifest, args.reference, limits, args.match, clades)
     args.out.mkdir(parents=True, exist_ok=True)

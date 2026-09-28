@@ -7,6 +7,9 @@ plausible-looking invented city would be indistinguishable from a real one.
 
 from __future__ import annotations
 
+import random
+from pathlib import Path
+
 import pytest
 
 from af.seq.names import (
@@ -140,3 +143,39 @@ def test_problem_codes_are_stable_strings() -> None:
         "name.fields",
         "name.extra_slash_in_paren",
     )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "a/exampletown-exampleisles/01/2024",
+        "A/ EXAMPLETOWN -EXAMPLEISLES- /7/2024",
+        "A/EXAMPLETOWN/EXAMPLELAB/7/2024",
+        "B/EXAMPLETOWN/7/2024 (x/y)",
+        "A(H3N2)/EXAMPLETOWN/0007/2024-EXTRA",
+        "A/EXAMPLETOWN/7",
+    ],
+)
+def test_normalise_is_idempotent(raw: str) -> None:
+    once = normalise(raw).name
+    assert normalise(once).name == once
+
+
+def test_normalise_is_idempotent_on_random_names() -> None:
+    # covers "X - Y" and "X--Y" locations; master's normaliser fails 63 of these
+    rng = random.Random(3)
+    alphabet = "AB- _/()0123456789"
+    for _ in range(5000):
+        raw = "A/" + "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 24))) + "/2024"
+        once = normalise(raw).name
+        assert normalise(once).name == once, raw
+
+
+def test_store_names_are_fixed_points(af_data: Path) -> None:
+    """Every name-location the store holds normalises to itself (a real-data list)."""
+    path = af_data / "fixtures" / "sequences" / "name-locations.txt"
+    if not path.is_file():
+        pytest.skip(f"{path} not present")
+    locations = [line for line in path.read_text().splitlines() if line and line[0] != "#"]
+    moved = [loc for loc in locations if normalise(f"A/{loc}/1/2000").name != f"A/{loc}/1/2000"]
+    assert not moved, f"{len(moved)} of {len(locations)} are not fixed points: {moved[:5]}"

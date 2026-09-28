@@ -115,7 +115,9 @@ def normalise(raw: str, subtype: str | None = None) -> Name:
         problems.append(FIELDS)
         location, isolate = middle[0], "-".join(middle[1:])
 
-    location = location.replace("-", " ").strip()
+    # Collapse after replacing: "X - Y" must become "X Y", not "X  Y", or a second pass
+    # would give a different answer (normalise must be idempotent).
+    location = " ".join(location.replace("-", " ").split())
     isolate = _strip_padding(isolate)
 
     if paren:

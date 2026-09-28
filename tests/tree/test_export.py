@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime
 import json
 from pathlib import Path
 
@@ -10,49 +9,23 @@ import pyarrow.parquet as pq
 import pytest
 
 from af.run.job import JobFailed
-from af.seq import processed
 from af.seq import select as S
-from af.seq.dates import parse as parse_date
 from af.store import Store, StoreRef
 from af.tree import export as E
 from af.tree import stages
 from af.tree.io import i6
 from af.tree.io.fasta import read_alignment
-from tests.clades.test_fallback_store import raw_dataset
-from tests.seq.test_store_build import aligned, record
 
-from .test_stages import TREE_STEPS, make_project, statuses, with_clades
+from .test_stages import (
+    OUTGROUP,
+    TREE_STEPS,
+    exported_project,
+    fill,
+    rules,
+    statuses,
+    with_clades,
+)
 from .tree_fixtures import KEYS, LEAF_SEQ
-
-OUTGROUP = S.Outgroup("EPI_ISL_900000", "EPI900000", "invented outgroup")
-
-
-def fill(store: Store, *, ragged: bool = False, nextclade: StoreRef | None = None) -> None:
-    """The five fixture leaves as a sequence-store version; ``c`` embargoed, ``b`` year-only."""
-    recs, found = [], {}
-    for index, name in enumerate("oabcd"):
-        rec = record(
-            index,
-            epi_isl=f"EPI_ISL_90000{index}",
-            accession=f"EPI90000{index}",
-            collection_date=parse_date("2021" if name == "b" else f"202{index}-01-15"),
-            embargoed_until="2031-01-01" if name == "c" else "",
-        )
-        recs.append(rec)
-        sequence = LEAF_SEQ[name] + ("A" if ragged and name == "d" else "")
-        found[rec.epi_isl] = aligned(rec, nucleotides=sequence, clade="P", subclade="P")
-    found = {processed.seq_id(r): found[r.epi_isl] for r in recs}
-    processed.publish_pull(
-        store, "h3", "p1", processed.isolates_table(recs, "h3", "p1"),
-        processed.sequences_table(recs, found, "p1"), inputs=[nextclade] if nextclade else [],
-        parameters={}, started=datetime.datetime.now(datetime.UTC),
-    )  # fmt: skip
-
-
-def rules(outgroup: S.Outgroup = OUTGROUP) -> S.SubtypeRules:
-    return S.SubtypeRules(
-        "h3", outgroup, [S.Rule("host", "host", "human only", optional=True, allow=["Human"])]
-    )
 
 
 @pytest.fixture
@@ -127,27 +100,6 @@ def test_files_other_than_the_exported_ones_are_refused(store: Store, tmp_path: 
 # Through the stages
 
 
-def exported_project(root: Path, *, test_only: bool = False, purpose: str | None = None) -> Path:
-    """make_project's config, its inputs replaced by an export from its own store."""
-    config = make_project(root)
-    store = Store.open(root / "store")
-    # The dataset the clades step's fallback reads the stored calls from (tests/clades/synthetic).
-    fill(store, nextclade=raw_dataset(store, "synthetic", "P"))
-    extra = {}
-    if test_only:
-        extra["test_only"] = E.TestOnly(OUTGROUP, "stand-in for the test")
-    E.export(store, "h3", rules(), root / "export", **extra)
-    text = config.read_text().replace(
-        'alignment = "alignment.fasta"\nleaves = "leaves.parquet"\n',
-        'alignment = "export/alignment.fasta"\nleaves = "export/leaves.parquet"\n'
-        'export = "export/export.json"\n',
-    )
-    if purpose is not None:
-        text += f'purpose = "{purpose}"\n'
-    config.write_text(text)
-    return config
-
-
 def test_the_tree_records_the_sequence_version_it_was_built_from(tmp_path: Path) -> None:
     config = exported_project(tmp_path / "p")
     assert statuses(config) == dict.fromkeys(TREE_STEPS, "ran")
@@ -192,3 +144,21 @@ def test_an_export_rooted_elsewhere_than_the_tree_config_is_refused(tmp_path: Pa
     config.write_text(config.read_text().replace(f'outgroup = "{KEYS["o"]}"', 'outgroup = "X|Y"'))
     with pytest.raises(JobFailed, match="rooted on a sequence the rules did not pin"):
         stages.run(config)
+
+
+def test_a_stage_tree_meets_the_clade_stores_identity_checks(tmp_path: Path) -> None:
+    """What WS4's publish_clades requires of a tree before labelling it (their guard, 26 Sep):
+    one sequences-store input, which still resolves, and which holds every leaf."""
+    config = exported_project(tmp_path / "p")
+    statuses(config)
+    store = Store.open(tmp_path / "p" / "store")
+    version = store.version_dir(store.current("trees", "h3/weekly"))
+    inputs = json.loads((version / "PROVENANCE.json").read_text())["inputs"]
+    sequences = [i["store"] for i in inputs if i.get("store", {}).get("kind") == "sequences"]
+    assert len(sequences) == 1
+    held = store.resolve(StoreRef.from_json(sequences[0]))
+    rows = pq.read_table(held / "sequences", columns=["epi_isl", "accession"]).to_pylist()
+    leaves = i6.read_nodes(version, columns=["is_leaf", "epi_isl", "accession"]).to_pylist()
+    on_tree = {(n["epi_isl"], n["accession"]) for n in leaves if n["is_leaf"]}
+    assert on_tree <= {(r["epi_isl"], r["accession"]) for r in rows}
+    assert len(on_tree) == 5
