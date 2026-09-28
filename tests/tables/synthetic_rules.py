@@ -19,6 +19,8 @@ RULES: dict[str, list[str]] = {
         "LABX\t*\texact\t*\t*" + META + "yes",
         "LABX\t*\texact\t5\t<10" + META + "yes",
         "LABN\tHI\texact\t≧640\t>320" + META + "yes",
+        "LABC\tHI\texact\tND\t*" + META + "yes",
+        "LABC\tHI\texact\t*\t*" + META + "yes",
     ],
     "control_sera": [
         "lab\tfield\tkind\tpattern\taction\tvalue\tevidence\tadded_by\tadded_on\toptional",
@@ -35,6 +37,7 @@ RULES: dict[str, list[str]] = {
         "CDC\t*\tHI\tturkey" + META + "yes",
         "CDC\t*\tHINT\t-" + META + "yes",
         "CDC\t*\tFRA\t-" + META + "yes",
+        "LABC\t*\tHI\tturkey" + META + "yes",
     ],
     "reassortants": [
         "lab\tkind\tpattern\tcanonical\tevidence\tadded_by\tadded_on\toptional",
@@ -66,6 +69,7 @@ RULES: dict[str, list[str]] = {
                 ("SIAT", "SIAT", "cell"),
             ]
         ),
+        "LABC\texact\tP\tX\tunknown" + META + "yes",
     ],
     "control_antigens": [
         "lab\tkind\tpattern\taction\tevidence\tadded_by\tadded_on\toptional",
@@ -116,6 +120,7 @@ RULES: dict[str, list[str]] = {
         "LABX\tYMD\trepeat-previous" + META + "yes",
         "LABN\tYMD\trepeat-previous" + META + "yes",
         "LABV\tDMY\t" + META + "yes",
+        "LABC\tDMY\t" + META + "yes",
     ],
 }
 

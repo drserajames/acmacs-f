@@ -85,7 +85,9 @@ class AC21Inputs:
 @dataclass(frozen=True)
 class VIDRLInputs:
     """A folder of VIDRL workbooks: as AC21Inputs, plus the flu type, which VIDRL's sheets do
-    not state (``subtype`` "A(H1N1)", "A(H3N2)" or "B"; ``lineage`` for B)."""
+    not state (``subtype`` "A(H1N1)", "A(H3N2)" or "B"; ``lineage`` for B). Crick's folders
+    take the same fields: there the flu type picks the sheets to read, since one Crick
+    workbook can hold several subtypes' tables."""
 
     lab: str
     dir: Path
@@ -103,6 +105,7 @@ class TablesSettings:
     ac21: list[AC21Inputs] = field(default_factory=list)
     niid: list[AC21Inputs] = field(default_factory=list)  # NIID's own layout (af.tables.niid)
     vidrl: list[VIDRLInputs] = field(default_factory=list)  # VIDRL's layout (af.tables.vidrl)
+    crick: list[VIDRLInputs] = field(default_factory=list)  # Crick's layout (af.tables.crick)
     locations: LocationSources | None = None
 
 
@@ -196,6 +199,14 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
             files, rules, lab=vinputs.lab, subtype=vinputs.subtype, lineage=vinputs.lineage
         )
         _add_workbooks(vinputs, files, result, tables, report, errors)
+    for cinputs in settings.crick:
+        from . import crick
+
+        files = _dated_files(cinputs)
+        result = crick.read(
+            files, rules, lab=cinputs.lab, subtype=cinputs.subtype, lineage=cinputs.lineage
+        )
+        _add_workbooks(cinputs, files, result, tables, report, errors)
     return tables, report, errors
 
 
@@ -290,7 +301,12 @@ def _input_files(settings: TablesSettings) -> list[Path]:
         files += [settings.cdc.tsv, *settings.cdc.xlsx, *settings.cdc.season]
     if settings.locations:
         files += [settings.locations.locdb, settings.locations.chinese_aliases]
-    folders: list[AC21Inputs | VIDRLInputs] = [*settings.ac21, *settings.niid, *settings.vidrl]
+    folders: list[AC21Inputs | VIDRLInputs] = [
+        *settings.ac21,
+        *settings.niid,
+        *settings.vidrl,
+        *settings.crick,
+    ]
     for inputs in folders:
         files += _dated_files(inputs)
     return files
