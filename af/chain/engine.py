@@ -23,6 +23,7 @@ import functools
 import hashlib
 import json
 import logging
+import platform
 import shutil
 import sys
 from collections.abc import Callable
@@ -44,6 +45,7 @@ from af.chart.titre import MergeSettings
 from af.pipeline import Pipeline, Step, StepContext
 from af.run.job import Job, Resources, Runner
 from af.run.local import LocalRunner
+from af.run.runtime import release_info
 from af.util.artefacts import Artefact, sha256_path
 
 log = logging.getLogger(__name__)
@@ -345,7 +347,21 @@ def _threads(maps: list[dict]) -> dict | None:
 
 
 def _write_step_record(directory: Path, record: dict) -> None:
+    record = {**record, "platform": platform_info()}
     (directory / STEP_RECORD).write_text(json.dumps(record, indent=1, default=_json_default))
+
+
+def platform_info() -> dict[str, str | None]:
+    """What made this step: near-tied incremental/scratch choices can differ between compilers
+    (diagnostics.Thresholds.near_tie), so each step says which build it came from. Outside a
+    release the compiler is unknown (None), and says so rather than guessing."""
+    release = release_info() or {}
+    return {
+        "release": release.get("commit"),
+        "cxx_version": release.get("cxx_version"),
+        "machine": platform.machine(),
+        "system": platform.system(),
+    }
 
 
 def _json_default(o: object) -> object:

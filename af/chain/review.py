@@ -241,6 +241,13 @@ def _step_info(s: dict, r: dict) -> list[str]:
         f"stress {stresses} · <b>chose {r['chosen']}</b>",
         f"RMSD to previous {rmsd_prev} · incremental vs scratch RMSD {rmsd_basin}",
     ]
+    if pf := r.get("platform"):  # which build made the step: near ties can differ between them
+        info.append(
+            _e(
+                f"made by {pf.get('cxx_version') or 'unknown compiler (not a release)'}"
+                f" · {pf.get('system')} {pf.get('machine')}"
+            )
+        )
     if m.get("cheating_assay"):
         info.append(
             f"cheating assay: {m['skipped_reference_antigens']} reference antigens not merged"
