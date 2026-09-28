@@ -61,3 +61,17 @@ def test_unknown_layout(tmp_path: Path) -> None:
     (root / "WORK.toml").write_text("layout = 7\n")
     with pytest.raises(StoreError, match="layout 7"):
         Work.open(root)
+
+
+def test_optional_shared_directories(tmp_path: Path) -> None:
+    """nomenclature and acmacs_data are optional, resolved like any path, None when absent."""
+    config = tmp_path / "step.toml"
+    config.write_text('[paths]\nstore = "s"\nwork = "w"\n')
+    paths = load_config(config, StepConfig).paths
+    assert paths.nomenclature is None and paths.acmacs_data is None
+    config.write_text(
+        '[paths]\nstore = "s"\nwork = "w"\nnomenclature = "clones"\nacmacs_data = "../acmacs-data"\n'
+    )
+    paths = load_config(config, StepConfig).paths
+    assert paths.nomenclature == (tmp_path / "clones").resolve()
+    assert paths.acmacs_data == (tmp_path.parent / "acmacs-data").resolve()

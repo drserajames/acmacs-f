@@ -59,6 +59,11 @@ class PathsConfig:
     One shared key, so trees, clades, geo and reports read the same clones rather than each
     pinning the directory separately. Optional here; a consumer that needs it and doesn't
     find it fails (e.g. a tree subtype with a clade_set)."""
+    acmacs_data: Path | None = None
+    """The acmacs-data checkout: the shared curated facts (clade colour schemes and groups in
+    semantic_clades.py, locations, vaccines) that af reads in place during the transition
+    rather than copying (DECISIONS, 24 Sep: one editable copy of each fact). Optional here;
+    a consumer that needs it and doesn't find it fails (e.g. map or geo clade colouring)."""
 
 
 @dataclass(frozen=True)
