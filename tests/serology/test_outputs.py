@@ -142,3 +142,47 @@ def test_geo_colours_from_clade_store_and_scheme(tmp_path: Path, syn: Any) -> No
     doc = json.loads((out / "geo" / "h3-records.json").read_text())
     points = doc["periods"][0]["locations"][0]["points"]
     assert points == [{"color": "#0000aa", "count": 1, "clade": "Clade P.1"}]
+
+
+def test_clade_tables_behind_the_sequence_store_are_reported(tmp_path: Path, syn: Any) -> None:
+    from af.seq.matching import read_passage_rules
+    from af.serology import query
+    from af.serology.joins import link_from_store
+
+    store, _, _ = _roots(tmp_path, syn)
+    labelled = store.current("sequences", "h3")
+    source = tmp_path / "assignments.parquet"
+    duckdb.execute(
+        f"""COPY (SELECT * FROM (VALUES ('EPI_ISL_1', 'ACC1', 'P.1', 'fallback'))
+            AS v(epi_isl, accession, clade, method)) TO '{source.as_posix()}' (FORMAT parquet)"""
+    )
+    with store.build("clades", "h3") as builder:
+        builder.copy(source, "assignments.parquet")
+        builder.publish(
+            Provenance(step="clades-test", inputs=(labelled,), parameters={}, started=NOW,
+                       finished=NOW)
+        )  # fmt: skip
+    rules = tmp_path / "passage_classes.tsv"
+    rules.write_text("pattern\tclass\treason\nSIAT\tcell\ttest\n")
+    con = query.connect(store.resolve(store.current("serology", "all")))
+    counts = link_from_store(con, store, read_passage_rules(rules), with_clades=True)
+    assert counts.clades_behind == {}  # labels the current sequences version
+
+    newer = tmp_path / "newer.parquet"
+    duckdb.execute(f"COPY (SELECT 1 AS x) TO '{newer.as_posix()}' (FORMAT parquet)")
+    with store.build("sequences", "h3") as builder:
+        builder.link(
+            store.resolve(labelled) / "isolates/pull=test/part-0.parquet",
+            "isolates/pull=test/part-0.parquet",
+        )
+        builder.link(
+            store.resolve(labelled) / "sequences/pull=test/part-0.parquet",
+            "sequences/pull=test/part-0.parquet",
+        )
+        builder.copy(newer, "isolates/pull=more/extra.txt")
+        builder.publish(_provenance("sequences-test"))  # fmt: skip
+    con = query.connect(store.resolve(store.current("serology", "all")))
+    counts = link_from_store(con, store, read_passage_rules(rules), with_clades=True)
+    current = store.current("sequences", "h3").version
+    assert current != labelled.version
+    assert counts.clades_behind == {"h3": (labelled.version, current)}
