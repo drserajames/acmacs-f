@@ -151,7 +151,7 @@ class Table:
         kw["antigens"] = [Antigen(**a) for a in d["antigens"]]
         kw["sera"] = [Serum(**s) for s in d["sera"]]
         table = cls(**kw)
-        stored = table.content_hash_as(fmt)
+        stored = table.content_hash() if fmt == FORMAT else _legacy_hash(table, fmt, written=d)
         if stored != d["content_hash"]:
             raise ValueError(
                 f"{table.table_id}: stored hash {d['content_hash']} != content {stored}"
@@ -181,14 +181,27 @@ class Table:
         return errors
 
 
-def _legacy_hash(table: Table, fmt: str) -> str:
-    """content_hash as an ``fmt`` table was hashed: af-table-1 had no passage_class."""
+def _legacy_hash(table: Table, fmt: str, written: dict[str, Any] | None = None) -> str:
+    """content_hash as an ``fmt`` table was hashed: af-table-1 had no passage_class.
+
+    ``written`` is the stored file, when there is one. af-table-1 gained fields during its
+    life without a new format string (``epi_isl`` and ``sequence_pairing`` on antigens and
+    sera), so a file written before them hashed without them. A field the file does not
+    have at all is left out of the hash; every field it has is hashed as read, so a changed
+    titre, name or any other stored value still fails the check (design rule 3)."""
     if fmt not in OLD_FORMATS:
         raise ValueError(f"unknown table format {fmt!r}")
     d = table.content()
     d["format"] = fmt
     for item in (*d["antigens"], *d["sera"]):
         item.pop("passage_class")
+    if written is not None:
+        for key in [k for k in d if k != "format" and k not in written]:
+            d.pop(key)
+        for kind in ("antigens", "sera"):
+            for item, stored in zip(d[kind], written[kind], strict=True):
+                for key in [k for k in item if k not in stored]:
+                    item.pop(key)
     return hashlib.sha256(canonical_json(d).encode()).hexdigest()
 
 
