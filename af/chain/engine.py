@@ -34,7 +34,7 @@ import numpy as np
 
 from af.chain.backend import Optimiser, default_optimiser
 from af.chain.config import ChainConfig, TableRef, config_to_json, option_parameters
-from af.chain.diagnostics import group_moves, step_diagnostics
+from af.chain.diagnostics import group_moves, run_threads, step_diagnostics
 from af.chain.starts import read_result, write_problem
 from af.chart.ace import read_chart, read_json, write_chart
 from af.chart.merge import ColumnBasisConvention, MergeOptions, MergeType, merge
@@ -339,6 +339,11 @@ def _loop(maps: list[dict]) -> dict:
     return loop
 
 
+def _threads(maps: list[dict]) -> dict | None:
+    """What the best map's relax and trapped pass ran on (`CoreOptimiser`; None for the stub)."""
+    return min(maps, key=lambda r: r["stress"]).get("run_threads")
+
+
 def _write_step_record(directory: Path, record: dict) -> None:
     (directory / STEP_RECORD).write_text(json.dumps(record, indent=1, default=_json_default))
 
@@ -406,6 +411,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
         "trapped_loop": {"scratch": _loop(all_maps)},
     }
     diagnostics = step_diagnostics(chart, None, None, None, arrays, optimiser, cfg)
+    diagnostics.update(run_threads({"scratch": _threads(all_maps)}))
     if o.move_groups:
         diagnostics["group_moves"] = group_moves(chart, _loop(all_maps).get("groups"))
     record["diagnostics"] = diagnostics
@@ -501,6 +507,9 @@ def _merge_step(
     }
     diagnostics = step_diagnostics(
         chosen, previous, inc_chart, scr_chart, arrays, optimiser, cfg, report
+    )
+    diagnostics.update(
+        run_threads({"incremental": _threads(all_incremental), "scratch": _threads(all_scratch)})
     )
     if o.move_groups:
         chosen_maps = all_incremental if chosen_name == "incremental" else all_scratch
