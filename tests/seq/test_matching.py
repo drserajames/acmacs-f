@@ -222,3 +222,104 @@ class TestLabNumber:
     def test_a_bad_scope_is_refused(self) -> None:
         with pytest.raises(ValueError, match="scope"):
             M.NumberRule("lab-n", "planet").key("X", "1", "2024")
+
+
+class TestLocationEquivalent:
+    LAB = "Example National Centre"
+    ANTIGEN = "A(H3N2)/EXAMPLEPROV EXAMPLESPELLING/31/2024"
+
+    def idx(self, *cands: M.Candidate, number: bool = False) -> M.SequenceIndex:
+        idx = index(*cands)
+        idx.submitters = {"lab-n": frozenset({self.LAB})}
+        idx.equivalents = {
+            ("lab-n", "EXAMPLEPROV EXAMPLESPELLING"): (
+                "EXAMPLEPROV EXAMPLEROMAN", "EXAMPLEPROV EXAMPLEROMANB",
+            )
+        }  # fmt: skip
+        if number:
+            idx.number_rules = {"lab-n": M.NumberRule("lab-n")}
+        return idx
+
+    def dep(self, n: int, name: str, seq: str = "a", lab: str = "Someone Else") -> M.Candidate:
+        return M.Candidate(f"EPI_ISL_{n}", f"EPI{n}", "h3", name, "MDCK1", M.CELL, seq, lab)
+
+    def test_the_gisaid_spelling_matches_any_depositor_and_is_flagged(self) -> None:
+        other = self.dep(1, "A/EXAMPLEPROV EXAMPLEROMAN/31/2024")
+        match = self.idx(other).match(self.ANTIGEN, M.CELL, lab="lab-n")
+        assert (match.method, match.chosen) == ("equivalent", other)
+        assert match.flags == (M.LOCATION_EQUIVALENT,) and not match.doubtful
+
+    def test_every_listed_spelling_is_tried(self) -> None:
+        second = self.dep(1, "A/EXAMPLEPROV EXAMPLEROMANB/31/2024")
+        assert self.idx(second).match(self.ANTIGEN, M.CELL, lab="lab-n").chosen == second
+
+    def test_one_way_and_only_for_that_lab(self) -> None:
+        other = self.dep(1, "A/EXAMPLEPROV EXAMPLEROMAN/31/2024")
+        assert self.idx(other).match(self.ANTIGEN, M.CELL, lab="lab-x").chosen is None
+        back = self.dep(2, "A/EXAMPLEPROV EXAMPLESPELLING/31/2024")
+        reverse = "A(H3N2)/EXAMPLEPROV EXAMPLEROMAN/31/2024"
+        assert self.idx(back).match(reverse, M.CELL, lab="lab-n").chosen is None  # one way
+
+    def test_a_name_match_is_never_replaced(self) -> None:
+        exact = self.dep(1, "A/EXAMPLEPROV EXAMPLESPELLING/31/2024", "a")
+        alias = self.dep(2, "A/EXAMPLEPROV EXAMPLEROMAN/31/2024", "b")
+        match = self.idx(exact, alias).match(self.ANTIGEN, M.CELL, lab="lab-n")
+        assert (match.method, match.chosen) == ("name", exact)
+
+    def test_a_tie_under_the_gisaid_spellings_is_not_taken(self) -> None:
+        a = self.dep(1, "A/EXAMPLEPROV EXAMPLEROMAN/31/2024", "a")
+        b = self.dep(2, "A/EXAMPLEPROV EXAMPLEROMANB/31/2024", "b")
+        match = self.idx(a, b).match(self.ANTIGEN, M.CELL, lab="lab-n")
+        assert match.chosen is None
+        assert M.AMBIGUOUS in match.flags and M.LOCATION_EQUIVALENT in match.flags
+
+    def test_the_number_rule_still_runs_after_it(self) -> None:
+        own = self.dep(1, "A/EXAMPLEPROV EXAMPLEOTHER/31/2024", lab=self.LAB)
+        match = self.idx(own, number=True).match(self.ANTIGEN, M.CELL, lab="lab-n")
+        assert (match.method, match.chosen) == ("number", own)
+
+
+EQUIVALENTS = (
+    "# invented\n"
+    "lab\ttable_location\tgisaid_location\tevidence\toptional\n"
+    "lab-n\tEXAMPLEPROV EXAMPLESPELLING\tEXAMPLEPROV EXAMPLEROMAN\tpinyin\t\n"
+    "lab-n\tEXAMPLEPROV EXAMPLESPELLING\tEXAMPLEPROV EXAMPLEROMANB\tpinyin\toptional\n"
+)
+
+
+def test_equivalents_file_is_read_one_way_per_key(tmp_path: Path) -> None:
+    path = tmp_path / "eq.tsv"
+    path.write_text(EQUIVALENTS)
+    rows = M.read_location_equivalents(path)
+    assert [(r.gisaid_location, r.optional, r.line) for r in rows] == [
+        ("EXAMPLEPROV EXAMPLEROMAN", False, 3), ("EXAMPLEPROV EXAMPLEROMANB", True, 4),
+    ]  # fmt: skip
+    assert M.equivalents_table(rows) == {
+        ("lab-n", "EXAMPLEPROV EXAMPLESPELLING"): (
+            "EXAMPLEPROV EXAMPLEROMAN", "EXAMPLEPROV EXAMPLEROMANB",
+        )
+    }  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ("lab-n\tEXAMPLEPROV EXAMPLESPELLING\tEXAMPLEPROV EXAMPLEROMAN\tagain\t\n", "twice"),
+        ("lab-n\tEXAMPLEPROV EXAMPLEX\tEXAMPLEPROV EXAMPLEY\t\t\n", "evidence"),
+        ("lab-n\tEXAMPLEPROV EXAMPLEX\tEXAMPLEPROV EXAMPLEX\tsame\t\n", "its own equivalent"),
+        ("lab-n\tEXAMPLEPROV EXAMPLEX\tEXAMPLEPROV EXAMPLEY\tpinyin\tyes\n", "optional"),
+    ],
+)
+def test_bad_equivalent_rows_are_refused(tmp_path: Path, extra: str, message: str) -> None:
+    path = tmp_path / "eq.tsv"
+    path.write_text(EQUIVALENTS + extra)
+    with pytest.raises(ValueError, match=message):
+        M.read_location_equivalents(path)
+
+
+def test_the_committed_equivalents_read(af_data: Path) -> None:
+    path = af_data / "rules" / "sequences" / "location-equivalents.tsv"
+    if not path.is_file():
+        pytest.skip(f"{path} not present")
+    rows = M.read_location_equivalents(path)
+    assert rows and all(r.lab == r.lab.upper() for r in rows)  # the tables' lab codes
