@@ -31,9 +31,20 @@ import numpy as np
 from numpy.typing import NDArray
 
 from af.chart.ace import content_hash, read_chart
+from af.chart.column_bases import (
+    ColumnBaseOverride,
+    ColumnBaseOverrideError,
+    apply_column_base_override,
+)
 from af.chart.model import Chart
 from af.map.config import MapConfig, MapsConfig
-from af.map.curate import CurationError, MoveOverride, apply_move
+from af.map.curate import (
+    BlockOffset,
+    CurationError,
+    MoveOverride,
+    apply_block_offset,
+    apply_move,
+)
 from af.map.finish import finish_map
 from af.map.labels import label_text
 from af.map.orient import Orientation, RotationOverride, drawn_pairs, orient
@@ -190,7 +201,7 @@ def apply_moves(
             m.name,
             m.reason,
             m.decided.isoformat(),
-            tuple(m.movers),
+            m.load_movers(),
             scheme.name,
             row.colour,
             m.max_stress_rise,
@@ -392,13 +403,62 @@ def build_map(
         (lambda row: row.colour if row else None)(scheme.paint(labels[i]))
         for i in range(chart.n_antigens)
     ]
-    relax, stress = relaxer_for(chart)
-    layout, flags, move_reports = apply_moves(chart, layout, cfg, scheme, painted, relax, stress)
-    # What was decided about this map, as opposed to what it was built FROM: these carry reasons,
+    # What was DECIDED about this map, as opposed to what it was built from: these carry reasons,
     # not content hashes, so they are not inputs.
     decisions: dict[str, Any] = {}
+    projection = chart.projections[0]
+    for cb in cfg.column_bases:
+        rule_cb = ColumnBaseOverride(
+            cb.name, cb.reason, cb.decided.isoformat(), tuple(cb.sera), cb.value
+        )
+        try:
+            result_cb = apply_column_base_override(chart, projection, rule_cb)
+        except ColumnBaseOverrideError as exc:
+            raise BuildError(f"{cfg.folder}: {exc}") from exc
+        projection = result_cb.projection
+        decisions.setdefault("column_bases", []).append(result_cb.report(rule_cb))
+    relax, stress = relaxer_for(chart, projection=projection)
+    layout, flags, move_reports = apply_moves(chart, layout, cfg, scheme, painted, relax, stress)
     if move_reports:
         decisions["moves"] = move_reports
+    for b in cfg.blocks:
+        row_b = next((r for r in scheme.rows if r.legend == b.target_legend), None)
+        if row_b is None:
+            raise BuildError(
+                f"{cfg.folder}: block {b.name!r} targets unknown legend row {b.target_legend!r}"
+            )
+        rule_b = BlockOffset(
+            b.name,
+            b.reason,
+            b.decided.isoformat(),
+            b.load_movers(),
+            b.shift,
+            b.derived_from,
+            scheme.name,
+            row_b.colour,
+            b.max_stress_rise,
+            b.settled_within,
+            b.min_settled,
+            b.max_other_move,
+        )
+        try:
+            result_b = apply_block_offset(
+                rule_b,
+                layout,
+                [designation(a) for a in chart.antigens],
+                painted,
+                stress_before=stress(layout),
+                relax=relax,
+            )
+        except CurationError as exc:
+            flags.append(str(exc).split(";")[0])
+            decisions.setdefault("blocks", []).append(
+                {"override": b.name, "applied": False, "why": str(exc).split(";")[0]}
+            )
+            continue
+        layout = result_b.layout
+        decisions.setdefault("blocks", []).append({**result_b.report(rule_b), "applied": True})
+
     hidden = hidden_by_rules(chart, cfg)
     if cfg.hides:
         decisions["hides"] = [
@@ -643,7 +703,7 @@ def _class(word: str) -> Any:
     return word
 
 
-def relaxer_for(chart: Chart, projection_no: int = 0) -> tuple[Any, Any]:
+def relaxer_for(chart: Chart, projection_no: int = 0, projection: Any = None) -> tuple[Any, Any]:
     """`(relax, stress)` bound to this chart's optimiser problem.
 
     `relax(start, movable)` minimises from `start` holding everything outside `movable`, which is
@@ -653,7 +713,8 @@ def relaxer_for(chart: Chart, projection_no: int = 0) -> tuple[Any, Any]:
     """
     from af.map.optimise import MapProblem, relax, stress
 
-    projection = chart.projections[projection_no]
+    if projection is None:
+        projection = chart.projections[projection_no]
     arrays = chart.optimiser_arrays(projection.minimum_column_basis, projection)
     problem = MapProblem(**{k: v for k, v in arrays.items() if k != "start_layout"})
 
