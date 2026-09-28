@@ -6,6 +6,7 @@ i * rate from the root — and single leaves are then broken in known ways.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 
 import pytest
@@ -15,7 +16,9 @@ from af.tree.clock import (
     IMPOSSIBLE_DATE,
     LONG_BRANCH,
     ClockSettings,
+    InvertedClockError,
     apply_flags,
+    check_clock_direction,
     excluded,
     find_outliers,
     root_to_tip,
@@ -196,3 +199,29 @@ def test_root_to_tip_is_the_cumulative_length() -> None:
     assert depths[0] == pytest.approx(0.0, abs=RATE / 2)
     assert depths[-1] == pytest.approx(2 * RATE, abs=RATE / 2)
     assert len(depths) == 4
+
+
+def test_a_tree_whose_clock_runs_forward_passes_the_direction_check() -> None:
+    direction = check_clock_direction(clock_tree())
+    assert direction.slope is not None and direction.slope > 0
+    assert direction.correlation is not None and direction.correlation > 0.9
+    assert direction.leaves == 40
+
+
+def test_a_tree_rooted_among_recent_leaves_is_refused() -> None:
+    """Same tree, dates reversed: the leaves nearest the root are the newest, as on 28 Sep."""
+    populated = clock_tree()
+    for key, record in populated.leaves.items():
+        day = record.collection_date
+        assert day is not None
+        populated.leaves[key] = dataclasses.replace(
+            record, collection_date=datetime.date(4040 - day.year, 7, 1)
+        )
+    with pytest.raises(InvertedClockError, match="rooted among recent sequences") as refused:
+        check_clock_direction(populated)
+    assert "slope -" in str(refused.value) and "Nearest the root" in str(refused.value)
+
+
+def test_too_few_dated_leaves_is_not_judged() -> None:
+    direction = check_clock_direction(clock_tree(), min_leaves=1000)
+    assert direction.slope is None and direction.leaves == 40

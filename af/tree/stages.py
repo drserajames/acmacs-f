@@ -68,7 +68,12 @@ from af.store.work import PathsConfig, Work
 from af.tree.asr import get_backend
 from af.tree.asr.base import AncestralStates
 from af.tree.build import build, prune_starting_tree
-from af.tree.clock import apply_flags, find_outliers
+from af.tree.clock import (
+    InvertedClockError,
+    apply_flags,
+    check_clock_direction,
+    find_outliers,
+)
 from af.tree.config import JOB_STAGES, SubtypeSettings, TreeSettings
 from af.tree.export import check_matches, read_export
 from af.tree.io import i6, newick
@@ -695,6 +700,11 @@ def _populate_step(
             excluded=excluded,
         )
         populated.counts["continent_not_assigned"] = CONTINENT_NOT_ASSIGNED
+        try:
+            direction = check_clock_direction(populated)
+        except InvertedClockError as error:
+            raise StageError(f"{subtype}: {error}") from error
+        populated.counts["clock_direction"] = direction.to_json()
         apply_flags(populated, find_outliers(populated, clock))
         i6.write(populated, out, inputs.purpose, build_source(layout))
 

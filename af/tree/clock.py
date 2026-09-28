@@ -185,6 +185,72 @@ def find_outliers(
     return result
 
 
+class InvertedClockError(ValueError):
+    """Root-to-tip distance falls with collection date: the tree is rooted in the wrong place."""
+
+
+@dataclass(frozen=True)
+class ClockDirection:
+    """Whether distance from the root grows with date, measured on CMAPLE's own lengths."""
+
+    slope: float | None  # per year, Theil-Sen; None when too few dated leaves to say
+    correlation: float | None  # Pearson, reported alongside so a reader can judge the slope
+    leaves: int  # dated leaves the fit used
+    nearest_root: list[tuple[str, float, str]]  # (leaf key, ML distance, ISO date), closest first
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "slope_ml_per_year": self.slope,
+            "correlation": self.correlation,
+            "dated_leaves": self.leaves,
+            "nearest_root": [list(item) for item in self.nearest_root],
+        }
+
+
+def check_clock_direction(
+    populated: PopulatedTree, *, min_leaves: int = 20, nearest: int = 10
+) -> ClockDirection:
+    """Refuse a tree whose whole clock is inverted; this is an artefact check, not curation.
+
+    Individual clock outliers are reported and kept (Sarah, 25 Sep). A tree whose root-to-tip
+    slope is not positive is different: it is rooted among recent viruses, so every distance from
+    the root means the opposite of what it should. The first full H3 build (28 Sep 2026) was, with
+    slope -0.0051/yr: a cluster of recent sequences almost identical to the 2009 outgroup joined the
+    tree at its recent end. CMAPLE's lengths are used, not the published scale, so the check does
+    not depend on ancestral reconstruction.
+    """
+    tree = populated.tree
+    distance: dict[int, float] = {id(tree.root): 0.0}
+    for node in tree.preorder():
+        if node.parent is not None:
+            length = populated.ml_lengths.get(node.node_id, node.branch_length or 0.0)
+            distance[id(node)] = distance[id(node.parent)] + length
+    dated: list[tuple[str, float, float, datetime.date]] = []
+    for leaf in tree.leaves():
+        record = populated.leaves.get(leaf.name or "")
+        if record is not None and record.collection_date is not None:
+            day = record.collection_date
+            dated.append((leaf.name or "", _decimal_year(day), distance[id(leaf)], day))
+    closest = sorted(dated, key=lambda item: (item[2], item[0]))[:nearest]
+    nearest_root = [(key, round(d, 6), day.isoformat()) for key, _, d, day in closest]
+    xs = [x for _, x, _, _ in dated]
+    if len(dated) < min_leaves or len(set(xs)) < 2:
+        return ClockDirection(None, None, len(dated), nearest_root)
+    ys = [y for _, _, y, _ in dated]
+    slope = theil_sen(xs, ys)
+    correlation = statistics.correlation(xs, ys) if len(set(ys)) > 1 else None
+    direction = ClockDirection(slope, correlation, len(dated), nearest_root)
+    if slope <= 0:
+        shown = ", ".join(f"{key} {day} ({d:g})" for key, d, day in nearest_root[:5])
+        corr = "n/a" if correlation is None else f"{correlation:.3f}"
+        raise InvertedClockError(
+            f"root-to-tip distance does not grow with date on CMAPLE's lengths: slope "
+            f"{slope:.5g}/yr, correlation {corr}, over {len(dated)} dated leaves. The tree is "
+            f"rooted among recent sequences. Nearest the root: {shown}"
+        )
+    return direction
+
+
 def apply_flags(populated: PopulatedTree, result: ClockResult) -> dict[str, object]:
     """Write the flags onto the tree's leaves, for I6's ``flags`` column. Returns the counts.
 
@@ -223,4 +289,7 @@ __all__ = [
     "find_outliers",
     "root_to_tip",
     "theil_sen",
+    "ClockDirection",
+    "InvertedClockError",
+    "check_clock_direction",
 ]
