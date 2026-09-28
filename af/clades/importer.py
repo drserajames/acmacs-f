@@ -1,10 +1,10 @@
 """Read today's ``semantic_clades.py`` read-only, and report what does not survive.
 
-This is transition scaffolding, not part of the pipeline. While ae is still in
-production the colour and grouping tables are edited only in ``acmacs-data`` (one
-editable copy of each fact), so af reads them from there, converts them to its own
-tables, and — the point of the exercise — says which rows cannot be carried across and
-why. They move here once, at switch-over.
+While ae is still in production the colour and grouping tables are edited only in
+``acmacs-data`` (one editable copy of each fact), so af reads them from there at run time
+(:func:`read_user_clades`, used by maps and geo alike) rather than keeping a converted
+copy that would silently go stale, and says which rows cannot be carried across and why.
+They move into af's own tables once, at switch-over.
 
 Two things are worth carrying over and two are not:
 
@@ -17,23 +17,25 @@ Two things are worth carrying over and two are not:
   table and line so the user can decide to re-anchor or drop it.
 
 The old file is a Python module wrapping Org-mode tables, and importing it needs ae on
-the path. Rather than depend on ae, :func:`read_semantic_clades` imports the module with
-a stand-in for ``ae.utils.org`` that parses the tables here. The module's own Python
-structure is then whatever Python says it is — no regular expression over the source,
-which is how three other readers of this file each broke on a layout change (trap T20).
+the path. Rather than depend on ae, :func:`read_semantic_clades` runs the module with a
+stand-in for ``ae.utils.org`` that parses the tables here, compiling the file itself so no
+bytecode cache is read or written. The module's own Python structure is then whatever
+Python says it is — no regular expression over the source, which is how three other
+readers of this file each broke on a layout change (trap T20).
 """
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from af.clades.colours import ColourScheme, scheme_from_rows
 from af.clades.groups import SUBSTITUTION, Group, GroupSet
 from af.clades.nomenclature import CladeSet
+from af.store import ExternalInput
 
 #: The old file's subtype keys, and af's names for them.
 SUBTYPE_KEYS = {"A(H1N1)": "A(H1N1)", "A(H3N2)": "A(H3N2)", "BV": "B/Vic", "BY": "B/Yam"}
@@ -129,11 +131,13 @@ def read_semantic_clades(path: Path) -> Mapping[str, Mapping[str, list[dict[str,
     saved = {name: sys.modules.get(name) for name in injected}
     sys.modules.update(injected)
     try:
-        specification = importlib.util.spec_from_file_location("_af_semantic_clades", path)
-        if specification is None or specification.loader is None:
-            raise ImportError_(f"cannot import {path}")
-        module = importlib.util.module_from_spec(specification)
-        specification.loader.exec_module(module)
+        # compiled from the file's bytes, not imported: the import system would run a cached
+        # .pyc keyed on mtime and size, so a same-length edit within one second is silently
+        # ignored while the content hash says the new file was read. It would also write
+        # __pycache__ into a directory af must only read.
+        module = types.ModuleType("_af_semantic_clades")
+        module.__file__ = str(path)
+        exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
     finally:
         for name, previous in saved.items():
             if previous is None:
@@ -450,3 +454,104 @@ def dead_row_report(dead: Sequence[DeadRow]) -> str:
             lines.append(f"  {subtype} {table}: {len(rows)}")
             lines.extend(f"    line {row.row}: {row.name!r} — {row.reason}" for row in rows)
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- run-time reader
+
+
+class UserCladesError(ValueError):
+    """The user's tables cannot be read, or a caller asked for something they do not have."""
+
+
+#: Where the user's tables live inside the acmacs-data directory.
+SEMANTIC_CLADES = "semantic_clades.py"
+CLADES_JSON = "clades.json"
+
+
+@dataclass(frozen=True)
+class UserClades:
+    """The user's colour schemes and groups, read from acmacs-data on this run.
+
+    ``inputs`` are the two files' content hashes, for the provenance of whatever is
+    coloured with them: a figure drawn after the user edits a scheme must not look
+    up-to-date against one drawn before. ``report`` keeps the rows that did not come
+    across (dead, needing a local definition, repeated), so a caller can count them.
+    """
+
+    schemes: Mapping[str, Mapping[str, ColourScheme]]
+    groups: Mapping[str, GroupSet]
+    report: ImportReport
+    inputs: tuple[ExternalInput, ...]
+
+    def scheme(self, subtype: str, name: str) -> ColourScheme:
+        """One scheme; an unknown subtype or scheme name is an error, never an empty scheme."""
+        if subtype not in self.schemes:
+            raise UserCladesError(
+                f"no colour schemes for {subtype!r}: it has no clade set here "
+                f"(read for: {', '.join(sorted(self.schemes)) or 'none'})"
+            )
+        schemes = self.schemes[subtype]
+        if name not in schemes:
+            raise UserCladesError(
+                f"no colour scheme {name!r} for {subtype} in {self.inputs[0].path} "
+                f"(there are: {', '.join(sorted(schemes)) or 'none'})"
+            )
+        return schemes[name]
+
+    def group_set(self, subtype: str) -> GroupSet | None:
+        """The subtype's groups, or None when it has none (a scheme may use clades only)."""
+        if subtype not in self.schemes:
+            raise UserCladesError(f"no groups for {subtype!r}: it has no clade set here")
+        return self.groups.get(subtype)
+
+
+def read_user_clades(
+    acmacs_data: Path,
+    clade_sets: Mapping[str, CladeSet],
+    *,
+    legacy_names: Mapping[str, Mapping[str, str]] | None = None,
+) -> UserClades:
+    """Read the user's schemes and groups from ``acmacs_data`` now, for these clade sets.
+
+    ``acmacs_data`` is the directory (from config; there is no default). Only the subtypes
+    in ``clade_sets`` are read: a subtype without a clade set (B/Yamagata, by design) has
+    no schemes, and asking for one fails. Every scheme is checked exactly as a scheme file
+    would be (:func:`af.clades.colours.scheme_from_rows`), so a key naming no clade or
+    group is an error here, not a colour nobody sees. Rows that name nothing are not
+    errors: they are the user's to decide on, and are listed in ``report``.
+
+    Both files are hashed before and after parsing; a file edited mid-read is refused
+    rather than recorded under a hash that does not describe what was parsed.
+    """
+    directory = Path(acmacs_data)
+    if not directory.is_dir():
+        raise UserCladesError(f"acmacs-data directory not found: {directory}")
+    paths = (directory / SEMANTIC_CLADES, directory / CLADES_JSON)
+    for path in paths:
+        if not path.is_file():
+            raise UserCladesError(f"{path.name} not found in {directory}")
+    before = tuple(ExternalInput.of(path) for path in paths)
+    report = import_semantic_clades(
+        paths[0],
+        clade_sets,
+        legacy_names=legacy_names,
+        defined_locally=clades_json_names(paths[1]),
+    )
+    after = tuple(ExternalInput.of(path) for path in paths)
+    if before != after:
+        changed = [b.path.name for b, a in zip(before, after, strict=True) if b != a]
+        raise UserCladesError(f"changed while being read: {', '.join(changed)}; run again")
+    schemes: dict[str, dict[str, ColourScheme]] = {subtype: {} for subtype in clade_sets}
+    for (subtype, table), rows in sorted(report.colour_rows.items()):
+        if subtype not in clade_sets:
+            continue
+        schemes[subtype][table] = scheme_from_rows(
+            [(f"{subtype} {table} row {row['order']}", row) for row in rows],
+            subtype,
+            table,
+            clade_sets[subtype],
+            report.groups.get(subtype),
+            paths[0],
+        )
+    groups = {subtype: group for subtype, group in report.groups.items() if subtype in clade_sets}
+    return UserClades(schemes, groups, report, before)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -188,3 +189,102 @@ def test_a_group_set_refuses_two_groups_of_one_name(tmp_path: Path) -> None:
     group = import_semantic_clades(write_module(tmp_path), synthetic(tmp_path)).groups[SUBTYPE]
     with pytest.raises(GroupError, match="duplicate group 'P.1 20V'"):
         GroupSet(SUBTYPE, (*group.groups, group.groups[0]))
+
+
+# ---------------------------------------------------------------- run-time reader
+
+
+def acmacs_data(tmp_path: Path, module: str = MODULE) -> Path:
+    """A stand-in acmacs-data directory: the module plus a clades.json naming P.9 locally."""
+    directory = tmp_path / "acmacs-data"
+    directory.mkdir(exist_ok=True)
+    (directory / "semantic_clades.py").write_text(module)
+    (directory / "clades.json").write_text('{"A(H3N2)": [{"N": "P.9", "aa": "20V"}]}')
+    return directory
+
+
+def test_reads_schemes_and_groups_at_run_time(tmp_path: Path) -> None:
+    from af.clades.importer import read_user_clades
+
+    user = read_user_clades(acmacs_data(tmp_path), synthetic(tmp_path))
+    assert user.scheme(SUBTYPE, "clades-v1").keys == ("P.1", "P.1 20V")
+    group_set = user.group_set(SUBTYPE)
+    assert group_set is not None and group_set.names == ("P.1 20V", "21W")
+    # P.9 is defined by the old system, so its rows need a local definition; not dead
+    assert {row.name for row in user.report.needs_local} == {"GONE 20V", "P.9"}
+
+
+def test_inputs_carry_both_files_content_hashes(tmp_path: Path) -> None:
+    from af.clades.importer import read_user_clades
+    from af.util.artefacts import sha256_path
+
+    directory = acmacs_data(tmp_path)
+    user = read_user_clades(directory, synthetic(tmp_path))
+    assert [(item.path.name, item.sha256) for item in user.inputs] == [
+        (name, sha256_path(directory / name)) for name in ("semantic_clades.py", "clades.json")
+    ]
+
+
+def test_an_edit_is_seen_on_the_next_read(tmp_path: Path) -> None:
+    """Read at run time, not converted once: an edited colour must reach the next figure,
+    and its provenance must change with it."""
+    from af.clades.importer import read_user_clades
+
+    sets = synthetic(tmp_path)
+    first = read_user_clades(acmacs_data(tmp_path), sets)
+    second = read_user_clades(acmacs_data(tmp_path, MODULE.replace("#112233", "#aabbcc")), sets)
+    assert first.scheme(SUBTYPE, "clades-v1").entries[0].colour == "#112233"
+    assert second.scheme(SUBTYPE, "clades-v1").entries[0].colour == "#aabbcc"
+    assert first.inputs[0].sha256 != second.inputs[0].sha256
+
+
+def test_an_unknown_scheme_or_subtype_is_an_error(tmp_path: Path) -> None:
+    from af.clades.importer import UserCladesError, read_user_clades
+
+    user = read_user_clades(acmacs_data(tmp_path), synthetic(tmp_path))
+    with pytest.raises(UserCladesError, match=r"no colour scheme 'clades-v9'.*clades-v1"):
+        user.scheme(SUBTYPE, "clades-v9")
+    # a subtype without a clade set (B/Yamagata, by design) has no schemes: asking fails
+    with pytest.raises(UserCladesError, match="no colour schemes for 'B/Yam'"):
+        user.scheme("B/Yam", "clades")
+    with pytest.raises(UserCladesError, match="no groups for 'B/Yam'"):
+        user.group_set("B/Yam")
+
+
+@pytest.mark.parametrize("missing", ["directory", "semantic_clades.py", "clades.json"])
+def test_missing_inputs_are_fatal(tmp_path: Path, missing: str) -> None:
+    from af.clades.importer import UserCladesError, read_user_clades
+
+    directory = acmacs_data(tmp_path)
+    if missing == "directory":
+        directory = tmp_path / "absent"
+    else:
+        (directory / missing).unlink()
+    with pytest.raises(UserCladesError, match="not found"):
+        read_user_clades(directory, synthetic(tmp_path))
+
+
+def test_a_malformed_scheme_row_is_an_error(tmp_path: Path) -> None:
+    """Checked as a scheme file is: a colour that is not #rrggbb fails the read."""
+    from af.clades.colours import ColourSchemeError
+    from af.clades.importer import read_user_clades
+
+    directory = acmacs_data(tmp_path, MODULE.replace("#445566", "red"))
+    with pytest.raises(ColourSchemeError, match="colour 'red' is not '#rrggbb'"):
+        read_user_clades(directory, synthetic(tmp_path))
+
+
+def test_a_file_edited_mid_read_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import af.clades.importer as importer
+
+    directory = acmacs_data(tmp_path)
+    original = importer.import_semantic_clades
+
+    def edit_while_reading(*args: Any, **kwargs: Any) -> importer.ImportReport:
+        report = original(*args, **kwargs)
+        (directory / "clades.json").write_text("{}")
+        return report
+
+    monkeypatch.setattr(importer, "import_semantic_clades", edit_while_reading)
+    with pytest.raises(importer.UserCladesError, match="changed while being read: clades.json"):
+        importer.read_user_clades(directory, synthetic(tmp_path))
