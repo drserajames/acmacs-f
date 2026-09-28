@@ -27,6 +27,7 @@ it means the clade store is behind the sequence store, or cannot align the seque
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -69,6 +70,9 @@ class LinkCounts:
     by_status_and_pairing: dict[tuple[str, str], int] = field(default_factory=dict)
     matched_without_clade_row: int = 0
     matched_with_empty_clade: int = 0
+    # clade dataset -> (sequences version it labelled, or None if its provenance names none,
+    # current sequences version), for every clade table behind the sequence store
+    clades_behind: dict[str, tuple[str | None, str]] = field(default_factory=dict)
 
 
 def link_sequences(
@@ -351,9 +355,36 @@ def link_from_store(
         )
     ]
     clades = None
+    behind: dict[str, tuple[str | None, str]] = {}
     if with_clades:
         refs = store.list_datasets("clades")
         if not refs:
             raise StoreError("no clades datasets in the store")
         clades = [p for ref in refs for p in sorted(store.resolve(ref).glob("*.parquet"))]
-    return link_sequences(con, indexes, isolates, clades, class_of)
+        behind = _clades_behind(store, refs)
+    counts = link_sequences(con, indexes, isolates, clades, class_of)
+    counts.clades_behind = behind
+    return counts
+
+
+def _clades_behind(store: Any, refs: Sequence[Any]) -> dict[str, tuple[str | None, str]]:
+    """Clade tables labelled from an older sequences version than the current one.
+
+    A clade table covers the sequences version its provenance names; sequences added since
+    have no row until the clade table is refreshed, and show up as "matched without clade
+    row". This says why, per dataset, instead of leaving the count to be puzzled over.
+    """
+    out: dict[str, tuple[str | None, str]] = {}
+    for ref in refs:
+        provenance = json.loads((store.resolve(ref) / "PROVENANCE.json").read_text())
+        labelled = [
+            item["store"]["version"]
+            for item in provenance.get("inputs", [])
+            if "store" in item and item["store"].get("kind") == "sequences"
+            and item["store"].get("dataset") == ref.dataset
+        ]  # fmt: skip
+        current = store.current("sequences", ref.dataset).version
+        version = labelled[0] if len(labelled) == 1 else None
+        if version != current:
+            out[ref.dataset] = (version, current)
+    return out
