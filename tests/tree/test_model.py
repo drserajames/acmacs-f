@@ -195,3 +195,39 @@ def test_binary_copy_leaves_an_already_binary_tree_alone() -> None:
     binary, added = tree.binary_copy()
     assert added == 0
     assert newick.dumps(binary) == newick.dumps(tree)
+
+
+def _patristic(tree: Tree) -> dict[tuple[str, str], float]:
+    """Every pair of leaves and the path length between them, whatever the root."""
+    edges: dict[int, list[tuple[object, float]]] = {}
+    for node in tree.preorder():
+        edges.setdefault(id(node), [])
+        if node.parent is not None:
+            edges[id(node)].append((node.parent, node.branch_length))
+            edges.setdefault(id(node.parent), []).append((node, node.branch_length))
+    out = {}
+    for start in tree.leaves():
+        seen = {id(start): 0.0}
+        stack = [start]
+        while stack:
+            here = stack.pop()
+            for there, length in edges[id(here)]:
+                if id(there) not in seen:
+                    seen[id(there)] = seen[id(here)] + length
+                    stack.append(there)  # type: ignore[arg-type]
+        for leaf in tree.leaves():
+            out[(start.name or "", leaf.name or "")] = round(seen[id(leaf)], 12)
+    return out
+
+
+def test_reroot_keeps_every_distance_between_leaves() -> None:
+    """Rerooting moves the root, never a leaf: all pairwise distances must survive it.
+
+    The outgroup is three nodes deep and every edge on the path has a different length, which is
+    what the old unit tests (every length 1) could not see.
+    """
+    tree = tree_of("((((outgroup:0.5,x:0.25):0.125,y:0.0625):0.03125,z:2):4,(p:8,q:16):32);")
+    before = _patristic(tree)
+    tree.reroot_on_outgroup("outgroup")
+    assert "outgroup" in {child.name for child in tree.root.children}
+    assert _patristic(tree) == before
