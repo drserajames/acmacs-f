@@ -283,13 +283,18 @@ class Tree:
         while node is not None:
             path.append(node)
             node = node.parent
-        # Reverse the parent chain between the old root and the outgroup's parent.
+        # Reverse the parent chain between the old root and the outgroup's parent. Each reversed
+        # edge keeps its own length: the edge (child -> parent) becomes (parent -> child), so the
+        # length moves from child to parent. Read the lengths first: assigning in the same loop
+        # copied the first edge's length down the whole path (the first full H3 build, 28 Sep:
+        # ten spine edges of 0.0100986612961 each, and an inverted clock).
+        lengths = [node.branch_length for node in path]
         new_root = path[0]
-        for child, parent in zip(path, path[1:], strict=False):
+        for index, (child, parent) in enumerate(zip(path, path[1:], strict=False)):
             parent.children.remove(child)
             child.children.append(parent)
             parent.parent = child
-            parent.branch_length = child.branch_length
+            parent.branch_length = lengths[index]
         new_root.parent = None
         new_root.branch_length = 0.0
         self.root = new_root

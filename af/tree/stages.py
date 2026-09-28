@@ -112,7 +112,7 @@ TEST_PURPOSE = "test"
 """A test-only export (a stand-in outgroup) publishes only under a purpose starting with this:
 weekly and report trees are read by people, and must never be rooted on a stand-in."""
 
-CODE_VERSION = 1
+CODE_VERSION = 2
 """Bump when a stage's code changes what it writes, so existing records stop counting."""
 
 
