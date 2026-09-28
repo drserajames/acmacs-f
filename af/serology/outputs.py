@@ -1,10 +1,13 @@
 """Geo maps and stat tables for one window, from the stores: the entry point reports call.
 
 Everything is read from published store versions (serology, sequences) and explicit
-files (the coastline, locationdb through :mod:`af.seq.locations`), so a report built from
-the same refs gets the same figures. Where a dot is drawn, and which region an antigen
-counts under, both come from the sequence workstream's location lookup, keyed by the
-location part of the strain name: one vocabulary (GISAID's regions) for geo and stat.
+files (the coastline, af's own location tables through :mod:`af.seq.locations`), so a report
+built from the same refs and tables gets the same figures. Where a dot is drawn, and which
+region an antigen counts under, both come from the sequence workstream's location lookup,
+keyed by the location part of the strain name: one vocabulary (GISAID's regions) for geo and
+stat. af no longer reads locationdb here (Sarah: "af should not use locationdb"); the
+content hash of each location table is recorded in the report, so a map can be traced to the
+table version it was drawn from.
 
 Colours: ``colouring`` gives, per subtype, a colour scheme with its clade set and groups
 (:mod:`af.clades.colours`). Each antigen is matched to its sequence
@@ -37,6 +40,7 @@ from af.serology.query import Preparation
 from af.stat.counts import stat_counts
 from af.stat.output import Previous, write_stat
 from af.store import Store, StoreRef
+from af.util.artefacts import sha256_path
 
 #: Store datasets whose isolates the location lookup learns from.
 SEQUENCE_DATASETS = ("h1", "h3", "bvic", "byam")
@@ -62,6 +66,7 @@ class OutputsReport:
     geo_not_counted: dict[str, Any] = field(default_factory=dict)  # undated / no location
     stat_unknown_region: dict[str, int] = field(default_factory=dict)
     lookup: dict[str, object] = field(default_factory=dict)
+    location_tables: dict[str, str] = field(default_factory=dict)  # file -> sha256
     links: LinkCounts | None = None  # antigen -> sequence matching, when colouring
     colours: dict[str, ColourCounts] = field(default_factory=dict)  # subtype -> counts
     uncoloured_subtypes: list[str] = field(default_factory=list)
@@ -69,7 +74,7 @@ class OutputsReport:
 
 def make_geo_and_stat(
     store: Store,
-    locationdb: Path,
+    location_tables: Path,
     coastline: Path,
     first: Month,
     last: Month,
@@ -87,9 +92,17 @@ def make_geo_and_stat(
     """Write ``geo/<st>-records.json``, ``geo/<st>-YYYY-MM.pdf`` and ``stat/`` for a window."""
     serology = store.current("serology", "all")
     con = query.connect(store.resolve(serology))
-    lookup = locations.from_store(store, SEQUENCE_DATASETS, locations.LocationDb.read(locationdb))
+    tables = locations.LocationTables.read(location_tables)
+    lookup = locations.places_from_store(store, SEQUENCE_DATASETS, tables)
     preps, uses = query.preparations(con), query.serum_uses(con)
-    report = OutputsReport(serology=serology, lookup=lookup.counts.to_json())
+    report = OutputsReport(
+        serology=serology,
+        lookup=lookup.counts.to_json(),
+        location_tables={
+            name: sha256_path(location_tables / name)
+            for name in ("countries.tsv", "regions.tsv", "places.tsv")
+        },
+    )
 
     style_of = None
     if colouring is not None:
