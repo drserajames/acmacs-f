@@ -132,9 +132,14 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
     step(f"installing af (non-editable, extras {args.extras}) with {build_env.get('CXX', 'c++')}")
     # On macOS, link the optimiser to the env's own libomp: numpy's OpenBLAS already loads
     # it, and a second libomp copy (e.g. Homebrew's) aborts the process at run time.
+    # On Linux, a RUNPATH to the env's lib: _core's libgomp and libstdc++ then come from the
+    # release whichever module loads first (o, 28 Sep: they came from the env only because
+    # numpy happened to load first; imported first, _core would have pulled in the system's).
     openmp: list[str] = []
     if platform.system() == "Darwin":
         openmp = [f"--config-settings=cmake.define.AF_OPENMP_PREFIX={env}"]
+    else:
+        openmp = [f"--config-settings=cmake.define.CMAKE_INSTALL_RPATH={env / 'lib'}"]
     run(
         [python, "-m", "pip", "install", "--no-build-isolation", *openmp, f"{src}[{args.extras}]"],
         build_env,
@@ -194,10 +199,12 @@ def verify_imports(release: Path) -> None:
 
 
 def verify_linkage(release: Path) -> None:
-    """af's compiled extensions may link nothing outside the release or the operating system.
+    """af's compiled extensions must take their libraries from the release.
 
-    A library from anywhere else (e.g. /opt/homebrew) means the release is not
-    self-contained, and may be a second copy of something the env already provides.
+    A library from outside the release and the operating system (e.g. /opt/homebrew) means
+    the release is not self-contained. On Linux also: a library the release itself ships
+    (by soname, e.g. libgomp.so.1, libstdc++.so.6) must resolve to the release's copy, not
+    the system's, or which copy a process uses depends on import order.
     A scan that finds no extension, or reads no libraries from one, fails: a check that
     examined nothing must not pass.
     """
@@ -205,33 +212,66 @@ def verify_linkage(release: Path) -> None:
     if not extensions:
         raise SystemExit(f"no compiled af extension found in {release}: cannot check linkage")
     darwin = platform.system() == "Darwin"
-    system = (
-        ("/usr/lib/", "/System/", "@rpath/", "@loader_path/")
-        if darwin
-        else ("/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/")
-    )
+    shipped = {path.name for path in (release / "env" / "lib").iterdir()}
     for extension in extensions:
         libraries = _linked_libraries(extension, darwin)
         if not libraries:
             raise SystemExit(f"read no linked libraries from {extension}: cannot check linkage")
-        foreign = [
-            lib
-            for lib in libraries
-            if not lib.startswith(system) and not Path(lib).resolve().is_relative_to(release)
-        ]
+        foreign = foreign_libraries(libraries, release, shipped, darwin=darwin)
         if foreign:
             raise SystemExit(
                 f"{extension.name} links libraries from outside the release: {foreign}"
             )
 
 
-def _linked_libraries(extension: Path, darwin: bool) -> list[str]:
+MACOS_SYSTEM = ("/usr/lib/", "/System/", "@rpath/", "@loader_path/")
+LINUX_SYSTEM = ("/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/")
+
+
+def foreign_libraries(
+    libraries: list[tuple[str, str]], release: Path, shipped: set[str], *, darwin: bool
+) -> list[str]:
+    """The resolved paths among ``(name, path)`` pairs that break self-containment.
+
+    macOS: anything outside the release and the OS (conda ships a libc++ too, but a
+    system libc++ beside it is normal there: two-level namespaces keep them apart).
+    Linux: also anything the release ships by the same soname but resolved elsewhere.
+    """
+    foreign = []
+    for name, path in libraries:
+        if path.startswith("@") or Path(path).resolve().is_relative_to(release.resolve()):
+            continue
+        if darwin:
+            if not path.startswith(MACOS_SYSTEM):
+                foreign.append(path)
+        elif not path.startswith(LINUX_SYSTEM) or name in shipped:
+            foreign.append(path)
+    return foreign
+
+
+def _linked_libraries(extension: Path, darwin: bool) -> list[tuple[str, str]]:
     tool = ["otool", "-L"] if darwin else ["ldd"]
-    lines = capture([*tool, str(extension)], {"PATH": "/usr/bin:/bin"}).splitlines()
-    if darwin:
-        return [line.split()[0] for line in lines[1:] if line.strip()]
-    paths = [line.split("=>")[-1].split()[0] for line in lines if "=>" in line]
-    return [path for path in paths if path.startswith("/")]
+    output = capture([*tool, str(extension)], {"PATH": "/usr/bin:/bin"})
+    return parse_otool(output) if darwin else parse_ldd(output)
+
+
+def parse_otool(output: str) -> list[tuple[str, str]]:
+    """``otool -L`` lines after the first: the install name is both name and path."""
+    paths = [line.split()[0] for line in output.splitlines()[1:] if line.strip()]
+    return [(Path(path).name, path) for path in paths]
+
+
+def parse_ldd(output: str) -> list[tuple[str, str]]:
+    """``ldd`` lines ``soname => /resolved/path (0x…)``; unresolved or vdso lines are skipped."""
+    pairs = []
+    for line in output.splitlines():
+        if "=>" not in line:
+            continue
+        name, _, rest = line.partition("=>")
+        path = rest.split()[0] if rest.split() else ""
+        if path.startswith("/"):
+            pairs.append((name.strip(), path))
+    return pairs
 
 
 OPENMP_PROBE = """
