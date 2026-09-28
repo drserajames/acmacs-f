@@ -3,7 +3,14 @@
 import numpy as np
 import pytest
 
-from af.map.curate import CurationError, MoveOverride, apply_move, continuity_layout
+from af.map.curate import (
+    BlockOffset,
+    CurationError,
+    MoveOverride,
+    apply_block_offset,
+    apply_move,
+    continuity_layout,
+)
 from af.map.orient import rotation
 
 BLUE, RED = "#0000ff", "#ff0000"
@@ -102,3 +109,86 @@ def test_continuity_starts_from_previous_positions() -> None:
     report = result.report()
     assert report["common_points"] == 30
     assert set(report) >= {"stress_delta_pct", "rmsd_continuity_to_chain"}
+
+
+def block_rule(**changes: object) -> BlockOffset:
+    base: dict[str, object] = dict(
+        name="shift the stray cluster in",
+        reason="reviewed at the meeting",
+        decided="2026-09-23",
+        movers=("STRAY A", "STRAY B"),
+        shift=(-9.0, -9.0),
+        derived_from="median of the blue group minus the mean of the strays, 22 Sep layout",
+        colour_scheme="scheme-1",
+        target_colour=BLUE,
+        max_stress_rise=1e9,
+        settled_within=1.0,
+        min_settled=2,
+        max_other_move=1e9,
+    )
+    base.update(changes)
+    return BlockOffset(**base)  # type: ignore[arg-type]
+
+
+def test_block_offset_shifts_the_group_and_keeps_its_shape() -> None:
+    result = apply_block_offset(
+        block_rule(), LAYOUT, NAMES, PAINTED, stress_before=0.0, relax=no_relax
+    )
+    # the two movers keep their separation: a block move, not a move to a point
+    before = LAYOUT[4] - LAYOUT[3]
+    after = result.layout[4] - result.layout[3]
+    np.testing.assert_allclose(after, before)
+    np.testing.assert_allclose(result.layout[3], LAYOUT[3] + [-9.0, -9.0])
+    assert result.settled == 2
+    report = result.report(block_rule())
+    assert report["shift"] == [-9.0, -9.0]
+    assert "derived_from" in report  # the number is round-bound; say where it came from
+    assert all(type(v) in (str, int, float, list) for v in report.values())
+
+
+def test_block_offset_guards() -> None:
+    with pytest.raises(CurationError, match="stress rose"):
+        apply_block_offset(
+            block_rule(max_stress_rise=0.0),
+            LAYOUT,
+            NAMES,
+            PAINTED,
+            stress_before=-1000.0,
+            relax=no_relax,
+        )
+    with pytest.raises(CurationError, match="settled within"):
+        apply_block_offset(
+            block_rule(shift=(0.0, 0.0)),
+            LAYOUT,
+            NAMES,
+            PAINTED,
+            stress_before=0.0,
+            relax=no_relax,
+        )
+    with pytest.raises(CurationError, match="matches 0"):
+        apply_block_offset(
+            block_rule(movers=("GHOST",)),
+            LAYOUT,
+            NAMES,
+            PAINTED,
+            stress_before=0.0,
+            relax=no_relax,
+        )
+
+
+def test_block_offset_ignores_a_rotation_when_measuring_collateral() -> None:
+    """A relax can turn the whole map; unfitted, that reads as every point having moved."""
+
+    def turns_the_map(start: np.ndarray, movable: np.ndarray) -> tuple[np.ndarray, float]:
+        return start @ rotation(25.0), 0.0
+
+    result = apply_block_offset(
+        block_rule(max_other_move=1e-6, settled_within=1e9),
+        LAYOUT,
+        NAMES,
+        PAINTED,
+        stress_before=0.0,
+        relax=turns_the_map,
+    )
+    assert result.largest_other_move < 1e-6  # the rotation is fitted out, not counted as movement
+    assert abs(result.rotation_degrees) == pytest.approx(25.0, abs=0.01)
