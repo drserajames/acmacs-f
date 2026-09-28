@@ -21,6 +21,8 @@ RULES: dict[str, list[str]] = {
         "LABN\tHI\texact\t≧640\t>320" + META + "yes",
         "LABC\tHI\texact\tND\t*" + META + "yes",
         "LABC\tHI\texact\t*\t*" + META + "yes",
+        "LABC\tPRN\texact\t<\t<40" + META + "yes",
+        "LABC\tPRN\texact\t-\t*" + META + "yes",
     ],
     "control_sera": [
         "lab\tfield\tkind\tpattern\taction\tvalue\tevidence\tadded_by\tadded_on\toptional",
