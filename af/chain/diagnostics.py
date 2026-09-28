@@ -31,6 +31,11 @@ class Thresholds:
     moved_far_count: int = 3  # a step is flagged when at least this many points moved far
     stress_jump: float = 0.15  # relative rise in stress per titre vs the previous step
     scratch_beats_incremental: float = 0.01  # scratch lower by this: incremental is stuck
+    # Incremental and scratch this close (relative), yet different maps: another compiler or BLAS
+    # can pick the other one, and every later step follows it. Measured on 28 Sep 2026: the same
+    # h3 step's scratch stress differed by 1.30 (~0.09%) between a laptop and an HPC build.
+    near_tie: float = 0.001
+    near_tie_rmsd: float = 0.1  # below this the two maps are the same basin: the choice is moot
     basin_rmsd: float = 0.5  # reported with a scratch win: the maps are in different basins
     column_basis_slack: float = 1.0  # a forced base this far above the table-only base
 
@@ -56,6 +61,12 @@ def flags(d: dict[str, Any], t: Thresholds = THRESHOLDS) -> list[str]:
         rmsd = d.get("incremental_vs_scratch_rmsd", 0.0)
         basin = f", different basin (RMSD {rmsd:.2f})" if rmsd > t.basin_rmsd else ""
         out.append(f"scratch beat incremental by {gap:.1%}{basin}")
+    elif gap is not None and abs(gap) < t.near_tie:
+        rmsd = d.get("incremental_vs_scratch_rmsd", 0.0)
+        if rmsd > t.near_tie_rmsd:  # measured only: the rule stays ae's, incremental <= scratch
+            out.append(
+                f"near tie: incremental {gap:+.3%} vs scratch, maps differ (RMSD {rmsd:.2f})"
+            )
     slack = [s for s in d.get("column_basis_slack", []) if s["slack"] >= t.column_basis_slack]
     if slack:
         out.append(f"{len(slack)} sera with column-basis slack ≥ {t.column_basis_slack}")
