@@ -404,6 +404,9 @@ def _as_job(step: Step, subtype: str, settings: TreeSettings, layout: Layout, co
     the job runs with the interpreter (and so the af) that is running this driver.
     """
     stage = step.name
+    # Resolved now, against the driver's working directory: a job runs in its own output
+    # directory, where a relative config path names nothing (the first real build, 28 Sep).
+    config = Path(config).resolve()
 
     def submit(context: StepContext) -> None:
         directory = layout.stage(stage)
