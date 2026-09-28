@@ -30,7 +30,7 @@ from typing import Protocol
 import numpy as np
 from numpy.typing import NDArray
 
-from af.map.orient import procrustes, rows_with_coordinates
+from af.map.orient import decompose, procrustes, rows_with_coordinates
 
 Array = NDArray[np.float64]
 Mask = NDArray[np.bool_]
@@ -219,4 +219,133 @@ def continuity_layout(
     to_chain = procrustes(out, chain)
     return ContinuityResult(
         out, stress_chain, stress, fit.rmsd, to_prev.rmsd, to_chain.rmsd, fit.n_common
+    )
+
+
+@dataclass(frozen=True)
+class BlockOffset:
+    """Shift named points by a fixed offset, keeping their shape, then relax the whole map.
+
+    Why a fixed offset rather than a target: for a large, weakly constrained group the relax is
+    sensitive to where it starts, so a shift recomputed from the current layout gives a visibly
+    different result from one a person reviewed. The number is therefore part of the decision,
+    like the reason, and is **round-bound**: it is derived from one round's layout and must be
+    re-derived when the map is rebuilt. `derived_from` records how it was obtained, so the next
+    round can repeat the derivation rather than guess.
+
+    Guards, all checked before anything is returned: stress may rise by at most
+    ``max_stress_rise``; at least ``min_settled`` of the movers must end within ``settled_within``
+    of the median of the points painted ``target_colour``; and no other point may move more than
+    ``max_other_move`` once the map is rigidly fitted back onto its old self.
+    """
+
+    name: str
+    reason: str
+    decided: str
+    movers: tuple[str, ...]
+    shift: tuple[float, float]
+    derived_from: str
+    colour_scheme: str
+    target_colour: str
+    max_stress_rise: float
+    settled_within: float
+    min_settled: int
+    max_other_move: float
+
+
+@dataclass(frozen=True)
+class BlockResult:
+    layout: Array
+    stress_before: float
+    stress_after: float
+    mover_rows: tuple[int, ...]
+    settled: int
+    largest_other_move: float
+    rotation_degrees: float
+
+    def report(self, rule: BlockOffset) -> dict[str, object]:
+        return {
+            "override": rule.name,
+            "reason": rule.reason,
+            "decided": rule.decided,
+            "shift": [round(float(rule.shift[0]), 4), round(float(rule.shift[1]), 4)],
+            "derived_from": rule.derived_from,
+            "movers": len(self.mover_rows),
+            "settled": self.settled,
+            "stress_before": round(float(self.stress_before), 4),
+            "stress_after": round(float(self.stress_after), 4),
+            "largest_other_move": round(float(self.largest_other_move), 4),
+            "rotation_degrees": round(float(self.rotation_degrees), 4),
+        }
+
+
+def apply_block_offset(
+    rule: BlockOffset,
+    layout: Array,
+    designations: Sequence[str],
+    painted: Sequence[str | None],
+    *,
+    stress_before: float,
+    relax: Relax,
+) -> BlockResult:
+    """Apply one :class:`BlockOffset`. Raises :class:`CurationError` if a guard fails."""
+    rows = []
+    for want in rule.movers:
+        hits = [i for i, d in enumerate(designations) if d == want]
+        if len(hits) != 1:
+            raise CurationError(f"block {rule.name!r}: mover {want!r} matches {len(hits)} antigens")
+        rows.append(hits[0])
+    has_xy = rows_with_coordinates(layout)
+    movers = set(rows)
+    group = [
+        i
+        for i, colour in enumerate(painted)
+        if colour is not None
+        and colour.lower() == rule.target_colour.lower()
+        and i not in movers
+        and has_xy[i]
+    ]
+    if not group:
+        raise CurationError(
+            f"block {rule.name!r}: no points painted {rule.target_colour} by {rule.colour_scheme}"
+        )
+    start = layout.copy()
+    start[rows] = start[rows] + np.asarray(rule.shift, dtype=float)
+    out, stress_after = relax(start, has_xy)
+
+    # Compare positions only after fitting the new map rigidly back onto the old one: a relax can
+    # turn the whole map, and an unfitted comparison reads that rotation as every point moving.
+    others = np.array(
+        [i for i in range(len(layout)) if i not in movers and has_xy[i]], dtype=np.intp
+    )
+    fit = procrustes(out[others], layout[others], reflection=False)
+    fitted = out @ fit.matrix + fit.translation
+    largest_other = float(np.linalg.norm(fitted[others] - layout[others], axis=1).max())
+    centre = np.median(fitted[group], axis=0)
+    settled = int((np.linalg.norm(fitted[rows] - centre, axis=1) <= rule.settled_within).sum())
+    degrees = decompose(fit.matrix)[0]
+
+    if stress_after - stress_before > rule.max_stress_rise:
+        raise CurationError(
+            f"block {rule.name!r}: stress rose {stress_after - stress_before:.3f} "
+            f"(cap {rule.max_stress_rise}); layout left unchanged"
+        )
+    if settled < rule.min_settled:
+        raise CurationError(
+            f"block {rule.name!r}: only {settled} of {len(rows)} movers settled within "
+            f"{rule.settled_within} of the target (need {rule.min_settled}); layout left unchanged"
+        )
+    if largest_other > rule.max_other_move:
+        raise CurationError(
+            f"block {rule.name!r}: another point moved {largest_other:.3f} "
+            f"(cap {rule.max_other_move}); layout left unchanged"
+        )
+    return BlockResult(
+        layout=out,
+        stress_before=stress_before,
+        stress_after=stress_after,
+        mover_rows=tuple(rows),
+        settled=settled,
+        largest_other_move=largest_other,
+        rotation_degrees=degrees,
     )
