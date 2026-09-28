@@ -20,10 +20,10 @@ non-country:NOWHERE\tNOWHERE\tatlas\ta placeholder, not a country\tt\t2026-01-01
 REGIONS = """scheme\tcountry\tgroup\tevidence\tadded_by\tadded_on
 blocs\tXAA\tNORTH\tfrom the atlas\tt\t2026-01-01
 blocs\tXBB\tSOUTH\tfrom the atlas\tt\t2026-01-01
-blocs\tnon-country:NOWHERE\tnot a country\trecorded, not blank\tt\t2026-01-01
+blocs\tnon-country:NOWHERE\tnot assigned\tnot a country\tt\t2026-01-01
 offices\tXAA\tOFFICE-1\tpublished list\tt\t2026-01-01
 offices\tXBB\tnot assigned\tnot in the published list\tt\t2026-01-01
-offices\tnon-country:NOWHERE\tnot a country\trecorded, not blank\tt\t2026-01-01
+offices\tnon-country:NOWHERE\tnot assigned\tnot a country\tt\t2026-01-01
 """
 
 
@@ -68,8 +68,11 @@ def test_schemes_give_a_group_for_every_country(tmp_path: Path, countries: P.Cou
     schemes = P.RegionSchemes.read(write(tmp_path, "r.tsv", REGIONS), countries)
     assert schemes.schemes == {"blocs", "offices"}
     assert schemes.group_of("offices", "XBB") == "not assigned"
+    assert (schemes.assigned("offices", "XBB"), schemes.assigned("offices", "XAA")) == (
+        None, "OFFICE-1",
+    )  # fmt: skip
     assert schemes.members("blocs") == {
-        "NORTH": ["XAA"], "SOUTH": ["XBB"], "not a country": ["non-country:NOWHERE"],
+        "NORTH": ["XAA"], "SOUTH": ["XBB"], "not assigned": ["non-country:NOWHERE"],
     }  # fmt: skip
     with pytest.raises(P.PlacesError, match="no region scheme 'zones'"):
         schemes.group_of("zones", "XAA")
@@ -84,6 +87,12 @@ def test_a_country_missing_from_a_scheme_is_refused(tmp_path: Path, countries: P
 def test_a_blank_group_is_refused_not_filled(tmp_path: Path, countries: P.Countries) -> None:
     text = REGIONS.replace("offices\tXBB\tnot assigned", "offices\tXBB\t")
     with pytest.raises(P.PlacesError, match="blank group"):
+        P.RegionSchemes.read(write(tmp_path, "r.tsv", text), countries)
+
+
+def test_a_reason_written_as_the_group_is_refused(tmp_path: Path, countries: P.Countries) -> None:
+    text = REGIONS.replace("offices\tXBB\tnot assigned", "offices\tXBB\tnot in the list")
+    with pytest.raises(P.PlacesError, match="reads as a reason"):
         P.RegionSchemes.read(write(tmp_path, "r.tsv", text), countries)
 
 

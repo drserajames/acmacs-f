@@ -25,6 +25,9 @@ from pathlib import Path
 from af.seq.names import normalise
 
 REQUIRED_COUNTRY = ("code", "spelling", "source", "evidence")
+#: The one group value that is not a group: the country is recorded as having none in that
+#: scheme, and the row's ``evidence`` says why. Consumers see it as "no group", never as a column.
+NOT_ASSIGNED = "not assigned"
 REQUIRED_REGION = ("scheme", "country", "group", "evidence")
 
 
@@ -101,6 +104,11 @@ class RegionSchemes:
                 raise PlacesError(
                     f"{path}:{line}: blank group; record 'not assigned' with a reason"
                 )
+            if group != NOT_ASSIGNED and group.lower().startswith(("not ", "no ")):
+                raise PlacesError(
+                    f"{path}:{line}: group {group!r} reads as a reason; record"
+                    f" {NOT_ASSIGNED!r} and put the reason in evidence"
+                )
             if (scheme, code) in groups:
                 raise PlacesError(f"{path}:{line}: {scheme} {code} has two rows")
             groups[(scheme, code)] = group
@@ -111,9 +119,15 @@ class RegionSchemes:
         return cls(groups, frozenset(covered))
 
     def group_of(self, scheme: str, code: str) -> str:
+        """The recorded value, :data:`NOT_ASSIGNED` included (see :meth:`assigned`)."""
         if scheme not in self.schemes:
             raise PlacesError(f"no region scheme {scheme!r}; have {sorted(self.schemes)}")
         return self.groups[(scheme, code)]
+
+    def assigned(self, scheme: str, code: str) -> str | None:
+        """The group, or None where the country is recorded as having none in this scheme."""
+        group = self.group_of(scheme, code)
+        return None if group == NOT_ASSIGNED else group
 
     def members(self, scheme: str) -> dict[str, list[str]]:
         """group -> country codes, for reports."""
