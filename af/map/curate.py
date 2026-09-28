@@ -112,6 +112,8 @@ def apply_move(
     antigens, the target group is too small, or a guard fails, so a failed rule can never leave a
     half-curated layout behind.
     """
+    if not rule.movers:
+        raise CurationError(f"move {rule.name!r}: no movers")
     rows = []
     for want in rule.movers:
         hits = [i for i, d in enumerate(designations) if d == want]
@@ -289,6 +291,8 @@ def apply_block_offset(
     relax: Relax,
 ) -> BlockResult:
     """Apply one :class:`BlockOffset`. Raises :class:`CurationError` if a guard fails."""
+    if not rule.movers:
+        raise CurationError(f"block {rule.name!r}: no movers")
     rows = []
     for want in rule.movers:
         hits = [i for i, d in enumerate(designations) if d == want]

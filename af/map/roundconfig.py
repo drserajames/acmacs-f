@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from af.map.config import (
+    BlockOffsetConfig,
+    ColumnBaseConfig,
     Defaults,
     FrameConfig,
     HideConfig,
@@ -131,7 +133,9 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
             "scheme_stand_in",
             "layout_stand_in",
             "title",
+            "column_bases",
             "moves",
+            "blocks",
             "hides",
             "rotations",
             "vaccine_disable",
@@ -148,6 +152,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
                 "reason",
                 "decided",
                 "movers",
+                "movers_file",
                 "target_legend",
                 "max_stress_rise",
                 "max_from_target",
@@ -160,11 +165,63 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
                 mv["name"],
                 mv["reason"],
                 _date(mv["decided"], f"{where} move {mv['name']}"),
-                tuple(mv["movers"]),
+                tuple(mv.get("movers", ())),
                 mv["target_legend"],
                 float(mv["max_stress_rise"]),
                 float(mv["max_from_target"]),
                 int(mv.get("min_target_points", 5)),
+                _path(mv["movers_file"], base) if "movers_file" in mv else None,
+            )
+        )
+    blocks = []
+    for b in m.get("blocks", ()):
+        _known(
+            b,
+            {
+                "name",
+                "reason",
+                "decided",
+                "movers",
+                "movers_file",
+                "shift",
+                "derived_from",
+                "target_legend",
+                "max_stress_rise",
+                "settled_within",
+                "min_settled",
+                "max_other_move",
+            },
+            f"{where} block",
+        )
+        shift = b["shift"]
+        if not (isinstance(shift, list) and len(shift) == 2):
+            raise ConfigError(f"{where} block {b['name']}: shift must be [dx, dy]")
+        blocks.append(
+            BlockOffsetConfig(
+                b["name"],
+                b["reason"],
+                _date(b["decided"], f"{where} block {b['name']}"),
+                tuple(b.get("movers", ())),
+                (float(shift[0]), float(shift[1])),
+                b["derived_from"],
+                b["target_legend"],
+                float(b["max_stress_rise"]),
+                float(b["settled_within"]),
+                int(b["min_settled"]),
+                float(b["max_other_move"]),
+                _path(b["movers_file"], base) if "movers_file" in b else None,
+            )
+        )
+    column_bases = []
+    for c in m.get("column_bases", ()):
+        _known(c, {"name", "reason", "decided", "sera", "value"}, f"{where} column_bases")
+        column_bases.append(
+            ColumnBaseConfig(
+                c["name"],
+                c["reason"],
+                _date(c["decided"], f"{where} column_bases {c['name']}"),
+                tuple(c["sera"]),
+                float(c["value"]),
             )
         )
     hides = []
@@ -222,7 +279,9 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
         layout_stand_in=_path(m["layout_stand_in"], base) if "layout_stand_in" in m else None,
         scheme_stand_in=_path(m["scheme_stand_in"], base) if "scheme_stand_in" in m else None,
         title=m.get("title"),
+        column_bases=tuple(column_bases),
         moves=tuple(moves),
+        blocks=tuple(blocks),
         hides=tuple(hides),
         rotations=tuple(rotations),
         vaccine_disable=tuple(disable),

@@ -17,6 +17,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def _movers(name: str, inline: tuple[str, ...], path: Path | None) -> tuple[str, ...]:
+    """Designations given inline or in a file beside the config; exactly one of the two."""
+    if inline and path:
+        raise ValueError(f"{name!r}: give movers or movers_file, not both")
+    if path is not None:
+        lines = path.read_text().splitlines()
+        return tuple(ln.strip() for ln in lines if ln.strip() and not ln.startswith("#"))
+    if not inline:
+        raise ValueError(f"{name!r}: no movers")
+    return inline
+
+
 @dataclass(frozen=True)
 class WindowConfig:
     """A time window of a map. ``since`` absent means "every antigen"."""
@@ -51,6 +63,11 @@ class MoveConfig:
     max_stress_rise: float
     max_from_target: float
     min_target_points: int = 5
+    movers_file: Path | None = None
+
+    def load_movers(self) -> tuple[str, ...]:
+        """The movers, inline or from a file beside the config: a long list is unreadable inline."""
+        return _movers(self.name, self.movers, self.movers_file)
 
 
 @dataclass(frozen=True)
@@ -75,6 +92,42 @@ class HideConfig:
         if not self.designations:
             raise ValueError(f"hide {self.name!r}: no designations")
         return self.designations
+
+
+@dataclass(frozen=True)
+class BlockOffsetConfig:
+    """Shift named points by a fixed offset, keeping their shape, then relax.
+
+    The offset is round-bound — it is derived from one round's layout — so ``derived_from`` says
+    how it was obtained and must be re-derived when the map is rebuilt.
+    """
+
+    name: str
+    reason: str
+    decided: dt.date
+    movers: tuple[str, ...]
+    shift: tuple[float, float]
+    derived_from: str
+    target_legend: str
+    max_stress_rise: float
+    settled_within: float
+    min_settled: int
+    max_other_move: float
+    movers_file: Path | None = None
+
+    def load_movers(self) -> tuple[str, ...]:
+        return _movers(self.name, self.movers, self.movers_file)
+
+
+@dataclass(frozen=True)
+class ColumnBaseConfig:
+    """Force the column base of named sera (log2 units: 8 is a titre of 2560)."""
+
+    name: str
+    reason: str
+    decided: dt.date
+    sera: tuple[str, ...]
+    value: float
 
 
 @dataclass(frozen=True)
@@ -118,7 +171,11 @@ class MapConfig:
     # styling step added, so the scheme often comes from a different chart than the layout.
     scheme_stand_in: Path | None = None
     title: str | None = None  # default: built from the chart's own lab/subtype/assay
+    # Steps run in the order a recipe needs: column bases first (they change what the stress
+    # means), then moves and block offsets in the order given, then hides.
+    column_bases: tuple[ColumnBaseConfig, ...] = ()
     moves: tuple[MoveConfig, ...] = ()
+    blocks: tuple[BlockOffsetConfig, ...] = ()
     hides: tuple[HideConfig, ...] = ()
     rotations: tuple[RotationConfig, ...] = ()
     vaccine_disable: tuple[VaccineDisableConfig, ...] = ()
