@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import csv
 import re
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -134,12 +134,6 @@ def load_colour_scheme(
     (INVENTORY E §2.3 counts four such rows).
     """
     path = Path(path)
-    problems: list[str] = []
-    entries: list[ColourEntry] = []
-    seen_keys: set[str] = set()
-    seen_orders: dict[int, str] = {}
-    group_names = set(group_set.names) if group_set else set()
-
     with path.open(newline="") as stream:
         reader = csv.DictReader(stream, delimiter="\t")
         fields = reader.fieldnames or []
@@ -149,46 +143,69 @@ def load_colour_scheme(
         unknown_columns = sorted(set(fields) - set(COLUMNS))
         if unknown_columns:
             raise ColourSchemeError(path, [f"unknown column(s): {', '.join(unknown_columns)}"])
-        for line, row in enumerate(reader, start=2):
-            values = {key: (row.get(key) or "").strip() for key in COLUMNS}
-            if not any(values.values()):
-                continue
-            where = f"line {line}"
-            key = values["key"]
-            if not key:
-                problems.append(f"{where}: no key")
-                continue
-            is_group = key in group_names
-            if not is_group and key not in clade_set:
-                problems.append(
-                    f"{where}: key {key!r} is neither a clade of {subtype} at "
-                    f"{clade_set.version} nor a known group"
-                )
-                continue
-            if key in seen_keys:
-                problems.append(f"{where}: duplicate key {key!r}")
-                continue
-            seen_keys.add(key)
-            if not COLOUR.fullmatch(values["colour"]):
-                problems.append(f"{where}: colour {values['colour']!r} is not '#rrggbb'")
-                continue
-            try:
-                order = int(values["order"])
-            except ValueError:
-                problems.append(f"{where}: order {values['order']!r} is not a number")
-                continue
-            if order in seen_orders:
-                problems.append(f"{where}: order {order} is already used by {seen_orders[order]!r}")
-                continue
-            seen_orders[order] = key
-            entries.append(
-                ColourEntry(order, key, values["legend"] or key, values["colour"].lower(), is_group)
+        rows = [(f"line {line}", row) for line, row in enumerate(reader, start=2)]
+    return scheme_from_rows(rows, subtype, path.stem, clade_set, group_set, path)
+
+
+def scheme_from_rows(
+    rows: Iterable[tuple[str, Mapping[str, str | None]]],
+    subtype: str,
+    name: str,
+    clade_set: CladeSet,
+    group_set: GroupSet | None = None,
+    source: Path | None = None,
+) -> ColourScheme:
+    """Check scheme rows, each ``(where, {order, key, legend, colour})``, and build it.
+
+    The one place a scheme is validated, whether its rows came from a file here or were
+    read at run time from the user's tables elsewhere (:mod:`af.clades.importer`), so the
+    two routes cannot drift apart in what they accept.
+    """
+    problems: list[str] = []
+    entries: list[ColourEntry] = []
+    seen_keys: set[str] = set()
+    seen_orders: dict[int, str] = {}
+    group_names = set(group_set.names) if group_set else set()
+    for where, row in rows:
+        values = {key: (row.get(key) or "").strip() for key in COLUMNS}
+        if not any(values.values()):
+            continue
+        key = values["key"]
+        if not key:
+            problems.append(f"{where}: no key")
+            continue
+        is_group = key in group_names
+        if not is_group and key not in clade_set:
+            problems.append(
+                f"{where}: key {key!r} is neither a clade of {subtype} at "
+                f"{clade_set.version} nor a known group"
             )
+            continue
+        if key in seen_keys:
+            problems.append(f"{where}: duplicate key {key!r}")
+            continue
+        seen_keys.add(key)
+        if not COLOUR.fullmatch(values["colour"]):
+            problems.append(f"{where}: colour {values['colour']!r} is not '#rrggbb'")
+            continue
+        try:
+            order = int(values["order"])
+        except ValueError:
+            problems.append(f"{where}: order {values['order']!r} is not a number")
+            continue
+        if order in seen_orders:
+            problems.append(f"{where}: order {order} is already used by {seen_orders[order]!r}")
+            continue
+        seen_orders[order] = key
+        entries.append(
+            ColourEntry(order, key, values["legend"] or key, values["colour"].lower(), is_group)
+        )
+    label = source if source is not None else f"{subtype} {name}"
     if not entries and not problems:
         problems.append("scheme has no entries")
     if problems:
-        raise ColourSchemeError(path, problems)
-    return ColourScheme(subtype, path.stem, tuple(entries), path)
+        raise ColourSchemeError(label, problems)
+    return ColourScheme(subtype, name, tuple(entries), source)
 
 
 def load_colour_schemes(
