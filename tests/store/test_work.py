@@ -70,7 +70,8 @@ def test_optional_shared_directories(tmp_path: Path) -> None:
     paths = load_config(config, StepConfig).paths
     assert paths.nomenclature is None and paths.acmacs_data is None
     config.write_text(
-        '[paths]\nstore = "s"\nwork = "w"\nnomenclature = "clones"\nacmacs_data = "../acmacs-data"\n'
+        '[paths]\nstore = "s"\nwork = "w"\n'
+        'nomenclature = "clones"\nacmacs_data = "../acmacs-data"\n'
     )
     paths = load_config(config, StepConfig).paths
     assert paths.nomenclature == (tmp_path / "clones").resolve()
