@@ -28,10 +28,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+          cache: pip                          # wheels reused across runs: fewer PyPI round trips
+          cache-dependency-path: pyproject.toml
       # Builds the C++ optimiser too once cpp/optimiser/ exists (alglib is fetched
       # and hash-checked by cpp/CMakeLists.txt); until then this is pure Python.
+      # Every extra, so no test skips for want of one. Retried only on network errors.
       - name: Install
-        run: python -m pip install -v -e '.[dev,geo]'   # every extra, so no test skips for want of one
+        run: tools/ci-pip-install.sh -e '.[dev,geo]'
       - name: Ruff
         run: |
           python -m ruff check .
@@ -123,7 +126,7 @@ jobs:
       - name: Install af into the environment
         run: |
           if [ "$RUNNER_OS" = macOS ]; then export CC=/usr/bin/clang CXX=/usr/bin/clang++; fi
-          python -m pip install -v -e '.[dev,geo]'
+          tools/ci-pip-install.sh -e '.[dev,geo]'
       - name: Tool tests (fail if a tool is missing)
         run: |
           set -o pipefail
