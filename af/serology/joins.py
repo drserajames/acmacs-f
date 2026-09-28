@@ -307,6 +307,7 @@ def link_from_store(
     with_clades: bool,
     lab_submitters: Mapping[str, frozenset[str]] | None = None,
     number_rules: Mapping[str, Any] | None = None,
+    equivalents: Sequence[Any] | None = None,
     lab_codes: Collection[str] | None = None,
     class_of: ClassOf = passage_class_column,
 ) -> LinkCounts:
@@ -320,20 +321,36 @@ def link_from_store(
     antigens match its own deposits by isolate number when the name does not. Both tables
     are keyed by the tables' own lab codes, exactly, checked against ``lab_codes`` (every lab
     code the table readers use, from config) with :func:`af.seq.matching.check_lab_codes`.
-    ``lab_codes`` is required with either table: the labs merely present in the store would
-    refuse a lab whose tables have not arrived yet.
+    ``lab_codes`` is required with any of these tables: the labs merely present in the store
+    would refuse a lab whose tables have not arrived yet. ``equivalents``
+    (:func:`af.seq.matching.read_location_equivalents`) are a lab's own spelling of a place
+    mapped to GISAID's (Sarah, Q44), used only when a name finds nothing; a row whose GISAID
+    spelling no stored sequence has is an error unless marked optional.
     """
-    from af.seq.matching import check_lab_codes, check_lab_submitters, index_from_store
+    from af.seq.matching import (
+        check_equivalents,
+        check_lab_codes,
+        check_lab_submitters,
+        equivalents_table,
+        index_from_store,
+    )
 
     # configuration first, before the store is read: a bad rule table fails fast
-    if (lab_submitters is not None or number_rules is not None) and lab_codes is None:
-        raise StoreError("lab_codes (from config) are needed to check lab_submitters/number_rules")
+    rule_tables = (lab_submitters, number_rules, equivalents)
+    if any(t is not None for t in rule_tables) and lab_codes is None:
+        raise StoreError(
+            "lab_codes (from config) are needed to check lab_submitters, number_rules and "
+            "location equivalents"
+        )
     if lab_submitters is not None:
         assert lab_codes is not None
         check_lab_codes(dict(lab_submitters), lab_codes, "lab_submitters")
     if number_rules is not None:
         assert lab_codes is not None
         check_lab_codes(dict(number_rules), lab_codes, "number_rules")
+    if equivalents is not None:
+        assert lab_codes is not None
+        check_lab_codes({row.lab: row for row in equivalents}, lab_codes, "location equivalents")
     datasets = sorted({d for group in DATASETS_FOR.values() for d in group})
     present = {ref.dataset for ref in store.list_datasets("sequences")}
     missing = [d for d in datasets if d not in present]
@@ -343,10 +360,14 @@ def link_from_store(
         # a submitter name that no longer appears in the store would silently stop breaking ties
         check_lab_submitters(store, datasets, dict(lab_submitters))
         _check_submitter_labs(con, lab_submitters)
+    if equivalents is not None:
+        # a GISAID spelling no stored sequence has would silently do nothing
+        check_equivalents(store, datasets, list(equivalents))
     indexes = {d: index_from_store(store, [d], passage_rules) for d in datasets}
     for index in indexes.values():
         index.submitters = dict(lab_submitters or {})
         index.number_rules = dict(number_rules or {})
+        index.equivalents = equivalents_table(equivalents or [])
     isolates = [
         path
         for d in datasets

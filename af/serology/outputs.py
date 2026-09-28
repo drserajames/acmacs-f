@@ -30,7 +30,7 @@ from af.geo.colours import UNCOLOURED, ColourCounts, DotStyle, dot_styles
 from af.geo.records import Month, geo_counts, to_i7
 from af.geo.render import render_geo
 from af.seq import locations
-from af.seq.matching import read_passage_rules
+from af.seq.matching import read_lab_submitters, read_passage_rules
 from af.serology import query
 from af.serology.joins import LinkCounts, link_from_store, preparation_sequences
 from af.serology.query import Preparation
@@ -80,6 +80,7 @@ def make_geo_and_stat(
     passage_rules: Path | None = None,
     lab_submitters: Path | None = None,
     number_rules: Mapping[str, Any] | None = None,
+    equivalents: Sequence[Any] | None = None,
     lab_codes: Sequence[str] | None = None,
     split_by_lineage: tuple[str, ...] = ("B",),
 ) -> OutputsReport:
@@ -95,8 +96,8 @@ def make_geo_and_stat(
         if passage_rules is None:
             raise ValueError("colouring needs passage_rules (the matcher's passage classes)")
         style_of = _styles(
-            store, con, preps, colouring, passage_rules, lab_submitters, number_rules, lab_codes,
-            report,
+            store, con, preps, colouring, passage_rules, lab_submitters, number_rules,
+            equivalents, lab_codes, report,
         )  # fmt: skip
     geo = geo_counts(preps, first, last, locations.name_location, style_of=style_of)
     geo_dir = out_dir / "geo"
@@ -137,11 +138,22 @@ def _styles(
     passage_rules: Path,
     lab_submitters: Path | None,
     number_rules: Mapping[str, Any] | None,
+    equivalents: Sequence[Any] | None,
     lab_codes: Sequence[str] | None,
     report: OutputsReport,
 ) -> Any:
     """Match antigens to sequences and clades, and give each preparation its dot style."""
-    report.links = link_from_store(con, store, read_passage_rules(passage_rules), with_clades=True)
+    submitters = read_lab_submitters(lab_submitters) if lab_submitters is not None else None
+    report.links = link_from_store(
+        con,
+        store,
+        read_passage_rules(passage_rules),
+        with_clades=True,
+        lab_submitters=submitters,
+        number_rules=number_rules,
+        equivalents=equivalents,
+        lab_codes=lab_codes,
+    )
     links = preparation_sequences(con)
     aligned = _aligned_sequences(store, con)
     styles = {}
