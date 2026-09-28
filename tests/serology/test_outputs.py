@@ -186,3 +186,24 @@ def test_clade_tables_behind_the_sequence_store_are_reported(tmp_path: Path, syn
     current = store.current("sequences", "h3").version
     assert current != labelled.version
     assert counts.clades_behind == {"h3": (labelled.version, current)}
+
+
+def test_rule_tables_reach_the_matcher(tmp_path: Path, syn: Any) -> None:
+    """make_geo_and_stat must pass its rule tables on, not accept and drop them: a submitters
+    table keyed by a lab code that is not one of lab_codes has to be refused from here."""
+    import pytest
+
+    store, locationdb, coastline = _roots(tmp_path, syn)
+    _clades(store, tmp_path)
+    rules = tmp_path / "passage_classes.tsv"
+    rules.write_text("pattern\tclass\treason\nSIAT\tcell\ttest\n")
+    submitters = tmp_path / "lab_submitters.tsv"
+    submitters.write_text("lab\tsubmitting_lab\treason\nlabx\tLab X Institute\ttest\n")
+    scheme = ColourScheme(subtype=H3, name="test", entries=())
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    with pytest.raises(ValueError, match="not table lab codes"):
+        make_geo_and_stat(
+            store, locationdb, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
+            colouring={H3: SubtypeColouring(scheme, clade_set)}, passage_rules=rules,
+            lab_submitters=submitters, lab_codes=["LABX"],
+        )  # fmt: skip
