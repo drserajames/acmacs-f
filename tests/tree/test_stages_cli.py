@@ -33,3 +33,16 @@ def test_the_driver_runs_its_jobs_when_started_with_dash_m(tmp_path: Path) -> No
 
 def test_jobs_name_the_real_module() -> None:
     assert stages.JOB_MODULE == stages.__name__ == "af.tree.stages"
+
+
+def test_a_relative_config_path_reaches_the_jobs(tmp_path: Path) -> None:
+    """Jobs run in their own output directory; the driver must hand them an absolute path."""
+    make_project(tmp_path / "p")
+    result = subprocess.run(
+        [sys.executable, "-m", "af.tree.stages", "p/trees.toml"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert Store.open(tmp_path / "p" / "store").current("trees", "h3/weekly") is not None
