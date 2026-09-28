@@ -2,7 +2,6 @@
 
 import datetime
 import json
-import lzma
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +16,7 @@ from af.store import Provenance, Store, Work
 from af.tables.identity import Manifest
 from af.tables.store import publish
 from tests.clades.synthetic import build_clone, load_synthetic
-from tests.seq.test_locations import LOCATIONDB
+from tests.seq.test_locations import COUNTRIES, PLACE_COLUMNS, PLACES, REGIONS
 
 NOW = datetime.datetime(2026, 9, 25, tzinfo=datetime.UTC)
 H3 = "A(H3N2)"
@@ -39,8 +38,8 @@ def _sequences(store: Store, tmp_path: Path) -> None:
         isolates = tmp_path / f"isolates-{dataset}.parquet"
         sequences = tmp_path / f"sequences-{dataset}.parquet"
         rows = ", ".join(
-            f"('EPI_ISL_{n}', 'ACC{n}', '{_name('A', n)}', 'SIAT1', 'EXAMPLELAND', "
-            f"'Example Region', 'EXAMPLETOWN', '2021-01-01', []::VARCHAR[])"
+            f"('EPI_ISL_{n}', 'ACC{n}', '{_name('A', n)}', 'SIAT1', 'Exampleland', "
+            f"'Example Continent', 'EXAMPLETOWN', '2021-01-01', []::VARCHAR[])"
             for n in numbers
         )
         duckdb.execute(
@@ -90,16 +89,20 @@ def _roots(tmp_path: Path, syn: Any) -> tuple[Store, Path, Path]:
     publish(store, tables, Manifest.from_tables(tables, inputs=[]), _provenance("tables-test"))
     update(store, work, syn.rules)
     _sequences(store, tmp_path)
-    locationdb = tmp_path / "locationdb.json.xz"
-    with lzma.open(locationdb, "wt") as handle:
-        json.dump(LOCATIONDB, handle)
-    return store, locationdb, _coastline(tmp_path)
+    location_dir = tmp_path / "locations"
+    location_dir.mkdir()
+    (location_dir / "countries.tsv").write_text(COUNTRIES)
+    (location_dir / "regions.tsv").write_text(REGIONS)
+    rows = [f"{loc}\t{c}\t\t{lat}\t{lon}\tcity\thand\tinvented\t\t\tt\t2026-01-01"
+            for loc, c, lat, lon in PLACES]  # fmt: skip
+    (location_dir / "places.tsv").write_text("\n".join([PLACE_COLUMNS, *rows]) + "\n")
+    return store, location_dir, _coastline(tmp_path)
 
 
 def test_geo_and_stat_from_the_stores(tmp_path: Path, syn: Any) -> None:
-    store, locationdb, coastline = _roots(tmp_path, syn)
+    store, tables, coastline = _roots(tmp_path, syn)
     out = tmp_path / "out"
-    report = make_geo_and_stat(store, locationdb, coastline, Month(2021, 1), Month(2021, 1), out)
+    report = make_geo_and_stat(store, tables, coastline, Month(2021, 1), Month(2021, 1), out)
     names = sorted(p.relative_to(out).as_posix() for p in report.files)
     assert names == ["geo/h3-2021-01.pdf", "geo/h3-records.json", "stat/index.html",
                      "stat/stat.json"]  # fmt: skip
@@ -111,14 +114,17 @@ def test_geo_and_stat_from_the_stores(tmp_path: Path, syn: Any) -> None:
     regions = {c["continent"]: c["count"] for c in cells
                if c["measure"] == "antigens" and c["subtype"] == "all" and c["lab"] == "all"
                and c["period"] == "all"}  # fmt: skip
-    assert regions == {"all": 2, "Example Region": 1, "UNKNOWN": 1}
+    assert regions == {"all": 2, "Example Continent": 1, "UNKNOWN": 1}
+    # the location tables a map was drawn from are recorded by content hash
+    assert sorted(report.location_tables) == ["countries.tsv", "places.tsv", "regions.tsv"]
+    assert all(len(h) == 64 for h in report.location_tables.values())
     assert report.stat_unknown_region == {"NEVERTOWN": 1}
     assert report.serology == store.current("serology", "all")
     assert report.links is None and report.colours == {}  # no colouring asked for
 
 
 def test_geo_colours_from_clade_store_and_scheme(tmp_path: Path, syn: Any) -> None:
-    store, locationdb, coastline = _roots(tmp_path, syn)
+    store, tables, coastline = _roots(tmp_path, syn)
     _clades(store, tmp_path)
     rules = tmp_path / "passage_classes.tsv"
     rules.write_text("pattern\tclass\treason\nSIAT\tcell\ttest\nMDCK\tcell\ttest\n")
@@ -133,7 +139,7 @@ def test_geo_colours_from_clade_store_and_scheme(tmp_path: Path, syn: Any) -> No
     clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
     out = tmp_path / "out"
     report = make_geo_and_stat(
-        store, locationdb, coastline, Month(2021, 1), Month(2021, 1), out,
+        store, tables, coastline, Month(2021, 1), Month(2021, 1), out,
         colouring={H3: SubtypeColouring(scheme, clade_set)}, passage_rules=rules,
     )  # fmt: skip
     assert report.links is not None and report.links.by_status["matched"] == 1
@@ -193,7 +199,7 @@ def test_rule_tables_reach_the_matcher(tmp_path: Path, syn: Any) -> None:
     table keyed by a lab code that is not one of lab_codes has to be refused from here."""
     import pytest
 
-    store, locationdb, coastline = _roots(tmp_path, syn)
+    store, tables, coastline = _roots(tmp_path, syn)
     _clades(store, tmp_path)
     rules = tmp_path / "passage_classes.tsv"
     rules.write_text("pattern\tclass\treason\nSIAT\tcell\ttest\n")
@@ -203,7 +209,7 @@ def test_rule_tables_reach_the_matcher(tmp_path: Path, syn: Any) -> None:
     clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
     with pytest.raises(ValueError, match="not table lab codes"):
         make_geo_and_stat(
-            store, locationdb, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
+            store, tables, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
             colouring={H3: SubtypeColouring(scheme, clade_set)}, passage_rules=rules,
             lab_submitters=submitters, lab_codes=["LABX"],
         )  # fmt: skip
