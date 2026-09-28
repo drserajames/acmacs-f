@@ -27,6 +27,12 @@ of the location) unless the rule's scope is national. The district spelling is w
 differ. It is taken only when that key has one district among the lab's deposits, flagged
 ``match.lab-number``; a key with several is flagged ``match.lab-number-collision`` and left.
 
+Between the two, a **location equivalent** (``location-equivalents.tsv``, acmacs-f-data) may
+join a lab's own location spelling to GISAID's, one way, keyed by (lab, table location): a
+name that found nothing is looked up again under each GISAID spelling the table lists for it,
+flagged ``match.location-equivalent``. It reaches deposits by any centre, which the number
+rule, keyed on the lab's own deposits, cannot.
+
 Passage classes of GISAID's free-text passages come from a rule table
 (``gisaid_passage_classes.tsv``, acmacs-f-data); table antigens bring their own class from
 the table parsers.
@@ -58,6 +64,7 @@ AMBIGUOUS = "match.ambiguous"
 OWN_LAB = "match.own-lab"
 LAB_NUMBER = "match.lab-number"
 LAB_NUMBER_COLLISION = "match.lab-number-collision"
+LOCATION_EQUIVALENT = "match.location-equivalent"
 REASSORTANT = "match.reassortant"
 NO_MATCH = "match.none"
 DOUBTFUL = frozenset({EPI_NAME_DIFFERS, SEVERAL_ACCESSIONS, EGG_WITHOUT_EGG_SEQUENCE,
@@ -152,6 +159,8 @@ class SequenceIndex:
     counts: Counter[str] = field(default_factory=Counter)
     submitters: dict[str, frozenset[str]] = field(default_factory=dict)  # lab -> GISAID names
     number_rules: dict[str, NumberRule] = field(default_factory=dict)  # lab -> rule
+    # (lab, table location) -> GISAID locations (read_location_equivalents)
+    equivalents: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
     _by_number: dict[str, dict[tuple[str, str, str], list[Candidate]]] | None = None
 
     def add(self, candidate: Candidate) -> None:
@@ -185,7 +194,10 @@ class SequenceIndex:
             flags.append(EPI_NOT_IN_STORE)
         key = name_key(name)
         found = self.by_name.get(key, []) if key is not None else []
-        result = self._from_name(found, antigen_class, flags, self.submitters.get(lab, frozenset()))
+        own = self.submitters.get(lab, frozenset())
+        result = self._from_name(found, antigen_class, flags, own)
+        if not found and key is not None and (lab, key[0]) in self.equivalents:
+            result = self._from_equivalent(result, key, lab, antigen_class, own)
         if result.chosen is None and key is not None and lab in self.number_rules:
             result = self._from_number(result, key, lab, antigen_class)
         self.counts.update(result.flags or ["match.clean"])
@@ -209,6 +221,30 @@ class SequenceIndex:
             tier = mine
         chosen = _one_sequence(tier, flags, AMBIGUOUS)
         return Match("name", chosen, tuple(found), tuple(flags))
+
+    def _from_equivalent(
+        self,
+        result: Match,
+        key: tuple[str, str, str],
+        lab: str,
+        antigen_class: str,
+        own: frozenset[str],
+    ) -> Match:
+        """The name again under each GISAID spelling of the lab's location, when it found none."""
+        location, isolate, year = key
+        found = [
+            c
+            for gisaid in self.equivalents[(lab, location)]
+            for c in self.by_name.get((gisaid, isolate, year), [])
+        ]
+        if not found:
+            return result
+        flags = [f for f in result.flags if f != NO_MATCH]
+        found_result = self._from_name(found, antigen_class, flags, own)
+        return Match(
+            "equivalent", found_result.chosen, found_result.candidates,
+            (*found_result.flags, LOCATION_EQUIVALENT),
+        )  # fmt: skip
 
     def _from_number(
         self, result: Match, key: tuple[str, str, str], lab: str, antigen_class: str
@@ -344,3 +380,85 @@ def check_lab_submitters(
     missing = sorted(n for names in submitters.values() for n in names if n not in seen)
     if missing:
         raise ValueError(f"lab submitters not in the sequence store: {missing}")
+
+
+@dataclass(frozen=True)
+class Equivalent:
+    lab: str
+    table_location: str
+    gisaid_location: str
+    optional: bool
+    line: int
+
+
+def read_location_equivalents(path: Path) -> list[Equivalent]:
+    """``location-equivalents.tsv``: lab, table_location, gisaid_location, evidence, optional.
+
+    One way (table -> GISAID). A key may list several GISAID spellings (one lab spelling that
+    GISAID holds under two romanisations); a repeated (key, GISAID spelling) is an error.
+    """
+    with path.open(encoding="utf-8") as handle:
+        numbered = [
+            (n, line) for n, line in enumerate(handle, 1) if line.strip() and line[0] != "#"
+        ]
+    reader = csv.DictReader([line for _, line in numbered], delimiter="\t")
+    required = ("lab", "table_location", "gisaid_location", "evidence")
+    if missing := [c for c in required if c not in (reader.fieldnames or [])]:
+        raise ValueError(f"{path}: missing columns {missing}")
+    out: list[Equivalent] = []
+    seen: set[tuple[str, str, str]] = set()
+    for (line, _), row in zip(numbered[1:], reader, strict=True):
+        cells = {k: (v or "").strip() for k, v in row.items() if k is not None}
+        lab, table, gisaid = cells["lab"], cells["table_location"], cells["gisaid_location"]
+        if not (lab and table and gisaid and cells["evidence"]):
+            raise ValueError(f"{path}:{line}: lab, table_location, gisaid_location and evidence")
+        if table == gisaid:
+            raise ValueError(f"{path}:{line}: {table!r} is its own equivalent")
+        if (lab, table, gisaid) in seen:
+            raise ValueError(f"{path}:{line}: ({lab}, {table}) -> {gisaid} is listed twice")
+        seen.add((lab, table, gisaid))
+        optional = cells.get("optional", "")
+        if optional not in ("", "optional"):
+            raise ValueError(f"{path}:{line}: optional is 'optional' or blank, not {optional!r}")
+        out.append(Equivalent(lab, table, gisaid, optional == "optional", line))
+    return out
+
+
+def equivalents_table(rows: Iterable[Equivalent]) -> dict[tuple[str, str], tuple[str, ...]]:
+    """(lab, table location) -> GISAID spellings, the shape :class:`SequenceIndex` takes."""
+    table: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for row in rows:
+        table[(row.lab, row.table_location)].append(row.gisaid_location)
+    return {key: tuple(spellings) for key, spellings in table.items()}
+
+
+def check_equivalents(
+    store: Store, datasets: Iterable[str], rows: Sequence[Equivalent]
+) -> dict[tuple[str, str, str], int]:
+    """Stored sequences under each row's GISAID spelling; a row with none is an error.
+
+    A spelling GISAID no longer uses (renamed, or a typo in the table) would otherwise do
+    nothing, silently. Rows marked optional may match nothing; they are counted, not refused.
+    """
+    paths = [
+        str(store.resolve(store.current("sequences", d)) / "isolates" / "*" / "*.parquet")
+        for d in datasets
+    ]
+    held = Counter(
+        dict(
+            duckdb.execute(
+                "select split_part(name, '/', 2), count(*) from read_parquet(?) group by 1",
+                [paths],
+            ).fetchall()
+        )
+    )
+    counts = {(r.lab, r.table_location, r.gisaid_location): held[r.gisaid_location] for r in rows}
+    idle = [r for r in rows if not held[r.gisaid_location] and not r.optional]
+    if idle:
+        raise ValueError(
+            "location equivalents whose GISAID spelling no stored sequence has: "
+            + ", ".join(
+                f"line {r.line} ({r.lab}, {r.table_location}) -> {r.gisaid_location}" for r in idle
+            )  # fmt: skip
+        )
+    return counts
