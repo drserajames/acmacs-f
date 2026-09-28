@@ -19,6 +19,7 @@ from af.chart.identity import antigen_identity, serum_identity
 from af.chart.model import Antigen, Chart, Layer, Projection, Serum, Titres, empty_table
 from af.chart.titre import (
     MISSING_TITRE,
+    MergeOutcome,
     MergeSettings,
     MoreThanOnly,
     Titre,
@@ -69,6 +70,9 @@ class MergeReport:
     cheating_assay: bool = False
     skipped_reference_antigens: int = 0
     outcomes: Counter = field(default_factory=Counter)  # MergeOutcome -> cells
+    # Cells a merge rule turned into `*` although they had readings: (antigen, serum, outcome).
+    # Counted above too; listed so a missing titre can say why (sd_limit, `<` meeting `>`).
+    dropped: list[tuple[int, int, str]] = field(default_factory=list)
     column_basis_slack: dict[int, float] = field(
         default_factory=dict
     )  # serum -> forced - table-only
@@ -154,6 +158,9 @@ def chart_layers(chart: Chart) -> list[Layer]:
     ]
 
 
+DROPPING = (MergeOutcome.SD_TOO_BIG, MergeOutcome.LESS_AND_MORE_THAN)
+
+
 def merge_layers(
     layers: list[Layer],
     n_ag: int,
@@ -177,6 +184,8 @@ def merge_layers(
             table[i][j] = merged
             if count and report is not None:
                 report.outcomes[outcome.value] += 1
+                if outcome in DROPPING:
+                    report.dropped.append((i, j, outcome.value))
         return table
 
     table = build(MoreThanOnly.TO_DONT_CARE, count=True)

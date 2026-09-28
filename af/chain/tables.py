@@ -20,6 +20,7 @@ from pathlib import Path
 
 from af.chain.config import ChainConfigError, TableRef
 from af.chart.ace import write_chart
+from af.chart.merge import DROPPING
 from af.chart.model import Antigen, Chart, Serum, Titres, empty_table
 from af.chart.titre import Titre, merge_titres
 from af.store.ref import StoreRef
@@ -27,6 +28,26 @@ from af.store.store import Store
 from af.tables.model import Table
 
 KIND = "tables"
+
+
+def repeat_drops(table: Table) -> list[str]:
+    """Cells with several readings in one test that the merge turns into `*`, and why.
+
+    Without this they would be a silent missing titre (the chain only ever sees the merged
+    cell). Measurement only: the merge itself is unchanged (Sarah, Q64: keep sd_limit).
+    """
+    out = []
+    for i, row in enumerate(table.titres):
+        for j, readings in enumerate(row):
+            if len(readings) > 1:
+                _, outcome = merge_titres([Titre.parse(r) for r in readings])
+                if outcome in DROPPING:
+                    a, s = table.antigens[i], table.sera[j]
+                    out.append(
+                        f"{a.name} {a.passage} × {s.name} {s.serum_id}: "
+                        f"{' '.join(readings)} → * ({outcome.value})"
+                    )
+    return out
 
 
 def cell_titre(readings: list[str]) -> Titre:
@@ -110,7 +131,11 @@ def tables_from_store(
             write_chart(table_chart(table), path)
         date = datetime.date.fromisoformat(entry["date"])
         suffix = int(entry["date_suffix"])
-        refs.append(TableRef(table_id, path, date, suffix, tuple(table.warnings)))
+        refs.append(
+            TableRef(
+                table_id, path, date, suffix, tuple(table.warnings), tuple(repeat_drops(table))
+            )
+        )
     if not refs:
         raise ChainConfigError(f"no tables in {dataset}")
     return ref, sorted(refs, key=lambda t: (t.date, t.suffix))

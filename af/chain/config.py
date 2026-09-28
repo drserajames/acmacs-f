@@ -110,6 +110,9 @@ class TableRef:
     date: datetime.date
     suffix: int  # 1 for the first table of a date
     warnings: tuple[str, ...] = ()  # the table's own warnings (tables store); not map content
+    # Cells the table's own repeat merge turned into `*` (af.chain.tables.repeat_drops): these
+    # vanish before the chain sees them, so they are carried here to be reported.
+    repeat_drops: tuple[str, ...] = ()
 
 
 @dataclass
@@ -220,6 +223,7 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
                 "date": t.date.isoformat(),
                 "suffix": t.suffix,
                 "warnings": list(t.warnings),
+                **({"repeat_drops": list(t.repeat_drops)} if t.repeat_drops else {}),
             }
             for t in cfg.tables
         ],
