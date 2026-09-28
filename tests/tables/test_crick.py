@@ -254,3 +254,34 @@ def test_abbreviation_year_decides():
     assert list(abbrev.match("Exa", "5", "30", antigens)) == [("B/EXAMPLEVILLE/5/2030", "")]
     assert len(abbrev.match("Exa", "5", "", antigens)) == 2
     assert list(abbrev.match("Exvl", "05", "2029", antigens)) == [("B/EXAMPLEVILLE/5/2029", "")]
+
+
+PRN_TITLE = (
+    "Table MN-1. Antigenic analysis of influenza A(H3N2) viruses"
+    " - Plaque Reduction Neutralisation (MDCK-SIAT) 2030-01-02"
+)
+PRN_SERA = [
+    ("A/Exa", "12/29", "SIAT", "F01/29"),
+    ("A/Exl", "7/29", "Egg", "F02/29"),
+]
+PRN_REFERENCE = [
+    ("", "A/Exampleville/12/2029", "", "2029-03-01", "SIAT1 10-3", ["436.5", "<"]),
+    ("", "A/Exampleland/7/2029", "", "2029-02-01", "E3", ["61", "1144"]),
+    ("", "A/Exampleville/5/2029", "", "2029-05-01", "SIAT2", ["-", "<"]),
+]
+
+
+def test_neutralisation_reads_measured_titres(tmp_path, rules):
+    path = workbook(
+        tmp_path / "labc-prn-20300102.xlsx",
+        title=PRN_TITLE,
+        sera=PRN_SERA,
+        reference=PRN_REFERENCE,
+        stray=[],
+    )
+    t = one_table(read(path, rules, "A(H3N2)", ""))
+    assert (t.group, t.assay, t.rbc) == ("h3-prn-labc", "PRN", "")
+    # measured, not dilutions: kept; a decimal rounds half up; "<" and "-" by rule
+    assert t.titres[:3] == [[["437"], ["<40"]], [["61"], ["1144"]], [[], ["<40"]]]
+    assert t.dropped["cells: decimal rounded"] == 1
+    assert t.antigens[0].passage == "SIAT1"

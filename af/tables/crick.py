@@ -38,6 +38,14 @@ virus got a different identity on sheets that list its substitutions.
 lab that raised the ferret when the sheet names one (``NIB F01/21``, ``St Jude's F18/20``):
 ae dropped it, which makes another lab's ferret look like Crick's.
 
+**Neutralisation (PRN) tables** use the same template, with "Plaque Reduction
+Neutralisation" in the title: the assay is PRN and there are no red cells. Their titres are
+measured, not dilutions (``229``, ``436.5``): any positive value is kept, a decimal rounded
+half up to a whole titre and counted (tables hold whole titres). The sheets have no footnote
+legend, so a bare ``<`` needs a ``titre_tokens`` rule (assay PRN). Crick keeps each season's
+PRN tests in one growing workbook, one sheet per test: a dated file reads the sheet of its
+date, as for HI.
+
 A workbook may hold other subtypes' tables (one per sheet) and other sheets (clade lists,
 template notes): a sheet with no ``Ferret number`` row is not a table, and a table of
 another subtype is reported and not read.
@@ -46,6 +54,7 @@ another subtype is reported and not read.
 from __future__ import annotations
 
 import datetime as dt
+import decimal
 import hashlib
 import re
 from collections import Counter
@@ -65,6 +74,8 @@ ISO_DATE = re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)")
 RBC_IN_TITLE = re.compile(r"\(\s*(Guinea\s+Pig|Turkey|Chicken)\s+RBC", re.IGNORECASE)
 RBC = {"GUINEA PIG": "guinea-pig", "TURKEY": "turkey", "CHICKEN": "chicken"}
 TITRE = re.compile(r"[<>]?[1-9]\d*")
+MEASURED = re.compile(r"[<>]?(?:[1-9]\d*|0)(?:\.\d+)?")  # PRN reads a titre, not a dilution
+NEUTRALISATION = re.compile(r"Neutrali[sz]ation", re.IGNORECASE)
 TAG = re.compile(r"[A-Z]\d{1,3}[A-Z]?")  # a variant tag: J141, J141O, J141J
 CLONE = re.compile(r"clone\s*(\d+)", re.IGNORECASE)
 # "1 < = <40", "2< =<10": footnote mark and the titre a bare "<" stands for
@@ -176,6 +187,7 @@ class SheetReader:
         )
         self.title_type = self._title_type()
         self.wanted = self.title_type == (subtype, lineage)
+        self.assay = "PRN" if NEUTRALISATION.search(self.title) else "HI"
         self.test_date = self._test_date() if self.wanted else dt.date.min
 
     def fail(self, r: int, c: int | None, message: str) -> CrickError:
@@ -222,7 +234,7 @@ class SheetReader:
     @staticmethod
     def _is_reading(text: str) -> bool:
         t = re.sub(r"\s+", "", text)
-        return bool(TITRE.fullmatch(t)) or t in ("<", ">", "ND", "*")
+        return bool(MEASURED.fullmatch(t)) or t in ("<", ">", "ND", "*", "-")
 
     def _title_type(self) -> tuple[str, str]:
         t = self.title
@@ -259,6 +271,8 @@ class SheetReader:
         return day
 
     def _rbc(self) -> str:
+        if self.assay != "HI":  # neutralisation: no red cells
+            return ""
         if m := RBC_IN_TITLE.search(self.title):
             return RBC[re.sub(r"\s+", " ", m[1]).upper()]
         rule = self.rules.table_defaults.lookup(lab=self.lab, subtype=self.subtype, assay="HI")
@@ -286,7 +300,7 @@ class SheetReader:
             "VICTORIA": "bvic",
             "YAMAGATA": "byam",
         }.get(self.lineage, "b")
-        group = f"{prefix}-hi-{rbc}-{self.lab.lower()}"
+        group = "-".join(p for p in (prefix, self.assay.lower(), rbc, self.lab.lower()) if p)
         legend = self._legend()
         antigens, rows = self._antigens()
         sera = [self._serum(c, antigens, legend) for c in self.header.serum_cols]
@@ -307,7 +321,7 @@ class SheetReader:
             lab=self.lab,
             subtype=self.subtype,
             lineage=self.lineage,
-            assay="HI",
+            assay=self.assay,
             rbc=rbc,
             date=self.test_date.isoformat(),
             date_suffix=0,
@@ -571,7 +585,7 @@ class SheetReader:
         if not raw:
             self.dropped["cells: blank"] += 1
             return []
-        if (rule := self.rules.titre_tokens.find(raw, lab=self.lab, assay="HI")) is not None:
+        if (rule := self.rules.titre_tokens.find(raw, lab=self.lab, assay=self.assay)) is not None:
             return [] if rule["titre"] == "*" else [rule["titre"]]
         text = re.sub(r"\s+", "", raw)
         if text == "<":
@@ -581,11 +595,26 @@ class SheetReader:
                     r, c, f"'<' for serum {serum.source['id']!r}: {len(values)} footnote values"
                 )
             return [values.pop()]
-        if TITRE.fullmatch(text) and abbrev.is_dilution(int(text.lstrip("<>"))):
+        if (
+            self.assay == "HI"
+            and TITRE.fullmatch(text)
+            and abbrev.is_dilution(int(text.lstrip("<>")))
+        ):
             return [text]
+        if self.assay != "HI" and MEASURED.fullmatch(text) and float(text.lstrip("<>")) > 0:
+            return [self._whole(text)]
         raise self.fail(
             r, c, f"titre {raw!r} is not a dilution (10, 20, 40...) nor a titre_tokens rule"
         )
+
+    def _whole(self, text: str) -> str:
+        """A neutralisation titre as a whole number: Crick reports some interpolated reads
+        with a decimal (``436.5``), and tables hold whole titres. Half rounds up, as ae did."""
+        sign, number = (text[0], text[1:]) if text[0] in "<>" else ("", text)
+        if "." not in number:
+            return text
+        self.dropped["cells: decimal rounded"] += 1
+        return sign + str(int(decimal.Decimal(number).quantize(0, decimal.ROUND_HALF_UP)))
 
 
 def _serum_id(raw: str) -> tuple[str, list[str]]:
