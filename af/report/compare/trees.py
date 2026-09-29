@@ -323,6 +323,12 @@ def compare_figures(
     rts, nts = ref["tree"]["time_series"], new["tree"]["time_series"]
     out["time_series"] = {"ref": rts, "new": nts, "same": rts == nts}
     out["depth"] = compare_depths([ri[k] for k in common], [ni[k] for k in common])
+    # The unit is recorded, never converted: ML branch lengths and mutation counts differ by a
+    # scale the fit absorbs, but a reader must know the scale factor compares two units.
+    out["depth"]["unit"] = {
+        "ref": ref["tree"].get("depth_unit"),
+        "new": new["tree"].get("depth_unit"),
+    }
     return out
 
 
