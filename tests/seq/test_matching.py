@@ -323,3 +323,41 @@ def test_the_committed_equivalents_read(af_data: Path) -> None:
         pytest.skip(f"{path} not present")
     rows = M.read_location_equivalents(path)
     assert rows and all(r.lab == r.lab.upper() for r in rows)  # the tables' lab codes
+
+
+NUMBER_RULES = (
+    "# invented\n"
+    "lab\tscope\tevidence\tadded_by\tadded_on\n"
+    "LAB-N\tprovince\tone number per virus per year\tt\t2026-01-01\n"
+)
+
+
+def test_number_rules_are_read_from_a_table(tmp_path: Path) -> None:
+    path = tmp_path / "number_rules.tsv"
+    path.write_text(NUMBER_RULES)
+    assert M.read_number_rules(path) == {"LAB-N": M.NumberRule("LAB-N", "province")}
+    assert M.read_number_rules(path, labs=["LAB-N", "LAB-X"]).keys() == {"LAB-N"}
+    with pytest.raises(ValueError, match="not table lab codes"):
+        M.read_number_rules(path, labs=["LAB-X"])
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ("LAB-X\tplanet\tbad\tt\t2026-01-01\n", "scope 'planet'"),
+        ("LAB-X\tnational\t\tt\t2026-01-01\n", "no evidence"),
+        ("LAB-N\tnational\tagain\tt\t2026-01-01\n", "two rows"),
+    ],
+)
+def test_bad_number_rule_rows_are_refused(tmp_path: Path, extra: str, message: str) -> None:
+    path = tmp_path / "number_rules.tsv"
+    path.write_text(NUMBER_RULES + extra)
+    with pytest.raises(ValueError, match=message):
+        M.read_number_rules(path)
+
+
+def test_the_committed_number_rules_read(af_data: Path) -> None:
+    path = af_data / "rules" / "sequences" / "number_rules.tsv"
+    if not path.is_file():
+        pytest.skip(f"{path} not present")
+    assert M.read_number_rules(path)

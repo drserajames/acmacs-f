@@ -348,6 +348,32 @@ def read_lab_submitters(path: Path) -> dict[str, frozenset[str]]:
     return {lab: frozenset(names) for lab, names in out.items()}
 
 
+def read_number_rules(path: Path, labs: Iterable[str] | None = None) -> dict[str, NumberRule]:
+    """``number_rules.tsv``: lab, scope, evidence: labs whose isolate numbers identify a virus.
+
+    Which labs number their viruses uniquely is a fact about each lab, so it is data with its
+    evidence, not a lab written into code. With ``labs`` (the table readers' lab codes, from
+    config) every row's lab is checked, as :func:`check_lab_codes` checks the other rule tables.
+    """
+    lines = [line for line in path.read_text().splitlines() if line and not line.startswith("#")]
+    reader = csv.DictReader(lines, delimiter="\t")
+    if missing := [c for c in ("lab", "scope", "evidence") if c not in (reader.fieldnames or [])]:
+        raise ValueError(f"{path}: missing columns {missing}")
+    rules: dict[str, NumberRule] = {}
+    for row in reader:
+        lab, scope = (row["lab"] or "").strip(), (row["scope"] or "").strip()
+        if not (row["evidence"] or "").strip():
+            raise ValueError(f"{path}: {lab}: no evidence")
+        if scope not in ("province", "national"):
+            raise ValueError(f"{path}: {lab}: scope {scope!r}: province or national")
+        if lab in rules:
+            raise ValueError(f"{path}: {lab} has two rows")
+        rules[lab] = NumberRule(lab, scope)
+    if labs is not None:
+        check_lab_codes(rules, labs, str(path))
+    return rules
+
+
 def check_lab_codes(table: Mapping[str, object], labs: Iterable[str], what: str) -> None:
     """Every lab a rule table names must be a lab code the tables use, exactly as written.
 
