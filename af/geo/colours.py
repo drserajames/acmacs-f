@@ -4,8 +4,8 @@ Today's geo maps carry a second copy of the clade rules (``conference_data.py``'
 ``geographic_coloring``: aa substitutions per colour, "the later row wins"), separate
 from the tables that colour trees and maps. Here a dot takes its colour from the same
 :class:`af.clades.colours.ColourScheme` everything else uses, through its
-:meth:`~af.clades.colours.ColourScheme.entry_for` (most specific entry wins; groups
-before clades). There is no geo-specific rule table.
+:meth:`~af.clades.colours.ColourScheme.entry_for` (the last matching row wins, as in the
+round's tables; Sarah, Q80). There is no geo-specific rule table.
 
 A preparation gets a colour only when it has one sequence (:mod:`af.serology.joins`),
 that sequence has a clade assignment, and the scheme has an entry for it. Every other
