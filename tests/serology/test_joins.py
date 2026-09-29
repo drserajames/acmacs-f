@@ -8,7 +8,12 @@ import pytest
 
 from af.seq.matching import Candidate, SequenceIndex
 from af.serology import query
-from af.serology.joins import SEVERAL_DATASETS, link_sequences, preparation_sequences
+from af.serology.joins import (
+    SEVERAL_DATASETS,
+    link_sequences,
+    passage_class_column,
+    preparation_sequences,
+)
 from af.serology.store import StoreError, build
 
 
@@ -103,10 +108,14 @@ def test_every_antigen_gets_one_status(tmp_path: Path, syn: Any) -> None:
     assert rows[3] == ("unmatched", None, None, None)
     assert rows[4] == ("unmatched", None, None, None)
     assert len(rows) == 5  # one row per antigen, never duplicated by the joins
-    # doubtful rows never decide a preparation's sequence
     preps = {key[1]: value for key, value in preparation_sequences(con).items()}
     with_sequence = {name for name, p in preps.items() if p.epi_isl is not None}
-    assert with_sequence == {syn.virus("SOMEWHERE", 1), syn.virus("ELSEWHERE", 3)}
+    assert with_sequence == {
+        syn.virus("SOMEWHERE", 1), syn.virus("SOMEWHERE", 2), syn.virus("ELSEWHERE", 3)
+    }  # fmt: skip
+    # a clean match carries no doubt; the doubtful one ae would use carries its flag (Q81 D)
+    assert preps[syn.virus("SOMEWHERE", 1)].doubts == ()
+    assert preps[syn.virus("SOMEWHERE", 2)].doubts == ("match.epi-name-differs",)
     # the refused tie (ELSEWHERE/4) chooses nothing, but keeps its candidates for colouring
     # (Q81); both rank alike on passage, so ae's rank falls to the lower EPI_ISL number
     tie = preps[syn.virus("ELSEWHERE", 4)]
@@ -116,7 +125,7 @@ def test_every_antigen_gets_one_status(tmp_path: Path, syn: Any) -> None:
         ("EPI_ISL_5", "ACC5"),
     ]
     assert tie.ranked is not None and tie.ranked.epi_isl == "EPI_ISL_4"
-    assert set(preps) == with_sequence | {syn.virus("ELSEWHERE", 4)}  # doubtful rows: never
+    assert set(preps) == with_sequence | {syn.virus("ELSEWHERE", 4)}  # NOWHERE/5: nothing
 
 
 def test_b_antigen_of_unknown_lineage_found_in_both_datasets_is_doubtful(
@@ -186,3 +195,51 @@ def test_submitters_keyed_by_another_spelling_of_the_labs_are_refused(
     _check_submitter_labs(con, {"LABX": frozenset({"Lab X Institute"})})
     with pytest.raises(StoreError, match="name none of the store's table labs"):
         _check_submitter_labs(con, {"labx": frozenset({"Lab X Institute"})})
+
+
+def test_doubtful_matches_ae_uses_are_kept_with_their_flag_and_others_left_out(
+    tmp_path: Path, syn: Any
+) -> None:
+    """Sarah, Q81 D: colour through the doubtful matches ae uses (egg antigen with only a cell
+    sequence, reassortant, EPI_ISL whose name differs), flagged; never other doubts, and a
+    clean row of the same preparation always wins."""
+
+    def antigen(place: str, number: int, passage: str, **extra: Any) -> dict[str, Any]:
+        klass = "egg" if passage.startswith("E") else "cell"
+        return {"name": syn.virus(place, number), "passage": passage, "passage_class": klass,
+                **extra}  # fmt: skip
+
+    serum = {"name": syn.virus("SOMEWHERE", 9), "serum_id": "S-1"}
+    first = [
+        antigen("EGGTOWN", 1, "E3"),  # only a cell sequence: doubtful, usable
+        antigen("REASTOWN", 2, "MDCK1", reassortant="NIB-1"),  # reassortant: doubtful, usable
+        antigen("SPLITTOWN", 3, "MDCK1", epi_isl="EPI_ISL_30"),  # several accessions: refused
+        antigen("BOTHTOWN", 4, "MDCK1", epi_isl="EPI_ISL_41"),  # doubtful here (name differs)
+    ]
+    later = [antigen("BOTHTOWN", 4, "MDCK1")]  # ...and clean by name in a later table
+    tables = [
+        syn.table("t1", first, [serum], [[["40"]] for _ in first]),
+        syn.table("t2", later, [serum], [[["40"]]], date="2021-04-01"),
+    ]
+    build(tables, tmp_path / "v", syn.rules)
+    con = query.connect(tmp_path / "v")
+    index = SequenceIndex()
+    for c in (
+        _candidate("EPI_ISL_10", "ACC10", gisaid("A", "EGGTOWN", 1), "cell", "e"),
+        _candidate("EPI_ISL_20", "ACC20", gisaid("A", "REASTOWN", 2), "cell", "r"),
+        _candidate("EPI_ISL_30", "ACC30", gisaid("A", "SPLITTOWN", 3), "cell", "s1"),
+        _candidate("EPI_ISL_30", "ACC31", gisaid("A", "SPLITTOWN", 3), "cell", "s2"),
+        _candidate("EPI_ISL_41", "ACC41", gisaid("A", "ELSEWHERE", 99), "cell", "o"),
+        _candidate("EPI_ISL_40", "ACC40", gisaid("A", "BOTHTOWN", 4), "cell", "b"),
+    ):
+        index.add(c)
+    isolates, clades = _isolates_and_clades(tmp_path)
+    link_sequences(con, {"h3": index}, [isolates], [clades], class_of=passage_class_column)
+    preps = {key[1]: value for key, value in preparation_sequences(con).items()}
+    egg = preps[syn.virus("EGGTOWN", 1)]
+    assert egg.accession == "ACC10" and egg.doubts == ("match.egg-antigen-non-egg-sequence",)
+    reassortant = preps[syn.virus("REASTOWN", 2)]
+    assert reassortant.accession == "ACC20" and reassortant.doubts == ("match.reassortant",)
+    assert syn.virus("SPLITTOWN", 3) not in preps  # a doubt ae has no rule for: never used
+    both = preps[syn.virus("BOTHTOWN", 4)]
+    assert both.accession == "ACC40" and both.doubts == ()  # the clean row wins
