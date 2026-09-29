@@ -195,12 +195,67 @@ class Defaults:
     orientation_reference: str = "previous-round"
 
 
+#: Where a map's colours come from.
+COLOUR_SOURCES = ("stand-in", "store")
+
+
+@dataclass(frozen=True)
+class ColouringConfig:
+    """Where every map in the round takes its colours from: one switch for the whole round.
+
+    ``"stand-in"`` (bring-up): the colour rows and clade labels a chart already carries, read
+    from ``scheme_stand_in`` or the layout chart, painted in row order.
+
+    ``"store"``: the shared clade colouring geo uses (Sarah, Q46). Each antigen is matched to
+    its sequence, takes the store's clade, and is coloured by the user's scheme from
+    ``acmacs_data``; which entry wins is decided by the shared rule, not by the map. The join's
+    rule tables are the ones geo reads (paths, until a shared loader exists).
+
+    One switch rather than one per map: a round whose maps mixed the two would draw the same
+    virus in two colours on facing pages.
+    """
+
+    source: str
+    acmacs_data: Path | None = None
+    nomenclature: Path | None = None  # the influenza-clade-nomenclature clones
+    passage_rules: Path | None = None
+    lab_submitters: Path | None = None
+    lab_codes: Path | None = None  # labs.tsv, required with lab_submitters
+    equivalents: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.source not in COLOUR_SOURCES:
+            raise ValueError(
+                f"colouring.source {self.source!r}: expected one of {', '.join(COLOUR_SOURCES)}"
+            )
+        if self.source == "store":
+            missing = [
+                k
+                for k in ("acmacs_data", "nomenclature", "passage_rules")
+                if getattr(self, k) is None
+            ]
+            if missing:
+                raise ValueError(f"colouring.source 'store' needs {', '.join(missing)}")
+        if self.lab_submitters is not None and self.lab_codes is None:
+            raise ValueError("colouring.lab_submitters needs colouring.lab_codes (labs.tsv)")
+
+
 @dataclass(frozen=True)
 class MapsConfig:
     defaults: Defaults
     frames: tuple[FrameConfig, ...]
     maps: tuple[MapConfig, ...]
     vaccine_defaults: Path | None = None  # shared subtype defaults (acmacs-f-data)
+    colouring: ColouringConfig = ColouringConfig("stand-in")
+
+    def __post_init__(self) -> None:
+        if self.colouring.source == "store":
+            both = [m.folder for m in self.maps if m.scheme_stand_in is not None]
+            if both:
+                raise ValueError(
+                    "colouring.source is 'store' but these maps still set scheme_stand_in: "
+                    + ", ".join(both)
+                )
 
     def frame_size(self, subtype: str, assay: str) -> float:
         """Most specific frame rule wins: subtype+assay, then subtype alone."""
