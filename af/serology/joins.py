@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -37,6 +37,7 @@ from typing import Any
 import pyarrow as pa
 
 from af.seq.matching import Match, SequenceIndex
+from af.seq.matching_rules import MatchingRules
 from af.serology.store import StoreError
 
 STATUSES = ("matched", "doubtful", "unmatched")
@@ -302,72 +303,46 @@ def preparation_sequences(con: Any) -> dict[PreparationKey, PreparationSequence]
 def link_from_store(
     con: Any,
     store: Any,
-    passage_rules: Sequence[Any],
+    rules: MatchingRules,
     *,
     with_clades: bool,
-    lab_submitters: Mapping[str, frozenset[str]] | None = None,
-    number_rules: Mapping[str, Any] | None = None,
-    equivalents: Sequence[Any] | None = None,
-    lab_codes: Collection[str] | None = None,
     class_of: ClassOf = passage_class_column,
 ) -> LinkCounts:
     """:func:`link_sequences` over the CURRENT ``sequences/*`` (and ``clades/*``) datasets.
 
     ``with_clades=False`` is the deliberate sequences-only join; with ``True`` a missing
-    clade dataset is an error, not an empty join. ``lab_submitters`` (lab -> the exact
-    GISAID submitting-lab names, :func:`af.seq.matching.read_lab_submitters`) lets the
-    matcher settle a name tie by the antigen's own lab; without it that rule never applies.
-    ``number_rules`` (lab -> :class:`af.seq.matching.NumberRule`, from config) let a lab's
-    antigens match its own deposits by isolate number when the name does not. Both tables
-    are keyed by the tables' own lab codes, exactly, checked against ``lab_codes`` (every lab
-    code the table readers use, from config) with :func:`af.seq.matching.check_lab_codes`.
-    ``lab_codes`` is required with any of these tables: the labs merely present in the store
-    would refuse a lab whose tables have not arrived yet. ``equivalents``
-    (:func:`af.seq.matching.read_location_equivalents`) are a lab's own spelling of a place
-    mapped to GISAID's (Sarah, Q44), used only when a name finds nothing; a row whose GISAID
-    spelling no stored sequence has is an error unless marked optional.
+    clade dataset is an error, not an empty join. ``rules`` are the matcher's tables
+    (:func:`af.seq.matching_rules.matching_rules`), already checked against the tables' lab
+    codes; the checks here are the ones that need the store. Every submitter named must
+    submit something in the sequence store, and the submitters must be keyed by labs the
+    serology store holds, or the own-lab tie-break would silently never apply. Every
+    location equivalent's GISAID spelling must be held by a stored sequence unless the row is
+    marked optional (Sarah, Q44).
     """
     from af.seq.matching import (
         check_equivalents,
-        check_lab_codes,
         check_lab_submitters,
         equivalents_table,
         index_from_store,
     )
 
-    # configuration first, before the store is read: a bad rule table fails fast
-    rule_tables = (lab_submitters, number_rules, equivalents)
-    if any(t is not None for t in rule_tables) and lab_codes is None:
-        raise StoreError(
-            "lab_codes (from config) are needed to check lab_submitters, number_rules and "
-            "location equivalents"
-        )
-    if lab_submitters is not None:
-        assert lab_codes is not None
-        check_lab_codes(dict(lab_submitters), lab_codes, "lab_submitters")
-    if number_rules is not None:
-        assert lab_codes is not None
-        check_lab_codes(dict(number_rules), lab_codes, "number_rules")
-    if equivalents is not None:
-        assert lab_codes is not None
-        check_lab_codes({row.lab: row for row in equivalents}, lab_codes, "location equivalents")
     datasets = sorted({d for group in DATASETS_FOR.values() for d in group})
     present = {ref.dataset for ref in store.list_datasets("sequences")}
     missing = [d for d in datasets if d not in present]
     if missing:
         raise StoreError(f"sequence datasets missing from the store: {', '.join(missing)}")
-    if lab_submitters is not None:
+    if rules.submitters:
         # a submitter name that no longer appears in the store would silently stop breaking ties
-        check_lab_submitters(store, datasets, dict(lab_submitters))
-        _check_submitter_labs(con, lab_submitters)
-    if equivalents is not None:
+        check_lab_submitters(store, datasets, dict(rules.submitters))
+        _check_submitter_labs(con, rules.submitters)
+    if rules.equivalents:
         # a GISAID spelling no stored sequence has would silently do nothing
-        check_equivalents(store, datasets, list(equivalents))
-    indexes = {d: index_from_store(store, [d], passage_rules) for d in datasets}
+        check_equivalents(store, datasets, list(rules.equivalents))
+    indexes = {d: index_from_store(store, [d], rules.passage) for d in datasets}
     for index in indexes.values():
-        index.submitters = dict(lab_submitters or {})
-        index.number_rules = dict(number_rules or {})
-        index.equivalents = equivalents_table(equivalents or [])
+        index.submitters = dict(rules.submitters)
+        index.number_rules = dict(rules.number_rules)
+        index.equivalents = equivalents_table(rules.equivalents)
     isolates = [
         path
         for d in datasets
