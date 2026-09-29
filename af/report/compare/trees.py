@@ -333,6 +333,11 @@ def compare_figures(
 
 
 DEPTH_MOVERS = 10  # how many of the largest depth changes to list
+# Below this a leaf's depth counts as the same. Depths are sums of branch lengths written to ~10
+# significant digits, so the same depth computed two ways differs by rounding: up to 1e-9 on real
+# trees (Sep 2026: H3 102 leaves, B/Vic 21,113 leaves between 1e-12 and 1e-9). A real difference is
+# at least one change over the alignment length, ~6e-4 (smallest seen 5.8e-4); nothing fell between.
+DEPTH_SAME = 1e-6
 
 
 def compare_depths(ref: list[dict[str, Any]], new: list[dict[str, Any]]) -> dict[str, Any]:
@@ -365,10 +370,11 @@ def compare_depths(ref: list[dict[str, Any]], new: list[dict[str, Any]]) -> dict
         "fitted_median": float(np.median(fitted)), "fitted_p95": float(np.percentile(fitted, 95)),
         "fitted_max": float(fitted.max()),
         "ref_max_depth": float(r.max()),
-        "movers": [
+        "n_differ": int((raw > DEPTH_SAME).sum()), "n_leaves": len(ref),
+        "movers": [  # a leaf whose depth did not change is never listed as a mover
             {"name": ref[i]["name"], "ref": float(r[i]), "new": float(n[i]),
              "fitted_residual": float(fitted[i])}
-            for i in top
+            for i in top if fitted[i] > DEPTH_SAME
         ],
     }  # fmt: skip
 

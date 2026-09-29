@@ -742,7 +742,25 @@ def test_tree_depth_units_are_recorded_and_a_mismatch_is_noted(tmp_path: Path) -
     adoption = {"status": "final", "adopted_by": "a reviewer", "adopted": dt.date(2026, 9, 25)}
     limits = parse_config({"adoption": adoption}, Limits, base_dir=tmp_path)
     text = markdown({"report": "r", "built": "b"}, [row], "l", "name", limits.adoption)
-    assert "depth units differ (ref not recorded, new mutations)" in text
+    assert "depth unit recorded only in new (mutations)" in text
+    assert "depth units differ" not in text
+    ref["tree"]["depth_unit"] = "ml"
+    res = trees.compare_figures(ref, new)
+    row = {"slot": "tree/x/report", "status": "ok", "tree_checks": tree_checks(res, TreeLimits()),
+           "detail": res}  # fmt: skip
+    text = markdown({"report": "r", "built": "b"}, [row], "l", "name", limits.adoption)
+    assert "depth units differ (ref ml, new mutations)" in text
+
+
+def test_tree_depth_unchanged_leaves_are_not_movers() -> None:
+    names = [f"leaf{i}" for i in range(20)]
+    depths = [0.001 * (i + 1) for i in range(20)]
+    ref = _with_depths(_tree_doc(names, ["P"] * 20, []), depths)
+    same = trees.compare_figures(ref, _with_depths(_tree_doc(names, ["P"] * 20, []), depths))
+    assert same["depth"]["n_differ"] == 0 and same["depth"]["movers"] == []
+    two = [d + (0.002 if i in (3, 7) else 0.0) for i, d in enumerate(depths)]
+    res = trees.compare_figures(ref, _with_depths(_tree_doc(names, ["P"] * 20, []), two))["depth"]
+    assert res["n_differ"] == 2 and [m["name"] for m in res["movers"]] == ["leaf3", "leaf7"]
 
 
 def test_tree_depth_scale_ignores_a_minority_of_changed_leaves() -> None:
@@ -758,3 +776,13 @@ def test_tree_depth_scale_ignores_a_minority_of_changed_leaves() -> None:
     assert res["fitted_median"] == pytest.approx(0.0, abs=1e-12)
     assert res["fitted_max"] == pytest.approx(0.005)
     assert {m["name"] for m in res["movers"]} <= {f"leaf{i}" for i in range(100) if i % 10 < 3}
+
+
+def test_tree_depth_rounding_is_not_a_difference() -> None:
+    # the same depths summed another way differ in the last digits: not a change, not a mover
+    names = [f"leaf{i}" for i in range(20)]
+    depths = [0.001 * (i + 1) for i in range(20)]
+    ref = _with_depths(_tree_doc(names, ["P"] * 20, []), depths)
+    rounded = [d + 3e-10 * (-1) ** i for i, d in enumerate(depths)]
+    res = trees.compare_figures(ref, _with_depths(_tree_doc(names, ["P"] * 20, []), rounded))
+    assert res["depth"]["n_differ"] == 0 and res["depth"]["movers"] == []
