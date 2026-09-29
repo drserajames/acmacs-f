@@ -161,6 +161,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
             "chain_until",
             "scheme_stand_in",
             "layout_stand_in",
+            "colouring",
             "title",
             "column_bases",
             "moves",
@@ -323,6 +324,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
         rotations=tuple(rotations),
         vaccine_disable=tuple(disable),
         vaccine_choose=tuple(choose),
+        colouring=m.get("colouring"),
     )
 
 

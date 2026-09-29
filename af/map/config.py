@@ -194,12 +194,21 @@ class MapConfig:
     rotations: tuple[RotationConfig, ...] = ()
     vaccine_disable: tuple[VaccineDisableConfig, ...] = ()
     vaccine_choose: tuple[VaccineChooseConfig, ...] = ()
+    # Where this map's colours come from, overriding the round's [colouring] source. Maps switch
+    # one at a time, each once its loss against the round's colours is within the agreed limit
+    # (Sarah, 29 Sep: "map by map now").
+    colouring: str | None = None
 
     def __post_init__(self) -> None:
         if not self.chain and not self.layout_stand_in:
             raise ValueError(f"map {self.folder!r}: needs a chain or a layout_stand_in")
         if self.chain_until is not None and not self.chain:
             raise ValueError(f"map {self.folder!r}: chain_until needs a chain")
+        if self.colouring is not None and self.colouring not in COLOUR_SOURCES:
+            raise ValueError(
+                f"map {self.folder!r}: colouring {self.colouring!r}: expected one of "
+                + ", ".join(COLOUR_SOURCES)
+            )
 
 
 @dataclass(frozen=True)
@@ -217,7 +226,7 @@ COLOUR_SOURCES = ("stand-in", "store")
 
 @dataclass(frozen=True)
 class ColouringConfig:
-    """Where every map in the round takes its colours from: one switch for the whole round.
+    """Where the round's maps take their colours from, by default; a map may override it.
 
     ``"stand-in"`` (bring-up): the colour rows and clade labels a chart already carries, read
     from ``scheme_stand_in`` or the layout chart, painted in row order.
@@ -227,8 +236,9 @@ class ColouringConfig:
     ``acmacs_data``; which entry wins is decided by the shared rule (the scheme's row order,
     Sarah, Q80), not by the map. The join's rule tables come from ``af_data``.
 
-    One switch rather than one per map: a round whose maps mixed the two would draw the same
-    virus in two colours on facing pages.
+    ``source`` is the default for every map; a map's own ``colouring`` overrides it, so maps can
+    switch one at a time (Sarah, 29 Sep). A mixed round can draw one virus in two colours on
+    facing pages, so each figure's provenance names the source it was coloured from.
     """
 
     source: str
@@ -243,12 +253,10 @@ class ColouringConfig:
             raise ValueError(
                 f"colouring.source {self.source!r}: expected one of {', '.join(COLOUR_SOURCES)}"
             )
-        if self.source == "store":
-            missing = [
-                k for k in ("acmacs_data", "nomenclature", "af_data") if getattr(self, k) is None
-            ]
-            if missing:
-                raise ValueError(f"colouring.source 'store' needs {', '.join(missing)}")
+
+    def missing_for_store(self) -> list[str]:
+        """The inputs store colouring needs that are not configured."""
+        return [k for k in ("acmacs_data", "nomenclature", "af_data") if getattr(self, k) is None]
 
 
 @dataclass(frozen=True)
@@ -260,13 +268,22 @@ class MapsConfig:
     colouring: ColouringConfig = ColouringConfig("stand-in")
 
     def __post_init__(self) -> None:
-        if self.colouring.source == "store":
-            both = [m.folder for m in self.maps if m.scheme_stand_in is not None]
-            if both:
-                raise ValueError(
-                    "colouring.source is 'store' but these maps still set scheme_stand_in: "
-                    + ", ".join(both)
-                )
+        store = [m for m in self.maps if self.colour_source(m) == "store"]
+        if store and (missing := self.colouring.missing_for_store()):
+            raise ValueError(
+                f"store colouring ({', '.join(m.folder for m in store)}) needs colouring."
+                + ", colouring.".join(missing)
+            )
+        both = [m.folder for m in store if m.scheme_stand_in is not None]
+        if both:
+            raise ValueError(
+                "these maps are coloured from the store but still set scheme_stand_in: "
+                + ", ".join(both)
+            )
+
+    def colour_source(self, m: MapConfig) -> str:
+        """The map's own colouring if it sets one, else the round's default."""
+        return m.colouring or self.colouring.source
 
     def frame_size(self, subtype: str, assay: str) -> float:
         """Most specific frame rule wins: subtype+assay, then subtype alone."""

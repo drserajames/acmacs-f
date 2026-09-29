@@ -438,7 +438,8 @@ def build_map(
         scheme, labels = _stand_in_colours(chart, cfg, inputs)
         sequenced = [bool(a.extra.get("A")) for a in chart.antigens]
         colour_note = {
-            "note": "STAND-IN: the chart's own rows, until user colour schemes are wired in"
+            "source": "stand-in",
+            "note": "STAND-IN: the chart's own rows, until user colour schemes are wired in",
         }
 
     inputs["colour_scheme"] = {
@@ -678,9 +679,9 @@ def build(
     if missing:
         raise BuildError(f"no such map(s) in the config: {', '.join(missing)}")
     colours = None
-    if config.colouring.source == "store":
+    if any(config.colour_source(m) == "store" for m in wanted):
         if store is None:
-            raise BuildError("[colouring] source is 'store' but no --store given")
+            raise BuildError("store colouring configured but no --store given")
         started = time.monotonic()
         from af.seq.matching_rules import matching_rules
         from af.serology.update import require_current
@@ -706,7 +707,7 @@ def build(
             vaccine_table=vaccine_list,
             vaccine_defaults=vaccine_defaults,
             created=created,
-            colours=colours,
+            colours=colours if config.colour_source(cfg) == "store" else None,
         )
         results.append(result)
         flags = f" flags={len(result.flags)}" if result.flags else ""

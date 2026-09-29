@@ -136,7 +136,7 @@ def test_colouring_source_must_be_said(tmp_path: Path) -> None:
 
 def test_store_colouring_needs_its_inputs(tmp_path: Path) -> None:
     text = GOOD + STORE_COLOURING.replace('af_data = "shared/acmacs-f-data"\n', "")
-    with pytest.raises(ConfigError, match="needs af_data"):
+    with pytest.raises(ConfigError, match="needs colouring.af_data"):
         load_maps_config(write(tmp_path, text))
 
 
@@ -156,4 +156,46 @@ def test_store_colouring_refuses_a_scheme_stand_in(tmp_path: Path) -> None:
 def test_unknown_colouring_source(tmp_path: Path) -> None:
     text = GOOD + STORE_COLOURING.replace('"store"', '"chart"')
     with pytest.raises(ConfigError, match="expected one of"):
+        load_maps_config(write(tmp_path, text))
+
+
+STAND_IN_DEFAULT = STORE_COLOURING.replace('source = "store"', 'source = "stand-in"')
+
+
+def map_colouring(source: str) -> str:
+    """GOOD with the example map's own colouring set."""
+    scheme = 'clade_scheme = "clades-v2"'
+    return GOOD.replace(scheme, f'{scheme}\ncolouring = "{source}"')
+
+
+def test_one_map_can_switch_to_the_store(tmp_path: Path) -> None:
+    """Sarah, 29 Sep: maps switch one at a time, each once its loss is within the limit."""
+    text = map_colouring("store") + STAND_IN_DEFAULT
+    config, _ = load_maps_config(write(tmp_path, text))
+    assert config.colouring.source == "stand-in"
+    assert config.colour_source(config.maps[0]) == "store"
+
+
+def test_a_store_map_needs_the_store_inputs_even_under_a_stand_in_default(tmp_path: Path) -> None:
+    text = map_colouring("store")
+    with pytest.raises(ConfigError, match=r"store colouring \(example-lab\) needs"):
+        load_maps_config(write(tmp_path, text))
+
+
+def test_a_map_can_stay_on_the_stand_in_under_a_store_default(tmp_path: Path) -> None:
+    text = (
+        GOOD.replace(
+            'layout_stand_in = "charts/example.ace"',
+            'layout_stand_in = "charts/example.ace"\nscheme_stand_in = "charts/styled.ace"'
+            '\ncolouring = "stand-in"',
+        )
+        + STORE_COLOURING
+    )
+    config, _ = load_maps_config(write(tmp_path, text))
+    assert config.colour_source(config.maps[0]) == "stand-in"
+
+
+def test_unknown_map_colouring(tmp_path: Path) -> None:
+    text = map_colouring("chart")
+    with pytest.raises((ConfigError, ValueError), match="expected one of"):
         load_maps_config(write(tmp_path, text))
