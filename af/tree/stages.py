@@ -395,7 +395,9 @@ def tree_steps(
         _publish_step(subtype, inputs, clades, layout, store_root),
     ]
     if clades is not None:
-        assert inputs.clade_agreement is not None  # SubtypeInputs requires it with a clade_set
+        if inputs.clade_agreement is None:  # SubtypeInputs already refuses this; not an assert,
+            # which python -O would remove
+            raise StageError(f"{subtype}: clade_set needs clade_agreement")
         steps.append(_clades_step(clades, inputs.clade_agreement, layout, store_root))
     if jobs_from is not None:
         steps = [
