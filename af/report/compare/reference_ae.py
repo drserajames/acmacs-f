@@ -232,21 +232,26 @@ def map_i7(
 
 
 def tjz_leaves(tjz: Path) -> list[dict[str, Any]]:
-    """Every leaf of an ae tree file: its name (with ae's hash suffix), date and finest clade."""
+    """Every leaf of an ae tree file: its name (with ae's hash suffix), date, clades and depth.
+
+    ``depth`` is the root-to-tip distance: the sum of the edge lengths (``"l"``) from the root,
+    the quantity af's figure records as a leaf's depth, so the two can be compared.
+    """
     raw = tjz.read_bytes()
     doc = json.loads(lzma.decompress(raw) if raw[:6] == b"\xfd7zXZ\x00" else raw)
     out: list[dict[str, Any]] = []
-    stack = [doc["tree"]]
+    stack = [(doc["tree"], 0.0)]
     while stack:  # iterative: trees are deeper than Python's stack
-        node = stack.pop()
+        node, above = stack.pop()
+        depth = above + float(node.get("l", 0.0))
         children = node.get("t")
         if children:
-            stack.extend(reversed(children))
+            stack.extend((child, depth) for child in reversed(children))
         else:
             tags = list(node.get("L") or [])
             # "clade" stays the last tag (ae's own display choice); "clade_tags" keeps every tag,
             # because the last is sometimes a legacy name coarser than an earlier canonical one.
-            out.append({"id": node["n"], "date": node.get("d"),
+            out.append({"id": node["n"], "date": node.get("d"), "depth": depth,
                         "clade": tags[-1] if tags else None, "clade_tags": tags})  # fmt: skip
     return out
 
@@ -276,7 +281,7 @@ def tree_i7(
         position = order.get(leaf["id"])
         leaves.append({
             "id": leaf["id"], "name": strain_name(leaf["id"]), "date": leaf["date"],
-            "clade": leaf["clade"], "clade_tags": leaf["clade_tags"],
+            "clade": leaf["clade"], "clade_tags": leaf["clade_tags"], "depth": leaf["depth"],
             "shown": position is not None, "order": position,
         })  # fmt: skip
     unknown = set(order) - {leaf["id"] for leaf in leaves}

@@ -688,3 +688,40 @@ def test_clades_config_reads_nomenclature_from_paths(tmp_path: Path) -> None:
         load_clades(tmp_path / "bare.toml")
     (tmp_path / "ok.toml").write_text(body + 'nomenclature = "n"\n')
     assert load_clades(tmp_path / "ok.toml").paths.nomenclature is not None
+
+
+def _with_depths(doc: dict[str, Any], depths: list[float]) -> dict[str, Any]:
+    for leaf, d in zip(doc["tree"]["leaves"], depths, strict=True):
+        leaf["depth"] = d
+    return doc
+
+
+def test_tree_depth_tells_a_rescale_from_a_local_change() -> None:
+    names = [f"leaf{i}" for i in range(40)]
+    clades = ["P"] * 40
+    depths = [0.001 * (i + 1) for i in range(40)]
+    ref = _with_depths(_tree_doc(names, clades, [("P", 0, 39)]), depths)
+    # a uniform rescale: the fitted residual vanishes and the scale factor says by how much
+    scaled = _with_depths(_tree_doc(names, clades, [("P", 0, 39)]), [d * 0.5 for d in depths])
+    res = trees.compare_figures(ref, scaled)["depth"]
+    assert res["tested"] and res["scale"] == pytest.approx(2.0)
+    assert res["raw_p95"] > 0.01 and res["fitted_max"] == pytest.approx(0.0, abs=1e-12)
+    # a local change (a stretch of leaves attached further down a lengthened edge) survives it
+    local = [d + (0.01 if i < 10 else 0.0) for i, d in enumerate(depths)]
+    res = trees.compare_figures(ref, _with_depths(_tree_doc(names, clades, [("P", 0, 39)]), local))
+    res = res["depth"]
+    assert res["fitted_p95"] > 0.003
+    assert {m["name"] for m in res["movers"][:5]} <= {f"leaf{i}" for i in range(10)}
+
+
+def test_tree_depth_not_tested_without_the_field() -> None:
+    from af.report.compare.run import TreeLimits, tree_checks
+
+    names = [f"leaf{i}" for i in range(10)]
+    ref = _with_depths(_tree_doc(names, ["P"] * 10, []), [0.01] * 10)
+    res = trees.compare_figures(ref, _tree_doc(names, ["P"] * 10, []))
+    assert res["depth"] == {"tested": False, "reason": "10 of 10 common leaves lack a depth"}
+    checks = {c["check"]: c for c in tree_checks(res, TreeLimits())}
+    depth_checks = [c for name, c in checks.items() if name.startswith("depth")]
+    assert len(depth_checks) == 3
+    assert all(c["ok"] is None and c["not_tested"] for c in depth_checks)
