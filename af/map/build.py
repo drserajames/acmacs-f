@@ -164,16 +164,31 @@ def map_title(chart: Chart, configured: str | None) -> str:
 # ---------------------------------------------------------------- steps
 
 
-def chain_chart(store: Store, dataset: str) -> tuple[Chart, StoreRef, Path]:
-    """The last step of a chain's CURRENT version. Resolved at run time: a pinned version goes
-    stale the moment the chain is rebuilt, and the report builder refuses a stale figure."""
+def chain_chart(
+    store: Store, dataset: str, until_table: str | None = None
+) -> tuple[Chart, StoreRef, Path]:
+    """The chart of a chain's CURRENT version: its last step, or the step after ``until_table``.
+
+    Resolved at run time: a pinned version goes stale the moment the chain is rebuilt, and the
+    report builder refuses a stale figure. ``until_table`` names a table id; it must match
+    exactly one step (design rule 1), and a step index is never accepted (rule 2).
+    """
     ref = store.current("chains", dataset)
     root = store.resolve(ref)
     steps = json.loads((root / "chain.json").read_text())["steps"]
     if not steps:
         raise BuildError(f"chain {dataset} has no steps")
-    last = steps[-1]
-    ace = root / last["directory"] / last["chosen_file"]
+    if until_table is None:
+        step = steps[-1]
+    else:
+        found = [s for s in steps if s["table_id"] == until_table]
+        if len(found) != 1:
+            raise BuildError(
+                f"chain {dataset}@{ref.version}: chain_until table {until_table!r} matches "
+                f"{len(found)} steps (needs exactly 1)"
+            )
+        step = found[0]
+    ace = root / step["directory"] / step["chosen_file"]
     return read_chart(ace), ref, ace
 
 
@@ -391,9 +406,12 @@ def build_map(
     if cfg.chain:
         if store is None:
             raise BuildError(f"{cfg.folder}: chain configured but no --store given")
-        chart, ref, ace = chain_chart(store, cfg.chain)
+        until = cfg.chain_until
+        chart, ref, ace = chain_chart(store, cfg.chain, until.table if until else None)
         store_refs.append(ref.to_json())
         inputs["chain"] = {**ref.to_json(), "sha256": content_hash(ace)}
+        if until is not None:
+            inputs["chain"]["until_table"] = until.table
     else:
         assert cfg.layout_stand_in is not None
         chart = read_chart(cfg.layout_stand_in)
@@ -438,6 +456,12 @@ def build_map(
     # What was DECIDED about this map, as opposed to what it was built from: these carry reasons,
     # not content hashes, so they are not inputs.
     decisions: dict[str, Any] = {}
+    if cfg.chain_until is not None:
+        decisions["chain_until"] = {
+            "table": cfg.chain_until.table,
+            "reason": cfg.chain_until.reason,
+            "decided": cfg.chain_until.decided.isoformat(),
+        }
     projection = chart.projections[0]
     for cb in cfg.column_bases:
         rule_cb = ColumnBaseOverride(

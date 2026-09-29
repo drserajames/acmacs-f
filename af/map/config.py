@@ -159,12 +159,26 @@ class VaccineChooseConfig:
 
 
 @dataclass(frozen=True)
+class ChainUntilConfig:
+    """Draw the chain as it stood after one named table, not its latest step.
+
+    For reproducing a past round: a chain rebuilt later has tables the round never saw, and
+    comparing against it measures the calendar, not af. Named by table id, never by step index.
+    """
+
+    table: str
+    reason: str
+    decided: dt.date
+
+
+@dataclass(frozen=True)
 class MapConfig:
     """One map folder: where its chart comes from, and its named choices."""
 
     folder: str
     clade_scheme: str
     chain: str | None = None  # store dataset, resolved to CURRENT at run time
+    chain_until: ChainUntilConfig | None = None  # the step after this table, not the last
     layout_stand_in: Path | None = None  # bring-up: a chart to take the layout from
     # bring-up: where to read the colour rows, when the layout chart does not carry them all.
     # A chain's chart is unstyled, and a pre-curation chart can be missing rows that the round's
@@ -184,6 +198,8 @@ class MapConfig:
     def __post_init__(self) -> None:
         if not self.chain and not self.layout_stand_in:
             raise ValueError(f"map {self.folder!r}: needs a chain or a layout_stand_in")
+        if self.chain_until is not None and not self.chain:
+            raise ValueError(f"map {self.folder!r}: chain_until needs a chain")
 
 
 @dataclass(frozen=True)

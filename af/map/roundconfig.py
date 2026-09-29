@@ -17,6 +17,7 @@ from typing import Any
 
 from af.map.config import (
     BlockOffsetConfig,
+    ChainUntilConfig,
     ColouringConfig,
     ColumnBaseConfig,
     Defaults,
@@ -157,6 +158,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
             "folder",
             "clade_scheme",
             "chain",
+            "chain_until",
             "scheme_stand_in",
             "layout_stand_in",
             "title",
@@ -299,10 +301,18 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
                 bool(v.get("optional", False)),
             )
         )
+    until = None
+    if "chain_until" in m:
+        u = m["chain_until"]
+        _known(u, {"table", "reason", "decided"}, f"{where} chain_until")
+        until = ChainUntilConfig(
+            u["table"], u["reason"], _date(u["decided"], f"{where} chain_until")
+        )
     return MapConfig(
         folder=m["folder"],
         clade_scheme=m["clade_scheme"],
         chain=m.get("chain"),
+        chain_until=until,
         layout_stand_in=_path(m["layout_stand_in"], base) if "layout_stand_in" in m else None,
         scheme_stand_in=_path(m["scheme_stand_in"], base) if "scheme_stand_in" in m else None,
         title=m.get("title"),
