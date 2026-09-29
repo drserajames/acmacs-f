@@ -659,7 +659,16 @@ def build(
             raise BuildError("[colouring] source is 'store' but no --store given")
         started = time.monotonic()
         from af.seq.matching_rules import matching_rules
+        from af.serology.update import require_current
+        from af.store import StoreError
 
+        # A serology store built before a lab's latest tables leaves that lab's newest antigens
+        # uncoloured, and nothing on the figure would say why. Refuse instead (10-serology's
+        # guard, the same one geo and stat use).
+        try:
+            require_current(store)
+        except StoreError as exc:
+            raise BuildError(str(exc)) from exc
         assert config.colouring.af_data is not None  # checked by the config
         colours = StoreColours(store, config.colouring, matching_rules(config.colouring.af_data))
         log(f"{'colouring':24s} {time.monotonic() - started:5.1f}s  store join and user tables")
