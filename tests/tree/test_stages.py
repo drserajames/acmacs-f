@@ -238,10 +238,21 @@ def test_incremental_needs_a_previous_tree(tmp_path: Path) -> None:
 
 def test_a_clade_set_without_clones_fails(tmp_path: Path) -> None:
     inputs = stages.SubtypeInputs(
-        alignment=tmp_path / "a.fasta", leaves=tmp_path / "l.parquet", clade_set="A(H3N2)"
+        alignment=tmp_path / "a.fasta",
+        leaves=tmp_path / "l.parquet",
+        clade_set="A(H3N2)",
+        clade_agreement=tmp_path / "agreement.tsv",
     )
     with pytest.raises(stages.StageError, match=r"needs \[paths\] nomenclature"):
         stages.clade_source(inputs, None)
+
+
+def test_a_clade_set_needs_agreement_limits(tmp_path: Path) -> None:
+    """Without them the clades step would publish a tree it had not checked."""
+    with pytest.raises(stages.StageError, match="clade_set needs clade_agreement"):
+        stages.SubtypeInputs(
+            alignment=tmp_path / "a.fasta", leaves=tmp_path / "l.parquet", clade_set="A(H3N2)"
+        )
 
 
 def test_inputs_for_an_unconfigured_subtype_are_refused(tmp_path: Path) -> None:
@@ -260,6 +271,12 @@ def with_clades(config: Path, pin: str | None = None) -> None:
         'work = "work"\n', 'work = "work"\nnomenclature = "clones"\n', 1
     )
     text += 'clade_set = "A(H3N2)"\nnomenclature_repository = "synthetic_HA"\n'
+    # The clades step checks the tree against the fallback; this synthetic pipeline is not a
+    # calibrated tree, so its limit only has to let it through, and says so.
+    (config.parent / "agreement.tsv").write_text(
+        "subtype\tmax_disagreement\treason\nA(H3N2)\t0.99\tsynthetic tree, not calibrated\n"
+    )
+    text += 'clade_agreement = "agreement.tsv"\n'
     if pin is not None:
         text += f'clade_pin = "{pin}"\n'
     config.write_text(text)
@@ -420,7 +437,9 @@ def test_a_subtype_called_state_is_refused(tmp_path: Path) -> None:
 def test_a_clade_set_needs_the_shared_nomenclature_path(tmp_path: Path) -> None:
     """[paths] nomenclature is the one place the clones directory is configured."""
     config = make_project(tmp_path / "p")
-    config.write_text(config.read_text() + 'clade_set = "A(H3N2)"\n')
+    config.write_text(
+        config.read_text() + 'clade_set = "A(H3N2)"\nclade_agreement = "agreement.tsv"\n'
+    )
     with pytest.raises(Exception, match=r"\[paths\] nomenclature .* required"):
         stages.load_run_config(config)
 

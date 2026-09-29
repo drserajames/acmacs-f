@@ -29,6 +29,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from af.clades.agreement import AgreementCheck, AgreementLimit, check_agreement
 from af.clades.assign import Assignment
 from af.clades.fallback import StoreFallback, assign_from_store, disagreements
 from af.clades.nomenclature import CladeSet
@@ -99,11 +100,13 @@ def publish_from_tree(
     nomenclature: Iterable[ExternalInput],
     started: datetime.datetime,
     sequences: StoreRef | None = None,
+    agreement: AgreementLimit | None = None,
+    accept_disagreement: str | None = None,
 ) -> StoreRef:
     """Publish ``clades/<subtype>`` from the tree version ``tree``, which is its input.
 
-    With ``sequences``, the sequences not on the tree are labelled too, by the fallback
-    (:func:`publish_clades`).
+    With ``sequences``, the sequences not on the tree are labelled too, by the fallback, and
+    the tree is checked against it under ``agreement`` (:func:`publish_clades`).
     """
     return publish_clades(
         store,
@@ -113,6 +116,8 @@ def publish_from_tree(
         sequences=sequences,
         nomenclature=nomenclature,
         started=started,
+        agreement=agreement,
+        accept_disagreement=accept_disagreement,
     )
 
 
@@ -125,6 +130,8 @@ def publish_clades(
     sequences: StoreRef | None,
     nomenclature: Iterable[ExternalInput],
     started: datetime.datetime,
+    agreement: AgreementLimit | None = None,
+    accept_disagreement: str | None = None,
 ) -> StoreRef:
     """One ``clades/<subtype>`` table: the tree's calls, and the fallback's for the rest.
 
@@ -139,10 +146,23 @@ def publish_clades(
     this version does not hold, so the two inputs do not describe the same set. Where both
     engines label a sequence the tree's call is kept, and the genuine disagreements (a
     different clade, not merely a less specific one) are counted in the report.
+
+    With both, ``agreement`` is required: a tree that disagrees with the fallback beyond it
+    is refused unless ``accept_disagreement`` names a reason (:mod:`af.clades.agreement`).
     """
     if tree is None and sequences is None:
         raise CladeStoreError(f"{subtype}: give a tree version, a sequence version, or both")
+    if tree is not None and sequences is not None and agreement is None:
+        raise CladeStoreError(
+            f"{subtype}: a tree with a fallback needs an agreement limit (af.clades.agreement); "
+            "a tree is never published unchecked when there is something to check it against"
+        )
+    if accept_disagreement is not None and (tree is None or sequences is None):
+        raise CladeStoreError(
+            f"{subtype}: accept_disagreement given, but there is no tree and fallback to compare"
+        )
     rows: list[CladeRow] = []
+    check: AgreementCheck | None = None
     report: dict[str, Any] = {}
     inputs: list[StoreRef] = []
     if tree is not None:
@@ -159,8 +179,12 @@ def publish_clades(
                 f"{sequences}: expected a sequence-store version, got kind {sequences.kind!r}"
             )
         fallback = assign_from_store(store, sequences, clade_set)
-        rows, fallback_report = _with_fallback(rows, fallback, subtype, clade_set)
+        rows, fallback_report, check = _with_fallback(
+            rows, fallback, subtype, clade_set, agreement, accept_disagreement
+        )
         report["fallback"] = fallback_report
+        if check is not None:
+            report["agreement"] = check.to_json()
         report.setdefault("not_on_tree", {})["labelled_by"] = "fallback, in this table"
         inputs += [sequences, fallback.dataset]
     return publish(
@@ -174,6 +198,9 @@ def publish_clades(
         engine="+".join(name for name, ref in (("tree", tree), ("fallback", sequences)) if ref),
         extra_inputs=inputs[1:],
         extra_report=report,
+        # the limit, its reason and any override go into provenance too: they decided
+        # whether this version could exist at all
+        extra_parameters=None if check is None else {"agreement": check.provenance()},
     )
 
 
@@ -220,9 +247,18 @@ def check_tree_identities(store: Store, tree: StoreRef, rows: Sequence[CladeRow]
 
 
 def _with_fallback(
-    tree_rows: list[CladeRow], fallback: StoreFallback, subtype: str, clade_set: CladeSet
-) -> tuple[list[CladeRow], dict[str, Any]]:
-    """Tree rows plus a fallback row for every sequence not on the tree."""
+    tree_rows: list[CladeRow],
+    fallback: StoreFallback,
+    subtype: str,
+    clade_set: CladeSet,
+    agreement: AgreementLimit | None,
+    accept_disagreement: str | None,
+) -> tuple[list[CladeRow], dict[str, Any], AgreementCheck | None]:
+    """Tree rows plus a fallback row for every sequence not on the tree.
+
+    With tree rows, the tree is first checked against the fallback under ``agreement``
+    (which :func:`publish_clades` has made sure is given).
+    """
     on_tree = {(row.epi_isl, row.accession): row for row in tree_rows}
     missing = sorted(set(on_tree) - set(fallback.assignments))
     if missing:
@@ -233,18 +269,28 @@ def _with_fallback(
     tree_calls = {key: Assignment(str(key), row.clade) for key, row in on_tree.items()}
     both = {key: fallback.assignments[key] for key in on_tree}
     disagree = disagreements(tree_calls, both, clade_set)
+    check = None
+    if tree_rows:
+        assert agreement is not None
+        check = check_agreement(
+            tree_calls, both, clade_set, agreement, accept_disagreement=accept_disagreement
+        )
     rows = list(tree_rows)
     for (epi_isl, accession), assignment in sorted(fallback.assignments.items()):
         if (epi_isl, accession) not in on_tree:
             rows.append(CladeRow(epi_isl, accession, subtype, assignment.clade, method="fallback"))
-    return rows, {
-        "dataset": {"dataset": fallback.dataset.dataset, "version": fallback.dataset.version},
-        **fallback.counts.to_json(),
-        "no_call": fallback.no_call,
-        "labelled_here": len(rows) - len(tree_rows),
-        "tree_vs_fallback_disagree": len(disagree),
-        "tree_vs_fallback_compared": len(both),
-    }
+    return (
+        rows,
+        {
+            "dataset": {"dataset": fallback.dataset.dataset, "version": fallback.dataset.version},
+            **fallback.counts.to_json(),
+            "no_call": fallback.no_call,
+            "labelled_here": len(rows) - len(tree_rows),
+            "tree_vs_fallback_disagree": len(disagree),
+            "tree_vs_fallback_compared": len(both),
+        },
+        check,
+    )
 
 
 def _check_metadata(

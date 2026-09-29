@@ -152,11 +152,24 @@ class SubtypeInputs:
     clade_pin: str | None = None
     """The nomenclature commit to use. Checked against the clone, never assumed. Absent: the
     clone's current commit, read when the pipeline is set up."""
+    clade_agreement: Path | None = None
+    """The clades step's agreement limits (``subtype, max_disagreement, reason``; the data repo's
+    ``clades/agreement.tsv``): a tree whose calls disagree with the fallback beyond its
+    subtype's limit is not published (af.clades.agreement). Required with ``clade_set``."""
     purpose: str = "weekly"
 
     def __post_init__(self) -> None:
-        if self.clade_set is None and (self.nomenclature_repository or self.clade_pin):
-            raise StageError("nomenclature_repository and clade_pin need a clade_set")
+        if self.clade_set is None and (
+            self.nomenclature_repository or self.clade_pin or self.clade_agreement
+        ):
+            raise StageError(
+                "nomenclature_repository, clade_pin and clade_agreement need a clade_set"
+            )
+        if self.clade_set is not None and self.clade_agreement is None:
+            raise StageError(
+                "clade_set needs clade_agreement: the agreement limits the clades step checks "
+                "the tree against (af.clades.agreement)"
+            )
         if self.incremental and self.previous is None:
             raise StageError("incremental = true needs a previous tree to start from")
 
@@ -382,7 +395,10 @@ def tree_steps(
         _publish_step(subtype, inputs, clades, layout, store_root),
     ]
     if clades is not None:
-        steps.append(_clades_step(clades, layout, store_root))
+        if inputs.clade_agreement is None:  # SubtypeInputs already refuses this; not an assert,
+            # which python -O would remove
+            raise StageError(f"{subtype}: clade_set needs clade_agreement")
+        steps.append(_clades_step(clades, inputs.clade_agreement, layout, store_root))
     if jobs_from is not None:
         steps = [
             _as_job(step, subtype, settings, layout, jobs_from) if step.name in JOB_STAGES else step
@@ -780,13 +796,15 @@ def _publish_step(
     )
 
 
-def _clades_step(clades: CladeSource, layout: Layout, store_root: Path) -> Step:
+def _clades_step(clades: CladeSource, agreement: Path, layout: Layout, store_root: Path) -> Step:
     written = layout.stage(CLADES) / PUBLISHED_FILE
 
     def action(_: StepContext) -> None:
+        from af.clades.agreement import limit_for, load_agreement_limits
         from af.clades.from_tree import publish_from_tree
 
         started = datetime.datetime.now(datetime.UTC)
+        limit = limit_for(load_agreement_limits(agreement), clades.subtype)
         tree = StoreRef.from_json(json.loads(layout.published.read_text()))
         ref = publish_from_tree(
             Store.open(store_root),
@@ -796,6 +814,7 @@ def _clades_step(clades: CladeSource, layout: Layout, store_root: Path) -> Step:
             nomenclature=[clades.provenance()],
             started=started,
             sequences=_source_sequences(layout),
+            agreement=limit,
         )
         written.parent.mkdir(parents=True, exist_ok=True)
         written.write_text(json.dumps(ref.to_json(), indent=1, sort_keys=True) + "\n")
@@ -807,6 +826,7 @@ def _clades_step(clades: CladeSource, layout: Layout, store_root: Path) -> Step:
             "tree_ref": layout.published,
             "clades": clades.subclades,
             "build_meta": layout.build_meta,
+            "agreement": agreement,  # a changed limit re-checks, and so re-runs, the step
         },
         parameters={"code_version": CODE_VERSION, "clade_set_version": clades.version},
         outputs=[Artefact(written, parse=_parse_json)],

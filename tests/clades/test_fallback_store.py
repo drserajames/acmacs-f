@@ -13,6 +13,7 @@ from typing import Any
 import duckdb
 import pytest
 
+from af.clades.agreement import AgreementLimit
 from af.clades.fallback import FallbackError, assign_from_store, dataset_for_calls
 from af.clades.from_tree import publish_clades
 from af.clades.store import ASSIGNMENTS_FILE, CladeStoreError, read_report
@@ -30,6 +31,8 @@ from .test_from_tree import (
 #: (epi_isl, accession, nextclade_subclade, qc). The first five are the tree fixture's
 #: leaves; the stub tree engine calls them P, P.1, P.1, P, None.
 TREE_LEAVES = [(f"EPI_ISL_90000{i}", f"EPI90000{i}") for i in range(5)]
+#: The synthetic tree disagrees with the fallback on 1 of its 5 leaves by design (leaf 2).
+AGREEMENT = AgreementLimit(SUBTYPE, 0.25, "synthetic: one leaf of five differs by design")
 
 
 def raw_dataset(store: Store, name: str, *clades: str) -> StoreRef:
@@ -144,6 +147,7 @@ def test_one_table_tree_calls_for_leaves_fallback_for_the_rest(tmp_path: Path) -
         sequences=sequences,
         nomenclature=[nomenclature_input(tmp_path)],
         started=STARTED,
+        agreement=AGREEMENT,
     )
     rows = read_rows(store, ref)
     assert [rows[key] for key in TREE_LEAVES] == [
@@ -181,6 +185,7 @@ def test_a_tree_leaf_missing_from_the_sequences_is_fatal(tmp_path: Path) -> None
             sequences=sequences,
             nomenclature=[nomenclature_input(tmp_path)],
             started=STARTED,
+            agreement=AGREEMENT,
         )
 
 
