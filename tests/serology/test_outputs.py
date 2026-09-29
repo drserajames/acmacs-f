@@ -299,3 +299,35 @@ def test_a_refused_tie_is_coloured_from_its_candidates_own_sequences(
     assert report.links is not None and report.links.by_flag["match.ambiguous"] == 1
     assert report.colours[H3].coloured == {"Clade P.1": 1}
     assert report.colours[H3].ties == {"match.tie-agrees": 1}
+
+
+def test_a_doubtful_match_ae_uses_is_coloured_and_counted(tmp_path: Path, syn: Any) -> None:
+    """End to end (Q81 D): an egg antigen whose only stored sequence is a cell isolate is
+    coloured from that sequence's own alignment, and counted under its doubt."""
+    store = Store.create(tmp_path / "store")
+    serum = {"name": syn.virus("Elsewhere", 9), "serum_id": "S-1"}
+    egg = {"name": syn.virus("EXAMPLETOWN", 2), "passage": "E3", "passage_class": "egg",
+           "date": "2021-01-05"}  # fmt: skip
+    tables = [syn.table("h3-hi-labx-20210304", [egg], [serum], [[["80"]]])]
+    publish(store, tables, Manifest.from_tables(tables, inputs=[]), _provenance("tables-test"))
+    update(store, syn.rules)
+    _sequences(store, tmp_path)  # EXAMPLETOWN/2 is stored as a SIAT1 (cell) isolate only
+    _clades(store, tmp_path, extra=((2, "P.1"),))
+    _, locations, coastline = _roots(tmp_path / "unused", syn)
+    scheme = ColourScheme(
+        subtype=H3, name="test",
+        entries=(ColourEntry(order=1, key="P.1", legend="Clade P.1", colour="#0000aa",
+                             is_group=False),),
+    )  # fmt: skip
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    rules = matching_rules(
+        write_af_data(tmp_path / "af-data", submitters="", number="", equivalents="")
+    )
+    report = make_geo_and_stat(
+        store, locations, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
+        colouring={H3: SubtypeColouring(scheme, clade_set)}, matching=rules,
+        identity_rules=syn.rules,
+    )  # fmt: skip
+    assert report.links is not None and report.links.by_status["doubtful"] == 1
+    assert report.colours[H3].coloured == {"Clade P.1": 1}
+    assert report.colours[H3].doubtful == {"match.egg-antigen-non-egg-sequence": 1}

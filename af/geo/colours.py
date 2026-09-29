@@ -16,7 +16,9 @@ by default and counted; ``use_proxies=False`` leaves them uncoloured instead.
 A preparation whose name found several different sequences (a refused tie, no sequence
 chosen) is coloured when every tied sequence gives the same style, and otherwise by the one
 ae's rank takes (Sarah, Q81: "Agree + ae's rank for splits"). Both are counted in
-``ColourCounts.ties``, so a figure says how many of its dots came from ties.
+``ColourCounts.ties``, so a figure says how many of its dots came from ties. Dots coloured
+through a doubtful match ae uses (egg antigen with only a cell sequence, reassortant, lab
+EPI_ISL whose name differs; Sarah, Q81 D) are counted per doubt in ``ColourCounts.doubtful``.
 """
 
 from __future__ import annotations
@@ -50,6 +52,7 @@ class ColourCounts:
     coloured: Counter[str] = field(default_factory=Counter)  # legend label -> preparations
     uncoloured: Counter[str] = field(default_factory=Counter)  # reason -> preparations
     ties: Counter[str] = field(default_factory=Counter)  # TIE_AGREES / TIE_RANKED -> preparations
+    doubtful: Counter[str] = field(default_factory=Counter)  # doubt flag -> coloured preparations
 
 
 def dot_styles(
@@ -77,6 +80,8 @@ def dot_styles(
                 counts.uncoloured[reason] += 1
             else:
                 counts.coloured[cache[key].label] += 1
+                linked = sequences_of.get(key)
+                counts.doubtful.update(linked.doubts if linked is not None else ())
         return cache[key]
 
     def _style(key: PreparationKey) -> tuple[DotStyle, str]:

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -284,67 +284,109 @@ class PreparationSequence:
     # one ae's rank takes. Colouring uses them only when the candidates agree, or ranks.
     tied: tuple[TiedSequence, ...] = ()
     ranked: TiedSequence | None = None
+    # The doubts (af.seq.matching.USABLE_DOUBTS) of the rows this came from; empty when a
+    # clean match decided it. Colouring counts each (Sarah, Q81 D).
+    doubts: tuple[str, ...] = ()
 
 
 PreparationKey = tuple[
     str, str, str, tuple[str, ...], str
 ]  # subtype, name, reass., annot., passage
 
+_PREP = "t.subtype, a.name, a.reassortant, a.annotations, a.identity_passage"
+_ROWS = """FROM antigen_sequences s
+        JOIN antigens a ON a.table_id = s.table_id AND a.position = s.position
+        JOIN tables t ON t.table_id = s.table_id"""
+
 
 def preparation_sequences(con: Any) -> dict[PreparationKey, PreparationSequence]:
-    """For every preparation (as :func:`af.serology.query.preparations` groups them) with at
-    least one ``matched`` row, its sequence. Doubtful rows are left out: unreviewed, they
-    must not decide anything. Needs the ``antigen_sequences`` view.
+    """For every preparation (as :func:`af.serology.query.preparations` groups them) that a
+    sequence can colour, where it comes from. Needs the ``antigen_sequences`` view.
+
+    In order, the first that applies:
+
+    1. its ``matched`` rows (no doubt);
+    2. its ``doubtful`` rows whose every doubt is one colouring accepts
+       (:data:`af.seq.matching.USABLE_DOUBTS`: ae uses these; Sarah, Q81 D), with the doubts
+       kept in ``doubts`` so they are counted. Any other doubt leaves the row out;
+    3. its rows that refused a name tie (and have no other doubt, or only usable ones): no
+       sequence, the ``tied`` candidates (the union over its rows), and as ``ranked`` the
+       lowest by EPI_ISL number of its rows' ranked picks (Sarah, Q81).
 
     A preparation appears in many tables; normally every row names the same isolate. When
     rows name different sequences the preparation is marked ``conflict`` and gets none,
     rather than one picked by table order.
-
-    A preparation none of whose rows matched, but whose rows refused a name tie and have no
-    other doubt, is included with no sequence and its ``tied`` candidates (Sarah, Q81): the
-    union over its rows, and as ``ranked`` the lowest by EPI_ISL number of its rows' ranked
-    picks (rows of one preparation normally rank the same candidate).
     """
+    from af.seq.matching import AMBIGUOUS, DOUBTFUL, USABLE_DOUBTS
+
+    refused = _sql_list(DOUBTFUL - USABLE_DOUBTS - {AMBIGUOUS})
+    usable = _sql_list(USABLE_DOUBTS)
+    no_refused_doubt = f"len(list_filter(s.flags, f -> f IN ({refused}))) = 0"
+    out = _single_sequences(con, "s.status = 'matched'")
+    doubtful = _single_sequences(
+        con,
+        f"s.status = 'doubtful' AND {no_refused_doubt} "
+        f"AND NOT list_contains(s.flags, '{AMBIGUOUS}')",
+        usable,
+    )
+    for key, found in doubtful.items():
+        out.setdefault(key, found)
+    tie_rows = (
+        f"s.status = 'unmatched' AND list_contains(s.flags, '{AMBIGUOUS}') AND {no_refused_doubt}"
+    )
+    for key, tied in _tied_preparations(con, tie_rows, usable).items():
+        out.setdefault(key, tied)
+    return out
+
+
+def _sql_list(flags: Collection[str]) -> str:
+    return ", ".join(f"'{flag}'" for flag in sorted(flags)) or "NULL"
+
+
+def _single_sequences(
+    con: Any, where: str, usable: str | None = None
+) -> dict[PreparationKey, PreparationSequence]:
+    """One sequence per preparation from the rows ``where`` selects, or a conflict."""
+    doubts = (
+        f"list_sort(list_distinct(flatten(list(list_filter(s.flags, f -> f IN ({usable}))))))"
+        if usable
+        else "[]::VARCHAR[]"
+    )
     rows = con.execute(
-        """
-        SELECT t.subtype, a.name, a.reassortant, a.annotations, a.identity_passage,
+        f"""
+        SELECT {_PREP},
                list(DISTINCT s.epi_isl || '|' || s.accession) AS sequences,
                any_value(s.epi_isl), any_value(s.accession), any_value(s.clade),
-               bool_or(s.pairing = 'exact'), bool_or(s.pairing = 'proxy')
-        FROM antigen_sequences s
-        JOIN antigens a ON a.table_id = s.table_id AND a.position = s.position
-        JOIN tables t ON t.table_id = s.table_id
-        WHERE s.status = 'matched'
-        GROUP BY t.subtype, a.name, a.reassortant, a.annotations, a.identity_passage
+               bool_or(s.pairing = 'exact'), bool_or(s.pairing = 'proxy'), {doubts}
+        {_ROWS}
+        WHERE {where}
+        GROUP BY {_PREP}
         """
     ).fetchall()
     out: dict[PreparationKey, PreparationSequence] = {}
-    for subtype, name, reassortant, annots, passage, seqs, epi, acc, clade, ex, px in rows:
+    for subtype, name, reassortant, annots, passage, seqs, epi, acc, clade, ex, px, dts in rows:
         key = (subtype, name, reassortant, tuple(annots), passage)
         pairing = "exact" if ex else "proxy" if px else ""
         if len(seqs) > 1:
             out[key] = PreparationSequence(None, None, None, pairing, conflict=True)
         else:
-            out[key] = PreparationSequence(epi, acc, clade, pairing, conflict=False)
-    for key, tied in _tied_preparations(con).items():
-        out.setdefault(key, tied)
+            out[key] = PreparationSequence(
+                epi, acc, clade, pairing, conflict=False, doubts=tuple(dts)
+            )
     return out
 
 
-def _tied_preparations(con: Any) -> dict[PreparationKey, PreparationSequence]:
-    """Preparations whose rows refused a name tie and carry no other doubt."""
-    from af.seq.matching import AMBIGUOUS, DOUBTFUL, epi_order
+def _tied_preparations(
+    con: Any, where: str, usable: str
+) -> dict[PreparationKey, PreparationSequence]:
+    """Preparations whose rows (``where``) refused a name tie."""
+    from af.seq.matching import epi_order
 
-    others = ", ".join(f"'{flag}'" for flag in sorted(DOUBTFUL - {AMBIGUOUS}))
-    where = f"""s.status = 'unmatched' AND list_contains(s.flags, '{AMBIGUOUS}')
-                AND len(list_filter(s.flags, f -> f IN ({others}))) = 0"""
     rows = con.execute(
         f"""
-        SELECT t.subtype, a.name, a.reassortant, a.annotations, a.identity_passage,
-               s.tied, s.ranked_epi_isl, s.ranked_accession, s.pairing
-        FROM antigen_sequences s
-        JOIN antigens a ON a.table_id = s.table_id AND a.position = s.position
-        JOIN tables t ON t.table_id = s.table_id
+        SELECT {_PREP}, s.tied, s.ranked_epi_isl, s.ranked_accession, s.pairing,
+               list_filter(s.flags, f -> f IN ({usable}))
+        {_ROWS}
         WHERE {where}
         """
     ).fetchall()
@@ -363,12 +405,14 @@ def _tied_preparations(con: Any) -> dict[PreparationKey, PreparationSequence]:
     tied: dict[PreparationKey, set[tuple[str, str]]] = {}
     ranked: dict[PreparationKey, set[tuple[str, str]]] = {}
     pairings: dict[PreparationKey, set[str]] = {}
-    for subtype, name, reassortant, annots, passage, cands, epi, acc, pairing in rows:
+    doubts: dict[PreparationKey, set[str]] = {}
+    for subtype, name, reassortant, annots, passage, cands, epi, acc, pairing, dts in rows:
         key = (subtype, name, reassortant, tuple(annots), passage)
         tied.setdefault(key, set()).update((c["epi_isl"], c["accession"]) for c in cands)
         if epi is not None:
             ranked.setdefault(key, set()).add((epi, acc))
         pairings.setdefault(key, set()).add(pairing)
+        doubts.setdefault(key, set()).update(dts)
     out: dict[PreparationKey, PreparationSequence] = {}
     for key, pairs in tied.items():
         order = sorted(pairs, key=lambda ea: (epi_order(ea[0]), ea[1]))
@@ -378,6 +422,7 @@ def _tied_preparations(con: Any) -> dict[PreparationKey, PreparationSequence]:
         out[key] = PreparationSequence(
             None, None, None, pairing, conflict=False, tied=seqs,
             ranked=next((t for t in seqs if (t.epi_isl, t.accession) == pick), None),
+            doubts=tuple(sorted(doubts[key])),
         )  # fmt: skip
     return out
 

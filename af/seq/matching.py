@@ -73,6 +73,9 @@ TIE_AGREES = "match.tie-agrees"
 TIE_RANKED = "match.tie-ranked"
 DOUBTFUL = frozenset({EPI_NAME_DIFFERS, SEVERAL_ACCESSIONS, EGG_WITHOUT_EGG_SEQUENCE,
                       AMBIGUOUS, REASSORTANT})  # fmt: skip
+# Doubts colouring accepts, flagged and counted (Sarah, Q81 D: "Yes, flagged + counted"): ae uses
+# these matches. A match with any other doubt (several accessions, several datasets) is not used.
+USABLE_DOUBTS = frozenset({EGG_WITHOUT_EGG_SEQUENCE, REASSORTANT, EPI_NAME_DIFFERS})
 
 
 @dataclass(frozen=True)

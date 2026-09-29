@@ -111,3 +111,23 @@ def test_a_refused_tie_is_coloured_when_its_sequences_agree_else_by_aes_rank(
     assert counts.ties == {TIE_AGREES: 1, TIE_RANKED: 1}
     assert counts.uncoloured == {"tie with no ranked sequence": 1}
     assert counts.coloured == {"Clade P.1": 1, "Clade P": 1}
+
+
+def test_dots_coloured_through_a_doubtful_match_are_counted_per_doubt(tmp_path: Path) -> None:
+    """Sarah, Q81 D: flagged + counted. An uncoloured dot counts no doubt: it was not used."""
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    egg, both, lost = prep("egg"), prep("both"), prep("lost")
+    links = {
+        key(egg): PreparationSequence("EPI_ISL_1", "ACC1", "P.1", "", conflict=False,
+                                      doubts=("match.egg-antigen-non-egg-sequence",)),
+        key(both): PreparationSequence("EPI_ISL_2", "ACC2", "P.2", "", conflict=False,
+                                       doubts=("match.epi-name-differs", "match.reassortant")),
+        key(lost): PreparationSequence("EPI_ISL_3", "ACC3", "", "", conflict=False,
+                                       doubts=("match.reassortant",)),  # no clade: uncoloured
+    }  # fmt: skip
+    style, counts = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), SCHEME, clade_set)
+    assert [style(p).label for p in (egg, both, lost)] == ["Clade P.1", "Clade P", ""]
+    assert counts.doubtful == {
+        "match.egg-antigen-non-egg-sequence": 1, "match.epi-name-differs": 1,
+        "match.reassortant": 1,
+    }  # fmt: skip
