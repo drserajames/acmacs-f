@@ -27,6 +27,7 @@ from typing import Any
 
 from af.clades.colours import ColourScheme
 from af.clades.groups import GroupSet
+from af.clades.importer import UserClades
 from af.clades.nomenclature import CladeSet
 from af.clades.sequence import AlignedSequence, GapSupport
 from af.geo.colours import UNCOLOURED, ColourCounts, DotStyle, dot_styles
@@ -39,7 +40,7 @@ from af.serology.joins import LinkCounts, link_from_store, preparation_sequences
 from af.serology.query import Preparation
 from af.stat.counts import stat_counts
 from af.stat.output import Previous, write_stat
-from af.store import Store, StoreRef
+from af.store import ExternalInput, Store, StoreRef
 from af.util.artefacts import sha256_path
 
 #: Store datasets whose isolates the location lookup learns from.
@@ -55,6 +56,7 @@ class SubtypeColouring:
     scheme: ColourScheme
     clade_set: CladeSet
     group_set: GroupSet | None = None
+    inputs: tuple[ExternalInput, ...] = ()  # the user's tables the scheme was read from
 
 
 @dataclass
@@ -67,6 +69,7 @@ class OutputsReport:
     stat_unknown_region: dict[str, int] = field(default_factory=dict)
     lookup: dict[str, object] = field(default_factory=dict)
     location_tables: dict[str, str] = field(default_factory=dict)  # file -> sha256
+    colour_inputs: dict[str, str] = field(default_factory=dict)  # scheme source -> sha256
     links: LinkCounts | None = None  # antigen -> sequence matching, when colouring
     colours: dict[str, ColourCounts] = field(default_factory=dict)  # subtype -> counts
     uncoloured_subtypes: list[str] = field(default_factory=list)
@@ -168,13 +171,16 @@ def _styles(
         lab_codes=lab_codes,
     )
     links = preparation_sequences(con)
-    aligned = _aligned_sequences(store, con)
+    aligned = aligned_sequences(store, con)
     styles = {}
     for subtype, setting in colouring.items():
         styles[subtype], report.colours[subtype] = dot_styles(
             links, aligned.get_pair, setting.scheme, setting.clade_set, setting.group_set
         )
     report.uncoloured_subtypes = sorted({p.subtype for p in preps} - set(colouring))
+    report.colour_inputs = {
+        str(item.path): item.sha256 for setting in colouring.values() for item in setting.inputs
+    }
 
     def style(prep: Preparation) -> DotStyle:
         found = styles.get(prep.subtype)
@@ -183,15 +189,19 @@ def _styles(
     return style
 
 
-class _Aligned(dict[tuple[str, str], AlignedSequence]):
+class AlignedSequences(dict[tuple[str, str], AlignedSequence]):
+    """(epi_isl, accession) -> aligned sequence, with the two-argument lookup dot_styles takes."""
+
     def get_pair(self, epi_isl: str, accession: str) -> AlignedSequence | None:
         return self.get((epi_isl, accession))
 
 
-def _aligned_sequences(store: Store, con: Any) -> _Aligned:
+def aligned_sequences(store: Store, con: Any) -> AlignedSequences:
     """Aligned amino acids of every sequence an antigen matched, from the sequence store.
 
-    Nextclade alignments of observed sequences: a gap there is a deletion.
+    Nextclade alignments of observed sequences: a gap there is a deletion. Needs the
+    ``antigen_sequences`` view (:func:`af.serology.joins.link_sequences`). Public because
+    the antigenic maps colour through the same path as geo (Q46).
     """
     paths = [
         path.as_posix()
@@ -205,7 +215,9 @@ def _aligned_sequences(store: Store, con: Any) -> _Aligned:
         "WHERE s.aa_aligned IS NOT NULL",
         [paths],
     ).fetchall()
-    return _Aligned({(e, a): AlignedSequence(aa, gaps=GapSupport.OBSERVED) for e, a, aa in rows})
+    return AlignedSequences(
+        {(e, a): AlignedSequence(aa, gaps=GapSupport.OBSERVED) for e, a, aa in rows}
+    )
 
 
 #: The clade store's subtype for a table subtype: B tables are coloured by the B/Victoria
@@ -213,54 +225,71 @@ def _aligned_sequences(store: Store, con: Any) -> _Aligned:
 CLADE_SUBTYPE = {"A(H1N1)": "A(H1N1)", "A(H3N2)": "A(H3N2)", "B": "B/Vic"}
 
 
-@dataclass(frozen=True)
-class SchemeChoice:
-    """Which colour scheme a subtype's geo dots use: ``<directory>/<name>.tsv``."""
-
-    directory: Path
-    name: str
-
-
 def clade_colouring(
     store: Store,
     clones: Path,
-    schemes: Mapping[str, SchemeChoice],
-    groups: Path | None = None,
+    acmacs_data: Path,
+    schemes: Mapping[str, str],
 ) -> dict[str, SubtypeColouring]:
     """Per table subtype, the clade colouring geo uses (Sarah, Q46: by clade for now).
 
+    ``schemes`` names the scheme per table subtype (e.g. the maps' "clades-v10" for H3). The
+    user's schemes and groups are read once, from ``acmacs_data``, on this run
+    (:func:`af.clades.importer.read_user_clades`), the same path the antigenic maps use, so
+    geo and maps cannot colour a clade differently; see :func:`subtype_colouring`.
+
+    This is the seam for other colourings later (the antigenic maps' extra colouring):
+    anything that yields a :class:`SubtypeColouring`.
+    """
+    user = read_clade_tables(store, clones, acmacs_data, list(schemes))
+    return {
+        subtype: subtype_colouring(store, clones, user, subtype, name)
+        for subtype, name in schemes.items()
+    }
+
+
+def read_clade_tables(
+    store: Store, clones: Path, acmacs_data: Path, subtypes: Sequence[str]
+) -> UserClades:
+    """The user's schemes and groups, read once, for the clade sets of these table subtypes.
+
+    Read once per run and handed to :func:`subtype_colouring` for every figure (geo per
+    subtype, maps per map), so every figure of a run is coloured from the same read.
+    """
+    from af.clades.importer import read_user_clades
+
+    return read_user_clades(
+        acmacs_data, {_clade_subtype(s): _clade_set(store, clones, s) for s in subtypes}
+    )
+
+
+def subtype_colouring(
+    store: Store, clones: Path, user: UserClades, subtype: str, scheme_name: str
+) -> SubtypeColouring:
+    """One subtype's colouring with one named scheme from ``user``.
+
     The clade set is the one the current ``clades/<subtype>`` table was labelled with
     (:func:`af.clades.store.clade_set_for`), so "is this within that clade?" is answered by
-    the nomenclature revision that assigned the label. Schemes and groups come from the
-    user's tables (paths from config). This is the seam for other colourings later (the
-    antigenic maps' extra colouring): anything that yields a :class:`SubtypeColouring`.
+    the nomenclature revision that assigned the label. The user's tables' content hashes
+    travel with the result, into whatever report the figure goes to.
     """
-    from af.clades.colours import load_colour_schemes
-    from af.clades.groups import load_groups
+    clade_subtype = _clade_subtype(subtype)
+    return SubtypeColouring(
+        user.scheme(clade_subtype, scheme_name),
+        _clade_set(store, clones, subtype),
+        user.group_set(clade_subtype),
+        inputs=user.inputs,
+    )
+
+
+def _clade_subtype(subtype: str) -> str:
+    if subtype not in CLADE_SUBTYPE:
+        raise ValueError(f"no clade set for table subtype {subtype!r}")
+    return CLADE_SUBTYPE[subtype]
+
+
+def _clade_set(store: Store, clones: Path, subtype: str) -> CladeSet:
     from af.clades.store import clade_set_for, dataset_for
 
-    clade_sets = {}
-    for subtype in schemes:
-        if subtype not in CLADE_SUBTYPE:
-            raise ValueError(f"no clade set for table subtype {subtype!r}")
-        clade_subtype = CLADE_SUBTYPE[subtype]
-        ref = store.current("clades", dataset_for(clade_subtype))
-        clade_sets[subtype] = clade_set_for(store, ref, clones)
-    group_sets = (
-        load_groups(groups, {CLADE_SUBTYPE[s]: c for s, c in clade_sets.items()})
-        if groups is not None
-        else {}
-    )
-    out = {}
-    for subtype, choice in schemes.items():
-        group_set = group_sets.get(CLADE_SUBTYPE[subtype])
-        loaded = load_colour_schemes(
-            choice.directory, CLADE_SUBTYPE[subtype], clade_sets[subtype], group_set
-        )
-        if choice.name not in loaded:
-            raise ValueError(
-                f"no colour scheme {choice.name!r} in {choice.directory} "
-                f"(there are: {', '.join(sorted(loaded))})"
-            )
-        out[subtype] = SubtypeColouring(loaded[choice.name], clade_sets[subtype], group_set)
-    return out
+    ref = store.current("clades", dataset_for(_clade_subtype(subtype)))
+    return clade_set_for(store, ref, clones)
