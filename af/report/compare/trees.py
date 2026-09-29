@@ -338,19 +338,23 @@ DEPTH_MOVERS = 10  # how many of the largest depth changes to list
 def compare_depths(ref: list[dict[str, Any]], new: list[dict[str, Any]]) -> dict[str, Any]:
     """Root-to-tip distance (the optional leaf "depth") of the same leaves in two figures.
 
-    Raw |difference|, and the residual after the one scale factor that best maps new onto ref
-    (least squares through the origin). A uniform rescale of the tree (another substitution model,
+    Raw |difference|, and the residual after one scale factor mapping new onto ref: the MEDIAN of
+    the per-leaf ratios ref/new. A uniform rescale of the tree (another substitution model,
     another alignment length) leaves the fitted residual near zero; a change to some edges (a
-    reroot moving where leaves attach, a different topology) does not. Reported, never gated
-    here. Not tested unless every compared leaf carries a depth on both sides.
+    reroot moving where leaves attach, a different topology) does not. The median, not least
+    squares, because least squares absorbs part of a local change into the scale: on a real tree
+    where 30% of leaves differ it moved the scale 2% and spread a residual over every leaf that
+    had not changed. The median keeps the scale at 1 until most leaves agree on another one.
+    Reported, never gated here. Not tested unless every compared leaf carries a depth on both
+    sides.
     """
     missing = sum(1 for r, n in zip(ref, new, strict=True) if "depth" not in r or "depth" not in n)
     if not ref or missing:
         return {"tested": False, "reason": f"{missing} of {len(ref)} common leaves lack a depth"}
     r = np.array([float(x["depth"]) for x in ref])
     n = np.array([float(x["depth"]) for x in new])
-    nn = float(n @ n)
-    scale = float(r @ n) / nn if nn > 0 else float("nan")
+    positive = n > 0  # a leaf at the root (depth 0) carries no ratio
+    scale = float(np.median(r[positive] / n[positive])) if positive.any() else float("nan")
     raw, fitted = np.abs(r - n), np.abs(r - scale * n)
     top = np.argsort(-fitted, kind="stable")[:DEPTH_MOVERS]
     return {

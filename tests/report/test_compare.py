@@ -743,3 +743,18 @@ def test_tree_depth_units_are_recorded_and_a_mismatch_is_noted(tmp_path: Path) -
     limits = parse_config({"adoption": adoption}, Limits, base_dir=tmp_path)
     text = markdown({"report": "r", "built": "b"}, [row], "l", "name", limits.adoption)
     assert "depth units differ (ref not recorded, new mutations)" in text
+
+
+def test_tree_depth_scale_ignores_a_minority_of_changed_leaves() -> None:
+    # 30 of 100 leaves attach further down (a local change): the scale stays 1, the whole change
+    # stays on those 30 leaves, and the 70 unchanged leaves show no residual
+    names = [f"leaf{i}" for i in range(100)]
+    depths = [0.001 * (i + 1) for i in range(100)]
+    ref = _with_depths(_tree_doc(names, ["P"] * 100, []), depths)
+    local = [d + (0.005 if i % 10 < 3 else 0.0) for i, d in enumerate(depths)]
+    res = trees.compare_figures(ref, _with_depths(_tree_doc(names, ["P"] * 100, []), local))
+    res = res["depth"]
+    assert res["scale"] == pytest.approx(1.0)
+    assert res["fitted_median"] == pytest.approx(0.0, abs=1e-12)
+    assert res["fitted_max"] == pytest.approx(0.005)
+    assert {m["name"] for m in res["movers"]} <= {f"leaf{i}" for i in range(100) if i % 10 < 3}
