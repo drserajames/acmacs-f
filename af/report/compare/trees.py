@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from af.report.compare.maps import adjusted_rand
 
 AE_HASH_SUFFIX = re.compile(r"_[A-Z0-9]*_?[0-9A-F]{8}$")
@@ -320,7 +322,45 @@ def compare_figures(
     out["sections"] = _compare_sections(ref, new, ri, ni, set(common), section_label)
     rts, nts = ref["tree"]["time_series"], new["tree"]["time_series"]
     out["time_series"] = {"ref": rts, "new": nts, "same": rts == nts}
+    out["depth"] = compare_depths([ri[k] for k in common], [ni[k] for k in common])
     return out
+
+
+DEPTH_MOVERS = 10  # how many of the largest depth changes to list
+
+
+def compare_depths(ref: list[dict[str, Any]], new: list[dict[str, Any]]) -> dict[str, Any]:
+    """Root-to-tip distance (the optional leaf "depth") of the same leaves in two figures.
+
+    Raw |difference|, and the residual after the one scale factor that best maps new onto ref
+    (least squares through the origin). A uniform rescale of the tree (another substitution model,
+    another alignment length) leaves the fitted residual near zero; a change to some edges (a
+    reroot moving where leaves attach, a different topology) does not. Reported, never gated
+    here. Not tested unless every compared leaf carries a depth on both sides.
+    """
+    missing = sum(1 for r, n in zip(ref, new, strict=True) if "depth" not in r or "depth" not in n)
+    if not ref or missing:
+        return {"tested": False, "reason": f"{missing} of {len(ref)} common leaves lack a depth"}
+    r = np.array([float(x["depth"]) for x in ref])
+    n = np.array([float(x["depth"]) for x in new])
+    nn = float(n @ n)
+    scale = float(r @ n) / nn if nn > 0 else float("nan")
+    raw, fitted = np.abs(r - n), np.abs(r - scale * n)
+    top = np.argsort(-fitted, kind="stable")[:DEPTH_MOVERS]
+    return {
+        "tested": True,
+        "raw_median": float(np.median(raw)), "raw_p95": float(np.percentile(raw, 95)),
+        "raw_max": float(raw.max()),
+        "scale": scale,
+        "fitted_median": float(np.median(fitted)), "fitted_p95": float(np.percentile(fitted, 95)),
+        "fitted_max": float(fitted.max()),
+        "ref_max_depth": float(r.max()),
+        "movers": [
+            {"name": ref[i]["name"], "ref": float(r[i]), "new": float(n[i]),
+             "fitted_residual": float(fitted[i])}
+            for i in top
+        ],
+    }  # fmt: skip
 
 
 def _section_bounds(

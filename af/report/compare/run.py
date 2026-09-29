@@ -410,7 +410,9 @@ def geo_checks(res: dict[str, Any], lim: GeoLimits) -> list[dict[str, Any]]:
 
 
 TREE_CHECKS = ("leaves jaccard", "order spearman", "clade ARI (tree)", "section min jaccard",
-               "time series same", "sections resolved")  # fmt: skip
+               "time series same", "sections resolved", "depth scale (not gated)",
+               "depth p95 abs diff (not gated)",
+               "depth p95 abs diff scaled (not gated)")  # fmt: skip
 
 
 def tree_checks(res: dict[str, Any], lim: TreeLimits) -> list[dict[str, Any]]:
@@ -432,7 +434,21 @@ def tree_checks(res: dict[str, Any], lim: TreeLimits) -> list[dict[str, Any]]:
             ">=",
             1.0,
         ),  # fmt: skip
+        *_depth_checks(res.get("depth", {"tested": False, "reason": "not compared"})),
     ]
+
+
+def _depth_checks(depth: dict[str, Any]) -> list[dict[str, Any]]:
+    """Leaf depth: reported only. A limit comes later, calibrated, and is Sarah's to set."""
+    names = {"depth scale (not gated)": "scale", "depth p95 abs diff (not gated)": "raw_p95",
+             "depth p95 abs diff scaled (not gated)": "fitted_p95"}  # fmt: skip
+    out = []
+    for name, key in names.items():
+        check = _check(name, depth.get(key, float("nan")), "<=", None)
+        if not depth.get("tested"):
+            check["not_tested"] = depth.get("reason", "no depth")
+        out.append(check)
+    return out
 
 
 def _cell(check: dict[str, Any]) -> str:
@@ -499,6 +515,12 @@ def markdown(
                 if sec["unresolved"][side]:
                     notes.append(f"- {row['slot']}: {side} sections whose bounds are not drawn "
                                  f"leaves: {sec['unresolved'][side]}")  # fmt: skip
+            dep = d.get("depth", {})
+            if dep.get("tested") and dep["movers"]:
+                notes.append(f"- {row['slot']}: largest depth changes after scaling new by "
+                             f"{dep['scale']:.4f}: " + ", ".join(
+                                 f"{m['name']} {m['ref']:.4g} -> {m['new']:.4g}"
+                                 for m in dep["movers"]))  # fmt: skip
             if sec["only_ref"] or sec["only_new"]:
                 notes.append(f"- {row['slot']}: sections only in ref {sec['only_ref']}, "
                              f"only in new {sec['only_new']}")  # fmt: skip
