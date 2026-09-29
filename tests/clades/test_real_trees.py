@@ -162,3 +162,26 @@ def test_bvic_uses_gap_aware_states(af_data: Path) -> None:
     expected = expectations(af_data)["subtypes"]["bvic"]
     assert expected["gap_support"] == GapSupport.OBSERVED.value
     assert expected["asr_states"].startswith("treetime")
+
+
+@pytest.mark.parametrize("key", ["h3", "h1", "bvic"])
+def test_the_agreement_guard_passes_the_round_trees(af_data: Path, key: str) -> None:
+    """The guard's limit (Sarah, 29 Sep 2026) was calibrated so that correctly built trees
+    pass with room to spare; these are such trees. The limit is read from the data repo, the
+    one editable copy, so a revised limit is checked here too."""
+    from af.clades.agreement import check_agreement, limit_for, load_agreement_limits
+    from af.clades.assign import Assignment
+
+    limits_path = af_data / "clades" / "agreement.tsv"
+    if not limits_path.is_file():
+        pytest.skip(f"no agreement limits at {limits_path} yet (committed after the code)")
+    result, expected, leaves = run(af_data, key)
+    tree = {leaf: Assignment(leaf, result.clade(leaf)) for leaf in expected["labels"]}
+    fallback = {
+        leaf: Assignment(leaf, None if row["nextclade"] in ("", "unassigned") else row["nextclade"])
+        for leaf, row in leaves.items()
+    }
+    limit = limit_for(load_agreement_limits(limits_path), expected["subtype"])
+    clade_set = load_clade_set(expected["subtype"], CLONES)  # run() checked it is the pin
+    check = check_agreement(tree, fallback, clade_set, limit)
+    assert not check.exceeded

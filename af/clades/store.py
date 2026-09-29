@@ -186,6 +186,7 @@ def publish(
     engine: str = "tree",
     extra_inputs: Iterable[Input] = (),
     extra_report: Mapping[str, Any] | None = None,
+    extra_parameters: Mapping[str, Any] | None = None,
 ) -> StoreRef:
     """Write one version of ``clades/<subtype>`` and make it current.
 
@@ -194,8 +195,8 @@ def publish(
     from), or the sequence store for the fallback. ``nomenclature`` is the pinned upstream
     inputs. Both go into the provenance, which is what makes a stale clade table
     detectable: if either moves, a consumer can see that the clades were built from
-    something else. ``extra_report`` is merged into ``report.json``; it may not replace
-    the standard counts.
+    something else. ``extra_report`` is merged into ``report.json``, and
+    ``extra_parameters`` into the provenance parameters; neither may replace a standard key.
     """
     if not rows:
         raise CladeStoreError(
@@ -222,17 +223,30 @@ def publish(
         provenance = Provenance(
             step=STEP,
             inputs=(labelled, *tuple(nomenclature), *tuple(extra_inputs)),
-            parameters={
-                "subtype": subtype,
-                "engine": engine,
-                "clade_set_version": clade_set.version,
-                "sequences": len(rows),
-                "unnamed": report["unnamed"],
-            },
+            parameters=_parameters(
+                {
+                    "subtype": subtype,
+                    "engine": engine,
+                    "clade_set_version": clade_set.version,
+                    "sequences": len(rows),
+                    "unnamed": report["unnamed"],
+                },
+                extra_parameters,
+                subtype,
+            ),
             started=started,
             finished=datetime.datetime.now(datetime.UTC),
         )
         return builder.publish(provenance, summary=report)
+
+
+def _parameters(
+    standard: dict[str, Any], extra: Mapping[str, Any] | None, subtype: str
+) -> dict[str, Any]:
+    clash = sorted(set(extra or {}) & set(standard))
+    if clash:
+        raise CladeStoreError(f"{subtype}: extra parameters would replace standard ones: {clash}")
+    return {**standard, **(extra or {})}
 
 
 def read_report(store: Store, ref: StoreRef) -> dict[str, Any]:
