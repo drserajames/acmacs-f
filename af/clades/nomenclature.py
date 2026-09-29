@@ -220,6 +220,29 @@ class CladeSet:
                 return legacy.short_name or legacy.name
         return None
 
+    def legacy_aliases(self) -> dict[str, str]:
+        """Each older name, full and short, mapped to the subclade upstream says it aliases.
+
+        The reverse of :meth:`legacy_name`, for reading tables written under the old names:
+        upstream publishes the mapping (``clades/<old>.yml``, ``alias_of``), so resolving
+        through it is the nomenclature's own statement, not a curation choice. Only aliases
+        of subclades in this set are included. Two different targets for one name is an
+        error rather than a silent winner.
+        """
+        aliases: dict[str, str] = {}
+        for legacy in self.legacy_clades.values():
+            if legacy.alias_of is None or legacy.alias_of not in self.subclades:
+                continue
+            for name in {legacy.name, legacy.short_name} - {None}:
+                assert name is not None
+                known = aliases.setdefault(name, legacy.alias_of)
+                if known != legacy.alias_of:
+                    raise ValueError(
+                        f"{self.subtype}: old name {name!r} aliases both {known!r} "
+                        f"and {legacy.alias_of!r}"
+                    )
+        return aliases
+
     def unexpressible(self) -> dict[str, tuple[Unexpressible, ...]]:
         """Clades with defining mutations no mature-HA sequence can carry (design rule 1)."""
         return {

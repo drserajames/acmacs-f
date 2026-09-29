@@ -173,3 +173,20 @@ def test_moving_the_clone_changes_the_version(tmp_path: Path) -> None:
     subprocess.run(["git", "-C", str(clone), "add", "-A"], check=True)
     subprocess.run(commit_command(clone, "add"), check=True)
     assert load(clones).version != f"synthetic_HA@{commit}"
+
+
+def test_legacy_aliases_map_old_names_to_their_subclade(tmp_path: Path) -> None:
+    """The reverse of legacy_name, from upstream's clades/<old>.yml alias_of."""
+    clade_set = load(synthetic(tmp_path)[0])
+    assert clade_set.legacy_aliases() == {"Q": "P.1"}
+
+
+def test_legacy_aliases_refuse_one_name_for_two_subclades(tmp_path: Path) -> None:
+    import dataclasses
+
+    clade_set = load(synthetic(tmp_path)[0])
+    [legacy] = clade_set.legacy_clades.values()
+    other = dataclasses.replace(legacy, name="R", short_name="Q", alias_of="P.2")
+    broken = dataclasses.replace(clade_set, legacy_clades={"Q": legacy, "R": other})
+    with pytest.raises(ValueError, match="old name 'Q' aliases both 'P.1' and 'P.2'"):
+        broken.legacy_aliases()
