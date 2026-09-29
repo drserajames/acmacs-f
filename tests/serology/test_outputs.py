@@ -32,24 +32,27 @@ def _name(prefix: str, number: int) -> str:
     return "/".join([prefix, "EXAMPLETOWN", str(number), "2021"])
 
 
-def _sequences(store: Store, tmp_path: Path) -> None:
+def _sequences(store: Store, tmp_path: Path, extra: tuple[tuple[int, int], ...] = ()) -> None:
     """Each sequences dataset gets its own two isolates in EXAMPLETOWN (EXAMPLELAND); only
-    h3's are the ones the test's antigens match (an isolate is in one dataset only)."""
+    h3's are the ones the test's antigens match (an isolate is in one dataset only).
+    ``extra`` adds h3 isolates as (EPI number, name number): two under one name are a tie."""
     for offset, dataset in enumerate(("h3", "h1", "bvic", "byam")):
-        numbers = (1 + 10 * offset, 2 + 10 * offset)
+        numbers = [(1 + 10 * offset,) * 2, (2 + 10 * offset,) * 2]
+        if dataset == "h3":
+            numbers += list(extra)
         isolates = tmp_path / f"isolates-{dataset}.parquet"
         sequences = tmp_path / f"sequences-{dataset}.parquet"
         rows = ", ".join(
-            f"('EPI_ISL_{n}', 'ACC{n}', '{_name('A', n)}', 'SIAT1', 'Exampleland', "
+            f"('EPI_ISL_{n}', 'ACC{n}', '{_name('A', m)}', 'SIAT1', 'Exampleland', "
             f"'Example Continent', 'EXAMPLETOWN', '2021-01-01', []::VARCHAR[])"
-            for n in numbers
+            for n, m in numbers
         )
         duckdb.execute(
             f"COPY (SELECT * FROM (VALUES {rows}) AS v(epi_isl, accession, name, passage, "
             f"country, region, place, collection_date, problems)) "
             f"TO '{isolates.as_posix()}' (FORMAT parquet)"
         )
-        seqs = ", ".join(f"('EPI_ISL_{n}', 'ACC{n}', 'hash{n}', '{'K' * 40}')" for n in numbers)
+        seqs = ", ".join(f"('EPI_ISL_{n}', 'ACC{n}', 'hash{n}', '{'K' * 40}')" for n, _ in numbers)
         duckdb.execute(
             f"COPY (SELECT * FROM (VALUES {seqs}) AS v(epi_isl, accession, seq_hash, aa_aligned)) "
             f"TO '{sequences.as_posix()}' (FORMAT parquet)"
@@ -60,10 +63,13 @@ def _sequences(store: Store, tmp_path: Path) -> None:
             builder.publish(_provenance("sequences-test"))
 
 
-def _clades(store: Store, tmp_path: Path) -> None:
+def _clades(store: Store, tmp_path: Path, extra: tuple[tuple[int, str], ...] = ()) -> None:
     source = tmp_path / "assignments.parquet"
+    rows = ", ".join(
+        f"('EPI_ISL_{n}', 'ACC{n}', '{c}', 'fallback')" for n, c in ((1, "P.1"), *extra)
+    )
     duckdb.execute(
-        f"""COPY (SELECT * FROM (VALUES ('EPI_ISL_1', 'ACC1', 'P.1', 'fallback'))
+        f"""COPY (SELECT * FROM (VALUES {rows})
             AS v(epi_isl, accession, clade, method)) TO '{source.as_posix()}' (FORMAT parquet)"""
     )
     with store.build("clades", "h3") as builder:
@@ -260,3 +266,36 @@ def test_geo_and_stat_refuse_a_serology_store_behind_the_tables(tmp_path: Path, 
             store, tables, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
             identity_rules=syn.rules,
         )  # fmt: skip
+
+
+def test_a_refused_tie_is_coloured_from_its_candidates_own_sequences(
+    tmp_path: Path, syn: Any
+) -> None:
+    """End to end (Q81): EXAMPLETOWN/7 has two different stored sequences, both P.1. The match
+    stays refused, but the dot is coloured, from the candidates' aligned sequences."""
+    store = Store.create(tmp_path / "store")
+    serum = {"name": syn.virus("Elsewhere", 9), "serum_id": "S-1"}
+    tied = {"name": syn.virus("EXAMPLETOWN", 7), "passage": "MDCK1", "date": "2021-01-05"}
+    tables = [syn.table("h3-hi-labx-20210304", [tied], [serum], [[["80"]]])]
+    publish(store, tables, Manifest.from_tables(tables, inputs=[]), _provenance("tables-test"))
+    update(store, syn.rules)
+    _sequences(store, tmp_path, extra=((7, 7), (8, 7)))
+    _clades(store, tmp_path, extra=((7, "P.1"), (8, "P.1")))
+    _, locations, coastline = _roots(tmp_path / "unused", syn)
+    scheme = ColourScheme(
+        subtype=H3, name="test",
+        entries=(ColourEntry(order=1, key="P.1", legend="Clade P.1", colour="#0000aa",
+                             is_group=False),),
+    )  # fmt: skip
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    rules = matching_rules(
+        write_af_data(tmp_path / "af-data", submitters="", number="", equivalents="")
+    )
+    report = make_geo_and_stat(
+        store, locations, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
+        colouring={H3: SubtypeColouring(scheme, clade_set)}, matching=rules,
+        identity_rules=syn.rules,
+    )  # fmt: skip
+    assert report.links is not None and report.links.by_flag["match.ambiguous"] == 1
+    assert report.colours[H3].coloured == {"Clade P.1": 1}
+    assert report.colours[H3].ties == {"match.tie-agrees": 1}

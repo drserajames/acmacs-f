@@ -82,3 +82,32 @@ def test_styles_and_reasons(tmp_path: Path) -> None:
     points = to_i7(geo, SUBTYPE)["periods"][0]["locations"][0]["points"]
     assert points[0] == {"color": "transparent", "count": 6}
     assert {"color": "#0000aa", "count": 1, "clade": "Clade P.1"} in points
+
+
+def test_a_refused_tie_is_coloured_when_its_sequences_agree_else_by_aes_rank(
+    tmp_path: Path,
+) -> None:
+    """Sarah, Q81: "Agree + ae's rank for splits". No sequence is chosen for an agreeing tie."""
+    from af.seq.matching import TIE_AGREES, TIE_RANKED
+    from af.serology.joins import TiedSequence
+
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    one, two, three = (TiedSequence(f"EPI_ISL_{n}", f"ACC{n}", c)
+                       for n, c in ((1, "P.1"), (2, "P.1.1"), (3, "P.2")))  # fmt: skip
+
+    def tie(*seqs: TiedSequence, ranked: TiedSequence | None) -> PreparationSequence:
+        return PreparationSequence(None, None, None, "", conflict=False, tied=seqs, ranked=ranked)
+
+    preps = {n: prep(n) for n in ("agree", "split", "split-unranked")}
+    links = {
+        key(preps["agree"]): tie(one, two, ranked=two),  # P.1 and P.1.1 both colour as P.1
+        key(preps["split"]): tie(one, three, ranked=three),  # P.1 vs P: ae's pick decides
+        key(preps["split-unranked"]): tie(one, three, ranked=None),
+    }
+    style, counts = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), SCHEME, clade_set)
+    assert style(preps["agree"]) == DotStyle("Clade P.1", "#0000aa")
+    assert style(preps["split"]) == DotStyle("Clade P", "#aa0000")
+    assert style(preps["split-unranked"]) == UNCOLOURED
+    assert counts.ties == {TIE_AGREES: 1, TIE_RANKED: 1}
+    assert counts.uncoloured == {"tie with no ranked sequence": 1}
+    assert counts.coloured == {"Clade P.1": 1, "Clade P": 1}

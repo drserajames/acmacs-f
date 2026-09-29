@@ -190,7 +190,8 @@ class AlignedSequences(dict[tuple[str, str], AlignedSequence]):
 
 
 def aligned_sequences(store: Store, con: Any) -> AlignedSequences:
-    """Aligned amino acids of every sequence an antigen matched, from the sequence store.
+    """Aligned amino acids of every sequence an antigen matched or tied on, from the sequence
+    store (a refused tie is coloured from its candidates' own sequences, Q81).
 
     Nextclade alignments of observed sequences: a gap there is a deletion. Needs the
     ``antigen_sequences`` view (:func:`af.serology.joins.link_sequences`). Public because
@@ -203,9 +204,9 @@ def aligned_sequences(store: Store, con: Any) -> AlignedSequences:
     ]
     rows = con.execute(
         "SELECT s.epi_isl, s.accession, s.aa_aligned FROM read_parquet(?) s "
-        "JOIN (SELECT DISTINCT epi_isl, accession FROM antigen_sequences "
-        "      WHERE status = 'matched') m USING (epi_isl, accession) "
-        "WHERE s.aa_aligned IS NOT NULL",
+        "JOIN (SELECT epi_isl, accession FROM antigen_sequences WHERE status = 'matched' "
+        "      UNION SELECT unnest(tied, recursive := true) FROM antigen_sequences) m "
+        "USING (epi_isl, accession) WHERE s.aa_aligned IS NOT NULL",
         [paths],
     ).fetchall()
     return AlignedSequences(

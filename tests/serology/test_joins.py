@@ -105,7 +105,18 @@ def test_every_antigen_gets_one_status(tmp_path: Path, syn: Any) -> None:
     assert len(rows) == 5  # one row per antigen, never duplicated by the joins
     # doubtful rows never decide a preparation's sequence
     preps = {key[1]: value for key, value in preparation_sequences(con).items()}
-    assert set(preps) == {syn.virus("SOMEWHERE", 1), syn.virus("ELSEWHERE", 3)}
+    with_sequence = {name for name, p in preps.items() if p.epi_isl is not None}
+    assert with_sequence == {syn.virus("SOMEWHERE", 1), syn.virus("ELSEWHERE", 3)}
+    # the refused tie (ELSEWHERE/4) chooses nothing, but keeps its candidates for colouring
+    # (Q81); both rank alike on passage, so ae's rank falls to the lower EPI_ISL number
+    tie = preps[syn.virus("ELSEWHERE", 4)]
+    assert tie.epi_isl is None and not tie.conflict
+    assert [(t.epi_isl, t.accession) for t in tie.tied] == [
+        ("EPI_ISL_4", "ACC4"),
+        ("EPI_ISL_5", "ACC5"),
+    ]
+    assert tie.ranked is not None and tie.ranked.epi_isl == "EPI_ISL_4"
+    assert set(preps) == with_sequence | {syn.virus("ELSEWHERE", 4)}  # doubtful rows: never
 
 
 def test_b_antigen_of_unknown_lineage_found_in_both_datasets_is_doubtful(

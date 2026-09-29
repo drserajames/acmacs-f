@@ -12,6 +12,11 @@ that sequence has a clade assignment, and the scheme has an entry for it. Every 
 case is drawn with the uncoloured style and counted by reason, so a thin map says why.
 Proxy pairings (the lab paired the antigen with a related isolate's sequence) are used
 by default and counted; ``use_proxies=False`` leaves them uncoloured instead.
+
+A preparation whose name found several different sequences (a refused tie, no sequence
+chosen) is coloured when every tied sequence gives the same style, and otherwise by the one
+ae's rank takes (Sarah, Q81: "Agree + ae's rank for splits"). Both are counted in
+``ColourCounts.ties``, so a figure says how many of its dots came from ties.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from af.clades.colours import ColourScheme
 from af.clades.groups import GroupSet
 from af.clades.nomenclature import CladeSet
 from af.clades.sequence import AlignedSequence
+from af.seq.matching import TIE_AGREES, TIE_RANKED
 from af.serology.joins import PreparationKey, PreparationSequence
 from af.serology.query import Preparation
 
@@ -43,6 +49,7 @@ UNCOLOURED = DotStyle(label="", colour=None)
 class ColourCounts:
     coloured: Counter[str] = field(default_factory=Counter)  # legend label -> preparations
     uncoloured: Counter[str] = field(default_factory=Counter)  # reason -> preparations
+    ties: Counter[str] = field(default_factory=Counter)  # TIE_AGREES / TIE_RANKED -> preparations
 
 
 def dot_styles(
@@ -80,15 +87,32 @@ def dot_styles(
             return UNCOLOURED, "rows name different sequences"
         if linked.pairing == "proxy" and not use_proxies:
             return UNCOLOURED, "proxy pairing not used"
-        if linked.clade is None:
-            return UNCOLOURED, "no clade assignment"
-        if linked.clade == "":
-            return UNCOLOURED, "nomenclature names no clade"
+        if linked.tied:
+            return _tie(linked)
         assert linked.epi_isl is not None and linked.accession is not None
-        sequence = aligned(linked.epi_isl, linked.accession)
+        return _sequence_style(linked.epi_isl, linked.accession, linked.clade)
+
+    def _tie(linked: PreparationSequence) -> tuple[DotStyle, str]:
+        """Every tied sequence styled as if it were the match; agree, or ae's rank decides."""
+        results = {_sequence_style(t.epi_isl, t.accession, t.clade) for t in linked.tied}
+        if len(results) == 1:
+            counts.ties[TIE_AGREES] += 1
+            return results.pop()
+        if linked.ranked is None:
+            return UNCOLOURED, "tie with no ranked sequence"
+        counts.ties[TIE_RANKED] += 1
+        ranked = linked.ranked
+        return _sequence_style(ranked.epi_isl, ranked.accession, ranked.clade)
+
+    def _sequence_style(epi_isl: str, accession: str, clade: str | None) -> tuple[DotStyle, str]:
+        if clade is None:
+            return UNCOLOURED, "no clade assignment"
+        if clade == "":
+            return UNCOLOURED, "nomenclature names no clade"
+        sequence = aligned(epi_isl, accession)
         if sequence is None:
             return UNCOLOURED, "no aligned sequence"
-        entry = scheme.entry_for(linked.clade, sequence, clade_set, group_set)
+        entry = scheme.entry_for(clade, sequence, clade_set, group_set)
         if entry is None:
             return UNCOLOURED, "not in the colour scheme"
         return DotStyle(label=entry.legend, colour=entry.colour), ""

@@ -361,3 +361,40 @@ def test_the_committed_number_rules_read(af_data: Path) -> None:
     if not path.is_file():
         pytest.skip(f"{path} not present")
     assert M.read_number_rules(path)
+
+
+class TestRefusedTies:
+    """Sarah, Q81: a refused tie keeps its candidates, and ae's rank for colouring a split."""
+
+    def test_a_refused_tie_keeps_its_candidates_and_aes_pick(self) -> None:
+        a, b = candidate(8, "MDCK2", seq="x"), candidate(3, "SIAT1", seq="y")
+        match = index(a, b).match(ANTIGEN, M.CELL, passage="SIAT1")
+        assert match.chosen is None and M.AMBIGUOUS in match.flags  # still refused
+        assert set(match.tied) == {a, b}
+        assert match.ranked == b  # identical passage (0) beats same class (50)
+
+    def test_a_chosen_match_has_no_tie(self) -> None:
+        match = index(candidate(1, "MDCK2")).match(ANTIGEN, M.CELL, passage="MDCK2")
+        assert match.chosen is not None and match.tied == () and match.ranked is None
+
+    @pytest.mark.parametrize(
+        ("antigen", "passages", "expected"),
+        [
+            ("MDCK1/SIAT2", ("MDCK1/SIAT2", "SIAT2"), 0),  # identical
+            ("MDCK1/SIAT2", ("SIAT2", "SIAT3"), 0),  # same last step (10) beats same name (20)
+            ("MDCK1/SIAT2", ("SIAT3", "MDCK4"), 0),  # same last name (20) beats same class (50)
+            ("E3", ("MDCK2", "E5"), 1),  # egg with egg (50) beats egg with cell (90)
+            ("", ("MDCK2", "SIAT1"), 0),  # unknown passage: both 90, EPI_ISL order decides
+        ],
+    )
+    def test_aes_passage_rank(self, antigen: str, passages: tuple[str, str], expected: int) -> None:
+        tier = [candidate(10 + i, p, seq=str(i)) for i, p in enumerate(passages)]
+        klass = M.passage_class(antigen, RULES)
+        assert M.ae_ranked(tier, antigen, klass) == tier[expected]
+
+    def test_equal_ranks_fall_to_the_epi_isl_number_whatever_the_order(self) -> None:
+        """ae's std::sort breaks equal ranks arbitrarily; af must not (design rule 8)."""
+        tier = [candidate(n, "MDCK2", seq=str(n)) for n in (100, 9, 23)]
+        for order in (tier, tier[::-1], tier[1:] + tier[:1]):
+            ranked = M.ae_ranked(order, "MDCK2", M.CELL)
+            assert ranked is not None and ranked.epi_isl == "EPI_ISL_9"  # numeric, not text
