@@ -27,11 +27,14 @@ a serum ``F12/18*2`` reads ``<`` as ``<10`` when the legend says ``2 < = <10``. 
 serum has no mark, or two, is an error: never a guess. A mark the legend calls hyperimmune
 sheep serum sets the serum's species.
 
-**Other information is not all identity.** A variant tag (``J141O``, ``J141``, ``(J141O)``)
-or a clone number (``clone 37``) tells two isolates of one virus apart and becomes an
-annotation; anything else there (lists of HA substitutions, ``?``, notes) describes the virus
-and is kept verbatim in the antigen's ``source``. ae annotated the whole cell, so the same
-virus got a different identity on sheets that list its substitutions.
+**Other information is mostly description.** Which variant tags and clone numbers are part of
+an antigen's identity is data: the ``identity_tags`` rules (lab, subtype), e.g. one position's
+tags for one subtype. A tag or clone number no rule names, lists of HA substitutions, ``?`` and
+notes describe the virus: they are counted ("tags: not identity") and the cell is kept verbatim
+in the antigen's ``source``. The same filter applies to tags written in the virus name
+(``Isolate 2 J141O``) and in a serum's passage row (``Egg J141O``), so a tag counts the same
+wherever Crick wrote it; an isolate number is always identity. ae annotated the whole cell
+where it read the column, so the same virus got a different identity from sheet to sheet.
 
 **Serum names are abbreviations**, resolved to the table's own antigens as for VIDRL
 (``af.tables.abbrev``), here with the year as well as the isolate. The serum id keeps the
@@ -76,8 +79,10 @@ RBC = {"GUINEA PIG": "guinea-pig", "TURKEY": "turkey", "CHICKEN": "chicken"}
 TITRE = re.compile(r"[<>]?[1-9]\d*")
 MEASURED = re.compile(r"[<>]?(?:[1-9]\d*|0)(?:\.\d+)?")  # PRN reads a titre, not a dilution
 NEUTRALISATION = re.compile(r"Neutrali[sz]ation", re.IGNORECASE)
-TAG = re.compile(r"[A-Z]\d{1,3}[A-Z]?")  # a variant tag: J141, J141O, J141J
-CLONE = re.compile(r"clone\s*(\d+)", re.IGNORECASE)
+# a variant tag: J141, J141O, J141O/J; not part of a longer word or number
+TAG = re.compile(r"(?<![A-Za-z0-9])([A-Z]\d{1,3}(?:[A-Z](?:/[A-Z])?)?)(?![A-Za-z0-9/])")
+CLONE = re.compile(r"clone\s*(\d+(?:\.\d+)*)", re.IGNORECASE)  # "clone 37", "clone 3.4.1"
+ISOLATE = re.compile(r"(?:Isolate|Isol|Isl)\s*(\d+)#?", re.IGNORECASE)
 # "1 < = <40", "2< =<10": footnote mark and the titre a bare "<" stands for
 LESS_THAN = re.compile(r"(\d)\s*<\s*=\s*(<\s*\d+)")
 LESS_THAN_ALONE = re.compile(r"\s*<\s*=\s*(<\s*\d+)\s*")  # the mark is in the cell to its left
@@ -405,8 +410,8 @@ class SheetReader:
         m = re.fullmatch(r"([A-Za-z]+)(?:\s+(.+))?", text)
         if m is None or m[1].upper() not in SERUM_WORD:
             raise self.fail(r, c, f"serum passage {text!r}: not one of {sorted(SERUM_WORD)}")
-        tags = _tags(m[2] or "")
-        if m[2] and not tags:
+        tags, _ = self._identity(m[2] or "")
+        if m[2] and not tags and not _candidates(m[2]):
             raise self.fail(r, c, f"serum passage {text!r}: {m[2]!r} is not a variant tag")
         return SERUM_WORD[m[1].upper()], tags
 
@@ -455,6 +460,29 @@ class SheetReader:
                 " add a strain_aliases rule (applies_to serum)",
             )
         return next(iter(found.values()))
+
+    def _identity(self, text: str) -> tuple[list[str], int]:
+        """(annotations, number of tags left out) from a name's extra text, an
+        Other-information cell or a serum's passage row. An isolate number is identity;
+        a variant tag or clone number is identity only when an ``identity_tags`` rule (lab,
+        subtype) names it; everything else is description."""
+        out: list[str] = []
+        ignored = 0
+        if m := ISOLATE.search(text):
+            out.append(f"ISOLATE {m[1]}")
+        for tag in _candidates(text):
+            rule = self.rules.identity_tags.find(tag, lab=self.lab, subtype=self.subtype)
+            if rule is None:
+                ignored += 1
+                continue
+            value = (
+                re.sub(rule["pattern"], rule["annotation"], tag, flags=re.IGNORECASE)
+                if rule["kind"] == "regex"
+                else rule["annotation"]
+            ).upper()
+            if value not in out:
+                out.append(value)
+        return out, ignored
 
     def _reassortant(self, text: str) -> str:
         from .names import split_extra
@@ -528,9 +556,17 @@ class SheetReader:
         raw_passage = self.s.cell(r, passage_col)
         passage = self._passage(raw_passage, r, passage_col)
         collected = self.s.cell(r, date_col)
-        # "Isl 2" is Crick's short form of "Isolate 2" (the serum rows write both)
-        annotations = [re.sub(r"^ISL\s*(\d+)$", r"ISOLATE \1", a) for a in name.annotations]
-        annotations += [t for t in _tags(other) if t not in annotations]
+        # the name's extras ("Isolate 2 J141O") and the Other-information cell go through the
+        # same filter, so a tag counts the same wherever Crick wrote it
+        annotations: list[str] = []
+        for text, in_name in [*((a, True) for a in name.annotations), (other, False)]:
+            kept, ignored = self._identity(text)
+            if in_name:  # the rest of a name's extra text stays, as for other labs
+                rest = re.sub(r"[\s(),]+", " ", CLONE.sub("", TAG.sub("", ISOLATE.sub("", text))))
+                kept += [rest.strip()] if rest.strip() else []
+            annotations += [a for a in kept if a not in annotations]
+            if ignored:
+                self.dropped["tags: not identity"] += ignored
         lab_ids = [
             f"{self.lab}#{v}"
             for c in range(name_col)
@@ -653,18 +689,11 @@ def _passage_text(raw: str, parser: PassageParser) -> str:
     return "/".join(out)
 
 
-def _tags(text: str) -> list[str]:
-    """The identity part of an Other-information cell (see the module docstring)."""
-    t = text.strip()
-    if m := CLONE.fullmatch(t):
-        return [f"CLONE {m[1]}"]
-    if m := re.fullmatch(r"(?:Isolate|Isol|Isl)\s*(\d+)#?", t, re.IGNORECASE):
-        return [f"ISOLATE {m[1]}"]
-    if TAG.fullmatch(t):
-        return [t.upper()]
-    if m := re.fullmatch(r"(?:.*\s)?\(\s*([A-Z]\d{1,3}[A-Z]?)\s*\)", t):
-        return [m[1].upper()]
-    return []
+def _candidates(text: str) -> list[str]:
+    """The variant tags and clone numbers written in ``text`` (upper case), in order."""
+    found = [(m.start(), f"CLONE {m[1]}") for m in CLONE.finditer(text)]
+    found += [(m.start(), m[1].upper()) for m in TAG.finditer(text)]
+    return [t for _, t in sorted(found)]
 
 
 def _file_date(path: Path) -> str | None:
