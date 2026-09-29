@@ -74,3 +74,95 @@ def test_file_without_a_rule_is_an_error(tmp_path):
         cdc_season.read(
             write(tmp_path / "other.tsv", [season_row()]), Rules(write_rules(tmp_path / "rules"))
         )
+
+
+def tsv_table(
+    date: str, antigens: list[tuple[str, str, str]], sera: list[tuple[str, str, str, str]]
+):
+    """A main-TSV table reduced to what the join reads: names, passages, harvest dates, lots."""
+    from af.tables.model import Antigen, Serum, Table
+
+    return Table(
+        table_id="",
+        group="h1pdm-hi-turkey-cdc",
+        lab="CDC",
+        subtype="A(H1N1)",
+        lineage="",
+        assay="HI",
+        rbc="turkey",
+        date=date,
+        date_suffix=0,
+        source_key=f"CDC test_id {date}",
+        antigens=[Antigen(name=n, raw_name=n, passage=p, passage_date=d) for n, p, d in antigens],
+        sera=[
+            Serum(name=n, raw_name=n, passage=p, passage_date=d, serum_id=lot)
+            for n, p, d, lot in sera
+        ],
+        titres=[[["640"] for _ in sera] for _ in antigens],
+    )
+
+
+REF = "A(H1N1)/EXAMPLEREF/2/2028"
+TOWN = "A(H1N1)/EXAMPLETOWN/1/2029"
+
+
+def joined(tmp_path, rows, tsv):
+    res = cdc_season.read(
+        write(tmp_path / "season-join.tsv", rows), Rules(write_rules(tmp_path / "rules"))
+    )
+    assert res.errors == []
+    counts = cdc_season.join_harvest_dates(res.tables, tsv)
+    return res.tables, counts
+
+
+def test_harvest_dates_join_the_tsv_points(tmp_path):
+    rows = [
+        season_row(virus_strain="A/EXAMPLEREF/2/2028", virus_strain_passage="E3", virus_cdc_id="7"),
+        season_row(),  # a test virus the TSV never has
+    ]
+    tsv = [
+        tsv_table(
+            "2029-10-01",
+            [(REF, "E3", "2027-01-23"), (REF, "E3", "2029-09-01")],  # re-harvested after the test
+            [(REF, "E3", "2027-02-01", "CDC T28-001,T28-002")],
+        )
+    ]
+    (t,), counts = joined(tmp_path, rows, tsv)
+    ref = next(a for a in t.antigens if a.name == REF)
+    town = next(a for a in t.antigens if a.name == TOWN)
+    # several harvest dates: the latest on or before the season test (2029-08-07)
+    assert ref.passage_date == "2027-01-23"
+    assert "latest of 2" in ref.source["passage_date_from"]
+    assert town.passage_date is None
+    assert t.sera[0].passage_date == "2027-02-01"  # same name, passage and lot
+    assert counts == {
+        "antigens: harvest date from the TSV": 1,
+        "antigens: no TSV harvest date": 1,
+        "sera: harvest date from the TSV": 1,
+    }
+
+
+def test_no_join_on_another_lot_or_a_later_harvest_or_without_the_rule(tmp_path):
+    rows = [season_row(virus_strain="A/EXAMPLEREF/2/2028", virus_strain_passage="E3")]
+    tsv = [
+        tsv_table(
+            "2029-10-01",
+            [(REF, "E3", "2029-09-01")],  # only harvested after the season test
+            [(REF, "E3", "2027-02-01", "CDC T28-999")],  # another lot
+        )
+    ]
+    (t,), counts = joined(tmp_path, rows, tsv)
+    assert t.antigens[0].passage_date is None and t.sera[0].passage_date is None
+    assert counts == {"antigens: no TSV harvest date": 1, "sera: no TSV harvest date": 1}
+    plain = cdc_season.read(
+        write(tmp_path / "season.tsv", rows), Rules(write_rules(tmp_path / "rules2"))
+    )
+    assert cdc_season.join_harvest_dates(plain.tables, tsv) == {}
+
+
+def test_an_unknown_harvest_dates_value_is_an_error(tmp_path):
+    rules_dir = write_rules(tmp_path / "rules")
+    path = rules_dir / "season_files.tsv"
+    path.write_text(path.read_text().replace("\tfrom-tsv", "\tfrom-somewhere"))
+    res = cdc_season.read(write(tmp_path / "season-join.tsv", [season_row()]), Rules(rules_dir))
+    assert any("harvest_dates 'from-somewhere'" in e for e in res.errors)

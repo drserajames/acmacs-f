@@ -353,6 +353,11 @@ def _read_cdc(inputs: CDCInputs, rules: Rules) -> tuple[list[Table], list[str], 
         )
         errors.extend(season.errors)
         errors.extend(duplicates(result.tables, season.tables))
+        joined = cdc_season.join_harvest_dates(season.tables, result.tables)
+        if joined:
+            report.append(
+                "  harvest dates: " + ", ".join(f"{k} {v}" for k, v in sorted(joined.items()))
+            )
         tables.extend(season.tables)
     return tables, report, errors
 
