@@ -150,3 +150,17 @@ def test_store_refs_are_recorded_in_the_i7(tmp_path):
     assert i7["provenance"]["store_refs"] == [ref.to_json()]
     make_figure(standard_tree(), PARENTS, config(), tmp_path / "n.pdf", {})
     assert "store_refs" not in json.loads((tmp_path / "n.i7.json").read_text())["provenance"]
+
+
+def test_leaves_carry_depth_before_page_scaling(tmp_path):
+    t = standard_tree()
+    make_figure(t, PARENTS, config(), tmp_path / "d.pdf", {}, depth_unit="mutations")
+    i7 = json.loads((tmp_path / "d.i7.json").read_text())["tree"]
+    assert i7["depth_unit"] == "mutations"
+    x = [0.0] * len(t)
+    for i in range(1, len(t)):
+        x[i] = x[t.parent[i]] + t.edge[i]
+    expected = {t.leaf_id[i]: x[i] for i in t.leaves()}
+    assert all(leaf["depth"] == pytest.approx(expected[leaf["id"]]) for leaf in i7["leaves"])
+    make_figure(t, PARENTS, config(), tmp_path / "e.pdf", {})
+    assert "depth_unit" not in json.loads((tmp_path / "e.i7.json").read_text())["tree"]
