@@ -256,7 +256,7 @@ def by_key(records: Sequence[SequenceRecord]) -> list[SequenceRecord]:
 
 def _isolate_row(record: SequenceRecord, dataset: str, pull_id: str) -> dict[str, Any]:
     date: CollectionDate | None = record.collection_date
-    region, country, place_ = _split_location(record.location)
+    region, country, place_ = split_location(record.location)
     return {
         "epi_isl": record.epi_isl,
         "accession": record.accession,
@@ -314,7 +314,7 @@ def _sequence_row(record: SequenceRecord, result: Aligned, pull_id: str) -> dict
     }
 
 
-def _split_location(location: str) -> tuple[str | None, str | None, str]:
+def split_location(location: str) -> tuple[str | None, str | None, str]:
     """GISAID's ``Region / Country / Division / …``: the first two, and the rest joined."""
     parts = [part.strip() for part in location.split(" / ")] if location.strip() else []
     region = parts[0] if parts else None
