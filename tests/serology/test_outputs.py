@@ -10,6 +10,7 @@ import shapefile  # pyshp, in the geo extra
 
 from af.clades.colours import ColourEntry, ColourScheme
 from af.geo.records import Month
+from af.seq.matching_rules import matching_rules
 from af.serology.outputs import SubtypeColouring, make_geo_and_stat
 from af.serology.update import update
 from af.store import Provenance, Store, Work
@@ -17,6 +18,7 @@ from af.tables.identity import Manifest
 from af.tables.store import publish
 from tests.clades.synthetic import build_clone, load_synthetic
 from tests.seq.test_locations import COUNTRIES, PLACE_COLUMNS, PLACES, REGIONS
+from tests.seq.test_matching_rules import write_af_data
 
 NOW = datetime.datetime(2026, 9, 25, tzinfo=datetime.UTC)
 H3 = "A(H3N2)"
@@ -126,8 +128,9 @@ def test_geo_and_stat_from_the_stores(tmp_path: Path, syn: Any) -> None:
 def test_geo_colours_from_clade_store_and_scheme(tmp_path: Path, syn: Any) -> None:
     store, tables, coastline = _roots(tmp_path, syn)
     _clades(store, tmp_path)
-    rules = tmp_path / "passage_classes.tsv"
-    rules.write_text("pattern\tclass\treason\nSIAT\tcell\ttest\nMDCK\tcell\ttest\n")
+    rules = matching_rules(
+        write_af_data(tmp_path / "af-data", submitters="", number="", equivalents="")
+    )
     scheme = ColourScheme(
         subtype=H3,
         name="test",
@@ -140,9 +143,12 @@ def test_geo_colours_from_clade_store_and_scheme(tmp_path: Path, syn: Any) -> No
     out = tmp_path / "out"
     report = make_geo_and_stat(
         store, tables, coastline, Month(2021, 1), Month(2021, 1), out,
-        colouring={H3: SubtypeColouring(scheme, clade_set)}, passage_rules=rules,
+        colouring={H3: SubtypeColouring(scheme, clade_set)}, matching=rules,
     )  # fmt: skip
     assert report.links is not None and report.links.by_status["matched"] == 1
+    # the matcher's tables are in the report by content hash, as the colour tables are
+    assert report.matching_inputs == rules.provenance() and len(report.matching_inputs) == 5
+    assert report.matching_rules == rules.counts()
     assert report.colours[H3].coloured == {"Clade P.1": 1}
     assert report.colours[H3].uncoloured == {"no sequence": 1}
     doc = json.loads((out / "geo" / "h3-records.json").read_text())
@@ -152,6 +158,7 @@ def test_geo_colours_from_clade_store_and_scheme(tmp_path: Path, syn: Any) -> No
 
 def test_clade_tables_behind_the_sequence_store_are_reported(tmp_path: Path, syn: Any) -> None:
     from af.seq.matching import read_passage_rules
+    from af.seq.matching_rules import MatchingRules
     from af.serology import query
     from af.serology.joins import link_from_store
 
@@ -168,10 +175,11 @@ def test_clade_tables_behind_the_sequence_store_are_reported(tmp_path: Path, syn
             Provenance(step="clades-test", inputs=(labelled,), parameters={}, started=NOW,
                        finished=NOW)
         )  # fmt: skip
-    rules = tmp_path / "passage_classes.tsv"
-    rules.write_text("pattern\tclass\treason\nSIAT\tcell\ttest\n")
+    passages = tmp_path / "passage_classes.tsv"
+    passages.write_text("pattern\tclass\treason\nSIAT\tcell\ttest\n")
+    rules = MatchingRules(tuple(read_passage_rules(passages)), frozenset({"LABX"}), {}, {}, (), ())
     con = query.connect(store.resolve(store.current("serology", "all")))
-    counts = link_from_store(con, store, read_passage_rules(rules), with_clades=True)
+    counts = link_from_store(con, store, rules, with_clades=True)
     assert counts.clades_behind == {}  # labels the current sequences version
 
     newer = tmp_path / "newer.parquet"
@@ -188,28 +196,43 @@ def test_clade_tables_behind_the_sequence_store_are_reported(tmp_path: Path, syn
         builder.copy(newer, "isolates/pull=more/extra.txt")
         builder.publish(_provenance("sequences-test"))  # fmt: skip
     con = query.connect(store.resolve(store.current("serology", "all")))
-    counts = link_from_store(con, store, read_passage_rules(rules), with_clades=True)
+    counts = link_from_store(con, store, rules, with_clades=True)
     current = store.current("sequences", "h3").version
     assert current != labelled.version
     assert counts.clades_behind == {"h3": (labelled.version, current)}
 
 
 def test_rule_tables_reach_the_matcher(tmp_path: Path, syn: Any) -> None:
-    """make_geo_and_stat must pass its rule tables on, not accept and drop them: a submitters
-    table keyed by a lab code that is not one of lab_codes has to be refused from here."""
+    """make_geo_and_stat must pass its rule tables on, not accept and drop them: a location
+    equivalent whose GISAID spelling no stored sequence has is refused by the join, so it can
+    only be refused from here if the rules got there."""
     import pytest
 
     store, tables, coastline = _roots(tmp_path, syn)
     _clades(store, tmp_path)
-    rules = tmp_path / "passage_classes.tsv"
-    rules.write_text("pattern\tclass\treason\nSIAT\tcell\ttest\n")
-    submitters = tmp_path / "lab_submitters.tsv"
-    submitters.write_text("lab\tsubmitting_lab\treason\nlabx\tLab X Institute\ttest\n")
+    rules = matching_rules(
+        write_af_data(
+            tmp_path / "af-data", submitters="", number="",
+            equivalents="LABX\tNEVERTOWN\tGHOSTTOWN\t\thand\ttest\ttest\t2026-01-01\t\n",
+        )
+    )  # fmt: skip
     scheme = ColourScheme(subtype=H3, name="test", entries=())
     clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
-    with pytest.raises(ValueError, match="not table lab codes"):
+    with pytest.raises(ValueError, match="no stored sequence has"):
         make_geo_and_stat(
             store, tables, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
-            colouring={H3: SubtypeColouring(scheme, clade_set)}, passage_rules=rules,
-            lab_submitters=submitters, lab_codes=["LABX"],
+            colouring={H3: SubtypeColouring(scheme, clade_set)}, matching=rules,
+        )  # fmt: skip
+
+
+def test_colouring_without_matching_rules_is_refused(tmp_path: Path, syn: Any) -> None:
+    import pytest
+
+    store, tables, coastline = _roots(tmp_path, syn)
+    scheme = ColourScheme(subtype=H3, name="test", entries=())
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    with pytest.raises(ValueError, match="colouring needs matching rules"):
+        make_geo_and_stat(
+            store, tables, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
+            colouring={H3: SubtypeColouring(scheme, clade_set)},
         )  # fmt: skip
