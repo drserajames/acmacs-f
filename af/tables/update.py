@@ -98,6 +98,23 @@ class VIDRLInputs:
 
 
 @dataclass(frozen=True)
+class CrickSheetsInputs:
+    """Named sheets of one Crick workbook that is not a whocc-tables copy: a compilation of
+    several tests (Sarah, Q72: Crick's own table holds rows its per-test files lacked). Each
+    dated workbook it ``replaces`` must be excluded from its folder, so that no test is read
+    twice; a test read here and from a folder as well is an error. A test that replaces a
+    workbook keeps that workbook's table id (identity.assign), so chains see it change, not
+    vanish and reappear under a new id."""
+
+    lab: str
+    file: Path
+    subtype: str
+    sheets: list[str]
+    replaces: list[str]  # the whocc-tables workbooks these sheets stand in for
+    lineage: str = ""
+
+
+@dataclass(frozen=True)
 class TablesSettings:
     rules: Path
     run: str  # work-area key for this run's state, e.g. "cdc/all" (one run publishes many groups)
@@ -106,6 +123,7 @@ class TablesSettings:
     niid: list[AC21Inputs] = field(default_factory=list)  # NIID's own layout (af.tables.niid)
     vidrl: list[VIDRLInputs] = field(default_factory=list)  # VIDRL's layout (af.tables.vidrl)
     crick: list[VIDRLInputs] = field(default_factory=list)  # Crick's layout (af.tables.crick)
+    crick_sheets: list[CrickSheetsInputs] = field(default_factory=list)  # named sheets, one file
     locations: LocationSources | None = None
 
 
@@ -207,7 +225,51 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
             files, rules, lab=cinputs.lab, subtype=cinputs.subtype, lineage=cinputs.lineage
         )
         _add_workbooks(cinputs, files, result, tables, report, errors)
+    for sinputs in settings.crick_sheets:
+        _add_sheets(settings, sinputs, rules, tables, report, errors)
     return tables, report, errors
+
+
+def _add_sheets(
+    settings: TablesSettings,
+    inputs: CrickSheetsInputs,
+    rules: Rules,
+    tables: list[Table],
+    report: list[str],
+    errors: list[str],
+) -> None:
+    from . import crick
+
+    if not inputs.file.is_file():
+        raise FileNotFoundError(f"workbook missing: {inputs.file}")
+    excluded = {name for folder in settings.crick for name in folder.exclude}
+    if missing := [name for name in inputs.replaces if name not in excluded]:
+        errors.append(f"{inputs.file.name}: replaces {missing}, not excluded from their folder")
+    result = crick.read(
+        [inputs.file],
+        rules,
+        lab=inputs.lab,
+        subtype=inputs.subtype,
+        lineage=inputs.lineage,
+        sheets=inputs.sheets,
+    )
+    report.append(
+        f"read {inputs.lab} {inputs.file.name} sheets {', '.join(inputs.sheets)}"
+        f" -> {len(result.tables)} tables (replacing {', '.join(inputs.replaces) or 'nothing'})"
+    )
+    report.extend(f"skipped: {s}" for s in result.skipped_tests)
+    errors.extend(result.errors)
+    already = {(t.group, t.date) for t in tables}
+    replaced = {_file_date(Path(name)): name for name in inputs.replaces}
+    for table in result.tables:
+        if (name := replaced.get(table.date)) is not None:
+            table.meta["replaces"] = name  # identity.assign: the test keeps that workbook's id
+        if (table.group, table.date) in already:
+            errors.append(
+                f"{inputs.file.name} [{table.meta['sheet']}]: {table.group} {table.date} is"
+                " also read from a folder: exclude the workbook it replaces"
+            )
+    tables.extend(result.tables)
 
 
 def _add_workbooks(
@@ -309,6 +371,7 @@ def _input_files(settings: TablesSettings) -> list[Path]:
     ]
     for inputs in folders:
         files += _dated_files(inputs)
+    files += [s.file for s in settings.crick_sheets]
     return files
 
 
