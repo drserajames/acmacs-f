@@ -516,6 +516,12 @@ def markdown(
                     notes.append(f"- {row['slot']}: {side} sections whose bounds are not drawn "
                                  f"leaves: {sec['unresolved'][side]}")  # fmt: skip
             dep = d.get("depth", {})
+            unit = dep.get("unit", {})
+            if dep.get("tested") and unit.get("ref") != unit.get("new"):
+                ru, nu = (unit.get(side) or "not recorded" for side in ("ref", "new"))
+                notes.append(f"- {row['slot']}: depth units differ (ref {ru}, new {nu}): the depth "
+                             "scale converts between them; only the scaled difference compares "
+                             "shape")  # fmt: skip
             if dep.get("tested") and dep["movers"]:
                 notes.append(f"- {row['slot']}: largest depth changes after scaling new by "
                              f"{dep['scale']:.4f}: " + ", ".join(

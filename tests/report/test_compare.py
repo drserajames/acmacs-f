@@ -720,8 +720,26 @@ def test_tree_depth_not_tested_without_the_field() -> None:
     names = [f"leaf{i}" for i in range(10)]
     ref = _with_depths(_tree_doc(names, ["P"] * 10, []), [0.01] * 10)
     res = trees.compare_figures(ref, _tree_doc(names, ["P"] * 10, []))
-    assert res["depth"] == {"tested": False, "reason": "10 of 10 common leaves lack a depth"}
+    assert not res["depth"]["tested"]
+    assert res["depth"]["reason"] == "10 of 10 common leaves lack a depth"
     checks = {c["check"]: c for c in tree_checks(res, TreeLimits())}
     depth_checks = [c for name, c in checks.items() if name.startswith("depth")]
     assert len(depth_checks) == 3
     assert all(c["ok"] is None and c["not_tested"] for c in depth_checks)
+
+
+def test_tree_depth_units_are_recorded_and_a_mismatch_is_noted(tmp_path: Path) -> None:
+    from af.report.compare.run import TreeLimits, markdown, tree_checks
+
+    names = [f"leaf{i}" for i in range(10)]
+    ref = _with_depths(_tree_doc(names, ["P"] * 10, []), [0.001 * (i + 1) for i in range(10)])
+    new = _with_depths(_tree_doc(names, ["P"] * 10, []), [float(i + 1) for i in range(10)])
+    new["tree"]["depth_unit"] = "mutations"
+    res = trees.compare_figures(ref, new)
+    assert res["depth"]["unit"] == {"ref": None, "new": "mutations"}
+    row = {"slot": "tree/x/report", "status": "ok", "tree_checks": tree_checks(res, TreeLimits()),
+           "detail": res}  # fmt: skip
+    adoption = {"status": "final", "adopted_by": "a reviewer", "adopted": dt.date(2026, 9, 25)}
+    limits = parse_config({"adoption": adoption}, Limits, base_dir=tmp_path)
+    text = markdown({"report": "r", "built": "b"}, [row], "l", "name", limits.adoption)
+    assert "depth units differ (ref not recorded, new mutations)" in text
