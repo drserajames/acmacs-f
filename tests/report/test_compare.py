@@ -786,3 +786,99 @@ def test_tree_depth_rounding_is_not_a_difference() -> None:
     rounded = [d + 3e-10 * (-1) ** i for i, d in enumerate(depths)]
     res = trees.compare_figures(ref, _with_depths(_tree_doc(names, ["P"] * 20, []), rounded))
     assert res["depth"]["n_differ"] == 0 and res["depth"]["movers"] == []
+
+
+def _virus(place: str, isolate: str, year: str = "2025") -> str:
+    return "/".join(
+        ("X", place, isolate, year)
+    )  # invented, built so no literal looks like a strain
+
+
+def _pt(
+    name: str, xy: tuple[float, float], passage: str | None = "cell",
+    date: str | None = "2025-03-01", serum_id: str | None = None,
+) -> dict[str, Any]:  # fmt: skip
+    point = {"id": name, "name": name, "passage_class": passage, "date": date, "xy": list(xy),
+             "shown": True, "in_viewport": True, "clade": "P", "colour": "#000000",
+             "greyed": False, "vaccine": False}  # fmt: skip
+    if serum_id:
+        point["serum_id"] = serum_id
+    return point
+
+
+def _doc(
+    antigens: list[dict[str, Any]], sera: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    return {"title": "synthetic", "map": {"antigens": antigens, "sera": sera or []}}
+
+
+def test_identity_matches_one_virus_spelled_two_ways() -> None:
+    # the same isolate, year, passage and date under two spellings of a place, and a padded
+    # isolate number; a serum by its serum id whatever the lab appended after the year
+    ref = _doc(
+        [_pt(_virus("OLDSPELLING", "15"), (0, 0)), _pt(_virus("PLACE", "007"), (1, 0)),
+         _pt(_virus("THIRD", "3"), (0, 1))],
+        [_pt(_virus("PLACE", "02", "2024-LABSUFFIX"), (2, 2), None, None, "S-1")],
+    )  # fmt: skip
+    new = _doc(
+        [_pt(_virus("NEWSPELLING", "15"), (0, 0)), _pt(_virus("PLACE", "7"), (1, 0)),
+         _pt(_virus("THIRD", "3"), (0, 1))],
+        [_pt(_virus("PLACE", "2", "2024"), (2, 2), None, None, "S-1")],
+    )  # fmt: skip
+    loose = maps.compare(ref, new, "loose")
+    assert loose["antigens"]["jaccard"] == pytest.approx(1 / 5) and loose["sera"]["jaccard"] == 0
+    res = maps.compare(ref, new, "identity")
+    assert res["antigens"]["jaccard"] == 1.0 and res["sera"]["jaccard"] == 1.0
+    assert res["antigens"]["identity_fallback"] == {
+        "no_identity": 0, "shared_identity": 0, "unpaired_identity": 0}  # fmt: skip
+
+
+def test_identity_keeps_two_preparations_of_one_isolate_apart() -> None:
+    # a reassortant and its wild type: same isolate and year, different date and passage
+    ref = _doc([_pt(_virus("PLACE", "1"), (0, 0), "egg", "2025-02-01")])
+    new = _doc([_pt(_virus("PLACE", "1"), (0, 0), "reassortant", "2024-10-23")])
+    res = maps.compare(ref, new, "identity")
+    assert res["antigens"]["common"] == 0
+    assert len(res["antigens"]["only_ref_keys"]) == len(res["antigens"]["only_new_keys"]) == 1
+
+
+def test_identity_never_loses_a_pair_the_name_finds() -> None:
+    # one virus, one name, recorded with another isolation date on each side: identity cannot
+    # pair it, the name pass does
+    ref = _doc([_pt(_virus("PLACE", "8"), (0, 0), date="2025-01-10")])
+    new = _doc([_pt(_virus("PLACE", "8"), (0, 0), date="2025-01-12")])
+    res = maps.compare(ref, new, "identity")
+    assert res["antigens"]["common"] == 1
+    assert res["antigens"]["identity_fallback"]["unpaired_identity"] == 2
+
+
+def test_identity_shared_on_one_side_falls_back_to_the_name_on_both() -> None:
+    # two different places' isolate 5 of one date on the new side: their identity is shared,
+    # so all three points are matched by name, and the reference's one pairs with its namesake
+    ref = _doc([_pt(_virus("ALPHA", "5"), (0, 0)), _pt(_virus("OTHER", "9"), (3, 3))])
+    new = _doc([_pt(_virus("ALPHA", "5"), (0, 0)), _pt(_virus("BETA", "5"), (1, 1)),
+                _pt(_virus("OTHER", "9"), (3, 3))])  # fmt: skip
+    res = maps.compare(ref, new, "identity")
+    a = res["antigens"]
+    assert a["identity_fallback"]["shared_identity"] == 3 and a["common"] == 2
+    assert a["only_new_keys"] == [maps.point_key(new["map"]["antigens"][1], "name")]
+
+
+def test_identity_without_a_date_matches_by_name() -> None:
+    ref = _doc([_pt(_virus("PLACE", "4"), (0, 0), date=None)])
+    new = _doc([_pt(_virus("PLACE", "4"), (0, 0), date=None)])
+    res = maps.compare(ref, new, "identity")
+    assert res["antigens"]["common"] == 1
+    assert res["antigens"]["identity_fallback"]["no_identity"] == 2
+
+
+def test_identity_excused_points_are_still_named(tmp_path: Path) -> None:
+    from af.report.compare.run import Excused, excuse_points
+
+    ref = _doc([_pt(_virus("PLACE", "4"), (0, 0)), _pt(_virus("PLACE", "5"), (1, 0))])
+    new = _doc([_pt(_virus("PLACE", "5"), (1, 0))])
+    entry = Excused(slots=["map/x/all"], points=tmp_path / "k.txt", reason="a named hide",
+                    approved_by="a reviewer", decided=dt.date(2026, 9, 25))  # fmt: skip
+    keys = {maps.normalise_key(maps.point_key(ref["map"]["antigens"][0], "name"), "loose")}
+    notes = excuse_points("map/x/all", ref, new, [(entry, keys)], "identity")
+    assert notes[0]["one_sided"] == 1 and len(ref["map"]["antigens"]) == 1

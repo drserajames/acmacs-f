@@ -271,6 +271,12 @@ def read_keys(path: Path) -> set[str]:
     return keys
 
 
+def _named(how: str) -> str:
+    """The key excused-point files are written in: a person names a point by its name, so
+    under identity matching they are read as ``loose`` names."""
+    return "loose" if how == "identity" else how
+
+
 def excuse_points(
     slot: str, ref: dict[str, Any], new: dict[str, Any], excused: list[tuple[Excused, set[str]]],
     how: str,
@@ -286,7 +292,7 @@ def excuse_points(
                 points = doc["map"][group]
                 kept = []
                 for point in points:
-                    key = maps.point_key(point, how)
+                    key = maps.point_key(point, _named(how))
                     if key in keys and maps.drawn(point):
                         seen[side].add(key)
                     if key not in keys:
@@ -330,7 +336,7 @@ def compare_report(
     if orphans:
         raise ValueError(f"expected/excused: slots not in this report {orphans}")
     excused = [
-        (entry, {maps.normalise_key(k, how) for k in read_keys(entry.points)})
+        (entry, {maps.normalise_key(k, _named(how)) for k in read_keys(entry.points)})
         for entry in limits.excused
     ]
     rows: list[dict[str, Any]] = []
@@ -593,6 +599,11 @@ def _one_sided(slot: str, antigens: dict[str, Any], sera: dict[str, Any]) -> lis
                         else ""
                     )
                     out.append(f"- {slot} {group} {what} ({len(keys)}): {listed}{more}")
+        shared = g.get("identity_fallback", {}).get("shared_identity", 0)
+        if shared:
+            out.append(f"- {slot} {group}: {shared} point(s) share an identity (isolate/year, "
+                       "passage, date or serum id) with another point, so they were matched by "
+                       "name instead")  # fmt: skip
     return out
 
 
@@ -602,8 +613,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("reference", type=Path)
     parser.add_argument("--limits", type=Path, required=True)
     parser.add_argument(
-        "--match", choices=maps.MATCH_MODES, default="loose",
-        help="loose (default): name spelling-normalised + passage class; see maps.spelling_key",
+        "--match", choices=maps.MATCH_MODES, default="identity",
+        help="identity (default): isolate/year + passage class + date, or + serum id, falling "
+        "back to loose (name spelling-normalised + passage class); see maps.identity_key",
     )  # fmt: skip
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument(

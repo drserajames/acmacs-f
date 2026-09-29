@@ -14,9 +14,15 @@ says which one it is:
 - relationships: the change in clade-to-clade centroid distances. This catches a whole clade
   moving, which a point percentile misses when the clade is small.
 
-Points are matched by designation (``id``) or, when the two sides spell passages differently,
-by name + passage class (sera: name + serum id). Keys that occur twice on one side are dropped
-and counted, never merged.
+Points are matched by designation (``id``); by name + passage class (sera: name + serum id),
+exactly (``name``) or with the name's punctuation and spacing dropped (``loose``); or by
+**identity** (``identity``, the default): isolate number, year, passage class and isolation
+date (sera: isolate, year, serum id), with the location left out. af keeps each lab's spelling
+of a place (DECISIONS 24 Sep) where ae rewrote it, so one virus is KIEV on one side and KYIV
+on the other, RAS AL KHAIMAH CITY and RAK; the isolate, year, passage and date agree. A point
+missing one of those, or whose identity is shared by two points on either side, is matched by
+its ``loose`` key instead, on both sides, and counted. Keys that occur twice on one side are
+dropped and counted, never merged.
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ Point = dict[str, Any]
 XY = tuple[float, float]
 
 
-MATCH_MODES = ("id", "name", "loose")
+MATCH_MODES = ("id", "name", "loose", "identity")
 
 
 def spelling_key(name: str) -> str:
@@ -47,11 +53,35 @@ def spelling_key(name: str) -> str:
     return "".join(ch for ch in name.upper() if ch.isalnum())
 
 
+def identity_key(point: Point) -> str | None:
+    """Isolate/year + passage class + isolation date (sera: isolate/year + serum id), or None.
+
+    The location is left out (see the module docstring); the type prefix and anything after
+    the year (a lab's reassortant suffix) too, so the date or the serum id must tell two
+    preparations of one isolate apart. None when the name is not TYPE/.../ISOLATE/YEAR or the
+    date (antigens) or serum id (sera) is missing: such a point is matched by its name.
+    """
+    parts = str(point["name"]).split("/")
+    if len(parts) < 4:
+        return None
+    isolate, year = spelling_key(parts[-2]), parts[-1].strip()[:4]
+    if not isolate or not year.isdigit():
+        return None
+    if isolate.isdigit():
+        isolate = isolate.lstrip("0") or "0"  # 01 and 1 are one isolate number
+    if point.get("serum_id"):
+        return f"#{isolate}/{year}|{point['serum_id']}"
+    if not point.get("date"):
+        return None
+    return f"#{isolate}/{year}|{point['passage_class'] or 'none'}|{point['date']}"
+
+
 def point_key(point: Point, how: str) -> str:
     """Matching key: ``id``; ``name`` (name + passage class, or + serum id); ``loose`` (``name``
-    with the name spelling-normalised by :func:`spelling_key`)."""
-    if how not in MATCH_MODES:
-        raise ValueError(f"match mode {how!r} not one of {MATCH_MODES}")
+    with the name spelling-normalised by :func:`spelling_key`). ``identity`` depends on the
+    other points of both sides, so it is not a per-point key: see :func:`keyed_points`."""
+    if how not in MATCH_MODES or how == "identity":
+        raise ValueError(f"match mode {how!r} not one of {MATCH_MODES[:3]}")
     if how == "id":
         return str(point["id"])
     name = spelling_key(point["name"]) if how == "loose" else point["name"]
@@ -82,9 +112,47 @@ def drawn(point: Point) -> bool:
 
 def index_points(points: Sequence[Point], how: str) -> tuple[dict[str, Point], int]:
     """Key -> point for keys that occur once; also the number of points dropped as ambiguous."""
-    counts = Counter(point_key(p, how) for p in points)
-    unique = {point_key(p, how): p for p in points if counts[point_key(p, how)] == 1}
-    return unique, sum(n for n in counts.values() if n > 1)
+    return _unique([(point_key(p, how), p) for p in points])
+
+
+def _unique(keyed: Sequence[tuple[str, Point]]) -> tuple[dict[str, Point], int]:
+    counts = Counter(k for k, _ in keyed)
+    return {k: p for k, p in keyed if counts[k] == 1}, sum(n for n in counts.values() if n > 1)
+
+
+def keyed_points(
+    ref: Sequence[Point], new: Sequence[Point], how: str
+) -> tuple[list[tuple[str, Point]], list[tuple[str, Point]], dict[str, int]]:
+    """Both sides' (key, point), and for ``identity`` how many points fell back to ``loose``.
+
+    Identity matching is two passes. First by identity; then every point identity did not
+    pair (no identity, an identity shared by two points on EITHER side, or no partner with the
+    same identity) is keyed by its ``loose`` name, on both sides, so the name can still pair
+    it. A point is never keyed one way on one side and another way on the other, so a shared
+    identity cannot pair the wrong partners, and identity never loses a pair the name finds:
+    the same name with another date on the two sides is still one virus to the name pass.
+    """
+    if how != "identity":
+        return [(point_key(p, how), p) for p in ref], [(point_key(p, how), p) for p in new], {}
+    ids = {"ref": [identity_key(p) for p in ref], "new": [identity_key(p) for p in new]}
+    counts = {side: Counter(k for k in keys if k is not None) for side, keys in ids.items()}
+    shared = {k for c in counts.values() for k, n in c.items() if n > 1}
+    paired = (counts["ref"].keys() & counts["new"].keys()) - shared
+    fallback = {"no_identity": 0, "shared_identity": 0, "unpaired_identity": 0}
+
+    def key(point: Point, ident: str | None) -> str:
+        if ident in paired:
+            return str(ident)
+        reason = "no_identity" if ident is None else (
+            "shared_identity" if ident in shared else "unpaired_identity")  # fmt: skip
+        fallback[reason] += 1
+        return point_key(point, "loose")
+
+    return (
+        [(key(p, k), p) for p, k in zip(ref, ids["ref"], strict=True)],
+        [(key(p, k), p) for p, k in zip(new, ids["new"], strict=True)],
+        fallback,
+    )
 
 
 @dataclass(frozen=True)
@@ -181,14 +249,15 @@ def _coloured(point: Point) -> bool:
 
 
 def _group(ref: list[Point], new: list[Point], how: str, clades: bool) -> dict[str, Any]:
-    ri, rdup = index_points([p for p in ref if drawn(p)], how)
-    ni, ndup = index_points([p for p in new if drawn(p)], how)
+    rk, nk, fallback = keyed_points([p for p in ref if drawn(p)], [p for p in new if drawn(p)], how)
+    (ri, rdup), (ni, ndup) = _unique(rk), _unique(nk)
     common = sorted(ri.keys() & ni.keys())
     in_frame = {k: (bool(ri[k]["in_viewport"]), bool(ni[k]["in_viewport"])) for k in common}
     out: dict[str, Any] = {
         "ref_shown": len(ri), "new_shown": len(ni), "common": len(common),
         "only_ref": len(ri.keys() - ni.keys()), "only_new": len(ni.keys() - ri.keys()),
         "ambiguous_dropped": {"ref": rdup, "new": ndup},
+        "identity_fallback": fallback,
         "jaccard": len(common) / max(1, len(ri.keys() | ni.keys())),
         # Full lists: every one-sided point must be listed somewhere a person reads.
         "only_ref_keys": sorted(_label(ri[k]) for k in ri.keys() - ni.keys()),
@@ -291,7 +360,7 @@ def compare(ref: dict[str, Any], new: dict[str, Any], how: str = "name") -> dict
             "frac_gt_1": sum(x > 1 for x in d) / len(d),
             "frac_gt_2": sum(x > 2 for x in d) / len(d),
             "moved_gt_2": [
-                {"key": pairs[i][0], "distance": d[i]}
+                {"key": _label(pairs[i][1]), "distance": d[i]}
                 for i in sorted(range(len(d)), key=lambda i: -d[i]) if d[i] > 2
             ][:50],
             "rmsd_antigens": math.sqrt(sum(x * x for x in d[:n_ag]) / n_ag) if n_ag else None,
