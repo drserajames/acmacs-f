@@ -26,6 +26,7 @@ class StoreTree:
     titrated_by: dict[str, list[str]]  # leaf id -> centre ids
     flags: dict[str, list[str]]  # leaf id -> reasons (e.g. clock outlier); reported, not excluded
     inputs: dict[str, str]  # for the I7 provenance: item -> content hash
+    branch_scale: str = ""  # tree.json's branch_scale ("ml", "mutations"): the unit of edge lengths
 
     def centre_leaves(self, centre: str) -> frozenset[str]:
         """Leaf ids titrated by ``centre``; a centre with no leaf is an error (design rule 1)."""
@@ -74,4 +75,12 @@ def load_version(directory: Path) -> StoreTree:
         "tree_nodes": _sha256(directory / "nodes.parquet"),
         "tree_metadata": _sha256(directory / "tree.json"),
     }
-    return StoreTree(tree, parents, str(meta["clade_set_version"]), titrated, flags, inputs)
+    return StoreTree(
+        tree,
+        parents,
+        str(meta["clade_set_version"]),
+        titrated,
+        flags,
+        inputs,
+        str(meta.get("branch_scale", "")),
+    )

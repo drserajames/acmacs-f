@@ -71,6 +71,7 @@ def make_figure(
     inputs: Mapping[str, str],
     flags: Mapping[str, list[str]] | None = None,
     store_refs: Sequence[StoreRef] = (),
+    depth_unit: str = "",
 ) -> dict[str, Any]:
     """Render ``pdf`` and write its I7 and draw report; return the draw report.
 
@@ -131,7 +132,7 @@ def make_figure(
     write_i7(
         pdf,
         config.title,
-        tree_block(tree, layout, hz, ts, config.marked_ids),
+        tree_block(tree, layout, hz, ts, config.marked_ids, depth_unit),
         inputs,
         store_refs=store_refs,
     )

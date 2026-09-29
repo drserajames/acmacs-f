@@ -37,8 +37,13 @@ def tree_block(
     hz: list[HzBand],
     ts: TimeSeries,
     marked_ids: frozenset[str] = frozenset(),
+    depth_unit: str = "",
 ) -> dict[str, Any]:
     """The I7 `tree` block. Every leaf is listed, drawn or not (`order` is null if not drawn).
+
+    Each leaf's ``depth`` is its root-to-tip distance in the tree's own branch lengths, before any
+    page scaling, so two figures of one tree can be compared leaf by leaf (e.g. before and after a
+    tree fix). ``depth_unit`` names those lengths (the tree store's ``branch_scale``).
 
     ``sections`` are the lettered bands (the reference extractor reads the same from the shipped
     trees), each named by its first and last leaf's strain name so the two sides compare like
@@ -58,6 +63,7 @@ def tree_block(
                 "shown": i in order,
                 "order": order.get(i),
                 "marked": leaf_id in marked_ids,
+                "depth": float(layout.node_x[i]),
             }
         )
     sections = [
@@ -74,12 +80,15 @@ def tree_block(
         for band in hz
     ]
     first, last = ts.months[0], ts.months[-1]
-    return {
+    block: dict[str, Any] = {
         "subtype": tree.subtype,
         "time_series": {"first": f"{first[0]}-{first[1]:02d}", "last": f"{last[0]}-{last[1]:02d}"},
         "sections": sections,
         "leaves": leaves,
     }
+    if depth_unit:
+        block["depth_unit"] = depth_unit
+    return block
 
 
 def write_i7(
