@@ -40,6 +40,8 @@ from af.seq.matching_rules import MatchingRules
 from af.serology import query
 from af.serology.joins import LinkCounts, link_from_store, preparation_sequences
 from af.serology.query import Preparation
+from af.serology.rows import IdentityRules
+from af.serology.update import require_current
 from af.stat.counts import stat_counts
 from af.stat.output import Previous, write_stat
 from af.store import ExternalInput, Store, StoreRef
@@ -91,8 +93,14 @@ def make_geo_and_stat(
     colouring: Mapping[str, SubtypeColouring] | None = None,
     matching: MatchingRules | None = None,
     split_by_lineage: tuple[str, ...] = ("B",),
+    identity_rules: IdentityRules | None = None,
 ) -> OutputsReport:
-    """Write ``geo/<st>-records.json``, ``geo/<st>-YYYY-MM.pdf`` and ``stat/`` for a window."""
+    """Write ``geo/<st>-records.json``, ``geo/<st>-YYYY-MM.pdf`` and ``stat/`` for a window.
+
+    Refuses when ``serology/all`` is behind the tables store (:func:`require_current`; the
+    identity rules it must have been built with default to the chain rules).
+    """
+    require_current(store, identity_rules)
     serology = store.current("serology", "all")
     con = query.connect(store.resolve(serology))
     tables = locations.LocationTables.read(location_tables)

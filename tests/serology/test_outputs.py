@@ -13,7 +13,7 @@ from af.geo.records import Month
 from af.seq.matching_rules import matching_rules
 from af.serology.outputs import SubtypeColouring, make_geo_and_stat
 from af.serology.update import update
-from af.store import Provenance, Store, Work
+from af.store import Provenance, Store
 from af.tables.identity import Manifest
 from af.tables.store import publish
 from tests.clades.synthetic import build_clone, load_synthetic
@@ -82,14 +82,14 @@ def _coastline(tmp_path: Path) -> Path:
 
 def _roots(tmp_path: Path, syn: Any) -> tuple[Store, Path, Path]:
     """A store with one table: EXAMPLETOWN/1 (the lab gave its EPI_ISL), NEVERTOWN/2."""
-    store, work = Store.create(tmp_path / "store"), Work.create(tmp_path / "work")
+    store = Store.create(tmp_path / "store")
     serum = {"name": syn.virus("Elsewhere", 9), "serum_id": "S-1"}
     here = {"name": syn.virus("EXAMPLETOWN", 1), "passage": "MDCK1", "date": "2021-01-05",
             "epi_isl": "EPI_ISL_1", "sequence_pairing": "exact"}  # fmt: skip
     lost = {"name": syn.virus("NEVERTOWN", 2), "passage": "MDCK1", "date": "2021-01-06"}
     tables = [syn.table("h3-hi-labx-20210304", [here, lost], [serum], [[["80"]], [["40"]]])]
     publish(store, tables, Manifest.from_tables(tables, inputs=[]), _provenance("tables-test"))
-    update(store, work, syn.rules)
+    update(store, syn.rules)
     _sequences(store, tmp_path)
     location_dir = tmp_path / "locations"
     location_dir.mkdir()
@@ -104,7 +104,9 @@ def _roots(tmp_path: Path, syn: Any) -> tuple[Store, Path, Path]:
 def test_geo_and_stat_from_the_stores(tmp_path: Path, syn: Any) -> None:
     store, tables, coastline = _roots(tmp_path, syn)
     out = tmp_path / "out"
-    report = make_geo_and_stat(store, tables, coastline, Month(2021, 1), Month(2021, 1), out)
+    report = make_geo_and_stat(
+        store, tables, coastline, Month(2021, 1), Month(2021, 1), out, identity_rules=syn.rules
+    )
     names = sorted(p.relative_to(out).as_posix() for p in report.files)
     assert names == ["geo/h3-2021-01.pdf", "geo/h3-records.json", "stat/index.html",
                      "stat/stat.json"]  # fmt: skip
@@ -144,6 +146,7 @@ def test_geo_colours_from_clade_store_and_scheme(tmp_path: Path, syn: Any) -> No
     report = make_geo_and_stat(
         store, tables, coastline, Month(2021, 1), Month(2021, 1), out,
         colouring={H3: SubtypeColouring(scheme, clade_set)}, matching=rules,
+        identity_rules=syn.rules,
     )  # fmt: skip
     assert report.links is not None and report.links.by_status["matched"] == 1
     # the matcher's tables are in the report by content hash, as the colour tables are
@@ -222,6 +225,7 @@ def test_rule_tables_reach_the_matcher(tmp_path: Path, syn: Any) -> None:
         make_geo_and_stat(
             store, tables, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
             colouring={H3: SubtypeColouring(scheme, clade_set)}, matching=rules,
+            identity_rules=syn.rules,
         )  # fmt: skip
 
 
@@ -234,5 +238,25 @@ def test_colouring_without_matching_rules_is_refused(tmp_path: Path, syn: Any) -
     with pytest.raises(ValueError, match="colouring needs matching rules"):
         make_geo_and_stat(
             store, tables, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
-            colouring={H3: SubtypeColouring(scheme, clade_set)},
+            colouring={H3: SubtypeColouring(scheme, clade_set)}, identity_rules=syn.rules,
+        )  # fmt: skip
+
+
+def test_geo_and_stat_refuse_a_serology_store_behind_the_tables(tmp_path: Path, syn: Any) -> None:
+    """A lab's tables published after serology/all was built would silently be missing from
+    every figure; the build refuses and names them instead."""
+    import pytest
+
+    from af.store import StoreError
+
+    store, tables, coastline = _roots(tmp_path, syn)
+    serum = {"name": syn.virus("Elsewhere", 9), "serum_id": "S-2"}
+    late = {"name": syn.virus("EXAMPLETOWN", 3), "passage": "MDCK1", "date": "2021-01-07"}
+    later = [syn.table("h3-hi-laby-20210305", [late], [serum], [[["80"]]], lab="LABY",
+                       group="h3-hi-laby")]  # fmt: skip
+    publish(store, later, Manifest.from_tables(later, inputs=[]), _provenance("tables-test"))
+    with pytest.raises(StoreError, match=r"run af.serology.update.*laby/h3-hi-laby: new since"):
+        make_geo_and_stat(
+            store, tables, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
+            identity_rules=syn.rules,
         )  # fmt: skip
