@@ -11,7 +11,9 @@ table version it was drawn from.
 
 Colours: ``colouring`` gives, per subtype, a colour scheme with its clade set and groups
 (:mod:`af.clades.colours`). Each antigen is matched to its sequence
-(:mod:`af.serology.joins`, the sequence workstream's matcher), the clade comes from the clade
+(:mod:`af.serology.joins`, the sequence workstream's matcher, told by ``matching``: the rule
+tables :func:`af.seq.matching_rules.matching_rules` reads, the same ones the maps read, with
+their hashes in the report), the clade comes from the clade
 store, and the aligned sequence from the sequence store, so groups defined by substitutions
 are tested on the virus's own sequence. Without ``colouring`` every dot is uncoloured, on
 purpose; a subtype missing from it is uncoloured too, and the report says so.
@@ -34,7 +36,7 @@ from af.geo.colours import UNCOLOURED, ColourCounts, DotStyle, dot_styles
 from af.geo.records import Month, geo_counts, to_i7
 from af.geo.render import render_geo
 from af.seq import locations
-from af.seq.matching import read_lab_submitters, read_passage_rules
+from af.seq.matching_rules import MatchingRules
 from af.serology import query
 from af.serology.joins import LinkCounts, link_from_store, preparation_sequences
 from af.serology.query import Preparation
@@ -70,6 +72,8 @@ class OutputsReport:
     lookup: dict[str, object] = field(default_factory=dict)
     location_tables: dict[str, str] = field(default_factory=dict)  # file -> sha256
     colour_inputs: dict[str, str] = field(default_factory=dict)  # scheme source -> sha256
+    matching_inputs: dict[str, str] = field(default_factory=dict)  # matcher's table -> sha256
+    matching_rules: dict[str, int] = field(default_factory=dict)  # rows per matcher table
     links: LinkCounts | None = None  # antigen -> sequence matching, when colouring
     colours: dict[str, ColourCounts] = field(default_factory=dict)  # subtype -> counts
     uncoloured_subtypes: list[str] = field(default_factory=list)
@@ -85,11 +89,7 @@ def make_geo_and_stat(
     *,
     previous_stat: Previous | None = None,
     colouring: Mapping[str, SubtypeColouring] | None = None,
-    passage_rules: Path | None = None,
-    lab_submitters: Path | None = None,
-    number_rules: Mapping[str, Any] | None = None,
-    equivalents: Sequence[Any] | None = None,
-    lab_codes: Sequence[str] | None = None,
+    matching: MatchingRules | None = None,
     split_by_lineage: tuple[str, ...] = ("B",),
 ) -> OutputsReport:
     """Write ``geo/<st>-records.json``, ``geo/<st>-YYYY-MM.pdf`` and ``stat/`` for a window."""
@@ -109,12 +109,9 @@ def make_geo_and_stat(
 
     style_of = None
     if colouring is not None:
-        if passage_rules is None:
-            raise ValueError("colouring needs passage_rules (the matcher's passage classes)")
-        style_of = _styles(
-            store, con, preps, colouring, passage_rules, lab_submitters, number_rules,
-            equivalents, lab_codes, report,
-        )  # fmt: skip
+        if matching is None:
+            raise ValueError("colouring needs matching rules (af.seq.matching_rules)")
+        style_of = _styles(store, con, preps, colouring, matching, report)
     geo = geo_counts(preps, first, last, locations.name_location, style_of=style_of)
     geo_dir = out_dir / "geo"
     geo_dir.mkdir(parents=True, exist_ok=True)
@@ -151,25 +148,13 @@ def _styles(
     con: Any,
     preps: list[Preparation],
     colouring: Mapping[str, SubtypeColouring],
-    passage_rules: Path,
-    lab_submitters: Path | None,
-    number_rules: Mapping[str, Any] | None,
-    equivalents: Sequence[Any] | None,
-    lab_codes: Sequence[str] | None,
+    matching: MatchingRules,
     report: OutputsReport,
 ) -> Any:
     """Match antigens to sequences and clades, and give each preparation its dot style."""
-    submitters = read_lab_submitters(lab_submitters) if lab_submitters is not None else None
-    report.links = link_from_store(
-        con,
-        store,
-        read_passage_rules(passage_rules),
-        with_clades=True,
-        lab_submitters=submitters,
-        number_rules=number_rules,
-        equivalents=equivalents,
-        lab_codes=lab_codes,
-    )
+    report.links = link_from_store(con, store, matching, with_clades=True)
+    report.matching_inputs = matching.provenance()
+    report.matching_rules = matching.counts()
     links = preparation_sequences(con)
     aligned = aligned_sequences(store, con)
     styles = {}

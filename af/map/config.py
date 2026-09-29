@@ -208,8 +208,8 @@ class ColouringConfig:
 
     ``"store"``: the shared clade colouring geo uses (Sarah, Q46). Each antigen is matched to
     its sequence, takes the store's clade, and is coloured by the user's scheme from
-    ``acmacs_data``; which entry wins is decided by the shared rule, not by the map. The join's
-    rule tables are the ones geo reads (paths, until a shared loader exists).
+    ``acmacs_data``; which entry wins is decided by the shared rule (the scheme's row order,
+    Sarah, Q80), not by the map. The join's rule tables come from ``af_data``.
 
     One switch rather than one per map: a round whose maps mixed the two would draw the same
     virus in two colours on facing pages.
@@ -218,10 +218,9 @@ class ColouringConfig:
     source: str
     acmacs_data: Path | None = None
     nomenclature: Path | None = None  # the influenza-clade-nomenclature clones
-    passage_rules: Path | None = None
-    lab_submitters: Path | None = None
-    lab_codes: Path | None = None  # labs.tsv, required with lab_submitters
-    equivalents: Path | None = None
+    # The acmacs-f-data checkout: the antigen -> sequence matcher's rule tables are read from
+    # it by af.seq.matching_rules, the one loader geo uses too, so the two joins cannot differ.
+    af_data: Path | None = None
 
     def __post_init__(self) -> None:
         if self.source not in COLOUR_SOURCES:
@@ -230,14 +229,10 @@ class ColouringConfig:
             )
         if self.source == "store":
             missing = [
-                k
-                for k in ("acmacs_data", "nomenclature", "passage_rules")
-                if getattr(self, k) is None
+                k for k in ("acmacs_data", "nomenclature", "af_data") if getattr(self, k) is None
             ]
             if missing:
                 raise ValueError(f"colouring.source 'store' needs {', '.join(missing)}")
-        if self.lab_submitters is not None and self.lab_codes is None:
-            raise ValueError("colouring.lab_submitters needs colouring.lab_codes (labs.tsv)")
 
 
 @dataclass(frozen=True)

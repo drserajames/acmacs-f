@@ -658,7 +658,10 @@ def build(
         if store is None:
             raise BuildError("[colouring] source is 'store' but no --store given")
         started = time.monotonic()
-        colours = StoreColours(store, config.colouring)
+        from af.seq.matching_rules import matching_rules
+
+        assert config.colouring.af_data is not None  # checked by the config
+        colours = StoreColours(store, config.colouring, matching_rules(config.colouring.af_data))
         log(f"{'colouring':24s} {time.monotonic() - started:5.1f}s  store join and user tables")
     results = []
     for cfg in wanted:

@@ -131,14 +131,7 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
     return config, _path(data["vaccine_list"], base)
 
 
-_COLOURING_PATHS = (
-    "acmacs_data",
-    "nomenclature",
-    "passage_rules",
-    "lab_submitters",
-    "lab_codes",
-    "equivalents",
-)
+_COLOURING_PATHS = ("acmacs_data", "nomenclature", "af_data")
 
 
 def _colouring(c: dict[str, Any] | None, base: Path) -> ColouringConfig:
