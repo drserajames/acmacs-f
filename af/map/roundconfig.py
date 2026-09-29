@@ -17,6 +17,7 @@ from typing import Any
 
 from af.map.config import (
     BlockOffsetConfig,
+    ColouringConfig,
     ColumnBaseConfig,
     Defaults,
     FrameConfig,
@@ -64,7 +65,11 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
     base = path.resolve().parent
     with path.open("rb") as f:
         data = tomllib.load(f)
-    _known(data, {"defaults", "frames", "maps", "vaccine_list", "vaccine_defaults"}, str(path))
+    _known(
+        data,
+        {"defaults", "frames", "maps", "vaccine_list", "vaccine_defaults", "colouring"},
+        str(path),
+    )
 
     d = data.get("defaults")
     if not d:
@@ -111,15 +116,44 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
 
     if "vaccine_list" not in data:
         raise ConfigError(f"{path}: vaccine_list (the curated list) is required")
-    config = MapsConfig(
-        defaults=defaults,
-        frames=tuple(frames),
-        maps=tuple(maps),
-        vaccine_defaults=_path(data["vaccine_defaults"], base)
-        if "vaccine_defaults" in data
-        else None,
-    )
+    try:
+        config = MapsConfig(
+            defaults=defaults,
+            frames=tuple(frames),
+            maps=tuple(maps),
+            vaccine_defaults=_path(data["vaccine_defaults"], base)
+            if "vaccine_defaults" in data
+            else None,
+            colouring=_colouring(data.get("colouring"), base),
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     return config, _path(data["vaccine_list"], base)
+
+
+_COLOURING_PATHS = (
+    "acmacs_data",
+    "nomenclature",
+    "passage_rules",
+    "lab_submitters",
+    "lab_codes",
+    "equivalents",
+)
+
+
+def _colouring(c: dict[str, Any] | None, base: Path) -> ColouringConfig:
+    """``[colouring]``. Absent means the bring-up stand-in, which each figure's provenance names;
+    present, ``source`` must be said outright."""
+    if c is None:
+        return ColouringConfig("stand-in")
+    _known(c, {"source", *_COLOURING_PATHS}, "colouring")
+    if "source" not in c:
+        raise ConfigError("colouring: source is required (stand-in or store)")
+    paths = {k: _path(c[k], base) for k in _COLOURING_PATHS if k in c}
+    try:
+        return ColouringConfig(c["source"], **paths)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _map(m: dict[str, Any], base: Path) -> MapConfig:

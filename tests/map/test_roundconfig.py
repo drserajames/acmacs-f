@@ -104,3 +104,65 @@ def test_windows_are_required(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigError, match="at least one window|must_show_since"):
         load_maps_config(write(tmp_path, text))
+
+
+STORE_COLOURING = """
+[colouring]
+source = "store"
+acmacs_data = "shared/acmacs-data"
+nomenclature = "shared/nomenclature"
+passage_rules = "rules/passage.tsv"
+lab_submitters = "rules/submitters.tsv"
+lab_codes = "rules/labs.tsv"
+"""
+
+
+def test_colouring_defaults_to_the_stand_in(tmp_path: Path) -> None:
+    config, _ = load_maps_config(write(tmp_path, GOOD))
+    assert config.colouring.source == "stand-in"
+
+
+def test_store_colouring_resolves_its_paths(tmp_path: Path) -> None:
+    config, _ = load_maps_config(write(tmp_path, GOOD + STORE_COLOURING))
+    c = config.colouring
+    assert c.source == "store"
+    assert c.acmacs_data == (tmp_path / "shared/acmacs-data").resolve()
+    assert c.lab_codes == (tmp_path / "rules/labs.tsv").resolve()
+    assert c.equivalents is None
+
+
+def test_colouring_source_must_be_said(tmp_path: Path) -> None:
+    text = GOOD + STORE_COLOURING.replace('source = "store"\n', "")
+    with pytest.raises(ConfigError, match="source is required"):
+        load_maps_config(write(tmp_path, text))
+
+
+def test_store_colouring_needs_its_inputs(tmp_path: Path) -> None:
+    text = GOOD + STORE_COLOURING.replace('passage_rules = "rules/passage.tsv"\n', "")
+    with pytest.raises(ConfigError, match="needs passage_rules"):
+        load_maps_config(write(tmp_path, text))
+
+
+def test_submitters_need_lab_codes(tmp_path: Path) -> None:
+    text = GOOD + STORE_COLOURING.replace('lab_codes = "rules/labs.tsv"\n', "")
+    with pytest.raises(ConfigError, match="needs colouring.lab_codes"):
+        load_maps_config(write(tmp_path, text))
+
+
+def test_store_colouring_refuses_a_scheme_stand_in(tmp_path: Path) -> None:
+    """Half a round on each source would draw one virus in two colours on facing pages."""
+    text = (
+        GOOD.replace(
+            'layout_stand_in = "charts/example.ace"',
+            'layout_stand_in = "charts/example.ace"\nscheme_stand_in = "charts/styled.ace"',
+        )
+        + STORE_COLOURING
+    )
+    with pytest.raises(ConfigError, match="still set scheme_stand_in: example-lab"):
+        load_maps_config(write(tmp_path, text))
+
+
+def test_unknown_colouring_source(tmp_path: Path) -> None:
+    text = GOOD + STORE_COLOURING.replace('"store"', '"chart"')
+    with pytest.raises(ConfigError, match="expected one of"):
+        load_maps_config(write(tmp_path, text))
