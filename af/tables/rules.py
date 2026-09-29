@@ -204,10 +204,21 @@ class Rules:
             else RuleTable.empty(shapes, ("lab",))
         )
 
+        # Which variant tags and clone numbers are part of an antigen's identity (af.tables.crick):
+        # a tag no row names is description, kept in the antigen's source. Absent: none are.
+        tags = directory / "identity_tags.tsv"
+        tag_scope, tag_required = ("lab", "subtype"), ("kind", "pattern", "annotation")
+        self.identity_tags = (
+            RuleTable(tags, scope=tag_scope, required=tag_required)
+            if tags.exists()
+            else RuleTable.empty(tags, tag_scope)
+        )
+
     def tables(self) -> list[RuleTable]:
         return [
             self.cell_fixes,
             self.id_shapes,
+            self.identity_tags,
             self.titre_tokens,
             self.control_sera,
             self.table_defaults,

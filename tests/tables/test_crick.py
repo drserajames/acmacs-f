@@ -231,20 +231,49 @@ def test_serum_ids(raw, expected):
 
 
 @pytest.mark.parametrize(
-    ("text", "tags"),
+    ("text", "candidates"),
     [
         ("J141O", ["J141O"]),
-        ("A1B, C2D (J141)", ["J141"]),
-        ("(J141O)", ["J141O"]),
+        ("A1B, C2D (J141)", ["A1B", "C2D", "J141"]),
+        ("(J141O/J)", ["J141O/J"]),
         ("clone 37", ["CLONE 37"]),
-        ("Isl 2", ["ISOLATE 2"]),
-        ("A1B, C2D", []),
+        ("Exa clone 3.4.1", ["CLONE 3.4.1"]),
+        ("J150O grp + O220J", ["J150O", "O220J"]),
         ("?", []),
-        ("J150O grp + O220J", []),
+        ("EXAMPLE1420", []),  # part of a word or number: not a tag
     ],
 )
-def test_other_information_tags(text, tags):
-    assert crick._tags(text) == tags
+def test_tag_candidates(text, candidates):
+    assert crick._candidates(text) == candidates
+
+
+def test_only_ruled_tags_are_identity(tmp_path, rules):
+    reference = [
+        *REFERENCE[:3],
+        (
+            "",
+            "B/Exampleville/5/2029 Isl 2 (J141O)",
+            "J150O, O220J",
+            "2029-05-01",
+            "E3",
+            REFERENCE[3][5],
+        ),
+        *REFERENCE[4:],
+    ]
+    t = one_table(read(workbook(tmp_path / "labc-20300102.xlsx", reference=reference), rules))
+    # the name's isolate and 141 tag are identity; the cell's substitutions are description
+    assert t.antigens[3].annotations == ["ISOLATE 2", "J141O"]
+    assert t.antigens[3].source["other_information"] == "J150O, O220J"
+    assert t.antigens[4].annotations == []  # "A1B, C2D": no rule names them
+    # J150O, O220J here; A1B, C2D in "A1B, C2D (J141O)" and in "A1B, C2D"
+    assert t.dropped["tags: not identity"] == 2 + 2 + 2
+
+
+def test_with_no_identity_rules_no_tag_is_identity(tmp_path, rules_dir):
+    (rules_dir / "identity_tags.tsv").unlink()
+    t = one_table(read(workbook(tmp_path / "labc-20300102.xlsx"), Rules(rules_dir)))
+    assert [a.annotations for a in t.antigens[:4]] == [[], [], [], []]
+    assert t.sera[2].annotations == []  # "Egg J141O": the passage word still reads
 
 
 def test_abbreviation_year_decides():

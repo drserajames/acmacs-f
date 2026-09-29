@@ -109,6 +109,11 @@ RULES: dict[str, list[str]] = {
         "\tevidence\tadded_by\tadded_on\toptional",
         "CDC\tregex\tNo Lot .*\tF0-TEST1\tT29-777\t40\t0.5" + META + "yes",
     ],
+    "identity_tags": [
+        "lab\tsubtype\tkind\tpattern\tannotation\tevidence\tadded_by\tadded_on\toptional",
+        "LABC\tB\tregex\tJ141(?:[A-Z](?:/[A-Z])?)?\t\\g<0>" + META + "yes",
+        "LABC\t*\tregex\tCLONE\\s*(\\d+(?:\\.\\d+)*)\tCLONE \\1" + META + "yes",
+    ],
     "cell_fixes": [
         "lab\tfile\tsheet\tcell\traw\tvalue\tevidence\tadded_by\tadded_on\toptional",
         "LABV\tlabv-fix-20300102.xlsx\tWorksheet\tE11\t604\t640" + META + "yes",
