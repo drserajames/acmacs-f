@@ -159,11 +159,12 @@ def import_semantic_clades(
 ) -> ImportReport:
     """Convert the old tables, reporting every row that cannot be carried across.
 
-    ``clade_sets`` are af's clade sets, keyed by af subtype name. ``legacy_names`` maps,
-    per subtype, an old clade name to the name af uses — the old file writes a clade as its
-    current name with the superseded one in brackets, and names some clades that were
-    since renamed, so without a mapping every such row would be reported dead when it is
-    really just spelled differently.
+    ``clade_sets`` are af's clade sets, keyed by af subtype name. Old clade names resolve
+    through upstream's own aliases (:meth:`~af.clades.nomenclature.CladeSet.legacy_aliases`),
+    each resolution listed in ``report.renamed``; ``legacy_names`` adds to them, per
+    subtype. The old file writes a clade as its current name with the superseded one in
+    brackets, and names some clades that were since renamed, so without a mapping every
+    such row would be reported dead when it is really just spelled differently.
 
     ``defined_locally`` is the set of clade names the *old* system defines (the entry
     names of ``clades.json``), per subtype. Without it every legacy and locally invented
@@ -177,7 +178,11 @@ def import_semantic_clades(
         if tables is None:
             continue
         clade_set = clade_sets.get(subtype)
-        mapping = dict((legacy_names or {}).get(subtype, {}))
+        # upstream's own aliases first (V1A.3 is A.3 under its old name), then any the
+        # caller adds; without them a row under an old name looks dead or local when it
+        # names a live subclade
+        mapping = clade_set.legacy_aliases() if clade_set is not None else {}
+        mapping.update((legacy_names or {}).get(subtype, {}))
         local_names = set((defined_locally or {}).get(subtype, ()))
         groups: list[Group] = []
         by_name: dict[str, Group] = {}
@@ -267,6 +272,8 @@ def import_semantic_clades(
                 )
                 if isinstance(resolved, _Unresolved):
                     continue
+                if resolved != name:
+                    report.renamed.append((subtype, name, str(resolved)))
                 kept.append(
                     {
                         "order": str(index),

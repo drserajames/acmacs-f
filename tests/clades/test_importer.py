@@ -288,3 +288,47 @@ def test_a_file_edited_mid_read_is_refused(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(importer, "import_semantic_clades", edit_while_reading)
     with pytest.raises(importer.UserCladesError, match="changed while being read: clades.json"):
         importer.read_user_clades(directory, synthetic(tmp_path))
+
+
+# ---------------------------------------------------------------- upstream's old names
+
+#: Rows written under Q, the synthetic clone's older name for P.1 (clades/Q.yml, alias_of P.1).
+OLD_NAMES = MODULE.replace(
+    "| GONE 20V | P.9   | 20V |\n", "| GONE 20V | P.9   | 20V |\n| Q 22K    | Q     | 22K |\n"
+).replace(
+    "| P.9     | P.9     | #778899 |\n",
+    "| P.9     | P.9     | #778899 |\n"
+    "| Q 22K   | Q 22K   | #001122 |\n"
+    "| Q       | Q       | #334455 |\n",
+)
+
+
+def module_without_p1_colour(text: str) -> str:
+    """Q and P.1 are one clade: a scheme listing both is a duplicate key, so drop P.1."""
+    return text.replace("| P.1     | P.1     | #112233 |\n", "")
+
+
+def test_an_old_name_resolves_through_upstreams_alias(tmp_path: Path) -> None:
+    """Upstream publishes which subclade an old name is; a row written under it names a
+    live clade, so it is neither dead nor waiting on a local definition."""
+    clade_sets = synthetic(tmp_path)
+    old = module_without_p1_colour(OLD_NAMES)
+    report = import_semantic_clades(write_module(tmp_path, old), clade_sets)
+    group = {group.name: group for group in report.groups[SUBTYPE]}["Q 22K"]
+    assert group.anchor == "P.1"
+    keys = [row["key"] for row in report.colour_rows[(SUBTYPE, "clades-v1")]]
+    assert keys == ["P.1 20V", "Q 22K", "P.1"]
+    assert {row.name for row in report.dead + report.needs_local} == {"GONE 20V", "P.9"}
+    # every resolution is counted, attribute anchors and colour keys alike
+    assert (SUBTYPE, "Q", "P.1") in report.renamed
+    assert report.renamed.count((SUBTYPE, "Q", "P.1")) == 2
+
+
+def test_caller_names_add_to_upstreams(tmp_path: Path) -> None:
+    report = import_semantic_clades(
+        write_module(tmp_path, OLD_NAMES.replace("| GONE 20V | P.9 ", "| GONE 20V | P.8 ")),
+        synthetic(tmp_path),
+        legacy_names={SUBTYPE: {"P.8": "P.2"}},
+    )
+    names = {group.name: group.anchor for group in report.groups[SUBTYPE]}
+    assert names["GONE 20V"] == "P.2" and names["Q 22K"] == "P.1"
