@@ -37,6 +37,7 @@ from af.chart.column_bases import (
     apply_column_base_override,
 )
 from af.chart.model import Chart
+from af.map.colouring import MapColouringError, StoreColours
 from af.map.config import MapConfig, MapsConfig
 from af.map.curate import (
     BlockOffset,
@@ -328,6 +329,34 @@ def _hidden_in_style(chart: Chart, scheme_name: str) -> set[int]:
     return hidden
 
 
+def _stand_in_colours(
+    chart: Chart, cfg: MapConfig, inputs: dict[str, Any]
+) -> tuple[ColourScheme, list[frozenset[str]]]:
+    """Bring-up colours: the rows and clade labels a chart already carries, painted in row order.
+
+    Replaced by the store colouring (``[colouring] source = "store"``).
+    """
+    scheme_chart = read_chart(cfg.scheme_stand_in) if cfg.scheme_stand_in else chart
+    scheme = scheme_from_chart(scheme_chart, cfg.clade_scheme)
+    if cfg.scheme_stand_in:
+        inputs["colour_scheme_chart"] = {
+            "path": str(cfg.scheme_stand_in),
+            "sha256": content_hash(cfg.scheme_stand_in),
+            "note": "STAND-IN: colour rows AND clade labels, until clade assignment is wired in",
+        }
+    # Clade labels come from the same chart as the colour rows: a chart written before the round's
+    # clade step carries neither.
+    labels_of = _labels_by_designation(scheme_chart) if cfg.scheme_stand_in else None
+    # Resolved ONCE, for every antigen, and used for both the colours and the points. Computing
+    # it in two places is how the substitution-qualified clades ("K 96R") were lost from the
+    # points while the colours still had them: one call site was updated and the other was not.
+    labels = [
+        clade_labels(a) if labels_of is None else labels_of.get(designation(a), frozenset())
+        for a in chart.antigens
+    ]
+    return scheme, labels
+
+
 # ---------------------------------------------------------------- one map
 
 
@@ -348,8 +377,13 @@ def build_map(
     vaccine_table: Mapping[str, Sequence[Any]] | Sequence[Any],
     vaccine_defaults: dict[str, tuple[VaccineDisable, ...]],
     created: dt.datetime,
+    colours: StoreColours | None = None,
 ) -> MapResult:
-    """Build every window of one map. Raises :class:`BuildError` with the folder named."""
+    """Build every window of one map. Raises :class:`BuildError` with the folder named.
+
+    ``colours`` is the run's store colouring when the round's ``[colouring] source`` is
+    "store"; without it the map is painted from its stand-in chart, as in bring-up.
+    """
     started = time.monotonic()
     inputs: dict[str, Any] = {}
     stand_in: dict[str, str] = {}
@@ -371,32 +405,30 @@ def build_map(
 
     if not chart.projections:
         raise BuildError(f"{cfg.folder}: chart has no projection to draw")
-    scheme_chart = read_chart(cfg.scheme_stand_in) if cfg.scheme_stand_in else chart
-    scheme = scheme_from_chart(scheme_chart, cfg.clade_scheme)
-    if cfg.scheme_stand_in:
-        inputs["colour_scheme_chart"] = {
-            "path": str(cfg.scheme_stand_in),
-            "sha256": content_hash(cfg.scheme_stand_in),
-            "note": "STAND-IN: colour rows AND clade labels, until clade assignment is wired in",
+    sequenced: list[bool]
+    if colours is not None:
+        try:
+            coloured = colours.for_chart(chart, cfg.clade_scheme)
+        except (MapColouringError, ValueError) as exc:
+            raise BuildError(f"{cfg.folder}: {exc}") from exc
+        scheme = coloured.scheme
+        labels = list(coloured.labels)
+        sequenced = list(coloured.sequenced)
+        store_refs.extend(colours.store_refs())
+        colour_note: dict[str, Any] = coloured.provenance
+    else:
+        scheme, labels = _stand_in_colours(chart, cfg, inputs)
+        sequenced = [bool(a.extra.get("A")) for a in chart.antigens]
+        colour_note = {
+            "note": "STAND-IN: the chart's own rows, until user colour schemes are wired in"
         }
-    # Clade labels come from the same chart as the colour rows: a chart written before the round's
-    # clade step carries neither. Workstream 4's assignment replaces both.
-    labels_of = _labels_by_designation(scheme_chart) if cfg.scheme_stand_in else None
-
-    # Resolved ONCE, for every antigen, and used for both the colours and the points. Computing
-    # it in two places is how the substitution-qualified clades ("K 96R") were lost from the
-    # points while the colours still had them: one call site was updated and the other was not.
-    labels: list[frozenset[str]] = [
-        clade_labels(a) if labels_of is None else labels_of.get(designation(a), frozenset())
-        for a in chart.antigens
-    ]
 
     inputs["colour_scheme"] = {
         "name": scheme.name,
         "sha256": hashlib.sha256(
             json.dumps([[r.legend, r.colour, sorted(r.labels)] for r in scheme.rows]).encode()
         ).hexdigest(),
-        "note": "STAND-IN: the chart's own rows, until user colour schemes are wired in",
+        **colour_note,
     }
     layout = chart.projections[0].layout.copy()
     painted = [
@@ -528,7 +560,7 @@ def build_map(
                 parse_date(a.date),
                 passage_class(a.passage, a.reassortant),
                 bool((a.extra.get("T") or {}).get("R")),
-                sequenced=bool(a.extra.get("A")),
+                sequenced=sequenced[i],
                 hide=hidden.get(i),
             )
         )
@@ -621,6 +653,13 @@ def build(
     missing = sorted(set(only) - {m.folder for m in config.maps})
     if missing:
         raise BuildError(f"no such map(s) in the config: {', '.join(missing)}")
+    colours = None
+    if config.colouring.source == "store":
+        if store is None:
+            raise BuildError("[colouring] source is 'store' but no --store given")
+        started = time.monotonic()
+        colours = StoreColours(store, config.colouring)
+        log(f"{'colouring':24s} {time.monotonic() - started:5.1f}s  store join and user tables")
     results = []
     for cfg in wanted:
         result = build_map(
@@ -631,6 +670,7 @@ def build(
             vaccine_table=vaccine_list,
             vaccine_defaults=vaccine_defaults,
             created=created,
+            colours=colours,
         )
         results.append(result)
         flags = f" flags={len(result.flags)}" if result.flags else ""
