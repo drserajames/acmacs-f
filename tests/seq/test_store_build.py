@@ -6,6 +6,7 @@ Every name, id, date and sequence here is invented.
 from __future__ import annotations
 
 import datetime
+import json
 import random
 from pathlib import Path
 
@@ -259,8 +260,10 @@ class TestRawPulls:
             pulls.import_pull(Store.create(tmp_path / "store"), pull)
 
 
-def test_store_pull_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Import, align with a stand-in Nextclade, publish; a re-run changes nothing."""
+def _run_pull(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, locations: build.LocationsConfig | None = None
+) -> tuple[build.SequencesConfig, Store, dict[str, StoreRef]]:
+    """Import an invented set and store its one H3 pull with a stand-in Nextclade."""
     rng = random.Random(7)
     root = extractor_set(tmp_path / "set", rng)
     store = Store.create(tmp_path / "store")
@@ -289,17 +292,77 @@ def test_store_pull_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         placement=[build.PlacementConfig(SUBTYPE, "", "h3", "no lineage for A(H3N2)")],
         sources={"definitive": root},
         source_subtypes={"h3n2": "A(H3N2)"},
+        locations=locations,
     )
     build.import_source(config, "definitive")
-    runner = build.make_runner(config.runner)
-    refs = build.store_pull(config, "definitive-2021-0312-h3n2", runner)
+    refs = build.store_pull(config, PULL, build.make_runner(config.runner))
+    return config, store, refs
+
+
+PULL = "definitive-2021-0312-h3n2"
+
+
+def _provenance(store: Store, ref: StoreRef) -> dict[str, object]:
+    text = (store.version_dir(ref) / "PROVENANCE.json").read_text()
+    parameters: dict[str, object] = json.loads(text)["parameters"]
+    return parameters
+
+
+def test_store_pull_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Import, align with a stand-in Nextclade, publish; a re-run changes nothing."""
+    config, store, refs = _run_pull(tmp_path, monkeypatch)
     table = processed.read_table(store, refs["h3"], "isolates", ["epi_isl", "date_precision"])
     assert table.to_pylist() == [
         {"epi_isl": f"EPI_ISL_{i}", "date_precision": "year"} for i in (1, 2, 3)
     ]
     sequences = processed.read_table(store, refs["h3"], "sequences", ["covers_mature"])
     assert sequences["covers_mature"].to_pylist() == [False] * 3  # the stand-in aligns 30 nt
-    assert build.store_pull(config, "definitive-2021-0312-h3n2", runner) == refs
+    assert build.store_pull(config, PULL, build.make_runner(config.runner)) == refs
+    # no [locations]: the provenance says the new-locations check did not run
+    assert _provenance(store, refs["h3"])["new_locations"] == {
+        "checked": False, "reason": "no [locations] in the sequences config",
+    }  # fmt: skip
+
+
+def _locations(tmp_path: Path) -> build.LocationsConfig:
+    """Invented location tables without the pull's town, and a GeoNames snapshot that has it."""
+    tables, geo = tmp_path / "locations", tmp_path / "geonames"
+    tables.mkdir()
+    geo.mkdir()
+    meta = "\tadded_by\tadded_on"
+    (tables / "countries.tsv").write_text(
+        f"code\tspelling\tsource\tevidence{meta}\n"
+        "XAA\tExampleland\tgisaid\tsame name\tt\t2026-01-01\n"
+    )
+    (tables / "regions.tsv").write_text(
+        f"scheme\tcountry\tgroup\tevidence{meta}\ngisaid\tXAA\tEurope\tthe store\tt\t2026-01-01\n"
+    )
+    columns = (
+        "location\tcountry\tadmin\tlatitude\tlongitude\tprecision\tsource\tevidence\tsame_as\tflags"
+    )
+    (tables / "places.tsv").write_text(
+        f"{columns}{meta}\nEXAMPLECITY\tXAA\t\t1.0\t2.0\tcity\thand\tinvented\t\t\tt\t2026-01-01\n"
+    )
+    (geo / "countryInfo.txt").write_text("XA\tXAA\t1\tXA\tExampleland\n")
+    (geo / "admin1CodesASCII.txt").write_text("XA.01\tExampleshire\tExampleshire\t901\n")
+    town = ["1", "Exampletown", "Exampletown", "", "10.5", "20.25", "P", "PPL", "XA", "", "01"]
+    (geo / "cities500.txt").write_text("\t".join([*town, "", "", "", "600"]) + "\n")
+    return build.LocationsConfig(tables=tables, geonames=geo)
+
+
+def test_store_pull_checks_new_locations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A name-location places.tsv lacks is proposed from GeoNames; counts in the provenance."""
+    _, store, refs = _run_pull(tmp_path, monkeypatch, _locations(tmp_path))
+    report = _provenance(store, refs["h3"])["new_locations"]
+    assert isinstance(report, dict)
+    assert (report["checked"], report["new_locations"], report["outcomes"]) == (
+        True, 1, {"proposed": 1},
+    )  # fmt: skip
+    area = tmp_path / "work" / "sequences" / "gisaid" / PULL / build.NEW_LOCATIONS / "h3"
+    assert report["review"] == str(area / "review.tsv")
+    assert (area / "review.tsv").read_text().count("\n") == 1  # header only: nothing to review
+    proposed = (area / "proposed-places.tsv").read_text().split("\t")
+    assert proposed[:5] == ["EXAMPLETOWN", "XAA", "", "10.5000", "20.2500"]
 
 
 def _dataset_ref(store: Store, source: Path, key: str = "nextclade/example/h3/t1") -> StoreRef:

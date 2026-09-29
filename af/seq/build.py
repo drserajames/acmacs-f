@@ -11,15 +11,22 @@ its subtype dataset by the configured rules, aligns each group with Nextclade, a
 publishes that pull's partitions of ``sequences/<subtype>`` (:mod:`af.seq.processed`).
 Alignments are pipeline steps in the work area, so re-running an unchanged pull does not
 re-run Nextclade.
+
+With a ``[locations]`` section, every ``store`` also checks the pull's name-locations against
+af's places table (:mod:`af.seq.newplaces`, LOCATIONS-PROPOSAL §6c): the counts go in each
+published version's provenance, and the proposed rows and the review list go in the pull's work
+area under ``new-locations/<dataset>/``. Without the section the provenance says the check did
+not run, so a new location never passes unnoticed.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,9 +34,10 @@ from typing import Any
 from af.pipeline.config import RunnerSettings, make_runner
 from af.pipeline.driver import Pipeline
 from af.run import Runner
+from af.seq import newplaces, processed
 from af.seq import nextclade as nc
-from af.seq import processed
 from af.seq.gisaid import SequenceRecord, join, read_fasta, read_workbook
+from af.seq.locations import LocationTables, name_location
 from af.seq.processed import PlacementRule
 from af.seq.pulls import find_pulls, import_pull, open_pull
 from af.store import DatasetWork, PathsConfig, Store, Work
@@ -37,6 +45,7 @@ from af.store.ref import StoreRef
 from af.util.config import ConfigError, load_config
 
 WORK_DATASET = "gisaid"
+NEW_LOCATIONS = "new-locations"  # under a pull's work area: one directory per dataset
 
 
 @dataclass(frozen=True)
@@ -78,6 +87,14 @@ class LineageCheckConfig:
 
 
 @dataclass(frozen=True)
+class LocationsConfig:
+    """What the new-locations check reads (LOCATIONS-PROPOSAL §6c)."""
+
+    tables: Path  # acmacs-f-data rules/locations: countries.tsv, regions.tsv, places.tsv
+    geonames: Path  # a GeoNames snapshot: cities500.txt, admin1CodesASCII.txt, countryInfo.txt
+
+
+@dataclass(frozen=True)
 class SequencesConfig:
     paths: PathsConfig
     runner: RunnerSettings
@@ -90,6 +107,8 @@ class SequencesConfig:
     source_subtypes: dict[str, str] = field(default_factory=dict)
     #: Subtypes placed by alignment rather than GISAID's label (processed.LineageCheck).
     lineage_check: list[LineageCheckConfig] = field(default_factory=list)
+    #: The new-locations check; absent, the provenance records that it did not run.
+    locations: LocationsConfig | None = None
 
 
 def import_source(config: SequencesConfig, source: str) -> list[StoreRef]:
@@ -143,6 +162,9 @@ def store_pull(config: SequencesConfig, pull_id: str, runner: Runner) -> dict[st
             config.nextclade, references, dataset, group, area, runner
         )
     _merge(placed, unchecked)
+    new_locations = _check_new_locations(
+        config.locations, placed, area.root / NEW_LOCATIONS, started
+    )
 
     refs: dict[str, StoreRef] = {}
     for dataset, group in sorted(placed.items()):
@@ -160,10 +182,69 @@ def store_pull(config: SequencesConfig, pull_id: str, runner: Runner) -> dict[st
                 "placement": _placement_used(config.placement, group, dataset),
                 "lineage_check": lineage_flags,
                 "alignment": summaries[dataset],
+                "new_locations": new_locations[dataset],
             },
             started=started,
         )
     return refs
+
+
+def _check_new_locations(
+    locations: LocationsConfig | None,
+    placed: Mapping[str, list[SequenceRecord]],
+    directory: Path,
+    started: datetime.datetime,
+) -> dict[str, dict[str, Any]]:
+    """Per dataset: this pull's name-locations that places.tsv has no row for, and what became of
+    each (proposed from GeoNames, or on the review list with the reason).
+
+    GeoNames is read only when there is something to look up. The review list is written even
+    when empty, so its absence always means the check did not run.
+    """
+    if locations is None:
+        return {d: {"checked": False, "reason": "no [locations] in the sequences config"}
+                for d in placed}  # fmt: skip
+    tables = LocationTables.read(locations.tables)
+    geo: newplaces.GeoNames | None = None
+    report: dict[str, dict[str, Any]] = {}
+    for dataset, group in sorted(placed.items()):
+        stated = newplaces.new_locations(
+            newplaces.stated_by_location(_stated_locations(group)), tables.places.by_location
+        )
+        outcomes: list[newplaces.Outcome] = []
+        if stated:
+            geo = geo or newplaces.GeoNames.read(locations.geonames)
+            outcomes = [
+                newplaces.resolve(location, s, tables.countries, geo)
+                for location, s in sorted(stated.items())
+            ]
+        target = directory / dataset
+        counts = newplaces.write(outcomes, target, "af.seq.build", started.date().isoformat())
+        report[dataset] = {
+            "checked": True,
+            "new_locations": len(outcomes),
+            "outcomes": dict(sorted(counts.items())),
+            "places_sha256": hashlib.sha256(
+                (locations.tables / "places.tsv").read_bytes()
+            ).hexdigest(),
+            "geonames": str(locations.geonames),
+            "review": str(target / "review.tsv"),
+        }
+        print(f"{NEW_LOCATIONS}\t{dataset}\t{len(outcomes)}\t{json.dumps(counts)}", file=sys.stderr)
+    return report
+
+
+def _stated_locations(
+    records: Iterable[SequenceRecord],
+) -> Iterator[tuple[str, str | None, str | None]]:
+    """(name-location, GISAID country, GISAID place) for each record whose name parsed cleanly."""
+    for record in records:
+        if any(problem.startswith("name.") for problem in record.problems):
+            continue
+        location = name_location(record.name)
+        if location is not None:
+            _, country, place = processed.split_location(record.location)
+            yield location, country, place
 
 
 def _lineage_checks(config: SequencesConfig) -> dict[str, processed.LineageCheck]:
