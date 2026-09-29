@@ -314,3 +314,73 @@ def test_neutralisation_reads_measured_titres(tmp_path, rules):
     assert t.titres[:3] == [[["437"], ["<40"]], [["61"], ["1144"]], [[], ["<40"]]]
     assert t.dropped["cells: decimal rounded"] == 1
     assert t.antigens[0].passage == "SIAT1"
+
+
+def compilation(path: Path) -> Path:
+    """Crick's own compilation: one sheet per test, named by date, plus a summary sheet."""
+    workbook(path)
+    wb = openpyxl.load_workbook(path)
+    first = wb.worksheets[0]
+    first.title = "020130"
+    second = wb.copy_worksheet(first)
+    second.title = "090130"
+    second["A1"] = TITLE.replace("2030-01-02", "2030-01-09")
+    summary = wb.copy_worksheet(first)
+    summary.title = "Summary"
+    summary["A1"] = TITLE.replace("2030-01-02", "- summary")
+    wb.save(path)
+    return path
+
+
+def test_named_sheets_of_a_compilation(tmp_path, rules):
+    path = compilation(tmp_path / "LABC compilation.xlsx")
+    res = crick.read([path], rules, lab="LABC", subtype="B", lineage="VICTORIA", sheets=["090130"])
+    assert res.errors == [] and [t.date for t in res.tables] == ["2030-01-09"]
+    assert sum("not a selected sheet" in s for s in res.skipped_tests) == 2
+    missing = crick.read([path], rules, lab="LABC", subtype="B", lineage="VICTORIA", sheets=["X"])
+    assert missing.tables == [] and "not in the workbook" in missing.errors[0]
+    unread = crick.read(
+        [path], rules, lab="LABC", subtype="B", lineage="VICTORIA", sheets=["Summary"]
+    )
+    assert unread.tables == [] and "gave no table" in unread.errors[0]
+
+
+def test_sheets_replace_a_folder_workbook_only_when_it_is_excluded(tmp_path, rules):
+    from af.tables import update
+
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    workbook(folder / "labc-20300109.xlsx", title=TITLE.replace("2030-01-02", "2030-01-09"))
+    sheets = update.CrickSheetsInputs(
+        lab="LABC",
+        file=compilation(tmp_path / "LABC compilation.xlsx"),
+        subtype="B",
+        lineage="VICTORIA",
+        sheets=["090130"],
+        replaces=["labc-20300109.xlsx"],
+    )
+
+    def run(exclude: list[str]) -> tuple[list, list[str]]:
+        settings = update.TablesSettings(
+            rules=tmp_path,
+            run="t",
+            crick=[
+                update.VIDRLInputs(
+                    lab="LABC",
+                    dir=folder,
+                    start="2030-01-01",
+                    subtype="B",
+                    lineage="VICTORIA",
+                    exclude=exclude,
+                )
+            ],
+            crick_sheets=[sheets],
+        )
+        tables, _, errors = update._read_all(settings, rules)
+        return tables, errors
+
+    tables, errors = run(["labc-20300109.xlsx"])
+    assert errors == [] and [t.meta["file"] for t in tables] == ["LABC compilation.xlsx"]
+    _, errors = run([])
+    assert any("not excluded" in e for e in errors)
+    assert any("also read from a folder" in e for e in errors)

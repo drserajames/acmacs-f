@@ -61,6 +61,7 @@ import decimal
 import hashlib
 import re
 from collections import Counter
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -102,11 +103,19 @@ class NoTestDate(CrickError):
 
 
 def read(
-    paths: list[Path], rules: Rules, *, lab: str, subtype: str, lineage: str = ""
+    paths: list[Path],
+    rules: Rules,
+    *,
+    lab: str,
+    subtype: str,
+    lineage: str = "",
+    sheets: Collection[str] | None = None,
 ) -> ReadResult:
     """``subtype`` and ``lineage`` select the sheets to read: a workbook may hold several
     subtypes' tables. A file named with a date (whocc-tables: ``...-YYYYMMDD.xlsx``) holds
-    that day's test; its sheets of other days are reported, not read."""
+    that day's test; its sheets of other days are reported, not read. ``sheets``, when
+    given, names the only sheets to read (a compilation of several tests); every one must
+    be there and read."""
     result = ReadResult(tables=[], rows=0)
     for path in paths:
         data = path.read_bytes()
@@ -116,13 +125,20 @@ def read(
             "reader": "af.tables.crick",
         }
         try:
-            sheets = load(path)
+            workbook = load(path)
         except Exception as err:  # openpyxl raises zip and XML errors of many kinds
             result.errors.append(f"{path.name}: not a readable workbook ({type(err).__name__})")
             continue
         file_date = _file_date(path)
         read_here, errors_before = 0, len(result.errors)
-        for sheet in sheets:
+        read_sheets: set[str] = set()
+        if sheets is not None:
+            if missing := sorted(set(sheets) - {sh.name for sh in workbook}):
+                result.errors.append(f"{path.name}: sheets {missing} not in the workbook")
+            for sheet in workbook:
+                if sheet.name not in sheets:
+                    result.skipped_tests.append(f"{sheet.where(0)}: not a selected sheet")
+        for sheet in workbook if sheets is None else [s for s in workbook if s.name in sheets]:
             if not sheet.find(FERRET.pattern, stop=40):
                 if any(any(row) for row in sheet.rows):
                     result.skipped_tests.append(f"{sheet.where(0)}: no 'Ferret number' row")
@@ -151,12 +167,17 @@ def read(
                 result.errors.append(str(err))
                 continue
             read_here += 1
+            read_sheets.add(sheet.name)
             table.provenance = dict(provenance)
             result.dropped.update(table.dropped)
             result.rows += len(table.antigens)
             if problems := table.check() or aliases.check_titres(table, rules):
                 result.errors.extend(f"{sheet.where(0)}: {p}" for p in problems)
             result.tables.append(table)
+        if sheets is not None and len(result.errors) == errors_before:
+            present = {sh.name for sh in workbook}
+            if unread := sorted(set(sheets) & present - read_sheets):
+                result.errors.append(f"{path.name}: selected sheets {unread} gave no table")
         if file_date is not None and read_here != 1 and len(result.errors) == errors_before:
             result.errors.append(f"{path.name}: {read_here} sheets with the file's test date")
     return result

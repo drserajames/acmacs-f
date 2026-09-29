@@ -51,12 +51,25 @@ def assign(tables: list[Table], previous: Manifest | None) -> list[str]:
             known[entry["source_key"]] = entry["table_id"]
             used.setdefault(base_id(entry["group"], entry["date"]), set()).add(entry["date_suffix"])
     seen: dict[str, Table] = {}
+    current = {t.source_key for t in tables}
     for table in sorted(tables, key=lambda t: (t.group, t.date, _source_order(t.source_key))):
         if table.source_key in seen:
             problems.append(f"source key {table.source_key!r} read twice")
             continue
         seen[table.source_key] = table
         base = base_id(table.group, table.date)
+        if table.source_key not in known and (replaced := table.meta.get("replaces")):
+            # a source configured to stand in for a workbook (update.CrickSheetsInputs) takes
+            # over that workbook's id for the same test, so the test keeps its id
+            heirs = [
+                (key, tid)
+                for key, tid in known.items()
+                if f" xlsx {replaced} [" in key and tid.partition(".")[0] == base
+            ]
+            if len(heirs) == 1 and heirs[0][0] not in current:
+                known[table.source_key] = heirs[0][1]
+            elif heirs:
+                problems.append(f"{table.source_key}: replaces {replaced}, ids {heirs}")
         if (old_id := known.get(table.source_key)) is not None:
             old_base, _, old_suffix = old_id.partition(".")
             if old_base == base:
