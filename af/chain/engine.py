@@ -33,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from af.chain import select
 from af.chain.backend import Optimiser, default_optimiser
 from af.chain.config import ChainConfig, TableRef, config_to_json, option_parameters
 from af.chain.diagnostics import group_moves, run_threads, step_diagnostics
@@ -181,6 +182,8 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
         "optimiser": mapper.optimiser.name,
         "seed": cfg.seed,
     }
+    if cfg.remove:  # only a chain that selects points gets the key: others keep their steps
+        common["select_remove"] = [r.to_json() for r in cfg.remove]
     steps = []
     d0 = step_dir(root, 0)
     first_outputs = [d0 / CHOSEN, d0 / STEP_RECORD] + (
@@ -248,6 +251,7 @@ def run_chain(
     `runner` runs the start chunks when `split` is given (af.run LocalRunner or SlurmRunner).
     """
     optimiser = optimiser or default_optimiser()
+    select.check_rules_match(cfg.remove, [t.path for t in cfg.tables])
     # `root` is the chain's own directory (af.store.Work: <work>/chains/<dataset>); without
     # it, <store_root>/<name>. Pipeline state goes in <root>/state (DatasetWork.state).
     root = Path(root) if root is not None else Path(store_root) / cfg.name
@@ -393,7 +397,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
         _write_step_record(directory, record)
         return
     t = cfg.tables[0]
-    table = read_chart(t.path)
+    table, removed = select.apply(cfg.remove, read_chart(t.path))
     arrays = table.optimiser_arrays(
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
     )
@@ -425,6 +429,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
         "stress": {"scratch": all_maps[0]["stress"]},
         "start_stresses": {"scratch": [r["stress"] for r in all_maps]},
         "trapped_loop": {"scratch": _loop(all_maps)},
+        **({"removed": removed} if cfg.remove else {}),
     }
     diagnostics = step_diagnostics(chart, None, None, None, arrays, optimiser, cfg)
     diagnostics.update(run_threads({"scratch": _threads(all_maps)}))
@@ -447,7 +452,8 @@ def _merge_step(
     o = cfg.options
     optimiser = mapper.optimiser
     previous = read_chart(previous_path)
-    merged, report = merge(previous, read_chart(table_ref.path), _merge_options(cfg))
+    table, removed = select.apply(cfg.remove, read_chart(table_ref.path))
+    merged, report = merge(previous, table, _merge_options(cfg))
     write_chart(merged, directory / "merge.ace")
     arrays = merged.optimiser_arrays(
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
@@ -507,6 +513,7 @@ def _merge_step(
             "scratch": [r["stress"] for r in all_scratch],
         },
         "trapped_loop": {"incremental": _loop(all_incremental), "scratch": _loop(all_scratch)},
+        **({"removed": removed} if cfg.remove else {}),
         "merge": {
             "antigens": merged.n_antigens,
             "sera": merged.n_sera,

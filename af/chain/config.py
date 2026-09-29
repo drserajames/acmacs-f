@@ -18,6 +18,11 @@ Example::
     [options]
     scratch_starts = 1000
     incremental_starts = 1000
+
+    [[select.remove]]             # optional, repeatable: points left out (af.chain.select)
+    what = "antigens"
+    passage = "egg"
+    reason = "egg-free map"
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from af.chain.select import RemoveRule, Selection
 from af.chart.merge import ColumnBasisConvention
 from af.util.config import load_config
 
@@ -101,6 +107,7 @@ class ChainSettings:
     seed: int
     first_map: Path | None = None  # a seed chart with a projection (today's `first_source`)
     options: MapOptions = field(default_factory=MapOptions)
+    select: Selection = field(default_factory=Selection)
 
 
 @dataclass(frozen=True)
@@ -125,8 +132,12 @@ class ChainConfig:
     seed: int = 0
     first_map: Path | None = None
     tables_source: dict[str, str] | None = None  # the store ref the tables came from
+    remove: list[RemoveRule] = field(default_factory=list)  # applied to each table (select)
 
     def __post_init__(self) -> None:
+        if self.remove and self.first_map is not None:
+            # a seed map's layout would need remapping; the round's selections apply to tables
+            raise ChainConfigError(f"{self.name}: select.remove cannot be used with first_map")
         if not self.tables:
             raise ChainConfigError(f"{self.name}: no tables")
         ids = [t.table_id for t in self.tables]
@@ -161,10 +172,12 @@ def load_chain_config(
             for x in tables
             if (start is None or x.date >= start) and (end is None or x.date <= end)
         ]
-        return ChainConfig(s.name, tables, s.options, s.seed, s.first_map, ref.to_json())
+        return ChainConfig(
+            s.name, tables, s.options, s.seed, s.first_map, ref.to_json(), s.select.remove
+        )
     if t.directory is not None and t.group is not None and t.dataset is None:
         tables = tables_from_directory(t.directory, t.group, start, end, set(t.exclude))
-        return ChainConfig(s.name, tables, s.options, s.seed, s.first_map)
+        return ChainConfig(s.name, tables, s.options, s.seed, s.first_map, None, s.select.remove)
     raise ChainConfigError(f"{path}: [tables] needs either dataset or directory + group")
 
 
@@ -216,6 +229,7 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
         "first_map": None if cfg.first_map is None else str(cfg.first_map),
         "tables_source": cfg.tables_source,
         "options": option_parameters(cfg.options),
+        **({"select_remove": [r.to_json() for r in cfg.remove]} if cfg.remove else {}),
         "tables": [
             {
                 "table_id": t.table_id,
