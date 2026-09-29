@@ -85,10 +85,13 @@ RULES: dict[str, list[str]] = {
         + "yes",
     ],
     "season_files": [
-        "lab\tfile\tsubtype\tdate_from\tdate_to\ttable_key\tevidence\tadded_by\tadded_on\toptional",
-        "CDC\tseason.tsv\tH1 swl\t2029-08-01\t2029-08-31\tassay_date+subtype+assay-type"
+        "lab\tfile\tsubtype\tdate_from\tdate_to\ttable_key\tharvest_dates"
+        "\tevidence\tadded_by\tadded_on\toptional",
+        "CDC\tseason.tsv\tH1 swl\t2029-08-01\t2029-08-31\tassay_date+subtype+assay-type\t"
         + META
         + "yes",
+        "CDC\tseason-join.tsv\tH1 swl\t2029-08-01\t2029-08-31\tassay_date+subtype+assay-type"
+        "\tfrom-tsv" + META + "yes",
     ],
     "name_rewrites": [
         "lab\tkind\tpattern\treplacement\tevidence\tadded_by\tadded_on\toptional",
