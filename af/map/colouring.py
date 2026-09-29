@@ -23,8 +23,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 from af.chart.model import Chart
 from af.clades.colours import ColourScheme as CladeColourScheme
+from af.clades.colours import shadowed_entries
 from af.map.config import ColouringConfig
 from af.map.style import ColourRow, ColourScheme
+from af.seq.matching_rules import MatchingRules
 from af.store.store import Store
 
 if TYPE_CHECKING:
@@ -91,31 +93,20 @@ class StoreColours:
     figure of the run is coloured from the same read of the user's tables and the same join.
     """
 
-    def __init__(self, store: Store, cfg: ColouringConfig) -> None:
-        from af.seq.matching import (
-            read_lab_submitters,
-            read_location_equivalents,
-            read_passage_rules,
-        )
+    def __init__(self, store: Store, cfg: ColouringConfig, rules: MatchingRules) -> None:
+        """``rules`` are the matcher's tables, loaded once by the caller
+        (:func:`af.seq.matching_rules.matching_rules`), the same loader geo uses."""
         from af.serology import query
         from af.serology.joins import link_from_store, preparation_sequences
         from af.serology.outputs import CLADE_SUBTYPE, aligned_sequences, read_clade_tables
-        from af.tables.labs import read_lab_codes
 
-        assert cfg.passage_rules and cfg.nomenclature and cfg.acmacs_data  # checked by the config
+        assert cfg.nomenclature and cfg.acmacs_data  # checked by the config
         self._store = store
         self._clones = cfg.nomenclature
+        self.rules = rules
         self.serology = store.current("serology", "all")
         con = query.connect(store.resolve(self.serology))
-        self.links = link_from_store(
-            con,
-            store,
-            read_passage_rules(cfg.passage_rules),
-            with_clades=True,
-            lab_submitters=read_lab_submitters(cfg.lab_submitters) if cfg.lab_submitters else None,
-            equivalents=read_location_equivalents(cfg.equivalents) if cfg.equivalents else None,
-            lab_codes=read_lab_codes(cfg.lab_codes) if cfg.lab_codes else None,
-        )
+        self.links = link_from_store(con, store, rules, with_clades=True)
         self._sequences = preparation_sequences(con)
         self._aligned = aligned_sequences(store, con)
         self._user = read_clade_tables(
@@ -158,12 +149,17 @@ class StoreColours:
             labels.append(labels_for(style(cast("Preparation", prep)).label, keys))
             sequenced.append(prep.key() in self._sequences)
         scheme = map_scheme(colouring.scheme)
+        # Rows a later row always overrides can never colour anything (trap T9). Not an error:
+        # row order is the user's (Q80). Listed so a dead legend row is visible, not silent.
+        shadowed = shadowed_entries(colouring.scheme, colouring.clade_set, colouring.group_set)
         provenance = {
             "source": "store",
             "scheme": scheme.name,
             "user_tables": {str(i.path): i.sha256 for i in colouring.inputs},
+            "matching_rules": self.rules.provenance(),
             "coloured": dict(counts.coloured),
             "uncoloured": dict(counts.uncoloured),
+            "shadowed_rows": [str(s) for s in shadowed],
         }
         return ChartColours(scheme, tuple(labels), tuple(sequenced), provenance)
 

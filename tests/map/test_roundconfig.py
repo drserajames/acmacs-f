@@ -111,9 +111,7 @@ STORE_COLOURING = """
 source = "store"
 acmacs_data = "shared/acmacs-data"
 nomenclature = "shared/nomenclature"
-passage_rules = "rules/passage.tsv"
-lab_submitters = "rules/submitters.tsv"
-lab_codes = "rules/labs.tsv"
+af_data = "shared/acmacs-f-data"
 """
 
 
@@ -127,8 +125,7 @@ def test_store_colouring_resolves_its_paths(tmp_path: Path) -> None:
     c = config.colouring
     assert c.source == "store"
     assert c.acmacs_data == (tmp_path / "shared/acmacs-data").resolve()
-    assert c.lab_codes == (tmp_path / "rules/labs.tsv").resolve()
-    assert c.equivalents is None
+    assert c.af_data == (tmp_path / "shared/acmacs-f-data").resolve()
 
 
 def test_colouring_source_must_be_said(tmp_path: Path) -> None:
@@ -138,14 +135,8 @@ def test_colouring_source_must_be_said(tmp_path: Path) -> None:
 
 
 def test_store_colouring_needs_its_inputs(tmp_path: Path) -> None:
-    text = GOOD + STORE_COLOURING.replace('passage_rules = "rules/passage.tsv"\n', "")
-    with pytest.raises(ConfigError, match="needs passage_rules"):
-        load_maps_config(write(tmp_path, text))
-
-
-def test_submitters_need_lab_codes(tmp_path: Path) -> None:
-    text = GOOD + STORE_COLOURING.replace('lab_codes = "rules/labs.tsv"\n', "")
-    with pytest.raises(ConfigError, match="needs colouring.lab_codes"):
+    text = GOOD + STORE_COLOURING.replace('af_data = "shared/acmacs-f-data"\n', "")
+    with pytest.raises(ConfigError, match="needs af_data"):
         load_maps_config(write(tmp_path, text))
 
 

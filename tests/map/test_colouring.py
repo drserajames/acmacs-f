@@ -15,9 +15,11 @@ from af.map.colouring import (
     labels_for,
     map_scheme,
 )
+from af.seq.matching_rules import matching_rules
 from af.serology.joins import PreparationSequence
 from af.serology.outputs import AlignedSequences, SubtypeColouring
 from tests.clades.synthetic import build_clone, load_synthetic
+from tests.seq.test_matching_rules import write_af_data
 
 
 def scheme(*entries: ColourEntry) -> CladeColourScheme:
@@ -88,6 +90,7 @@ def test_chart_antigens_take_the_shared_choice(tmp_path: Path) -> None:
         {("EPI_1", "A1"): AlignedSequence("M"), ("EPI_2", "A2"): AlignedSequence("M")}
     )
     colours._colourings = {(sub, "test"): SubtypeColouring(s, clade_set)}
+    colours.rules = matching_rules(write_af_data(tmp_path / "af-data"))
 
     got = colours.for_chart(chart, "test")
     assert got.labels == (frozenset({"P.1"}), frozenset({"P"}), frozenset())
@@ -95,3 +98,5 @@ def test_chart_antigens_take_the_shared_choice(tmp_path: Path) -> None:
     painted = [got.scheme.paint(lb) for lb in got.labels]
     assert [row.colour if row else None for row in painted] == ["#0000aa", "#aa0000", None]
     assert got.provenance["uncoloured"] == {"no sequence": 1}
+    assert got.provenance["shadowed_rows"] == []
+    assert len(got.provenance["matching_rules"]) == 5  # every rule table, with its hash
