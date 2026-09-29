@@ -67,6 +67,10 @@ LAB_NUMBER_COLLISION = "match.lab-number-collision"
 LOCATION_EQUIVALENT = "match.location-equivalent"
 REASSORTANT = "match.reassortant"
 NO_MATCH = "match.none"
+# How a refused name tie was coloured (Sarah, Q81): every tied candidate gave the same colour,
+# so none had to be chosen; or they split and ae's rank chose one (see :func:`ae_ranked`).
+TIE_AGREES = "match.tie-agrees"
+TIE_RANKED = "match.tie-ranked"
 DOUBTFUL = frozenset({EPI_NAME_DIFFERS, SEVERAL_ACCESSIONS, EGG_WITHOUT_EGG_SEQUENCE,
                       AMBIGUOUS, REASSORTANT})  # fmt: skip
 
@@ -128,6 +132,10 @@ class Match:
     chosen: Candidate | None
     candidates: tuple[Candidate, ...]
     flags: tuple[str, ...] = ()
+    # A refused name tie (``match.ambiguous``): the candidates it was among, and the one ae's
+    # rank would take. Nothing is chosen; colouring may use them (Sarah, Q81).
+    tied: tuple[Candidate, ...] = ()
+    ranked: Candidate | None = None
 
     @property
     def doubtful(self) -> bool:
@@ -178,11 +186,12 @@ class SequenceIndex:
         epi_isl: str = "",
         reassortant: str = "",
         lab: str = "",
+        passage: str = "",
     ) -> Match:
         """The sequence for one antigen; ``antigen_class`` is egg, cell, original or unknown.
 
         ``lab`` is the lab whose table the antigen is in; it breaks a name tie only through
-        ``submitters``.
+        ``submitters``. ``passage`` (the antigen's own) only ranks a tie that stays refused.
         """
         flags: list[str] = [REASSORTANT] if reassortant else []
         if epi_isl:
@@ -195,9 +204,9 @@ class SequenceIndex:
         key = name_key(name)
         found = self.by_name.get(key, []) if key is not None else []
         own = self.submitters.get(lab, frozenset())
-        result = self._from_name(found, antigen_class, flags, own)
+        result = self._from_name(found, antigen_class, flags, own, passage)
         if not found and key is not None and (lab, key[0]) in self.equivalents:
-            result = self._from_equivalent(result, key, lab, antigen_class, own)
+            result = self._from_equivalent(result, key, lab, antigen_class, own, passage)
         if result.chosen is None and key is not None and lab in self.number_rules:
             result = self._from_number(result, key, lab, antigen_class)
         self.counts.update(result.flags or ["match.clean"])
@@ -210,7 +219,12 @@ class SequenceIndex:
         return Match("epi_isl", chosen, tuple(found), tuple(flags))
 
     def _from_name(
-        self, found: list[Candidate], antigen_class: str, flags: list[str], own: frozenset[str]
+        self,
+        found: list[Candidate],
+        antigen_class: str,
+        flags: list[str],
+        own: frozenset[str],
+        passage: str = "",
     ) -> Match:
         if not found:
             return Match(None, None, (), (*flags, NO_MATCH))
@@ -220,6 +234,9 @@ class SequenceIndex:
             flags.append(OWN_LAB)  # a tie only the antigen's own lab's submission settles
             tier = mine
         chosen = _one_sequence(tier, flags, AMBIGUOUS)
+        if chosen is None:
+            ranked = ae_ranked(tier, passage, antigen_class)
+            return Match("name", None, tuple(found), tuple(flags), tuple(tier), ranked)
         return Match("name", chosen, tuple(found), tuple(flags))
 
     def _from_equivalent(
@@ -229,6 +246,7 @@ class SequenceIndex:
         lab: str,
         antigen_class: str,
         own: frozenset[str],
+        passage: str,
     ) -> Match:
         """The name again under each GISAID spelling of the lab's location, when it found none."""
         location, isolate, year = key
@@ -240,11 +258,10 @@ class SequenceIndex:
         if not found:
             return result
         flags = [f for f in result.flags if f != NO_MATCH]
-        found_result = self._from_name(found, antigen_class, flags, own)
-        return Match(
-            "equivalent", found_result.chosen, found_result.candidates,
-            (*found_result.flags, LOCATION_EQUIVALENT),
-        )  # fmt: skip
+        found_result = self._from_name(found, antigen_class, flags, own, passage)
+        return replace(
+            found_result, method="equivalent", flags=(*found_result.flags, LOCATION_EQUIVALENT)
+        )
 
     def _from_number(
         self, result: Match, key: tuple[str, str, str], lab: str, antigen_class: str
@@ -296,6 +313,63 @@ def _preferred(found: list[Candidate], antigen_class: str, flags: list[str]) -> 
             return by_class[ORIGINAL]
         return found
     return by_class[antigen_class] or found
+
+
+_STEP = re.compile(r"([A-Z]+)\s*(\d+|X|\?)?")
+
+
+def passage_steps(text: str) -> tuple[tuple[str, str], ...]:
+    """A passage as (name, count) steps, read loosely from free text ("MDCK1/SIAT2", "E3").
+
+    Only for ranking a tie: GISAID passages are free text, and a string this cannot read
+    fully still yields its last step, which is what the rank compares.
+    """
+    return tuple((name, count or "") for name, count in _STEP.findall(text.upper()))
+
+
+def ae_passage_rank(antigen: str, antigen_class: str, candidate: Candidate) -> int:
+    """ae's passage similarity (``SeqdbSelected::filter_name``): lower is closer.
+
+    Identical 0; either unknown 90; same last step (name and count) 10; same last step name 20;
+    same egg/non-egg class 50; otherwise 90. The egg test uses af's classes, so a GISAID "C1"
+    and a table's "MDCK1" rank as same-class (50) where ae, knowing C is MDCK, ranks them 10.
+    """
+    mine, theirs = passage_steps(antigen), passage_steps(candidate.passage)
+    if mine and mine == theirs:
+        return 0
+    if not mine or not theirs:
+        return 90
+    if mine[-1] == theirs[-1]:
+        return 10
+    if mine[-1][0] == theirs[-1][0]:
+        return 20
+    if (antigen_class == EGG) == (candidate.passage_class == EGG):
+        return 50
+    return 90
+
+
+def ae_ranked(tier: Sequence[Candidate], passage: str, antigen_class: str) -> Candidate | None:
+    """The candidate ae would take from a tie: best passage rank, then the lowest EPI_ISL number
+    and accession, so the choice never depends on input order (design rule 8; ae's
+    std::sort breaks equal ranks arbitrarily). ae's reassortant term is left out: af keys
+    candidates by name, and a reassortant's GISAID name never shares a key with its parent's.
+    """
+    if not tier:
+        return None
+    return min(
+        tier,
+        key=lambda c: (
+            ae_passage_rank(passage, antigen_class, c),
+            epi_order(c.epi_isl),
+            c.accession,
+        ),
+    )
+
+
+def epi_order(epi_isl: str) -> tuple[int, str]:
+    """Sort key for EPI_ISL ids by their number (EPI_ISL_9 before EPI_ISL_10); others last."""
+    digits = epi_isl.rsplit("_", 1)[-1]
+    return (int(digits), epi_isl) if digits.isdigit() else (1 << 62, epi_isl)
 
 
 def _one_sequence(tier: list[Candidate], flags: list[str], ambiguous_flag: str) -> Candidate | None:

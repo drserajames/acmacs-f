@@ -111,6 +111,7 @@ def link_sequences(
         CREATE OR REPLACE VIEW antigen_sequences AS
         SELECT m.table_id, m.position, m.method, m.flags, m.doubtful, m.epi_isl, m.accession,
                m.dataset, coalesce(a.sequence_pairing, '') AS pairing,
+               m.tied, m.ranked_epi_isl, m.ranked_accession,
                CASE WHEN m.accession IS NULL THEN 'unmatched'
                     WHEN m.doubtful THEN 'doubtful' ELSE 'matched' END AS status,
                i.country, i.region, i.place,
@@ -173,6 +174,11 @@ def _match_rows(
         out["doubtful"].append(
             bool(match is not None and (match.doubtful or SEVERAL_DATASETS in match.flags))
         )
+        tied = match.tied if match is not None else ()
+        ranked = match.ranked if match is not None else None
+        out["tied"].append([{"epi_isl": c.epi_isl, "accession": c.accession} for c in tied])
+        out["ranked_epi_isl"].append(ranked.epi_isl if ranked else None)
+        out["ranked_accession"].append(ranked.accession if ranked else None)
     table = pa.table({k: pa.array(v, type=_MATCH_COLUMNS[k]) for k, v in out.items()})
     con.register("antigen_matches_arrow", table)
     con.execute("CREATE OR REPLACE TABLE antigen_matches AS SELECT * FROM antigen_matches_arrow")
@@ -195,6 +201,7 @@ def _match_row(
             epi_isl=row.get("epi_isl") or "",
             reassortant=row.get("reassortant") or "",
             lab=row.get("table_lab") or "",
+            passage=row.get("passage") or "",
         )
         for d in datasets
     ]
@@ -215,6 +222,10 @@ _MATCH_COLUMNS: dict[str, pa.DataType] = {
     "dataset": pa.string(),
     "flags": pa.list_(pa.string()),
     "doubtful": pa.bool_(),
+    # a refused name tie: the candidates it was among and ae's rank-first (Q81); else empty
+    "tied": pa.list_(pa.struct([("epi_isl", pa.string()), ("accession", pa.string())])),
+    "ranked_epi_isl": pa.string(),
+    "ranked_accession": pa.string(),
 }
 
 
@@ -252,6 +263,15 @@ def _parquet(paths: Sequence[Path]) -> str:
 
 
 @dataclass(frozen=True)
+class TiedSequence:
+    """One candidate of a refused name tie, with its clade as the clade store gives it."""
+
+    epi_isl: str
+    accession: str
+    clade: str | None  # None: no clade row; "": the nomenclature names none
+
+
+@dataclass(frozen=True)
 class PreparationSequence:
     """The one sequence a preparation's table rows point at, or why there is none."""
 
@@ -260,6 +280,10 @@ class PreparationSequence:
     clade: str | None
     pairing: str  # "exact" if any row is an exact pairing, else "proxy" or ""
     conflict: bool  # its rows point at different sequences: none is chosen
+    # No row matched, and its rows refused a name tie (Sarah, Q81): every candidate, and the
+    # one ae's rank takes. Colouring uses them only when the candidates agree, or ranks.
+    tied: tuple[TiedSequence, ...] = ()
+    ranked: TiedSequence | None = None
 
 
 PreparationKey = tuple[
@@ -275,6 +299,11 @@ def preparation_sequences(con: Any) -> dict[PreparationKey, PreparationSequence]
     A preparation appears in many tables; normally every row names the same isolate. When
     rows name different sequences the preparation is marked ``conflict`` and gets none,
     rather than one picked by table order.
+
+    A preparation none of whose rows matched, but whose rows refused a name tie and have no
+    other doubt, is included with no sequence and its ``tied`` candidates (Sarah, Q81): the
+    union over its rows, and as ``ranked`` the lowest by EPI_ISL number of its rows' ranked
+    picks (rows of one preparation normally rank the same candidate).
     """
     rows = con.execute(
         """
@@ -297,6 +326,59 @@ def preparation_sequences(con: Any) -> dict[PreparationKey, PreparationSequence]
             out[key] = PreparationSequence(None, None, None, pairing, conflict=True)
         else:
             out[key] = PreparationSequence(epi, acc, clade, pairing, conflict=False)
+    for key, tied in _tied_preparations(con).items():
+        out.setdefault(key, tied)
+    return out
+
+
+def _tied_preparations(con: Any) -> dict[PreparationKey, PreparationSequence]:
+    """Preparations whose rows refused a name tie and carry no other doubt."""
+    from af.seq.matching import AMBIGUOUS, DOUBTFUL, epi_order
+
+    others = ", ".join(f"'{flag}'" for flag in sorted(DOUBTFUL - {AMBIGUOUS}))
+    where = f"""s.status = 'unmatched' AND list_contains(s.flags, '{AMBIGUOUS}')
+                AND len(list_filter(s.flags, f -> f IN ({others}))) = 0"""
+    rows = con.execute(
+        f"""
+        SELECT t.subtype, a.name, a.reassortant, a.annotations, a.identity_passage,
+               s.tied, s.ranked_epi_isl, s.ranked_accession, s.pairing
+        FROM antigen_sequences s
+        JOIN antigens a ON a.table_id = s.table_id AND a.position = s.position
+        JOIN tables t ON t.table_id = s.table_id
+        WHERE {where}
+        """
+    ).fetchall()
+    clade_of = {
+        (epi, acc): clade
+        for epi, acc, clade in con.execute(
+            f"""
+            SELECT c.epi_isl, c.accession,
+                   CASE WHEN k.epi_isl IS NOT NULL THEN coalesce(k.clade, '') END
+            FROM (SELECT DISTINCT unnest(s.tied, recursive := true)
+                  FROM antigen_sequences s WHERE {where}) c
+            LEFT JOIN clade_rows k ON k.epi_isl = c.epi_isl AND k.accession = c.accession
+            """
+        ).fetchall()
+    }
+    tied: dict[PreparationKey, set[tuple[str, str]]] = {}
+    ranked: dict[PreparationKey, set[tuple[str, str]]] = {}
+    pairings: dict[PreparationKey, set[str]] = {}
+    for subtype, name, reassortant, annots, passage, cands, epi, acc, pairing in rows:
+        key = (subtype, name, reassortant, tuple(annots), passage)
+        tied.setdefault(key, set()).update((c["epi_isl"], c["accession"]) for c in cands)
+        if epi is not None:
+            ranked.setdefault(key, set()).add((epi, acc))
+        pairings.setdefault(key, set()).add(pairing)
+    out: dict[PreparationKey, PreparationSequence] = {}
+    for key, pairs in tied.items():
+        order = sorted(pairs, key=lambda ea: (epi_order(ea[0]), ea[1]))
+        seqs = tuple(TiedSequence(epi, acc, clade_of.get((epi, acc))) for epi, acc in order)
+        pick = min(ranked.get(key, ()), key=lambda ea: (epi_order(ea[0]), ea[1]), default=None)
+        pairing = next((p for p in ("exact", "proxy") if p in pairings[key]), "")
+        out[key] = PreparationSequence(
+            None, None, None, pairing, conflict=False, tied=seqs,
+            ranked=next((t for t in seqs if (t.epi_isl, t.accession) == pick), None),
+        )  # fmt: skip
     return out
 
 
