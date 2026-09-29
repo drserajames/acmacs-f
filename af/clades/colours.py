@@ -11,21 +11,23 @@ in acmacs-f-data as plain tables, one per scheme::
 
 ``key`` is a clade name or a group name (:mod:`af.clades.groups`); ``legend`` is what the
 figure prints, which is not always the key — today's tables relabel clades on the figure
-while keeping the old key. ``order`` is the legend's order and nothing else.
+while keeping the old key. ``order`` is the row order: it orders the legend **and decides
+which entry colours a virus**.
 
-**Which entry colours a virus is decided by specificity, not by row order.** Today the
-rule is "the later row wins", so a scheme that lists a child clade above its parent
-silently draws the child in the parent's colour, and the only defence is remembering to
-order the file correctly (INVENTORY E, trap T9; the H1 table carries a comment doing
-exactly this by hand). Here the most specific entry wins:
+**The last matching row wins** (Sarah, 29 Sep 2026, Q80: "keep the order, maps & geo
+should match"). Entries are walked in ``order``; an entry matches a virus when it is a
+group the virus belongs to, or a clade the virus's clade lies within; the last one that
+matches colours it, and a virus no entry matches is not drawn. This is the rule the round's
+tables were written for, so maps and geo draw what the round drew. A rule chosen by
+specificity instead (groups first, then the deepest clade) was built first and measured
+against the round on 18 maps: it repainted most of one current clade with a legacy group
+that the tables deliberately list above it.
 
-1. a group the virus matches, most specific group first (groups are a deliberate,
-   narrower statement than a clade);
-2. otherwise the deepest clade entry the virus's clade lies within;
-3. otherwise nothing — the virus is not drawn by this scheme.
-
-Order in the file therefore cannot change which colour a virus gets, only the order of
-the legend. Two entries that would tie are a load error rather than a silent winner.
+The cost is the trap this rule has always had (INVENTORY E, trap T9): a row listed above a
+broader row can never win — a child clade above its parent is always drawn in the parent's
+colour. That is the user's content to order, so it is not an error; but a row that can
+never colour anything is reported (:func:`shadowed_entries`), so it cannot go unnoticed.
+Two rows with the same ``order`` would leave the winner undefined, and are a load error.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from af.clades.groups import GroupSet
+from af.clades.groups import Group, GroupSet
 from af.clades.nomenclature import CladeSet
 from af.clades.sequence import AlignedSequence
 
@@ -89,10 +91,7 @@ class ColourScheme:
 
     def legend(self) -> tuple[tuple[str, str], ...]:
         """(label, colour) in the order the file gives, for drawing the legend."""
-        return tuple(
-            (entry.legend, entry.colour)
-            for entry in sorted(self.entries, key=lambda entry: entry.order)
-        )
+        return tuple((entry.legend, entry.colour) for entry in self.in_order())
 
     def entry_for(
         self,
@@ -101,24 +100,35 @@ class ColourScheme:
         clade_set: CladeSet,
         group_set: GroupSet | None = None,
     ) -> ColourEntry | None:
-        """The entry that colours this virus: most specific wins, never row order."""
-        by_key = {entry.key: entry for entry in self.entries}
-        if group_set is not None:
-            for name in group_set.matching(clade, sequence, clade_set):
-                if name in by_key:
-                    return by_key[name]
-        if clade is None:
-            return None
-        candidates = [
-            entry
-            for entry in self.entries
-            if not entry.is_group
-            and entry.key in clade_set
-            and clade_set.is_within(clade, entry.key)
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda entry: clade_set.depth(entry.key))
+        """The entry that colours this virus: the last matching row wins (Q80).
+
+        A scheme with group entries needs the groups it was loaded with; without them a
+        group row would silently never match, so that is an error.
+        """
+        has_groups = any(entry.is_group for entry in self.entries)
+        if has_groups and group_set is None:
+            raise ValueError(
+                f"colour scheme {self.subtype} {self.name} has group entries; "
+                "entry_for needs the group set it was loaded with"
+            )
+        in_groups = (
+            set(group_set.matching(clade, sequence, clade_set))
+            if has_groups and group_set is not None
+            else set()
+        )
+        chosen: ColourEntry | None = None
+        for entry in self.in_order():
+            if entry.is_group:
+                matched = entry.key in in_groups
+            else:
+                matched = clade is not None and clade_set.is_within(clade, entry.key)
+            if matched:
+                chosen = entry
+        return chosen
+
+    def in_order(self) -> tuple[ColourEntry, ...]:
+        """Entries by ``order``: the legend's order and the order precedence is decided in."""
+        return tuple(sorted(self.entries, key=lambda entry: entry.order))
 
 
 def load_colour_scheme(
@@ -235,3 +245,65 @@ def unused_entries(scheme: ColourScheme, used: Mapping[str, int]) -> tuple[str, 
     (design rule 1).
     """
     return tuple(entry.key for entry in scheme.entries if not used.get(entry.key))
+
+
+@dataclass(frozen=True)
+class Shadowed:
+    """A row that can never colour anything, and the later row that always overrides it."""
+
+    entry: ColourEntry
+    by: ColourEntry
+
+    def __str__(self) -> str:
+        return (
+            f"row {self.entry.order} {self.entry.key!r} is always overridden by "
+            f"row {self.by.order} {self.by.key!r}"
+        )
+
+
+def shadowed_entries(
+    scheme: ColourScheme, clade_set: CladeSet, group_set: GroupSet | None = None
+) -> tuple[Shadowed, ...]:
+    """Rows that can never win under "the last matching row wins", each with its overrider.
+
+    A row is shadowed when a later row matches every virus it matches: a later clade that
+    contains the row's clade (or the group's anchor), or a later group whose anchor
+    contains the row's anchor and whose substitutions are a subset of the row's. Reported,
+    not fatal — ordering is the user's (Q80) — but a shadowed row is dead weight in the
+    legend and is how trap T9 shows itself.
+    """
+    groups = {group.name: group for group in group_set} if group_set is not None else {}
+    ordered = scheme.in_order()
+    found: list[Shadowed] = []
+    for index, entry in enumerate(ordered):
+        for later in reversed(ordered[index + 1 :]):
+            if _covers(later, entry, clade_set, groups):
+                found.append(Shadowed(entry, later))
+                break
+    return tuple(found)
+
+
+def _covers(
+    later: ColourEntry,
+    earlier: ColourEntry,
+    clade_set: CladeSet,
+    groups: Mapping[str, Group],
+) -> bool:
+    """True when every virus ``earlier`` matches is also matched by ``later``."""
+    earlier_group = groups.get(earlier.key) if earlier.is_group else None
+    earlier_anchor = earlier_group.anchor if earlier_group is not None else earlier.key
+    if earlier.is_group and earlier_group is None:
+        return False
+    if not later.is_group:
+        # a clade row covers anything confined to a clade within it; an unanchored group
+        # (substitutions alone) is confined to no clade, so no clade row covers it
+        return earlier_anchor is not None and clade_set.is_within(earlier_anchor, later.key)
+    later_group = groups.get(later.key)
+    if later_group is None:
+        return False
+    if later_group.anchor is not None and (
+        earlier_anchor is None or not clade_set.is_within(earlier_anchor, later_group.anchor)
+    ):
+        return False
+    required = set(earlier_group.substitutions) if earlier_group is not None else set()
+    return set(later_group.substitutions) <= required

@@ -7,12 +7,14 @@ from pathlib import Path
 import pytest
 
 from af.clades.colours import (
+    ColourScheme,
     ColourSchemeError,
     load_colour_scheme,
     load_colour_schemes,
+    shadowed_entries,
     unused_entries,
 )
-from af.clades.groups import load_groups
+from af.clades.groups import GroupSet, load_groups
 from af.clades.nomenclature import CladeSet
 from af.clades.sequence import AlignedSequence
 
@@ -48,33 +50,101 @@ def test_reads_a_scheme(tmp_path: Path) -> None:
     assert scheme.legend() == (("P", "#112233"), ("P.1 (old)", "#445566"))
 
 
-def test_the_most_specific_clade_wins_whatever_the_row_order(tmp_path: Path) -> None:
-    """Today the later row wins, so a scheme listing a child above its parent silently
-    draws the child in the parent's colour (trap T9). Order must not decide this."""
+def test_the_last_matching_row_wins(tmp_path: Path) -> None:
+    """Q80 (Sarah, 29 Sep 2026): the round's rule, so maps and geo draw what it drew. A
+    child listed above its parent is drawn in the parent's colour (trap T9, reported by
+    shadowed_entries rather than refused)."""
     clade_set = synthetic(tmp_path)
     child_first = write_scheme(tmp_path / "a", "s", "1\tP.1\tP.1\t#445566", "2\tP\tP\t#112233")
     parent_first = write_scheme(tmp_path / "b", "s", "1\tP\tP\t#112233", "2\tP.1\tP.1\t#445566")
-    for path in (child_first, parent_first):
+    for path, colour in ((child_first, "#112233"), (parent_first, "#445566")):
         scheme = load_colour_scheme(path, SUBTYPE, clade_set)
         entry = scheme.entry_for("P.1.1", sequence(), clade_set)
-        assert entry is not None and entry.colour == "#445566"
+        assert entry is not None and entry.colour == colour
 
 
-def test_a_group_beats_a_clade(tmp_path: Path) -> None:
+def test_order_is_the_order_column_not_the_file_line(tmp_path: Path) -> None:
     clade_set = synthetic(tmp_path)
+    path = write_scheme(tmp_path / "s", "s", "2\tP\tP\t#112233", "1\tP.1\tP.1\t#445566")
+    scheme = load_colour_scheme(path, SUBTYPE, clade_set)
+    entry = scheme.entry_for("P.1", sequence(), clade_set)
+    assert entry is not None and entry.key == "P"
+    assert [label for label, _ in scheme.legend()] == ["P.1", "P"]
+
+
+def group_set_p1_20v(tmp_path: Path, clade_set: CladeSet) -> GroupSet:
     groups_path = tmp_path / "groups.tsv"
     groups_path.write_text(
         f"subtype\tgroup\tanchor\tsubstitutions\tnote\n{SUBTYPE}\tP.1 20V\tP.1\t20V\t\n"
     )
-    group_set = load_groups(groups_path, {SUBTYPE: clade_set})[SUBTYPE]
+    return load_groups(groups_path, {SUBTYPE: clade_set})[SUBTYPE]
+
+
+def colour_of(
+    scheme: ColourScheme,
+    clade: str,
+    virus: AlignedSequence,
+    clade_set: CladeSet,
+    group_set: GroupSet | None = None,
+) -> str | None:
+    entry = scheme.entry_for(clade, virus, clade_set, group_set)
+    return entry.colour if entry is not None else None
+
+
+def test_a_group_or_a_clade_wins_by_row_order(tmp_path: Path) -> None:
+    """A group is not privileged: listed above its clade, the clade row wins, as in the
+    round's tables (where this kept a current clade from taking a legacy group's colour)."""
+    clade_set = synthetic(tmp_path)
+    group_set = group_set_p1_20v(tmp_path, clade_set)
+    group_last = write_scheme(
+        tmp_path / "a", "s", "1\tP.1\tP.1\t#445566", "2\tP.1 20V\tP.1 20V\t#778899"
+    )
+    group_first = write_scheme(
+        tmp_path / "b", "s", "1\tP.1 20V\tP.1 20V\t#778899", "2\tP.1\tP.1\t#445566"
+    )
+    last = load_colour_scheme(group_last, SUBTYPE, clade_set, group_set)
+    first = load_colour_scheme(group_first, SUBTYPE, clade_set, group_set)
+    with_substitution = sequence(p20="V")
+    assert colour_of(last, "P.1", with_substitution, clade_set, group_set) == "#778899"
+    assert colour_of(last, "P.1", sequence(), clade_set, group_set) == "#445566"
+    assert colour_of(first, "P.1", with_substitution, clade_set, group_set) == "#445566"
+
+
+def test_a_scheme_with_groups_needs_its_group_set(tmp_path: Path) -> None:
+    """Without the groups a group row would silently never match."""
+    clade_set = synthetic(tmp_path)
+    group_set = group_set_p1_20v(tmp_path, clade_set)
+    path = write_scheme(tmp_path / "s", "s", "1\tP.1 20V\tP.1 20V\t#778899")
+    scheme = load_colour_scheme(path, SUBTYPE, clade_set, group_set)
+    with pytest.raises(ValueError, match="needs the group set"):
+        scheme.entry_for("P.1", sequence(p20="V"), clade_set)
+
+
+def test_shadowed_rows_are_reported(tmp_path: Path) -> None:
+    clade_set = synthetic(tmp_path)
+    group_set = group_set_p1_20v(tmp_path, clade_set)
     path = write_scheme(
-        tmp_path / "s", "report", "1\tP.1\tP.1\t#445566", "2\tP.1 20V\tP.1 20V\t#778899"
+        tmp_path / "s",
+        "s",
+        "1\tP.1 20V\tP.1 20V\t#778899",  # shadowed: every member is in P.1, listed later
+        "2\tP.1\tP.1\t#445566",
+        "3\tP.2\tP.2\t#aabbcc",  # not shadowed: P.1 does not contain P.2
+        "4\tP.1.1\tP.1.1\t#ddeeff",  # not shadowed: nothing later
     )
     scheme = load_colour_scheme(path, SUBTYPE, clade_set, group_set)
-    with_substitution = scheme.entry_for("P.1", sequence(p20="V"), clade_set, group_set)
-    without = scheme.entry_for("P.1", sequence(), clade_set, group_set)
-    assert with_substitution is not None and with_substitution.colour == "#778899"
-    assert without is not None and without.colour == "#445566"
+    [shadowed] = shadowed_entries(scheme, clade_set, group_set)
+    assert (shadowed.entry.key, shadowed.by.key) == ("P.1 20V", "P.1")
+    assert "row 1 'P.1 20V' is always overridden by row 2 'P.1'" in str(shadowed)
+
+
+def test_a_later_group_shadows_only_what_it_always_matches(tmp_path: Path) -> None:
+    """A group with a substitution does not match every virus of its clade, so it cannot
+    shadow the clade row above it; the clade row above a parent-clade row can."""
+    clade_set = synthetic(tmp_path)
+    group_set = group_set_p1_20v(tmp_path, clade_set)
+    path = write_scheme(tmp_path / "s", "s", "1\tP.1\tP.1\t#445566", "2\tP.1 20V\tP.1 20V\t#778899")
+    scheme = load_colour_scheme(path, SUBTYPE, clade_set, group_set)
+    assert shadowed_entries(scheme, clade_set, group_set) == ()
 
 
 def test_a_virus_no_entry_covers_is_not_drawn(tmp_path: Path) -> None:
