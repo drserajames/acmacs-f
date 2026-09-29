@@ -451,6 +451,27 @@ def _depth_checks(depth: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _depth_notes(slot: str, dep: dict[str, Any]) -> list[str]:
+    """What a reader needs beside the depth columns: units, how many leaves moved, and which."""
+    out = []
+    unit = dep.get("unit", {})
+    ru, nu = unit.get("ref"), unit.get("new")
+    if ru and nu and ru != nu:
+        out.append(f"- {slot}: depth units differ (ref {ru}, new {nu}): the depth scale converts "
+                   "between them; only the scaled difference compares shape")  # fmt: skip
+    elif bool(ru) != bool(nu):
+        side, u = ("ref", ru) if ru else ("new", nu)
+        out.append(f"- {slot}: depth unit recorded only in {side} ({u}); the other side does not "
+                   "say, so the depth scale is the only check that the units agree")  # fmt: skip
+    if "n_differ" in dep:
+        out.append(f"- {slot}: depth differs on {dep['n_differ']} of {dep['n_leaves']} leaves")
+    if dep["movers"]:
+        out.append(f"- {slot}: largest depth changes after scaling new by {dep['scale']:.4f}: "
+                   + ", ".join(f"{m['name']} {m['ref']:.4g} -> {m['new']:.4g}"
+                               for m in dep["movers"]))  # fmt: skip
+    return out
+
+
 def _cell(check: dict[str, Any]) -> str:
     if check.get("not_tested"):
         return "n/t"
@@ -516,17 +537,8 @@ def markdown(
                     notes.append(f"- {row['slot']}: {side} sections whose bounds are not drawn "
                                  f"leaves: {sec['unresolved'][side]}")  # fmt: skip
             dep = d.get("depth", {})
-            unit = dep.get("unit", {})
-            if dep.get("tested") and unit.get("ref") != unit.get("new"):
-                ru, nu = (unit.get(side) or "not recorded" for side in ("ref", "new"))
-                notes.append(f"- {row['slot']}: depth units differ (ref {ru}, new {nu}): the depth "
-                             "scale converts between them; only the scaled difference compares "
-                             "shape")  # fmt: skip
-            if dep.get("tested") and dep["movers"]:
-                notes.append(f"- {row['slot']}: largest depth changes after scaling new by "
-                             f"{dep['scale']:.4f}: " + ", ".join(
-                                 f"{m['name']} {m['ref']:.4g} -> {m['new']:.4g}"
-                                 for m in dep["movers"]))  # fmt: skip
+            if dep.get("tested"):
+                notes += _depth_notes(row["slot"], dep)
             if sec["only_ref"] or sec["only_new"]:
                 notes.append(f"- {row['slot']}: sections only in ref {sec['only_ref']}, "
                              f"only in new {sec['only_new']}")  # fmt: skip
