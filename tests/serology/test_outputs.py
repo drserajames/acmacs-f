@@ -18,7 +18,7 @@ from af.tables.identity import Manifest
 from af.tables.store import publish
 from tests.clades.synthetic import build_clone, load_synthetic
 from tests.seq.test_locations import COUNTRIES, PLACE_COLUMNS, PLACES, REGIONS
-from tests.seq.test_matching_rules import write_af_data
+from tests.seq.test_matching_rules import passage_matcher, write_af_data
 
 NOW = datetime.datetime(2026, 9, 25, tzinfo=datetime.UTC)
 H3 = "A(H3N2)"
@@ -156,7 +156,7 @@ def test_geo_colours_from_clade_store_and_scheme(tmp_path: Path, syn: Any) -> No
     )  # fmt: skip
     assert report.links is not None and report.links.by_status["matched"] == 1
     # the matcher's tables are in the report by content hash, as the colour tables are
-    assert report.matching_inputs == rules.provenance() and len(report.matching_inputs) == 5
+    assert report.matching_inputs == rules.provenance() and len(report.matching_inputs) == 6
     assert report.matching_rules == rules.counts()
     assert report.colours[H3].coloured == {"Clade P.1": 1}
     assert report.colours[H3].uncoloured == {"no sequence": 1}
@@ -186,7 +186,10 @@ def test_clade_tables_behind_the_sequence_store_are_reported(tmp_path: Path, syn
         )  # fmt: skip
     passages = tmp_path / "passage_classes.tsv"
     passages.write_text("pattern\tclass\treason\nSIAT\tcell\ttest\n")
-    rules = MatchingRules(tuple(read_passage_rules(passages)), frozenset({"LABX"}), {}, {}, (), ())
+    rules = MatchingRules(
+        tuple(read_passage_rules(passages)), frozenset({"LABX"}), {}, {}, (), (),
+        passage_matcher(tmp_path),
+    )  # fmt: skip
     con = query.connect(store.resolve(store.current("serology", "all")))
     counts = link_from_store(con, store, rules, with_clades=True)
     assert counts.clades_behind == {}  # labels the current sequences version

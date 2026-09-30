@@ -19,6 +19,12 @@ ae's rank takes (Sarah, Q81: "Agree + ae's rank for splits"). Both are counted i
 ``ColourCounts.ties``, so a figure says how many of its dots came from ties. Dots coloured
 through a doubtful match ae uses (egg antigen with only a cell sequence, reassortant, lab
 EPI_ISL whose name differs; Sarah, Q81 D) are counted per doubt in ``ColourCounts.doubtful``.
+
+A preparation whose table rows name two GISAID records of one virus is coloured by the record
+whose passage matches its own; when none or several match, by the records only if they agree
+(Sarah, Q81, 30 Sep: "Passage-matched record"). Counted in ``ColourCounts.rows``. Passage stays
+part of antigen identity: egg and cell preparations are never merged; this chooses only among
+the records one preparation's rows already name.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ from af.clades.groups import GroupSet
 from af.clades.nomenclature import CladeSet
 from af.clades.sequence import AlignedSequence
 from af.seq.matching import TIE_AGREES, TIE_RANKED
-from af.serology.joins import PreparationKey, PreparationSequence
+from af.serology.joins import ROWS_PASSAGE_MATCHED, PreparationKey, PreparationSequence
 from af.serology.query import Preparation
 
 
@@ -53,6 +59,7 @@ class ColourCounts:
     uncoloured: Counter[str] = field(default_factory=Counter)  # reason -> preparations
     ties: Counter[str] = field(default_factory=Counter)  # TIE_AGREES / TIE_RANKED -> preparations
     doubtful: Counter[str] = field(default_factory=Counter)  # doubt flag -> coloured preparations
+    rows: Counter[str] = field(default_factory=Counter)  # ROWS_* resolution -> preparations
 
 
 def dot_styles(
@@ -89,13 +96,25 @@ def dot_styles(
         if linked is None:
             return UNCOLOURED, "no sequence"
         if linked.conflict:
-            return UNCOLOURED, "rows name different sequences"
+            return _rows(linked)
         if linked.pairing == "proxy" and not use_proxies:
             return UNCOLOURED, "proxy pairing not used"
         if linked.tied:
             return _tie(linked)
         assert linked.epi_isl is not None and linked.accession is not None
         return _sequence_style(linked.epi_isl, linked.accession, linked.clade)
+
+    def _rows(linked: PreparationSequence) -> tuple[DotStyle, str]:
+        """Rows naming different records: the passage-matched one, else only if they agree."""
+        if linked.resolution == ROWS_PASSAGE_MATCHED:
+            assert linked.epi_isl is not None and linked.accession is not None
+            counts.rows[ROWS_PASSAGE_MATCHED] += 1
+            return _sequence_style(linked.epi_isl, linked.accession, linked.clade)
+        results = {_sequence_style(a.epi_isl, a.accession, a.clade) for a in linked.alternatives}
+        if len(results) == 1 and linked.resolution:
+            counts.rows[linked.resolution] += 1
+            return results.pop()
+        return UNCOLOURED, "rows name different sequences"
 
     def _tie(linked: PreparationSequence) -> tuple[DotStyle, str]:
         """Every tied sequence styled as if it were the match; agree, or ae's rank decides."""

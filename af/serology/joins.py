@@ -38,6 +38,7 @@ import pyarrow as pa
 
 from af.seq.matching import Match, SequenceIndex
 from af.seq.matching_rules import MatchingRules
+from af.seq.passage_match import PassageMatcher
 from af.serology.store import StoreError
 
 STATUSES = ("matched", "doubtful", "unmatched")
@@ -116,6 +117,7 @@ def link_sequences(
                     WHEN m.doubtful THEN 'doubtful' ELSE 'matched' END AS status,
                i.country, i.region, i.place,
                i.collection_date AS sequence_collection_date,
+               i.passage AS sequence_passage,
                -- the clade store writes NULL where the nomenclature names no clade; here that
                -- is '' so NULL keeps one meaning downstream: no assignment row at all
                CASE WHEN k.epi_isl IS NOT NULL THEN coalesce(k.clade, '') END AS clade,
@@ -287,6 +289,19 @@ class PreparationSequence:
     # The doubts (af.seq.matching.USABLE_DOUBTS) of the rows this came from; empty when a
     # clean match decided it. Colouring counts each (Sarah, Q81 D).
     doubts: tuple[str, ...] = ()
+    # conflict: the records its rows name, and how one was chosen (Sarah, Q81, 30 Sep):
+    # ROWS_PASSAGE_MATCHED (epi_isl/accession/clade are that record), or ROWS_NONE_MATCH /
+    # ROWS_SEVERAL_MATCH (none chosen; colouring uses them only when they agree).
+    alternatives: tuple[TiedSequence, ...] = ()
+    resolution: str = ""
+
+
+#: How a preparation whose rows name different records was resolved (Sarah, Q81, 30 Sep:
+#: "Passage-matched record"). Passage stays part of antigen identity: these choose only which
+#: of the records a preparation's own rows name colours it.
+ROWS_PASSAGE_MATCHED = "rows.passage-matched"
+ROWS_NONE_MATCH = "rows.agree.no-record-matches-passage"
+ROWS_SEVERAL_MATCH = "rows.agree.several-records-match-passage"
 
 
 PreparationKey = tuple[
@@ -299,7 +314,9 @@ _ROWS = """FROM antigen_sequences s
         JOIN tables t ON t.table_id = s.table_id"""
 
 
-def preparation_sequences(con: Any) -> dict[PreparationKey, PreparationSequence]:
+def preparation_sequences(
+    con: Any, passages: PassageMatcher
+) -> dict[PreparationKey, PreparationSequence]:
     """For every preparation (as :func:`af.serology.query.preparations` groups them) that a
     sequence can colour, where it comes from. Needs the ``antigen_sequences`` view.
 
@@ -314,17 +331,22 @@ def preparation_sequences(con: Any) -> dict[PreparationKey, PreparationSequence]
        lowest by EPI_ISL number of its rows' ranked picks (Sarah, Q81).
 
     A preparation appears in many tables; normally every row names the same isolate. When
-    rows name different sequences the preparation is marked ``conflict`` and gets none,
-    rather than one picked by table order.
+    rows name different GISAID records (two deposits of one virus, e.g. its S1 isolate and its
+    S2 passage) the preparation is marked ``conflict``, and takes the record whose passage
+    matches its own (``passages``, :class:`af.seq.passage_match.PassageMatcher`; Sarah, Q81):
+    the one scoring highest, if it is the only one; otherwise none, and colouring falls back to
+    agreement among them. Never one picked by table order. Passage stays part of the
+    preparation's identity: this only chooses among the records its own rows name.
     """
     from af.seq.matching import AMBIGUOUS, DOUBTFUL, USABLE_DOUBTS
 
     refused = _sql_list(DOUBTFUL - USABLE_DOUBTS - {AMBIGUOUS})
     usable = _sql_list(USABLE_DOUBTS)
     no_refused_doubt = f"len(list_filter(s.flags, f -> f IN ({refused}))) = 0"
-    out = _single_sequences(con, "s.status = 'matched'")
+    out = _single_sequences(con, passages, "s.status = 'matched'")
     doubtful = _single_sequences(
         con,
+        passages,
         f"s.status = 'doubtful' AND {no_refused_doubt} "
         f"AND NOT list_contains(s.flags, '{AMBIGUOUS}')",
         usable,
@@ -344,7 +366,7 @@ def _sql_list(flags: Collection[str]) -> str:
 
 
 def _single_sequences(
-    con: Any, where: str, usable: str | None = None
+    con: Any, passages: PassageMatcher, where: str, usable: str | None = None
 ) -> dict[PreparationKey, PreparationSequence]:
     """One sequence per preparation from the rows ``where`` selects, or a conflict."""
     doubts = (
@@ -355,7 +377,8 @@ def _single_sequences(
     rows = con.execute(
         f"""
         SELECT {_PREP},
-               list(DISTINCT s.epi_isl || '|' || s.accession) AS sequences,
+               list(DISTINCT struct_pack(epi := s.epi_isl, acc := s.accession, clade := s.clade,
+                                         passage := coalesce(s.sequence_passage, ''))) AS sequences,
                any_value(s.epi_isl), any_value(s.accession), any_value(s.clade),
                bool_or(s.pairing = 'exact'), bool_or(s.pairing = 'proxy'), {doubts}
         {_ROWS}
@@ -367,13 +390,42 @@ def _single_sequences(
     for subtype, name, reassortant, annots, passage, seqs, epi, acc, clade, ex, px, dts in rows:
         key = (subtype, name, reassortant, tuple(annots), passage)
         pairing = "exact" if ex else "proxy" if px else ""
-        if len(seqs) > 1:
-            out[key] = PreparationSequence(None, None, None, pairing, conflict=True)
+        if len({(r["epi"], r["acc"]) for r in seqs}) > 1:
+            out[key] = _resolve(key[4], seqs, passages, pairing, tuple(dts))
         else:
             out[key] = PreparationSequence(
                 epi, acc, clade, pairing, conflict=False, doubts=tuple(dts)
             )
     return out
+
+
+def _resolve(
+    passage: str,
+    records: list[dict[str, Any]],
+    passages: PassageMatcher,
+    pairing: str,
+    doubts: tuple[str, ...],
+) -> PreparationSequence:
+    """A preparation whose rows name several records: the one whose passage matches, alone."""
+    from af.seq.matching import epi_order
+
+    alternatives = tuple(
+        TiedSequence(r["epi"], r["acc"], r["clade"])
+        for r in sorted(records, key=lambda r: (epi_order(r["epi"]), r["acc"]))
+    )
+    scores = {(r["epi"], r["acc"]): passages.score(passage, r["passage"]) for r in records}
+    best = max(scores.values())
+    top = [a for a in alternatives if scores[(a.epi_isl, a.accession)] == best]
+    if best > 0 and len(top) == 1:
+        chosen = top[0]
+        return PreparationSequence(
+            chosen.epi_isl, chosen.accession, chosen.clade, pairing, conflict=True,
+            doubts=doubts, alternatives=alternatives, resolution=ROWS_PASSAGE_MATCHED,
+        )  # fmt: skip
+    return PreparationSequence(
+        None, None, None, pairing, conflict=True, doubts=doubts, alternatives=alternatives,
+        resolution=ROWS_NONE_MATCH if best == 0 else ROWS_SEVERAL_MATCH,
+    )  # fmt: skip
 
 
 def _tied_preparations(

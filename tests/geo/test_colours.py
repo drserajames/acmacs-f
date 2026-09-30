@@ -131,3 +131,42 @@ def test_dots_coloured_through_a_doubtful_match_are_counted_per_doubt(tmp_path: 
         "match.egg-antigen-non-egg-sequence": 1, "match.epi-name-differs": 1,
         "match.reassortant": 1,
     }  # fmt: skip
+
+
+def test_rows_naming_two_records_colour_by_the_passage_matched_one_else_by_agreement(
+    tmp_path: Path,
+) -> None:
+    """Sarah, Q81 (30 Sep): the passage-matched record colours; with none or several matching,
+    the records colour only if they agree. Counted in ColourCounts.rows."""
+    from af.serology.joins import (
+        ROWS_NONE_MATCH,
+        ROWS_PASSAGE_MATCHED,
+        ROWS_SEVERAL_MATCH,
+        TiedSequence,
+    )
+
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    p1, p11, p2 = (TiedSequence(f"EPI_ISL_{n}", f"ACC{n}", c)
+                   for n, c in ((1, "P.1"), (2, "P.1.1"), (3, "P.2")))  # fmt: skip
+
+    def rows(
+        chosen: TiedSequence | None, resolution: str, *alts: TiedSequence
+    ) -> PreparationSequence:
+        return PreparationSequence(
+            chosen.epi_isl if chosen else None, chosen.accession if chosen else None,
+            chosen.clade if chosen else None, "", conflict=True, alternatives=alts,
+            resolution=resolution,
+        )  # fmt: skip
+
+    preps = {n: prep(n) for n in ("matched", "agree", "disagree")}
+    links = {
+        key(preps["matched"]): rows(p2, ROWS_PASSAGE_MATCHED, p1, p2),  # P, not P.1
+        key(preps["agree"]): rows(None, ROWS_SEVERAL_MATCH, p1, p11),  # both colour as P.1
+        key(preps["disagree"]): rows(None, ROWS_NONE_MATCH, p1, p2),
+    }
+    style, counts = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), SCHEME, clade_set)
+    assert style(preps["matched"]) == DotStyle("Clade P", "#aa0000")
+    assert style(preps["agree"]) == DotStyle("Clade P.1", "#0000aa")
+    assert style(preps["disagree"]) == UNCOLOURED
+    assert counts.rows == {ROWS_PASSAGE_MATCHED: 1, ROWS_SEVERAL_MATCH: 1}
+    assert counts.uncoloured == {"rows name different sequences": 1}
