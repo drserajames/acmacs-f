@@ -6,12 +6,28 @@ import pytest
 
 from af.seq.matching import Equivalent, NumberRule, read_passage_rules
 from af.seq.matching_rules import TABLES, MatchingRules, matching_rules
+from af.seq.passage_match import PassageMatcher
 from af.util.artefacts import sha256_path
 
 PASSAGE = "pattern\tclass\treason\nSIAT\tcell\ttest\nMDCK\tcell\ttest\nE\\d\tegg\ttest\n"
 LABS_HEADER = "code\tname\treader\tevidence\tadded_by\tadded_on\toptional\n"
 SUBMITTERS_HEADER = "lab\tsubmitting_lab\treason\n"
 NUMBER_HEADER = "lab\tscope\tevidence\tadded_by\tadded_on\n"
+# the shared passage steps (lab "*"), as rules/tables/passage_tokens.tsv writes them
+PASSAGE_TOKENS = (
+    "lab\tkind\tpattern\tcanonical\tclass\tevidence\tadded_by\tadded_on\toptional\n"
+    + "".join(
+        f"*\texact\t{pattern}\t{canonical}\t{klass}\ttest\ttest\t2026-01-01\t\n"
+        for pattern, canonical, klass in (
+            ("C", "MDCK", "cell"),
+            ("MDCK", "MDCK", "cell"),
+            ("S", "SIAT", "cell"),
+            ("SIAT", "SIAT", "cell"),
+            ("E", "E", "egg"),
+            ("OR", "OR", "original"),
+        )
+    )
+)
 EQUIVALENTS_HEADER = (
     "lab\ttable_location\tgisaid_location\tchinese\tcheck\tevidence\tadded_by\tadded_on\toptional\n"
 )
@@ -33,6 +49,7 @@ def write_af_data(
         "rules/sequences/lab_submitters.tsv": SUBMITTERS_HEADER + submitters,
         "rules/sequences/number_rules.tsv": NUMBER_HEADER + number,
         "rules/sequences/location-equivalents.tsv": EQUIVALENTS_HEADER + equivalents,
+        "rules/tables/passage_tokens.tsv": PASSAGE_TOKENS,
     }
     for name, text in files.items():
         (root / name).parent.mkdir(parents=True, exist_ok=True)
@@ -40,7 +57,14 @@ def write_af_data(
     return root
 
 
-def test_the_five_tables_load_together_with_their_hashes(tmp_path: Path) -> None:
+def passage_matcher(tmp_path: Path) -> PassageMatcher:
+    """The invented shared passage steps, for tests that build a MatchingRules directly."""
+    path = tmp_path / "passage_tokens.tsv"
+    path.write_text(PASSAGE_TOKENS)
+    return PassageMatcher.read(path)
+
+
+def test_the_tables_load_together_with_their_hashes(tmp_path: Path) -> None:
     root = write_af_data(tmp_path)
     rules = matching_rules(root)
     assert rules.lab_codes == {"LABX", "LABY"}
@@ -89,15 +113,16 @@ def test_a_value_built_directly_is_checked_too(tmp_path: Path) -> None:
     passages = tmp_path / "passage.tsv"
     passages.write_text(PASSAGE)
     passage = tuple(read_passage_rules(passages))
-    ok = MatchingRules(passage, frozenset({"LABX"}), {}, {}, (), ())
+    matcher = passage_matcher(tmp_path)
+    ok = MatchingRules(passage, frozenset({"LABX"}), {}, {}, (), (), matcher)
     assert ok.provenance() == {}
     with pytest.raises(ValueError, match="not table lab codes"):
         elsewhere = (Equivalent("LABQ", "A", "B", False, 3),)
-        MatchingRules(passage, frozenset({"LABX"}), {}, {}, elsewhere, ())
+        MatchingRules(passage, frozenset({"LABX"}), {}, {}, elsewhere, (), matcher)
     with pytest.raises(ValueError, match="without passage rules"):
-        MatchingRules((), frozenset({"LABX"}), {}, {}, (), ())
+        MatchingRules((), frozenset({"LABX"}), {}, {}, (), (), matcher)
     with pytest.raises(ValueError, match="without lab codes"):
-        MatchingRules(passage, frozenset(), {}, {}, (), ())
+        MatchingRules(passage, frozenset(), {}, {}, (), (), matcher)
 
 
 def test_the_real_tables_load(af_data: Path) -> None:

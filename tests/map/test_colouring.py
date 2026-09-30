@@ -99,4 +99,4 @@ def test_chart_antigens_take_the_shared_choice(tmp_path: Path) -> None:
     assert [row.colour if row else None for row in painted] == ["#0000aa", "#aa0000", None]
     assert got.provenance["uncoloured"] == {"no sequence": 1}
     assert got.provenance["shadowed_rows"] == []
-    assert len(got.provenance["matching_rules"]) == 5  # every rule table, with its hash
+    assert len(got.provenance["matching_rules"]) == 6  # every rule table, with its hash

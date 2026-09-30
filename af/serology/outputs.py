@@ -163,7 +163,7 @@ def _styles(
     report.links = link_from_store(con, store, matching, with_clades=True)
     report.matching_inputs = matching.provenance()
     report.matching_rules = matching.counts()
-    links = preparation_sequences(con)
+    links = preparation_sequences(con, matching.passages)
     aligned = aligned_sequences(store, con)
     styles = {}
     for subtype, setting in colouring.items():

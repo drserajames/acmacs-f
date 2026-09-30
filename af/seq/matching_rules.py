@@ -31,6 +31,7 @@ from af.seq.matching import (
     read_number_rules,
     read_passage_rules,
 )
+from af.seq.passage_match import PassageMatcher
 from af.store import ExternalInput
 from af.tables.labs import read_lab_codes
 
@@ -40,7 +41,8 @@ LAB_SUBMITTERS = Path("rules/sequences/lab_submitters.tsv")
 NUMBER_RULES = Path("rules/sequences/number_rules.tsv")
 LOCATION_EQUIVALENTS = Path("rules/sequences/location-equivalents.tsv")
 LABS = Path("rules/tables/labs.tsv")
-TABLES = (PASSAGE_CLASSES, LAB_SUBMITTERS, NUMBER_RULES, LOCATION_EQUIVALENTS, LABS)
+PASSAGE_TOKENS = Path("rules/tables/passage_tokens.tsv")
+TABLES = (PASSAGE_CLASSES, LAB_SUBMITTERS, NUMBER_RULES, LOCATION_EQUIVALENTS, LABS, PASSAGE_TOKENS)
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,8 @@ class MatchingRules:
     number_rules: Mapping[str, NumberRule]  # lab -> rule
     equivalents: tuple[Equivalent, ...]
     inputs: tuple[ExternalInput, ...]
+    # which of a preparation's two named records has its passage (Sarah, Q81, 30 Sep)
+    passages: PassageMatcher
 
     def __post_init__(self) -> None:
         if not self.passage:
@@ -102,4 +106,5 @@ def matching_rules(af_data: Path) -> MatchingRules:
         number_rules=read_number_rules(af_data / NUMBER_RULES, labs=lab_codes),
         equivalents=tuple(read_location_equivalents(af_data / LOCATION_EQUIVALENTS)),
         inputs=inputs,
+        passages=PassageMatcher.read(af_data / PASSAGE_TOKENS),
     )
