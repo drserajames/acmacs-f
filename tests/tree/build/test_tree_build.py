@@ -17,6 +17,7 @@ from af.run import JobFailed
 from af.tree import build
 from af.tree.build import CmapleSettings, build_job
 from af.tree.io import fasta, newick
+from af.tree.model import TreeError
 
 
 def alignment_of(tmp_path, n_leaves: int = 20, length: int = 400, seed: int = 3):
@@ -143,8 +144,9 @@ def test_an_incremental_build_starts_from_the_previous_tree(tmp_path) -> None:
     keep = [name for name in sequences if name not in {"leaf000", "leaf001"}]
     smaller = tmp_path / "smaller.fasta"
     fasta.write_alignment(smaller, {name: sequences[name] for name in keep})
-    start, removed = build.prune_starting_tree(first.tree, keep, tmp_path / "start.nwk")
-    assert removed == 2
+    seeded = build.prune_starting_tree(first.tree, keep, tmp_path / "start.nwk")
+    assert (seeded.removed, seeded.added_by_builder, seeded.leaves) == (2, 0, len(keep))
+    start = seeded.path
 
     second = build.build(
         smaller,
@@ -191,3 +193,28 @@ def test_the_job_log_is_not_cmaples_own_log(tmp_path) -> None:
     job, _ = build_job(alignment, tmp_path / "out", CmapleSettings())
     cmaple_own_log = (tmp_path / "out" / "cmaple.log").resolve()
     assert job.log.resolve() != cmaple_own_log
+
+
+def test_a_starting_tree_may_lack_leaves_the_builder_will_add(tmp_path: Path) -> None:
+    """A seeded or weekly build starts from a tree without this run's new sequences (29 Sep 2026).
+
+    The stage used to refuse it: pruning to the selection raised because 181,934 of 193,185 leaves
+    were not in the date-stratified seed.
+    """
+    tree = newick.loads("((a:0.1,b:0.1):0.1,(c:0.1,outgroup:0.1):0.1);")
+    seeded = build.prune_starting_tree(
+        tree, ["a", "c", "outgroup", "new1", "new2"], tmp_path / "s.nwk"
+    )
+    assert (seeded.leaves, seeded.removed, seeded.added_by_builder) == (3, 1, 2)
+    assert sorted(leaf.name or "" for leaf in newick.load(seeded.path).leaves()) == [
+        "a",
+        "c",
+        "outgroup",
+    ]
+    assert seeded.to_json() == {"leaves": 3, "removed": 1, "added_by_builder": 2}
+
+
+def test_a_starting_tree_with_nothing_in_common_is_refused(tmp_path: Path) -> None:
+    tree = newick.loads("((a:0.1,b:0.1):0.1,c:0.1);")
+    with pytest.raises(TreeError, match="holds none of the"):
+        build.prune_starting_tree(tree, ["x", "y"], tmp_path / "s.nwk")

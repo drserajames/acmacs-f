@@ -21,6 +21,7 @@ from typing import Any
 from af.run import Runner
 from af.tree.build.cmaple import (
     CmapleSettings,
+    StartingTree,
     build_job,
     prune_starting_tree,
     run_cmaple,
@@ -116,6 +117,7 @@ __all__ = [
     "build",
     "build_job",
     "finish_tree",
+    "StartingTree",
     "prune_starting_tree",
     "run_cmaple",
     "version",
