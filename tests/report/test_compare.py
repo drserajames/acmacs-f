@@ -882,3 +882,25 @@ def test_identity_excused_points_are_still_named(tmp_path: Path) -> None:
     keys = {maps.normalise_key(maps.point_key(ref["map"]["antigens"][0], "name"), "loose")}
     notes = excuse_points("map/x/all", ref, new, [(entry, keys)], "identity")
     assert notes[0]["one_sided"] == 1 and len(ref["map"]["antigens"]) == 1
+
+
+def test_colour_loss_counts_ref_coloured_antigens_af_leaves_uncoloured() -> None:
+    from af.report.compare.run import MapLimits, map_checks
+
+    names = [_virus("PLACE", str(i)) for i in range(10)]
+    ref = _doc([_pt(n, (float(i), float(i % 3))) for i, n in enumerate(names)])
+    new = _doc([_pt(n, (float(i), float(i % 3))) for i, n in enumerate(names)])
+    ref["map"]["antigens"][9]["clade"] = None  # af colours one the reference left grey
+    new["map"]["antigens"][0]["clade"] = None  # af leaves one uncoloured: lost
+    for doc in (ref, new):  # outside the time window on both sides: greyed, not a colour loss
+        doc["map"]["antigens"][5]["greyed"] = True
+    res = maps.compare(ref, new, "identity")
+    colour = res["antigens"]["colour"]
+    assert colour == {"ref_coloured": 8, "lost": 1, "gained": 1, "lost_frac": 1 / 8}
+    assert res["antigens"]["colour_only_ref_keys"] == [
+        maps.point_key(ref["map"]["antigens"][0], "name")
+    ]
+    checks = {c["check"]: c for c in map_checks(res, MapLimits())}
+    assert checks["colour loss"]["value"] == 1 / 8 and checks["colour loss"]["ok"] is None
+    gated = {c["check"]: c for c in map_checks(res, MapLimits(colour_loss_max=0.01))}
+    assert gated["colour loss"]["ok"] is False

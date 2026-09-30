@@ -284,6 +284,19 @@ def _group(ref: list[Point], new: list[Point], how: str, clades: bool) -> dict[s
             "adjusted_rand": adjusted_rand(lr, ln),
             "top_disagreements": [f"{a} -> {b}: {n}" for (a, b), n in disagree.most_common(5)],
         }  # fmt: skip
+        # Colour coverage: drawn on both sides, in a clade colour on one only, and not greyed by the
+        # time window on either (that is greyed_agreement's). "Lost" is Sarah's Q81 switch measure
+        # for a map changing its colour source: the reference coloured it, af leaves it uncoloured.
+        in_window = [k for k in common if not ri[k].get("greyed") and not ni[k].get("greyed")]
+        lost = [k for k in in_window if ri[k]["clade"] and not ni[k]["clade"]]
+        gained = [k for k in in_window if ni[k]["clade"] and not ri[k]["clade"]]
+        ref_coloured = sum(1 for k in in_window if ri[k]["clade"])
+        out["colour"] = {
+            "ref_coloured": ref_coloured, "lost": len(lost), "gained": len(gained),
+            "lost_frac": len(lost) / ref_coloured if ref_coloured else float("nan"),
+        }  # fmt: skip
+        out["colour_only_ref_keys"] = sorted(_label(ri[k]) for k in lost)
+        out["colour_only_new_keys"] = sorted(_label(ni[k]) for k in gained)
         grey = [bool(ri[k].get("greyed")) == bool(ni[k].get("greyed")) for k in common]
         out["greyed_agreement"] = sum(grey) / len(grey) if grey else float("nan")
         # Vaccine marks: an antigen drawn on both sides but marked as a vaccine on one only (e.g.

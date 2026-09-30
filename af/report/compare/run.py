@@ -43,6 +43,9 @@ class MapLimits:
     centroid_diff_max: float | None = None
     rotation_deg_max: float | None = None
     vaccine_differences_max: float | None = None  # antigens marked as a vaccine on one side only
+    colour_loss_max: float | None = (
+        None  # share of ref-coloured antigens af leaves uncoloured (Q81)
+    )
 
 
 @dataclass(frozen=True)
@@ -178,7 +181,7 @@ ONE_SIDED_LISTED = 25  # per slot, group and side, in COMPARISON.md; the JSON ha
 MAP_CHECKS = (
     "antigens jaccard", "sera jaccard", "clade ARI", "p95 displacement", "frac moved > 1",
     "clade centroid max diff", "rotation deg", "reflected", "vaccine marks differ",
-    "RMSD (not gated)",
+    "colour loss", "RMSD (not gated)",
 )  # fmt: skip
 
 
@@ -213,6 +216,7 @@ def map_checks(res: dict[str, Any], lim: MapLimits) -> list[dict[str, Any]]:
             "<=",
             lim.vaccine_differences_max,
         ),  # fmt: skip
+        _check("colour loss", a.get("colour", {}).get("lost_frac", nan), "<=", lim.colour_loss_max),
         _check("RMSD (not gated)", p.get("rmsd", nan), "<=", None),
     ]
     if p.get("identical_layout"):
@@ -589,6 +593,7 @@ def _one_sided(slot: str, antigens: dict[str, Any], sera: dict[str, Any]) -> lis
             ]
             if group == "antigens":
                 kinds.append((f"vaccine_only_{side}_keys", f"marked as a vaccine only in {side}"))
+                kinds.append((f"colour_only_{side}_keys", f"in a clade colour only in {side}"))
             for field_name, what in kinds:
                 keys = g.get(field_name, [])
                 if keys:
