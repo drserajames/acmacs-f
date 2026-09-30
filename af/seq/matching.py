@@ -59,6 +59,7 @@ EPI_NAME_DIFFERS = "match.epi-name-differs"
 SEVERAL_ACCESSIONS = "match.several-accessions"
 EGG_WITHOUT_EGG_SEQUENCE = "match.egg-antigen-non-egg-sequence"
 CELL_FROM_ORIGINAL = "match.cell-antigen-original-sequence"
+CELL_FROM_EGG = "match.cell-antigen-egg-sequence"
 IDENTICAL_DUPLICATES = "match.identical-duplicates"
 AMBIGUOUS = "match.ambiguous"
 OWN_LAB = "match.own-lab"
@@ -74,6 +75,11 @@ TIE_AGREES = "match.tie-agrees"
 TIE_RANKED = "match.tie-ranked"
 DOUBTFUL = frozenset({EPI_NAME_DIFFERS, SEVERAL_ACCESSIONS, EGG_WITHOUT_EGG_SEQUENCE,
                       AMBIGUOUS, REASSORTANT})  # fmt: skip
+# CELL_FROM_EGG is deliberately NOT here yet. It is the mirror of EGG_WITHOUT_EGG_SEQUENCE and
+# reads like a doubt, but adding it moves 285 antigen rows on the live store from matched to
+# doubtful, and (unless it also joins USABLE_DOUBTS) drops their colour -- 0.47% of matched rows,
+# against Q81's own target. Whether colouring should keep using these matches, as it does for an
+# egg antigen given a non-egg sequence, is Sarah's call through the coordinator, not a default.
 # Doubts colouring accepts, flagged and counted (Sarah, Q81 D: "Yes, flagged + counted"): ae uses
 # these matches. A match with any other doubt (several accessions, several datasets) is not used.
 USABLE_DOUBTS = frozenset({EGG_WITHOUT_EGG_SEQUENCE, REASSORTANT, EPI_NAME_DIFFERS})
@@ -357,6 +363,12 @@ def _preferred(found: list[Candidate], antigen_class: str, flags: list[str]) -> 
         if by_class[ORIGINAL]:
             flags.append(CELL_FROM_ORIGINAL)
             return by_class[ORIGINAL]
+        if by_class[EGG]:
+            # The mirror of EGG_WITHOUT_EGG_SEQUENCE, and doubtful for the same reason: egg
+            # adaptation substitutes antigenic positions, so an egg sequence stands in badly
+            # for a cell-grown antigen. Still matched, because a flag reports rather than
+            # excludes, and the antigen would otherwise have no sequence at all.
+            flags.append(CELL_FROM_EGG)
         return found
     return by_class[antigen_class] or found
 
