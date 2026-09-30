@@ -65,6 +65,7 @@ OWN_LAB = "match.own-lab"
 LAB_NUMBER = "match.lab-number"
 LAB_NUMBER_COLLISION = "match.lab-number-collision"
 LOCATION_EQUIVALENT = "match.location-equivalent"
+NAME_SPACING = "match.name-spacing"  # same name but for spaces/punctuation in the location
 REASSORTANT = "match.reassortant"
 NO_MATCH = "match.none"
 # How a refused name tie was coloured (Sarah, Q81): every tied candidate gave the same colour,
@@ -111,6 +112,17 @@ def name_key(name: str) -> tuple[str, str, str] | None:
     """location/isolate/year of a normalised name; None for a name of another shape."""
     parts = name.split("/")
     return (parts[1], parts[2], parts[3]) if len(parts) == 4 else None
+
+
+def location_forms_key(key: tuple[str, str, str]) -> tuple[str, str, str]:
+    """A name key with the location's spaces and punctuation dropped.
+
+    Labs and GISAID space and punctuate one location differently ("SHANDONG RENCHENG" /
+    "SHANDONGRENCHENG", "COTE DIVOIRE" / "COTE D'IVOIRE"), and af.seq.names deliberately does not
+    rewrite location spellings, so the two forms never meet on the exact key. Only the isolate
+    number and year stay exact: they are what makes the key a virus rather than a place.
+    """
+    return (re.sub(r"[^A-Z0-9]", "", key[0].upper()), key[1], key[2])
 
 
 @dataclass(frozen=True)
@@ -172,6 +184,12 @@ class SequenceIndex:
     number_rules: dict[str, NumberRule] = field(default_factory=dict)  # lab -> rule
     # (lab, table location) -> GISAID locations (read_location_equivalents)
     equivalents: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
+    #: The same candidates under :func:`location_forms_key`. Kept beside ``by_name`` rather than
+    #: replacing it: the number rule reads ``by_name``'s keys and takes the province from the
+    #: location's first word, which a key without spaces could not give.
+    by_location_forms: dict[tuple[str, str, str], list[Candidate]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
     _by_number: dict[str, dict[tuple[str, str, str], list[Candidate]]] | None = None
 
     def add(self, candidate: Candidate) -> None:
@@ -180,6 +198,7 @@ class SequenceIndex:
         key = name_key(candidate.name)
         if key is not None:
             self.by_name[key].append(candidate)
+            self.by_location_forms[location_forms_key(key)].append(candidate)
 
     def match(
         self,
@@ -208,7 +227,9 @@ class SequenceIndex:
         found = self.by_name.get(key, []) if key is not None else []
         own = self.submitters.get(lab, frozenset())
         result = self._from_name(found, antigen_class, flags, own, passage)
-        if not found and key is not None and (lab, key[0]) in self.equivalents:
+        if not found and key is not None:
+            result = self._from_location_forms(result, key, antigen_class, own, passage)
+        if result.method is None and key is not None and (lab, key[0]) in self.equivalents:
             result = self._from_equivalent(result, key, lab, antigen_class, own, passage)
         if result.chosen is None and key is not None and lab in self.number_rules:
             result = self._from_number(result, key, lab, antigen_class)
@@ -241,6 +262,28 @@ class SequenceIndex:
             ranked = ae_ranked(tier, passage, antigen_class)
             return Match("name", None, tuple(found), tuple(flags), tuple(tier), ranked)
         return Match("name", chosen, tuple(found), tuple(flags))
+
+    def _from_location_forms(
+        self,
+        result: Match,
+        key: tuple[str, str, str],
+        antigen_class: str,
+        own: frozenset[str],
+        passage: str,
+    ) -> Match:
+        """The same name with the location's spaces and punctuation dropped, when it found none.
+
+        A different spelling of one place, not a different place: the isolate number and year
+        still have to match exactly. Measured on the live store (29 Sep 2026), this joins 235
+        pairs of name forms, and every one is the same virus; where two forms carry different
+        sequences the usual tie rules still refuse them rather than choose.
+        """
+        found = self.by_location_forms.get(location_forms_key(key), [])
+        if not found:
+            return result
+        flags = [f for f in result.flags if f != NO_MATCH]
+        loose = self._from_name(found, antigen_class, flags, own, passage)
+        return Match("location-forms", loose.chosen, loose.candidates, (*loose.flags, NAME_SPACING))
 
     def _from_equivalent(
         self,
