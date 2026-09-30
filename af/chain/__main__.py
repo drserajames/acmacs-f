@@ -51,6 +51,7 @@ from af.chain.engine import SplitStarts, run_chain
 from af.chain.publish import publish_chain
 from af.chain.review import build_review
 from af.pipeline.config import RunnerSettings, make_runner
+from af.run.job import run_main
 from af.run.runtime import release_info, require_python
 from af.store.work import PathsConfig, Work
 from af.util.config import load_config
@@ -153,4 +154,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    run_main(lambda: main(sys.argv[1:]))  # Ctrl-C / SIGTERM stop it at once

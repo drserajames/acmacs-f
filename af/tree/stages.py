@@ -61,6 +61,7 @@ import pyarrow.parquet as pq
 from af.pipeline import Pipeline, Step, StepContext, StepOutcome
 from af.pipeline.config import RunnerSettings, make_runner
 from af.run import Job, LocalRunner, Runner
+from af.run.job import run_main
 from af.store import Store, StoreRef
 from af.store.ref import ExternalInput
 from af.store.store import Provenance
@@ -945,4 +946,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run_main(main)  # Ctrl-C / SIGTERM stop it at once

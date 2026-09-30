@@ -34,6 +34,7 @@ from typing import Any
 from af.pipeline.config import RunnerSettings, make_runner
 from af.pipeline.driver import Pipeline
 from af.run import Runner
+from af.run.job import run_main
 from af.seq import newplaces, processed
 from af.seq import nextclade as nc
 from af.seq.gisaid import SequenceRecord, join, read_fasta, read_workbook
@@ -378,4 +379,4 @@ def _print(data: Mapping[str, str]) -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run_main(main)  # Ctrl-C / SIGTERM stop it at once
