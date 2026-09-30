@@ -21,6 +21,7 @@ recognise is an error naming the file and the line, because a silently skipped
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -285,6 +286,30 @@ class CladeSet:
             if candidate in shared:
                 return candidate
         return None
+
+    def legacy_set(self) -> CladeSet:
+        """The self-defining legacy clades as a nomenclature of their own, for the tree engine.
+
+        Sarah (30 Sep 2026): older clades are defined from the tree node, as subclades are. So
+        a retrospective label is the same engine (:func:`af.clades.assign.assign_tree`) run on
+        these definitions, and used only where the subclade run names nothing; reversions are
+        then handled by placement, with no per-sequence tolerance. Parents outside the
+        defining legacy clades end the hierarchy.
+        """
+        defining = self.legacy_defining()
+        if not defining:
+            raise NomenclatureError(f"{self.subtype}: no legacy clades with their own definitions")
+        subclades = {
+            name: dataclasses.replace(self.legacy_clades[name], parent=self.legacy_parent(name))
+            for name in defining
+        }
+        return dataclasses.replace(
+            self,
+            subclades=subclades,
+            legacy_clades={},
+            version=f"{self.version}+legacy",
+            _ancestors={name: self.legacy_ancestors(name) for name in defining},
+        )
 
     def unexpressible(self) -> dict[str, tuple[Unexpressible, ...]]:
         """Clades with defining mutations no mature-HA sequence can carry (design rule 1)."""

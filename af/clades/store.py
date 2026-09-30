@@ -54,9 +54,8 @@ COLUMNS: dict[str, str] = {
     "support": "INTEGER",
     "unobservable": "INTEGER",
     "tree_node": "VARCHAR",
-    # retrospective label (af.clades.legacy): only where ``clade`` is null; display, never selection
+    # retrospective label (task 4.10): only where ``clade`` is null; display, never selection
     "legacy_clade": "VARCHAR",
-    "legacy_tolerated": "VARCHAR[]",
 }
 
 #: How a clade was decided. Recorded per row because the two are not equally strong: a
@@ -86,9 +85,8 @@ class CladeRow:
     unobservable: int = 0
     tree_node: str | None = None
     legacy_clade: str | None = None
-    """An older upstream clade, only where ``clade`` is null (af.clades.legacy)."""
-    legacy_tolerated: tuple[str, ...] = ()
-    """The ancestral loci the legacy label forgave, as ``<legacy clade>:<locus>``."""
+    """An older upstream clade, only where ``clade`` is null: the tree engine's call on the
+    legacy definitions (:meth:`af.clades.nomenclature.CladeSet.legacy_set`)."""
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -101,7 +99,6 @@ class CladeRow:
             "unobservable": self.unobservable,
             "tree_node": self.tree_node,
             "legacy_clade": self.legacy_clade,
-            "legacy_tolerated": list(self.legacy_tolerated),
         }
 
 
