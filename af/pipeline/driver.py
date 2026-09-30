@@ -147,14 +147,19 @@ class Pipeline:
             raise PipelineError(f"unknown step(s) to force: {unknown}")
         planned = self.order(targets)
         outcomes: dict[str, StepOutcome] = {}
-        with signals_as_exceptions(), ThreadPoolExecutor(max_workers=self.max_parallel) as pool:
+        with signals_as_exceptions():
+            pool = ThreadPoolExecutor(max_workers=self.max_parallel)
             try:
                 failure = self._schedule(pool, planned, outcomes, force)
             except BaseException:
-                # Ctrl-C / SIGTERM / SIGHUP arrive here, in the main thread, while steps
-                # wait on jobs in worker threads: stop those jobs, then stop.
+                # Ctrl-C / SIGTERM / SIGHUP arrive here, in the main thread, while steps run
+                # in worker threads: stop their jobs, then stop WITHOUT joining the steps. A
+                # step may be minutes into in-process work (a C++ optimiser call) that cannot
+                # be interrupted; waiting for it made SIGTERM look ignored (o, 30 Sep 2026).
                 self.runner.cancel_active()
+                pool.shutdown(wait=False, cancel_futures=True)
                 raise
+            pool.shutdown(wait=True)
         if failure is not None:
             raise failure
         return [outcomes[step.name] for step in planned]

@@ -79,7 +79,9 @@ class SlurmRunner:
     sbatch: str = "sbatch"
     scancel: str = "scancel"
     sacct: str = "sacct"
-    _active: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    _active: dict[str, Path] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )  # in-flight submissions: job name -> batch directory
     _lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False, compare=False
     )
@@ -112,10 +114,18 @@ class SlurmRunner:
         return collect([outcome_by_name[job.name] for job in jobs])
 
     def cancel_active(self) -> None:
-        """scancel every submission still in flight. Their sbatch --wait then returns."""
+        """scancel every submission still in flight. Their sbatch --wait then returns.
+
+        Each cancelled batch directory gets a CANCELLED file saying when and why, so on
+        disk it is clear why its tasks left no status files.
+        """
         with self._lock:
-            names = sorted(self._active)
-        for name in names:
+            active = sorted(self._active.items())
+        for name, batch in active:
+            (batch / "CANCELLED").write_text(
+                f"cancelled {now().isoformat()} by the driver (interrupted or terminated); "
+                f"scancel --name={name}\n"
+            )
             self._cancel(name)
 
     def _chunks(self, jobs: list[Job]) -> list[list[Job]]:
@@ -137,7 +147,7 @@ class SlurmRunner:
         started = now()
         name = _job_name(jobs, batch)
         with self._lock:
-            self._active.add(name)
+            self._active[name] = batch
         try:
             submitted = subprocess.run(argv, capture_output=True, text=True)
         except OSError as error:
@@ -148,7 +158,7 @@ class SlurmRunner:
             raise
         finally:
             with self._lock:
-                self._active.discard(name)
+                self._active.pop(name, None)
         (batch / "sbatch.out").write_text(submitted.stdout + submitted.stderr)
         log.info("sbatch exited %d for %s", submitted.returncode, batch.name)
         job_id = _job_id(submitted.stdout)

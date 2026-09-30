@@ -13,14 +13,16 @@ contract is the same for all of them:
 from __future__ import annotations
 
 import datetime
+import logging
+import os
 import signal
 import sys
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
 
 from af.util.artefacts import Artefact, ArtefactError, CheckedArtefact, check_artefacts
 
@@ -161,6 +163,13 @@ def signals_as_exceptions() -> Iterator[None]:
     KeyboardInterrupt. Handlers can only be installed from the main thread;
     elsewhere this does nothing, and the caller in the main thread (the pipeline, or
     a runner called directly) is the one that catches the exception and cancels.
+
+    The signals are also UNBLOCKED for the duration. A process can inherit a signal
+    mask with SIGTERM blocked from whatever launched it; a blocked signal then stays
+    pending forever, whatever handler is installed, and the driver ignores ``kill``
+    until ``kill -9`` (seen on o, 30 Sep 2026: a chain driver blocked in
+    ``sbatch --wait``). Threads started while this is active inherit the unblocked mask.
+    The previous mask and handlers are restored afterwards.
     """
     if threading.current_thread() is not threading.main_thread():
         yield
@@ -170,9 +179,12 @@ def signals_as_exceptions() -> Iterator[None]:
         raise Terminated(signum)
 
     previous = {sig: signal.signal(sig, handler) for sig in TERMINATING_SIGNALS}
+    unblock = {*TERMINATING_SIGNALS, signal.SIGINT}
+    blocked_before = signal.pthread_sigmask(signal.SIG_UNBLOCK, unblock)
     try:
         yield
     finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, blocked_before)
         for sig, old in previous.items():
             signal.signal(sig, old)
 
@@ -230,3 +242,38 @@ def _site_flags() -> list[str]:
     environment's editable-install hook and import ``af`` from somewhere else.
     """
     return ["-S"] if sys.flags.no_site else []
+
+
+def run_main(main: Callable[[], int]) -> NoReturn:
+    """Run a command-line driver's ``main`` so that Ctrl-C, SIGTERM and SIGHUP stop it now.
+
+    Pipelines cancel their SLURM jobs and stop scheduling when interrupted, but a step
+    thread can be minutes into in-process work (the chain's resolve_trapped, grid test
+    and refine are long C++ calls) that cannot be interrupted, and interpreter exit joins
+    such threads, so the driver would outlive the signal by minutes (o, 30 Sep 2026).
+    Here, once the interruption has reached ``main``'s caller (jobs already cancelled),
+    logs and output are flushed and the process exits at once with 128+signal,
+    abandoning that in-process work. Nothing is lost: an interrupted step has no record,
+    so a rerun redoes it.
+
+        if __name__ == "__main__":
+            run_main(lambda: main(sys.argv[1:]))
+    """
+    try:
+        code = main()
+    except Terminated as error:
+        _exit_now(128 + error.signum, str(error))
+    except KeyboardInterrupt:
+        _exit_now(128 + signal.SIGINT, "interrupted by SIGINT")
+    sys.exit(code)
+
+
+def _exit_now(code: int, reason: str) -> NoReturn:
+    message = (
+        f"{reason}: in-flight jobs cancelled, in-process work abandoned; the interrupted "
+        f"step reruns next time. Exiting with {code}."
+    )
+    logging.getLogger("af.run").error(message)  # stderr too, when nothing configured logging
+    logging.shutdown()
+    sys.stdout.flush()
+    os._exit(code)

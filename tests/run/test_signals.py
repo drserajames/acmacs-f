@@ -83,3 +83,133 @@ def test_handlers_restored_after_run(tmp_path: Path) -> None:
         Job("x", ["/bin/sh", "-c", "echo 1 > x"], tmp_path, tmp_path / "x.log", [Artefact(out)])
     )
     assert {sig: signal.getsignal(sig) for sig in before} == before
+
+
+DRIVER = """\
+import sys
+from pathlib import Path
+from af.pipeline import Pipeline, Step
+from af.run import Job, SlurmRunner
+from af.util.artefacts import Artefact
+
+root, sbatch, scancel = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+runner = SlurmRunner(work_dir=root / "slurm", sbatch=sbatch, scancel=scancel)
+def action(context):
+    context.runner.run_many([
+        Job(f"s{i}", ["/bin/sh", "-c", "sleep 60; echo x > s%d" % i], root, root / f"s{i}.log",
+            [Artefact(root / f"s{i}")]) for i in range(2)
+    ])
+print("started", flush=True)
+Pipeline([Step("relax", action, outputs=[Artefact(root / "s0")])], state_dir=root / "state",
+         runner=runner, root=root).run()
+"""
+
+LAUNCH_BLOCKED = """\
+import os, signal, sys
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+os.execv(sys.argv[1], sys.argv[1:])
+"""
+
+
+def test_driver_launched_with_sigterm_blocked_still_stops(
+    tmp_path: Path, fake_sbatch: Path, fake_scancel: Path
+) -> None:
+    """A chain-shaped driver (pipeline step -> SlurmRunner -> sbatch --wait) whose launcher
+    left SIGTERM blocked: before the fix it ignored kill until kill -9 (seen on o)."""
+    import subprocess
+    import sys
+
+    driver = tmp_path / "driver.py"
+    driver.write_text(DRIVER)
+    launch = tmp_path / "launch.py"
+    launch.write_text(LAUNCH_BLOCKED)
+    work = tmp_path / "work"
+    work.mkdir()
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(launch),
+            sys.executable,
+            str(driver),
+            str(work),
+            str(fake_sbatch),
+            str(fake_scancel),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        cwd=tmp_path,
+    )
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "started"
+        time.sleep(2)  # into sbatch --wait
+        process.send_signal(signal.SIGTERM)
+        output, _ = process.communicate(timeout=20)
+    finally:
+        if process.poll() is None:
+            process.kill()
+    assert process.returncode != 0
+    assert "terminated by SIGTERM" in output
+    cancelled = (fake_sbatch.parent / "scancel-calls.txt").read_text().split()
+    assert len(cancelled) == 1 and cancelled[0].startswith("--name=af-s0+1-")
+    markers = list((work / "slurm").glob("batch-*/CANCELLED"))
+    assert len(markers) == 1 and "cancelled" in markers[0].read_text()
+
+
+BUSY_DRIVER = """\
+import sys, time
+from pathlib import Path
+from af.pipeline import Pipeline, Step
+from af.run import LocalRunner
+from af.run.job import run_main
+from af.util.artefacts import Artefact
+
+root = Path(sys.argv[1])
+def busy(context):
+    time.sleep(120)  # stands in for a long C++ call (resolve_trapped) Python can't interrupt
+    (root / "out").write_text("x")
+def main():
+    Pipeline([Step("refine", busy, outputs=[Artefact(root / "out")])], state_dir=root / "state",
+             runner=LocalRunner(), root=root).run()
+    return 0
+print("started", flush=True)
+run_main(main)
+"""
+
+
+def test_driver_busy_in_process_stops_at_once(tmp_path: Path) -> None:
+    """SIGTERM while a step is minutes into in-process work: exit now with 143, not after it.
+
+    Before the fix the main thread handled the signal but then joined the busy step thread,
+    so the driver outlived SIGTERM by minutes (chain drivers on o, 30 Sep 2026).
+    """
+    import subprocess
+    import sys
+
+    driver = tmp_path / "busy.py"
+    driver.write_text(BUSY_DRIVER)
+    work = tmp_path / "work"
+    work.mkdir()
+    process = subprocess.Popen(
+        [sys.executable, str(driver), str(work)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        cwd=tmp_path,
+    )
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "started"
+        time.sleep(1)
+        started = time.monotonic()
+        process.send_signal(signal.SIGTERM)
+        output, _ = process.communicate(timeout=20)
+        elapsed = time.monotonic() - started
+    finally:
+        if process.poll() is None:
+            process.kill()
+    assert process.returncode == 128 + signal.SIGTERM
+    assert elapsed < 5, f"took {elapsed:.1f} s to stop"
+    assert "terminated by SIGTERM" in output and "step reruns next time" in output
+    assert not (work / "state" / "refine.json").exists(), "an interrupted step keeps no record"
