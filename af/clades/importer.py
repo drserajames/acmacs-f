@@ -75,6 +75,8 @@ class ImportReport:
     dead: list[DeadRow] = field(default_factory=list)
     needs_local: list[DeadRow] = field(default_factory=list)
     renamed: list[tuple[str, str, str]] = field(default_factory=list)
+    legacy: list[tuple[str, str, int, str]] = field(default_factory=list)
+    """Colour rows keyed by an older upstream clade (subtype, table, row, name): legacy entries."""
     repeated: list[DeadRow] = field(default_factory=list)
     """Rows that repeat an earlier row of the same name exactly: kept once, listed here."""
 
@@ -268,7 +270,16 @@ def import_semantic_clades(
                     )
                     continue
                 resolved = _resolve(
-                    name, mapping, clade_set, report, subtype, index, name, table, local=local_names
+                    name,
+                    mapping,
+                    clade_set,
+                    report,
+                    subtype,
+                    index,
+                    name,
+                    table,
+                    local=local_names,
+                    allow_legacy=True,
                 )
                 if isinstance(resolved, _Unresolved):
                     continue
@@ -305,6 +316,7 @@ def _resolve(
     name: str,
     table: str = "attributes",
     local: set[str] | None = None,
+    allow_legacy: bool = False,
 ) -> str | None | _Unresolved:
     """An old clade name as af's name, or ``_UNRESOLVED`` (recorded as a dead row).
 
@@ -323,6 +335,26 @@ def _resolve(
     bare = candidate.split(" (")[0].strip()
     if bare in clade_set:
         return bare
+    if allow_legacy:
+        # colour rows may name an older upstream clade that defines itself (af.clades.legacy),
+        # by its full name only: short names ("1", "5b") are ambiguous to a reader
+        defining = set(clade_set.legacy_defining())
+        if bare in defining:
+            report.legacy.append((subtype, table, index, bare))
+            return bare
+        by_short = {clade_set.legacy_clades[n].short_name: n for n in defining}
+        if bare in by_short and bare not in defining:
+            report.dead.append(
+                DeadRow(
+                    subtype,
+                    table,
+                    index,
+                    name,
+                    f"names legacy clade {by_short[bare]!r} by its short name {bare!r}; "
+                    "use the full name",
+                )
+            )
+            return _UNRESOLVED
     if local and (candidate in local or bare in local):
         report.needs_local.append(
             DeadRow(

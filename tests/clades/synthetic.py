@@ -148,3 +148,37 @@ def clone_commit(clone: Path) -> str:
 def load_synthetic(clones: Path) -> CladeSet:
     """The synthetic nomenclature, loaded from the directory holding the clone."""
     return load_clade_set("A(H3N2)", clones, repository="synthetic_HA")
+
+
+#: Older clades with their own definitions, as upstream publishes for some subtypes: a root
+#: ``L`` (HA1 20V), children ``L.1`` (21W, short name ``l1``), ``L.2`` (23R) and ``L.3`` (24S),
+#: and ``L.1.1`` (22K) below ``L.1``. ``Q`` (a pointer to P.1) stays a pointer.
+LEGACY = {
+    "L": ("none", 20, "V", None),
+    "L.1": ("L", 21, "W", "l1"),
+    "L.1.1": ("L.1", 22, "K", None),
+    "L.2": ("L", 23, "R", None),
+    "L.3": ("L", 24, "S", None),
+}
+
+
+def add_legacy_clades(root: Path) -> Path:
+    """Write the ``LEGACY`` clade files into a clone from :func:`build_clone` and commit."""
+    for name, (parent, position, state, short) in LEGACY.items():
+        short_line = f"short_name: {short}\n" if short else ""
+        write_clade(
+            root / "clades",
+            name,
+            f"""
+name: {name}
+{short_line}parent: {parent}
+representatives: []
+defining_mutations:
+- locus: HA1
+  position: {position}
+  state: {state}
+""",
+        )
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(commit_command(root, "legacy clades"), check=True)
+    return root

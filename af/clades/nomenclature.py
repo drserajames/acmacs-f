@@ -22,7 +22,7 @@ recognise is an error naming the file and the line, because a silently skipped
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -242,6 +242,49 @@ class CladeSet:
                         f"and {legacy.alias_of!r}"
                     )
         return aliases
+
+    def legacy_defining(self) -> tuple[str, ...]:
+        """Legacy clades that define themselves (own mutations, not a pointer to a subclade).
+
+        Only these can label a virus the subclades do not name (af.clades.legacy); a pointer
+        is an old name for a live subclade and is resolved as one (:meth:`legacy_aliases`).
+        """
+        return tuple(
+            sorted(
+                name
+                for name, clade in self.legacy_clades.items()
+                if clade.mutations and not clade.is_pointer
+            )
+        )
+
+    def legacy_parent(self, name: str) -> str | None:
+        """``name``'s parent among the defining legacy clades; None at the root of that tree."""
+        parent = self.legacy_clades[name].parent
+        return parent if parent in self.legacy_defining() else None
+
+    def legacy_ancestors(self, name: str) -> tuple[str, ...]:
+        """Defining legacy ancestors of ``name``, nearest first."""
+        found: list[str] = []
+        parent = self.legacy_parent(name)
+        while parent is not None:
+            if parent in found:
+                raise NomenclatureError(f"{self.subtype}: legacy clades form a cycle at {parent!r}")
+            found.append(parent)
+            parent = self.legacy_parent(parent)
+        return tuple(found)
+
+    def legacy_is_within(self, name: str, ancestor: str) -> bool:
+        """True when legacy clade ``name`` is ``ancestor`` or below it."""
+        return name == ancestor or ancestor in self.legacy_ancestors(name)
+
+    def legacy_common_ancestor(self, names: Sequence[str]) -> str | None:
+        """The deepest legacy clade every one of ``names`` lies within; None if they share none."""
+        lineages = [(name, *self.legacy_ancestors(name)) for name in names]
+        shared = set(lineages[0]).intersection(*lineages[1:])
+        for candidate in lineages[0]:
+            if candidate in shared:
+                return candidate
+        return None
 
     def unexpressible(self) -> dict[str, tuple[Unexpressible, ...]]:
         """Clades with defining mutations no mature-HA sequence can carry (design rule 1)."""

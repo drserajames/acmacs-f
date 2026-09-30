@@ -54,6 +54,9 @@ COLUMNS: dict[str, str] = {
     "support": "INTEGER",
     "unobservable": "INTEGER",
     "tree_node": "VARCHAR",
+    # retrospective label (af.clades.legacy): only where ``clade`` is null; display, never selection
+    "legacy_clade": "VARCHAR",
+    "legacy_tolerated": "VARCHAR[]",
 }
 
 #: How a clade was decided. Recorded per row because the two are not equally strong: a
@@ -82,6 +85,10 @@ class CladeRow:
     support: int = 0
     unobservable: int = 0
     tree_node: str | None = None
+    legacy_clade: str | None = None
+    """An older upstream clade, only where ``clade`` is null (af.clades.legacy)."""
+    legacy_tolerated: tuple[str, ...] = ()
+    """The ancestral loci the legacy label forgave, as ``<legacy clade>:<locus>``."""
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -93,6 +100,8 @@ class CladeRow:
             "support": self.support,
             "unobservable": self.unobservable,
             "tree_node": self.tree_node,
+            "legacy_clade": self.legacy_clade,
+            "legacy_tolerated": list(self.legacy_tolerated),
         }
 
 
@@ -206,6 +215,12 @@ def publish(
     wrong = sorted({row.subtype for row in rows} - {subtype})
     if wrong:
         raise CladeStoreError(f"{subtype}: rows carry other subtypes: {wrong}")
+    both = [(row.epi_isl, row.accession) for row in rows if row.clade and row.legacy_clade]
+    if both:
+        raise CladeStoreError(
+            f"{subtype}: {len(both)} rows carry a subclade and a legacy label, e.g. {both[:3]}; "
+            "a legacy label is only for sequences the subclades do not name"
+        )
     duplicates = _duplicates((row.epi_isl, row.accession) for row in rows)
     if duplicates:
         raise CladeStoreError(

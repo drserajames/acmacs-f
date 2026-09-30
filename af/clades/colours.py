@@ -9,7 +9,9 @@ in acmacs-f-data as plain tables, one per scheme::
     2       D          D            #5b00d3
     3       D 139N     D.3.1 139N   #00bfff
 
-``key`` is a clade name or a group name (:mod:`af.clades.groups`); ``legend`` is what the
+``key`` is a clade name, a group name (:mod:`af.clades.groups`), or the full name of an older
+upstream clade with its own definitions (a *legacy* entry, :mod:`af.clades.legacy`, which only
+matches viruses the subclades leave unnamed); ``legend`` is what the
 figure prints, which is not always the key — today's tables relabel clades on the figure
 while keeping the old key. ``order`` is the row order: it orders the legend **and decides
 which entry colours a virus**.
@@ -65,6 +67,7 @@ class ColourEntry:
     legend: str
     colour: str
     is_group: bool
+    is_legacy: bool = False
 
     def __str__(self) -> str:
         return f"{self.key} ({self.colour})"
@@ -99,12 +102,18 @@ class ColourScheme:
         sequence: AlignedSequence,
         clade_set: CladeSet,
         group_set: GroupSet | None = None,
+        *,
+        legacy_clade: str | None = None,
     ) -> ColourEntry | None:
         """The entry that colours this virus: the last matching row wins (Q80).
 
         A scheme with group entries needs the groups it was loaded with; without them a
-        group row would silently never match, so that is an error.
+        group row would silently never match, so that is an error. ``legacy_clade`` is the
+        virus's retrospective label, given only when the subclades do not name it; a legacy
+        row matches it or anything below it, and no clade row can then match.
         """
+        if clade is not None and legacy_clade is not None:
+            raise ValueError("a virus has a subclade or a legacy label, never both")
         has_groups = any(entry.is_group for entry in self.entries)
         if has_groups and group_set is None:
             raise ValueError(
@@ -120,6 +129,10 @@ class ColourScheme:
         for entry in self.in_order():
             if entry.is_group:
                 matched = entry.key in in_groups
+            elif entry.is_legacy:
+                matched = legacy_clade is not None and clade_set.legacy_is_within(
+                    legacy_clade, entry.key
+                )
             else:
                 matched = clade is not None and clade_set.is_within(clade, entry.key)
             if matched:
@@ -176,6 +189,7 @@ def scheme_from_rows(
     seen_keys: set[str] = set()
     seen_orders: dict[int, str] = {}
     group_names = set(group_set.names) if group_set else set()
+    legacy_names = set(clade_set.legacy_defining())
     for where, row in rows:
         values = {key: (row.get(key) or "").strip() for key in COLUMNS}
         if not any(values.values()):
@@ -185,10 +199,12 @@ def scheme_from_rows(
             problems.append(f"{where}: no key")
             continue
         is_group = key in group_names
-        if not is_group and key not in clade_set:
+        is_legacy = not is_group and key not in clade_set and key in legacy_names
+        if not is_group and not is_legacy and key not in clade_set:
             problems.append(
                 f"{where}: key {key!r} is neither a clade of {subtype} at "
-                f"{clade_set.version} nor a known group"
+                f"{clade_set.version}, nor a legacy clade with its own definitions, nor a known "
+                "group"
             )
             continue
         if key in seen_keys:
@@ -208,7 +224,9 @@ def scheme_from_rows(
             continue
         seen_orders[order] = key
         entries.append(
-            ColourEntry(order, key, values["legend"] or key, values["colour"].lower(), is_group)
+            ColourEntry(
+                order, key, values["legend"] or key, values["colour"].lower(), is_group, is_legacy
+            )
         )
     label = source if source is not None else f"{subtype} {name}"
     if not entries and not problems:
@@ -290,6 +308,14 @@ def _covers(
     groups: Mapping[str, Group],
 ) -> bool:
     """True when every virus ``earlier`` matches is also matched by ``later``."""
+    if earlier.is_legacy or later.is_legacy:
+        # legacy rows match only viruses the subclades leave unnamed, so a legacy row covers
+        # (and is covered by) nothing but a legacy row at or above it
+        return (
+            earlier.is_legacy
+            and later.is_legacy
+            and clade_set.legacy_is_within(earlier.key, later.key)
+        )
     earlier_group = groups.get(earlier.key) if earlier.is_group else None
     earlier_anchor = earlier_group.anchor if earlier_group is not None else earlier.key
     if earlier.is_group and earlier_group is None:

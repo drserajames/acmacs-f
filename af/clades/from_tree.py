@@ -23,6 +23,7 @@ Refusals, each because the alternative is a table that looks right and is not:
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import json
 from collections.abc import Iterable, Mapping, Sequence
@@ -32,7 +33,9 @@ from typing import Any
 from af.clades.agreement import AgreementCheck, AgreementLimit, check_agreement
 from af.clades.assign import Assignment
 from af.clades.fallback import StoreFallback, assign_from_store, disagreements
+from af.clades.legacy import LegacyRule, legacy_labels
 from af.clades.nomenclature import CladeSet
+from af.clades.sequence import AlignedSequence
 from af.clades.store import CladeRow, CladeStoreError, dataset_for, publish, rows_from_assignments
 from af.seq.processed import read_table
 from af.store import ExternalInput, Store, StoreRef
@@ -132,6 +135,7 @@ def publish_clades(
     started: datetime.datetime,
     agreement: AgreementLimit | None = None,
     accept_disagreement: str | None = None,
+    legacy: LegacyRule | None = None,
 ) -> StoreRef:
     """One ``clades/<subtype>`` table: the tree's calls, and the fallback's for the rest.
 
@@ -149,7 +153,17 @@ def publish_clades(
 
     With both, ``agreement`` is required: a tree that disagrees with the fallback beyond it
     is refused unless ``accept_disagreement`` names a reason (:mod:`af.clades.agreement`).
+
+    With ``legacy``, every row the subclades leave unnamed also gets a retrospective label
+    from upstream's older definitions (:mod:`af.clades.legacy`); ``nomenclature`` must then
+    include the clone's ``clades/`` directory, the definitions it was read from.
     """
+    nomenclature = list(nomenclature)
+    if legacy is not None and not any(item.path.name == "clades" for item in nomenclature):
+        raise CladeStoreError(
+            f"{subtype}: a legacy label needs the nomenclature's clades/ directory among the "
+            "nomenclature inputs, so the definitions it came from are in the provenance"
+        )
     if tree is None and sequences is None:
         raise CladeStoreError(f"{subtype}: give a tree version, a sequence version, or both")
     if tree is not None and sequences is not None and agreement is None:
@@ -162,6 +176,7 @@ def publish_clades(
             f"{subtype}: accept_disagreement given, but there is no tree and fallback to compare"
         )
     rows: list[CladeRow] = []
+    tree_sequences: StoreRef | None = None
     check: AgreementCheck | None = None
     report: dict[str, Any] = {}
     inputs: list[StoreRef] = []
@@ -170,7 +185,7 @@ def publish_clades(
             raise CladeStoreError(f"{tree}: expected a tree-store version, got kind {tree.kind!r}")
         directory = store.resolve(tree, verify=True)
         rows = rows_from_tree(directory, subtype, clade_set)
-        check_tree_identities(store, tree, rows)
+        tree_sequences = check_tree_identities(store, tree, rows)
         report = _tree_report(tree, i6.read_metadata(directory), i6.read_excluded(directory))
         inputs.append(tree)
     if sequences is not None:
@@ -187,6 +202,10 @@ def publish_clades(
             report["agreement"] = check.to_json()
         report.setdefault("not_on_tree", {})["labelled_by"] = "fallback, in this table"
         inputs += [sequences, fallback.dataset]
+    if legacy is not None:
+        source = sequences or tree_sequences
+        assert source is not None  # a tree without sequences still names its sequence version
+        rows, report["legacy"] = _with_legacy(store, rows, source, clade_set, legacy)
     return publish(
         store,
         subtype,
@@ -200,7 +219,11 @@ def publish_clades(
         extra_report=report,
         # the limit, its reason and any override go into provenance too: they decided
         # whether this version could exist at all
-        extra_parameters=None if check is None else {"agreement": check.provenance()},
+        extra_parameters={
+            **({} if check is None else {"agreement": check.provenance()}),
+            **({} if legacy is None else {"legacy": legacy.to_json()}),
+        }
+        or None,
     )
 
 
@@ -291,6 +314,52 @@ def _with_fallback(
         },
         check,
     )
+
+
+def _with_legacy(
+    store: Store,
+    rows: list[CladeRow],
+    sequences: StoreRef,
+    clade_set: CladeSet,
+    rule: LegacyRule,
+) -> tuple[list[CladeRow], dict[str, Any]]:
+    """The rows, with a legacy label on each the subclades leave unnamed, and the counts."""
+    unnamed = {(row.epi_isl, row.accession) for row in rows if row.clade is None}
+    table = read_table(store, sequences, "sequences", ["epi_isl", "accession", "nuc_aligned"])
+    aligned = {
+        (epi_isl, accession): nucleotides
+        for epi_isl, accession, nucleotides in zip(
+            table["epi_isl"].to_pylist(),
+            table["accession"].to_pylist(),
+            table["nuc_aligned"].to_pylist(),
+            strict=True,
+        )
+        if (epi_isl, accession) in unnamed
+    }
+    missing = sorted(unnamed - set(aligned))
+    if missing:
+        raise CladeStoreError(
+            f"{len(missing)} unnamed rows are not sequences of {sequences}, e.g. {missing[:3]}"
+        )
+    calls, counts = legacy_labels(
+        {
+            key: None if not nucleotides else AlignedSequence.from_nucleotides(nucleotides)
+            for key, nucleotides in aligned.items()
+        },
+        clade_set,
+        rule,
+    )
+    labelled = [
+        row
+        if row.clade is not None
+        else dataclasses.replace(
+            row,
+            legacy_clade=calls[(row.epi_isl, row.accession)].clade,
+            legacy_tolerated=calls[(row.epi_isl, row.accession)].tolerated,
+        )
+        for row in rows
+    ]
+    return labelled, {**rule.to_json(), "unnamed": len(unnamed), **counts.to_json()}
 
 
 def _check_metadata(
