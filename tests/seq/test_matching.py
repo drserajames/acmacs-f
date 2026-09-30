@@ -457,3 +457,37 @@ class TestLocationForms:
 def test_location_forms_key_keeps_the_number_and_year() -> None:
     assert M.location_forms_key(("COTE D'IVOIRE", "948", "2020")) == ("COTEDIVOIRE", "948", "2020")
     assert M.location_forms_key(("Cote Divoire", "948", "2020")) == ("COTEDIVOIRE", "948", "2020")
+
+
+class TestCellAntigenEggSequence:
+    """A cell antigen with only egg sequences: the mirror of an egg antigen with none."""
+
+    def cand(self, n: int, passage: str, klass: str, seq: str = "a") -> M.Candidate:
+        return M.Candidate(f"EPI_ISL_{n}", f"EPI{n}", "h3", "A/EXAMPLETOWN/7/2024", passage,
+                           klass, seq)  # fmt: skip
+
+    def test_only_egg_sequences_are_taken_and_flagged(self) -> None:
+        egg = self.cand(1, "E5", M.EGG)
+        match = index(egg).match("A(H3N2)/EXAMPLETOWN/7/2024", M.CELL)
+        assert match.chosen == egg  # matched: a flag reports, it does not exclude
+        assert match.flags == (M.CELL_FROM_EGG,)
+
+    def test_a_cell_sequence_is_preferred_and_unflagged(self) -> None:
+        egg, cell = self.cand(1, "E5", M.EGG), self.cand(2, "MDCK2", M.CELL, "b")
+        match = index(egg, cell).match("A(H3N2)/EXAMPLETOWN/7/2024", M.CELL)
+        assert (match.chosen, match.flags) == (cell, ())
+
+    def test_an_original_sequence_still_wins_over_an_egg_one(self) -> None:
+        egg, original = self.cand(1, "E5", M.EGG), self.cand(2, "Original", M.ORIGINAL, "b")
+        match = index(egg, original).match("A(H3N2)/EXAMPLETOWN/7/2024", M.CELL)
+        assert (match.chosen, match.flags) == (original, (M.CELL_FROM_ORIGINAL,))
+
+    def test_an_egg_antigen_is_unaffected(self) -> None:
+        egg = self.cand(1, "E5", M.EGG)
+        assert index(egg).match("A(H3N2)/EXAMPLETOWN/7/2024", M.EGG).flags == ()
+
+    def test_the_flag_is_a_doubt_that_colouring_still_uses(self) -> None:
+        """Sarah, 30 Sep: "doubtful and usable" -- counted as a doubt, colour kept."""
+        match = index(self.cand(1, "E5", M.EGG)).match("A(H3N2)/EXAMPLETOWN/7/2024", M.CELL)
+        assert match.doubtful
+        assert M.CELL_FROM_EGG in M.DOUBTFUL and M.CELL_FROM_EGG in M.USABLE_DOUBTS
