@@ -159,6 +159,11 @@ class StoreColours:
             "matching_rules": self.rules.provenance(),
             "coloured": dict(counts.coloured),
             "uncoloured": dict(counts.uncoloured),
+            # How the join reached some of those colours, as geo reports them: refused name ties
+            # coloured anyway, doubtful matches used, and preparations whose rows disagreed.
+            "ties": dict(counts.ties),
+            "doubtful": dict(counts.doubtful),
+            "rows": dict(counts.rows),
             "shadowed_rows": [str(s) for s in shadowed],
         }
         return ChartColours(scheme, tuple(labels), tuple(sequenced), provenance)
