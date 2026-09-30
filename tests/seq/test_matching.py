@@ -398,3 +398,62 @@ class TestRefusedTies:
         for order in (tier, tier[::-1], tier[1:] + tier[:1]):
             ranked = M.ae_ranked(order, "MDCK2", M.CELL)
             assert ranked is not None and ranked.epi_isl == "EPI_ISL_9"  # numeric, not text
+
+
+class TestLocationForms:
+    """Spaces and punctuation in the location; the isolate number and year stay exact."""
+
+    ANTIGEN = "A(H3N2)/EXAMPLEPROV EXAMPLETOWN/31/2024"
+
+    def dep(self, n: int, name: str, seq: str = "a", lab: str = "Someone Else") -> M.Candidate:
+        return M.Candidate(f"EPI_ISL_{n}", f"EPI{n}", "h3", name, "MDCK1", M.CELL, seq, lab)
+
+    def test_a_spacing_difference_matches_and_is_flagged(self) -> None:
+        stored = self.dep(1, "A/EXAMPLEPROVEXAMPLETOWN/31/2024")
+        match = index(stored).match(self.ANTIGEN, M.CELL)
+        assert (match.method, match.chosen) == ("location-forms", stored)
+        assert match.flags == (M.NAME_SPACING,) and not match.doubtful
+
+    @pytest.mark.parametrize(
+        "stored_location",
+        ["EXAMPLE PROV EXAMPLETOWN", "EXAMPLEPROV_EXAMPLETOWN", "EXAMPLEPROV-EXAMPLETOWN"],
+    )
+    def test_punctuation_and_underscores_too(self, stored_location: str) -> None:
+        stored = self.dep(1, f"A/{stored_location}/31/2024")
+        assert index(stored).match(self.ANTIGEN, M.CELL).chosen == stored
+
+    def test_the_isolate_number_and_year_still_have_to_match(self) -> None:
+        other_number = self.dep(1, "A/EXAMPLEPROVEXAMPLETOWN/32/2024")
+        other_year = self.dep(2, "A/EXAMPLEPROVEXAMPLETOWN/31/2023")
+        assert index(other_number, other_year).match(self.ANTIGEN, M.CELL).chosen is None
+
+    def test_an_exact_name_is_never_replaced(self) -> None:
+        exact = self.dep(1, "A/EXAMPLEPROV EXAMPLETOWN/31/2024", "a")
+        spaced = self.dep(2, "A/EXAMPLEPROVEXAMPLETOWN/31/2024", "b")
+        match = index(exact, spaced).match(self.ANTIGEN, M.CELL)
+        assert (match.method, match.chosen) == ("name", exact)
+
+    def test_two_forms_with_different_sequences_are_refused_not_chosen(self) -> None:
+        a = self.dep(1, "A/EXAMPLEPROVEXAMPLETOWN/31/2024", "a")
+        b = self.dep(2, "A/EXAMPLEPROV_EXAMPLETOWN/31/2024", "b")
+        match = index(a, b).match(self.ANTIGEN, M.CELL)
+        assert match.chosen is None
+        assert M.AMBIGUOUS in match.flags and M.NAME_SPACING in match.flags
+
+    def test_two_forms_of_one_sequence_are_one_match(self) -> None:
+        a = self.dep(1, "A/EXAMPLEPROVEXAMPLETOWN/31/2024", "a")
+        b = self.dep(2, "A/EXAMPLEPROV_EXAMPLETOWN/31/2024", "a")
+        match = index(a, b).match(self.ANTIGEN, M.CELL)
+        assert match.chosen is not None and M.IDENTICAL_DUPLICATES in match.flags
+
+    def test_the_number_rule_still_sees_the_province(self) -> None:
+        idx = index(self.dep(1, "A/EXAMPLEPROV EXAMPLEOTHER/31/2024", lab="Own Lab"))
+        idx.submitters = {"lab-n": frozenset({"Own Lab"})}
+        idx.number_rules = {"lab-n": M.NumberRule("lab-n")}
+        match = idx.match(self.ANTIGEN, M.CELL, lab="lab-n")
+        assert (match.method, match.flags) == ("number", (M.LAB_NUMBER,))
+
+
+def test_location_forms_key_keeps_the_number_and_year() -> None:
+    assert M.location_forms_key(("COTE D'IVOIRE", "948", "2020")) == ("COTEDIVOIRE", "948", "2020")
+    assert M.location_forms_key(("Cote Divoire", "948", "2020")) == ("COTEDIVOIRE", "948", "2020")
