@@ -25,7 +25,7 @@ from pathlib import Path
 
 from af.run import Job, LocalRunner, Resources, Runner
 from af.tree.io import newick
-from af.tree.model import Tree
+from af.tree.model import Tree, TreeError
 
 SEARCH_TYPES = ("FAST", "NORMAL", "EXHAUSTIVE")
 
@@ -138,12 +138,45 @@ def run_cmaple(
     return newick.load(treefile)
 
 
-def prune_starting_tree(previous: Tree, keep: list[str], out_path: Path) -> tuple[Path, int]:
+@dataclass(frozen=True)
+class StartingTree:
+    """The pruned previous tree handed to the builder, and what it does and does not hold."""
+
+    path: Path
+    leaves: int  # leaves it keeps: those in both the previous tree and the current selection
+    removed: int  # leaves the previous tree had that the selection no longer wants
+    added_by_builder: int  # selected leaves it does not hold; the builder places these
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "leaves": self.leaves,
+            "removed": self.removed,
+            "added_by_builder": self.added_by_builder,
+        }
+
+
+def prune_starting_tree(previous: Tree, keep: list[str], out_path: Path) -> StartingTree:
     """Write the previous tree cut down to the current selection, for an incremental build.
 
     Leaves that are gone are removed and any node left with one child is spliced out, because
-    CMAPLE segfaults on unary nodes. Returns the path and how many leaves were dropped.
+    CMAPLE segfaults on unary nodes.
+
+    Leaves of ``keep`` that the previous tree does not have are **not** an error: the builder places
+    them itself, which is the point of an incremental build. A weekly run adds that week's new
+    sequences this way; a run seeded from a date-stratified subsample adds almost everything (the H3
+    seed of 29 Sep 2026 held 11,251 of 193,185). They are counted and reported, never silently
+    dropped. An overlap of nothing is an error: such a tree would tell the builder nothing.
     """
-    removed = previous.prune(keep)
+    present = {leaf.name for leaf in previous.leaves() if leaf.name}
+    wanted = set(keep)
+    shared = wanted & present
+    if not shared:
+        raise TreeError(
+            f"the starting tree holds none of the {len(wanted)} leaves to keep, so it cannot "
+            "seed a build"
+        )
+    removed = previous.prune(sorted(shared))
     newick.dump(previous, out_path)
-    return out_path, removed
+    return StartingTree(
+        path=out_path, leaves=len(shared), removed=removed, added_by_builder=len(wanted - present)
+    )

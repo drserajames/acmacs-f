@@ -490,12 +490,13 @@ def _build_step(
         source = _checked_export(subtype, sub, inputs)
         exclude, not_dropped = _prebuild(sub, inputs, rule)
         starting = None
+        starting_counts: dict[str, object] | None = None
         if inputs.incremental:
             assert inputs.previous is not None  # SubtypeInputs checks this
             keep = sorted(set(read_alignment(inputs.alignment)) - exclude.keys())
-            starting, _ = prune_starting_tree(
-                newick.load(inputs.previous), keep, out / "starting.nwk"
-            )
+            seeded = prune_starting_tree(newick.load(inputs.previous), keep, out / "starting.nwk")
+            starting = seeded.path
+            starting_counts = seeded.to_json()
         result = build(
             inputs.alignment,
             sub.outgroup,
@@ -517,6 +518,7 @@ def _build_step(
             "prebuild_not_applied": not_dropped,
             "excluded": exclude.records(),
             "source": source,
+            "starting_tree": starting_counts,
         }
         layout.build_meta.write_text(json.dumps(meta, indent=1, default=str) + "\n")
 
