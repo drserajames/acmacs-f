@@ -213,3 +213,79 @@ def test_driver_busy_in_process_stops_at_once(tmp_path: Path) -> None:
     assert elapsed < 5, f"took {elapsed:.1f} s to stop"
     assert "terminated by SIGTERM" in output and "step reruns next time" in output
     assert not (work / "state" / "refine.json").exists(), "an interrupted step keeps no record"
+
+
+PUBLISHING_DRIVER = """\
+import datetime, sys, time
+from pathlib import Path
+import af.store.store as store_module
+from af.pipeline import Pipeline, Step
+from af.run import LocalRunner
+from af.run.job import run_main
+from af.store import Provenance, Store
+from af.util.artefacts import Artefact
+
+root = Path(sys.argv[1])
+store = Store.create(root / "store")
+append_history = store_module._append_history
+def slow_append_history(*args, **kwargs):
+    (root / "in-publish").write_text("x")  # renamed into place; HISTORY and CURRENT not yet
+    time.sleep(2)
+    append_history(*args, **kwargs)
+store_module._append_history = slow_append_history
+def publish(context):
+    with store.build("tables", "labx/h3") as build:
+        (build.path / "t.txt").write_text("synthetic")
+        now = datetime.datetime.now(datetime.UTC)
+        build.publish(Provenance(step="publish", inputs=(), parameters={}, started=now,
+                                 finished=now))
+    time.sleep(120)
+    (root / "out").write_text("x")
+def main():
+    Pipeline([Step("publish", publish, outputs=[Artefact(root / "out")])],
+             state_dir=root / "state", runner=LocalRunner(), root=root).run()
+    return 0
+run_main(main)
+"""
+
+
+def test_driver_stopped_mid_publish_finishes_the_publish(tmp_path: Path) -> None:
+    """SIGTERM between a version's rename and its HISTORY/CURRENT writes (07-chains, 30 Sep).
+
+    The driver exits at once otherwise; here it waits for the publish to finish, so HISTORY
+    and CURRENT agree, and then exits with 143.
+    """
+    import json
+    import subprocess
+    import sys
+
+    driver = tmp_path / "publishing.py"
+    driver.write_text(PUBLISHING_DRIVER)
+    work = tmp_path / "work"
+    work.mkdir()
+    process = subprocess.Popen(
+        [sys.executable, str(driver), str(work)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        cwd=tmp_path,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while not (work / "in-publish").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert (work / "in-publish").exists(), "the step never reached the publish"
+        started = time.monotonic()
+        process.send_signal(signal.SIGTERM)
+        output, _ = process.communicate(timeout=20)
+        elapsed = time.monotonic() - started
+    finally:
+        if process.poll() is None:
+            process.kill()
+    assert process.returncode == 128 + signal.SIGTERM, output
+    assert 1 < elapsed < 10, f"stopped after {elapsed:.1f} s: should wait out the 2 s publish"
+    dataset = work / "store" / "tables" / "labx" / "h3"
+    history = [json.loads(line) for line in (dataset / "HISTORY.jsonl").read_text().splitlines()]
+    assert [entry["event"] for entry in history] == ["published"]
+    assert (dataset / "CURRENT").read_text().strip() == history[0]["version"]
+    assert (dataset / "versions" / history[0]["version"]).is_dir()
