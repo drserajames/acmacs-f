@@ -486,7 +486,8 @@ class TestCellAntigenEggSequence:
         egg = self.cand(1, "E5", M.EGG)
         assert index(egg).match("A(H3N2)/EXAMPLETOWN/7/2024", M.EGG).flags == ()
 
-    def test_the_flag_is_not_a_doubt_until_that_is_decided(self) -> None:
-        """Adding it to DOUBTFUL would drop these matches' colour; that is Sarah's call."""
+    def test_the_flag_is_a_doubt_that_colouring_still_uses(self) -> None:
+        """Sarah, 30 Sep: "doubtful and usable" -- counted as a doubt, colour kept."""
         match = index(self.cand(1, "E5", M.EGG)).match("A(H3N2)/EXAMPLETOWN/7/2024", M.CELL)
-        assert M.CELL_FROM_EGG not in M.DOUBTFUL and not match.doubtful
+        assert match.doubtful
+        assert M.CELL_FROM_EGG in M.DOUBTFUL and M.CELL_FROM_EGG in M.USABLE_DOUBTS

@@ -74,15 +74,11 @@ NO_MATCH = "match.none"
 TIE_AGREES = "match.tie-agrees"
 TIE_RANKED = "match.tie-ranked"
 DOUBTFUL = frozenset({EPI_NAME_DIFFERS, SEVERAL_ACCESSIONS, EGG_WITHOUT_EGG_SEQUENCE,
-                      AMBIGUOUS, REASSORTANT})  # fmt: skip
-# CELL_FROM_EGG is deliberately NOT here yet. It is the mirror of EGG_WITHOUT_EGG_SEQUENCE and
-# reads like a doubt, but adding it moves 285 antigen rows on the live store from matched to
-# doubtful, and (unless it also joins USABLE_DOUBTS) drops their colour -- 0.47% of matched rows,
-# against Q81's own target. Whether colouring should keep using these matches, as it does for an
-# egg antigen given a non-egg sequence, is Sarah's call through the coordinator, not a default.
+                      CELL_FROM_EGG, AMBIGUOUS, REASSORTANT})  # fmt: skip
 # Doubts colouring accepts, flagged and counted (Sarah, Q81 D: "Yes, flagged + counted"): ae uses
 # these matches. A match with any other doubt (several accessions, several datasets) is not used.
-USABLE_DOUBTS = frozenset({EGG_WITHOUT_EGG_SEQUENCE, REASSORTANT, EPI_NAME_DIFFERS})
+USABLE_DOUBTS = frozenset({EGG_WITHOUT_EGG_SEQUENCE, CELL_FROM_EGG, REASSORTANT,
+                           EPI_NAME_DIFFERS})  # fmt: skip
 
 
 @dataclass(frozen=True)
