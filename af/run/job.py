@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn, Protocol
 
+from af.util import critical
 from af.util.artefacts import Artefact, ArtefactError, CheckedArtefact, check_artefacts
 
 LOG_TAIL_LINES = 20
@@ -170,15 +171,22 @@ def signals_as_exceptions() -> Iterator[None]:
     until ``kill -9`` (seen on o, 30 Sep 2026: a chain driver blocked in
     ``sbatch --wait``). Threads started while this is active inherit the unblocked mask.
     The previous mask and handlers are restored afterwards.
+
+    A signal that arrives while the main thread is inside an :func:`af.util.critical.critical`
+    section (a store publish) takes effect as the section ends, not in the middle of it.
     """
     if threading.current_thread() is not threading.main_thread():
         yield
         return
 
     def handler(signum: int, frame: object) -> None:
+        if critical.defer_in_main(signum):
+            return  # re-raised when the main thread's critical section ends
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
         raise Terminated(signum)
 
-    previous = {sig: signal.signal(sig, handler) for sig in TERMINATING_SIGNALS}
+    previous = {sig: signal.signal(sig, handler) for sig in (*TERMINATING_SIGNALS, signal.SIGINT)}
     unblock = {*TERMINATING_SIGNALS, signal.SIGINT}
     blocked_before = signal.pthread_sigmask(signal.SIG_UNBLOCK, unblock)
     try:
@@ -244,6 +252,9 @@ def _site_flags() -> list[str]:
     return ["-S"] if sys.flags.no_site else []
 
 
+CRITICAL_GRACE_SECONDS = 60
+
+
 def run_main(main: Callable[[], int]) -> NoReturn:
     """Run a command-line driver's ``main`` so that Ctrl-C, SIGTERM and SIGHUP stop it now.
 
@@ -273,7 +284,15 @@ def _exit_now(code: int, reason: str) -> NoReturn:
         f"{reason}: in-flight jobs cancelled, in-process work abandoned; the interrupted "
         f"step reruns next time. Exiting with {code}."
     )
-    logging.getLogger("af.run").error(message)  # stderr too, when nothing configured logging
+    log = logging.getLogger("af.run")
+    log.error(message)  # stderr too, when nothing configured logging
+    # A step thread may be mid-publish (rename, HISTORY, CURRENT): let it finish that.
+    # The handlers are restored by now, so a second signal still kills at once.
+    if not critical.wait_for_critical_sections(CRITICAL_GRACE_SECONDS):
+        log.error(
+            "a critical section (e.g. a store publish) did not finish in %d s",
+            CRITICAL_GRACE_SECONDS,
+        )
     logging.shutdown()
     sys.stdout.flush()
     os._exit(code)

@@ -54,6 +54,7 @@ from af.store.ref import (
     check_kind,
     input_to_json,
 )
+from af.util.critical import critical
 
 LAYOUT_VERSION = 1
 STORE_FILE = "STORE.toml"
@@ -326,13 +327,29 @@ class VersionBuilder:
         target = dataset_dir / VERSIONS / ref.version
         if target.exists():
             self.store.verify(ref)
-            event = "reconfirmed" if previous == ref.version else "restored"
         else:
             (self.path / MANIFEST).write_bytes(manifest.to_bytes())
             (self.path / PROVENANCE).write_text(
                 json.dumps(provenance.to_json(), indent=2, sort_keys=True) + "\n"
             )
             _make_read_only(self.path)
+        # Rename, HISTORY and CURRENT go together: a driver told to stop (af.run.job) lets
+        # this finish rather than leave HISTORY naming a version CURRENT doesn't point to.
+        with critical():
+            self._commit(ref, target, previous, provenance, summary, dataset_dir)
+
+    def _commit(
+        self,
+        ref: StoreRef,
+        target: Path,
+        previous: str | None,
+        provenance: Provenance,
+        summary: Mapping[str, Any] | None,
+        dataset_dir: Path,
+    ) -> None:
+        if target.exists():
+            event = "reconfirmed" if previous == ref.version else "restored"
+        else:
             self.path.rename(target)
             event = "published"
         _append_history(
