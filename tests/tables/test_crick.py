@@ -384,3 +384,32 @@ def test_sheets_replace_a_folder_workbook_only_when_it_is_excluded(tmp_path, rul
     _, errors = run([])
     assert any("not excluded" in e for e in errors)
     assert any("also read from a folder" in e for e in errors)
+
+
+@pytest.mark.parametrize(
+    ("serum_id", "expected"),
+    [
+        ("SH5/6/71", ("SH5/6/7", ["1"])),  # "Sh 5, 6, 71": mark 1 without its '*'
+        ("SH539/540/5741", ("SH539/540/574", ["1"])),
+        ("SH5/6/72", None),  # 2 is not a legend mark
+        ("SH5/6/7", None),  # the same width: nothing lost
+        ("SH5/16/71", None),  # widths differ already: no telling
+        ("F12/281", None),  # only sheep pools
+    ],
+)
+def test_a_sheep_pool_mark_written_without_its_star(serum_id, expected):
+    legend = {"1": {"species": "SHEEP"}, "3": {"<": "<40"}}
+    assert crick._lost_mark(serum_id, legend) == expected
+
+
+def test_a_reference_with_no_passage_takes_its_serums_word(tmp_path, rules):
+    reference = [list(row) for row in REFERENCE]
+    reference[0][4] = ""  # B/Exampleville/12/2029: its serum's column says Egg
+    t = one_table(read(workbook(tmp_path / "labc-20300102.xlsx", reference=reference), rules))
+    first = t.antigens[0]
+    assert (first.name, first.passage, first.source["passage_from"]) == (
+        "B/EXAMPLEVILLE/12/2029",
+        "E?",
+        "homologous serum",
+    )
+    assert any("no passage written; E? from its serum" in w for w in t.warnings)
