@@ -162,3 +162,39 @@ def test_a_stage_tree_meets_the_clade_stores_identity_checks(tmp_path: Path) -> 
     on_tree = {(n["epi_isl"], n["accession"]) for n in leaves if n["is_leaf"]}
     assert on_tree <= {(r["epi_isl"], r["accession"]) for r in rows}
     assert len(on_tree) == 5
+
+
+def test_the_alignment_is_shuffled_with_a_recorded_seed(store: Store, tmp_path: Path) -> None:
+    """A date-sorted alignment made CMAPLE bury the old lineages (H3-OLD-LINEAGE-PLACEMENT.md)."""
+    first = E.export(store, "h3", rules(), tmp_path / "a")
+    again = E.export(store, "h3", rules(), tmp_path / "b")
+    order = list(read_alignment(tmp_path / "a" / E.ALIGNMENT_FILE))
+    assert order == list(read_alignment(tmp_path / "b" / E.ALIGNMENT_FILE))  # reproducible
+    assert first.shuffle_seed == again.shuffle_seed == E.SHUFFLE_SEED
+    assert first.alignment_sha256 == again.alignment_sha256
+    recorded = json.loads((tmp_path / "a" / E.EXPORT_FILE).read_text())["alignment_order"]
+    assert recorded["shuffled_with_seed"] == E.SHUFFLE_SEED
+    assert recorded["outgroup_first"] is True
+    assert E.read_export(tmp_path / "a").shuffle_seed == E.SHUFFLE_SEED
+
+
+def test_the_outgroup_is_written_first_whatever_the_seed(store: Store, tmp_path: Path) -> None:
+    """CMAPLE takes the first record as its reference, so this must not depend on the seed."""
+    seen = set()
+    for index, seed in enumerate((1, 2, 7, 20261001)):
+        record = E.export(store, "h3", rules(), tmp_path / f"s{index}", shuffle_seed=seed)
+        order = list(read_alignment(tmp_path / f"s{index}" / E.ALIGNMENT_FILE))
+        assert order[0] == KEYS["o"] == record.outgroup
+        assert sorted(order) == sorted(read_alignment(tmp_path / "s0" / E.ALIGNMENT_FILE))
+        seen.add(tuple(order))
+    assert len(seen) > 1  # different seeds really do give different orders
+
+
+def test_a_different_seed_changes_the_order_but_not_the_leaves(
+    store: Store, tmp_path: Path
+) -> None:
+    one = E.export(store, "h3", rules(), tmp_path / "one", shuffle_seed=1)
+    two = E.export(store, "h3", rules(), tmp_path / "two", shuffle_seed=2)
+    assert (one.leaves, one.embargoed) == (two.leaves, two.embargoed)
+    assert one.leaves_sha256 == two.leaves_sha256  # leaves.parquet is sorted by key, not shuffled
+    assert one.alignment_sha256 != two.alignment_sha256

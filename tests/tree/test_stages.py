@@ -130,10 +130,8 @@ def exported_project(root: Path, *, test_only: bool = False, purpose: str | None
     store = Store.open(root / "store")
     # The dataset the clades step's fallback reads the stored calls from (tests/clades/synthetic).
     fill(store, nextclade=raw_dataset(store, "synthetic", "P"))
-    extra = {}
-    if test_only:
-        extra["test_only"] = E.TestOnly(OUTGROUP, "stand-in for the test")
-    E.export(store, "h3", rules(), root / "export", **extra)
+    stand_in = E.TestOnly(OUTGROUP, "stand-in for the test") if test_only else None
+    E.export(store, "h3", rules(), root / "export", test_only=stand_in)
     text = config.read_text().replace(
         'alignment = "alignment.fasta"\nleaves = "leaves.parquet"\n',
         'alignment = "export/alignment.fasta"\nleaves = "export/leaves.parquet"\n'
