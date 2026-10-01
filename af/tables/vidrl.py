@@ -35,6 +35,8 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from af.util.subtypes import subtypes
+
 from . import aliases, dates
 from .cdc import ReadResult
 from .model import Antigen, Serum, Table
@@ -289,10 +291,7 @@ class SheetReader:
 
     def table(self) -> Table:
         assay, rbc = self._assay()
-        prefix = {"A(H1N1)": "h1pdm", "A(H3N2)": "h3"}.get(self.subtype) or {
-            "VICTORIA": "bvic",
-            "YAMAGATA": "byam",
-        }.get(self.lineage, "b")
+        prefix = subtypes().group_prefix(self.subtype, self.lineage)
         group = "-".join(p for p in (prefix, assay.lower(), rbc, self.lab.lower()) if p)
         serum_cols, sera_raw = self._sera()
         antigens, titres = self._antigens(serum_cols)

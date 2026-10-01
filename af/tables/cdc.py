@@ -23,6 +23,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from af.util.subtypes import subtypes
+
 from . import aliases
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
@@ -90,12 +92,13 @@ PROTOCOLS = {  # test_protocol -> assay
     "hint_protocol": "HINT",
     "fra_protocol": "FRA",
 }
-SUBTYPES = {  # test_subtype -> (subtype, lineage, group prefix)
-    "H1 swl": ("A(H1N1)", "", "h1pdm"),
-    "H3": ("A(H3N2)", "", "h3"),
-    "B": ("B", "", "b"),
-    "B vic": ("B", "VICTORIA", "bvic"),
-    "B yam": ("B", "YAMAGATA", "byam"),
+# CDC's test_subtype -> (table subtype, lineage); the group prefix comes from af.util.subtypes
+SUBTYPES = {
+    "H1 swl": ("A(H1N1)", ""),
+    "H3": ("A(H3N2)", ""),
+    "B": ("B", ""),
+    "B vic": ("B", "VICTORIA"),
+    "B yam": ("B", "YAMAGATA"),
 }
 # CDC's "not for use" flags: column -> the value that means "drop this row".
 FLAGS = {
@@ -241,7 +244,8 @@ def _make_table(
     if test_subtype not in SUBTYPES:
         raise CDCFormatError(f"unknown test_subtype {test_subtype!r}")
     assay = PROTOCOLS[protocol]
-    subtype, lineage, prefix = SUBTYPES[test_subtype]
+    subtype, lineage = SUBTYPES[test_subtype]
+    prefix = subtypes().group_prefix(subtype, lineage)
     date = _iso_date(_single(rows, "test_date"), "test_date")
     rbc_rule = rules.table_defaults.lookup(lab=LAB, subtype=subtype, assay=assay)
     if rbc_rule is None:

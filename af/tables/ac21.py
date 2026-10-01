@@ -28,6 +28,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from af.util.subtypes import subtypes
+
 from . import aliases, dates
 from .cdc import ReadResult
 from .locations import ChineseLocations
@@ -118,10 +120,7 @@ class SheetReader:
                 0, None, f"flu type {header['Default flu type']!r} matches no flu_types rule"
             )
         subtype, lineage = flu["subtype"], "" if flu["lineage"] == "-" else flu["lineage"]
-        prefix = {"A(H1N1)": "h1pdm", "A(H3N2)": "h3"}.get(subtype) or {
-            "VICTORIA": "bvic",
-            "YAMAGATA": "byam",
-        }.get(lineage, "b")
+        prefix = subtypes().group_prefix(subtype, lineage)
         group = "-".join((prefix, assay.lower(), rbc, self.lab.lower()))
         titres_row, columns = self._serum_columns()
         antisera_row = self._antisera_row(titres_row)

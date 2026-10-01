@@ -25,6 +25,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from af.util.subtypes import subtypes
+
 from . import aliases, dates
 from .cdc import LAB, ReadResult, _titre_order
 from .model import Antigen, Serum, Table
@@ -34,13 +36,13 @@ from .sheet import Sheet, SheetError, apply_cell_fixes, load
 
 TITLE = r"HEMAGGLUTINATION INHIBITION REACTIONS OF INFLUENZA (.+) VIRUSES"
 TITLE_SUBTYPES = {
-    "H3": ("A(H3N2)", "", "h3"),
-    "A(H3N2)": ("A(H3N2)", "", "h3"),
-    "A(H1N1)PDM09": ("A(H1N1)", "", "h1pdm"),
-    "H1N1PDM09": ("A(H1N1)", "", "h1pdm"),
-    "B/VICTORIA": ("B", "VICTORIA", "bvic"),
-    "B VICTORIA LINEAGE": ("B", "VICTORIA", "bvic"),
-    "TYPE B VICTORIA LINEAGE": ("B", "VICTORIA", "bvic"),  # 2013-19 layout
+    "H3": ("A(H3N2)", ""),
+    "A(H3N2)": ("A(H3N2)", ""),
+    "A(H1N1)PDM09": ("A(H1N1)", ""),
+    "H1N1PDM09": ("A(H1N1)", ""),
+    "B/VICTORIA": ("B", "VICTORIA"),
+    "B VICTORIA LINEAGE": ("B", "VICTORIA"),
+    "TYPE B VICTORIA LINEAGE": ("B", "VICTORIA"),  # 2013-19 layout
 }
 RBC = {"GUINEA PIG": "guinea-pig", "TURKEY": "turkey"}
 # The passage cell: "S1(07/19/2024)<NY>", "E4/E1(9/13/2024)LOT#10", "S2".
@@ -199,7 +201,9 @@ class SheetReader:
         if raw not in TITLE_SUBTYPES:
             raise self.fail(r, c, f"unknown subtype {raw!r} in title")
         oseltamivir = bool(self.s.find(r".*OSELTAMIVIR.*", stop=r + 3))
-        return (*TITLE_SUBTYPES[raw], "hi_oseltamivir_protocol" if oseltamivir else "hi_protocol")
+        subtype, lineage = TITLE_SUBTYPES[raw]
+        protocol = "hi_oseltamivir_protocol" if oseltamivir else "hi_protocol"
+        return subtype, lineage, subtypes().group_prefix(subtype, lineage), protocol
 
     def _test_date(self) -> dt.date:
         found = set()

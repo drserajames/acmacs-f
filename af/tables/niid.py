@@ -45,6 +45,8 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from af.util.subtypes import subtypes
+
 from . import aliases, dates
 from .cdc import ReadResult
 from .model import Antigen, Serum, Table
@@ -213,10 +215,7 @@ class SheetReader:
         subtype, lineage = flu["subtype"], "" if flu["lineage"] == "-" else flu["lineage"]
         rbc = self._rbc(title)
         test_date = self._test_date(h)
-        prefix = {"A(H1N1)": "h1pdm", "A(H3N2)": "h3"}.get(subtype) or {
-            "VICTORIA": "bvic",
-            "YAMAGATA": "byam",
-        }.get(lineage, "b")
+        prefix = subtypes().group_prefix(subtype, lineage)
         group = "-".join((prefix, "hi", rbc, self.lab.lower()))
         serum_cols, sera = self._sera(h, cols["Sample date"], subtype, lineage, test_date)
         antigens, titres = self._antigens(h, id_col, cols, serum_cols, subtype, lineage, test_date)
