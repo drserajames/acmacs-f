@@ -197,3 +197,15 @@ def test_with_no_passage_column_the_id_column_holds_the_reference_passages(tmp_p
     assert [a.lab_ids for a in t.antigens[:4]] == [[], [], [], []]
     assert t.antigens[4].lab_ids == ["LABV#VW10000001"]
     assert sum("the passage is in the ID column" in w for w in t.warnings) == 4
+
+
+def test_a_qc_standard_block_under_the_table_is_not_read(tmp_path, rules):
+    titres = ["80", "40", "40", "160", "80"]
+    antigens = [
+        *ANTIGENS,
+        ("", "QC Standard Median Titres", ["", "", "", "", ""], "", "", ""),
+        ("", "A. B/EXAMPLEVILLE/12/2029", titres, "", "", ""),
+    ]
+    t = one_table(read(workbook(tmp_path / "labv-20300102.xlsx", antigens=antigens), rules))
+    assert len(t.antigens) == len(ANTIGENS)
+    assert any("'QC Standard Median Titres' block not read" in w for w in t.warnings)

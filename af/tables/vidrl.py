@@ -59,6 +59,9 @@ DATE_CELL = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}")
 REASSORTANT_ONLY = re.compile(r"[A-Z]+-\d+[A-Z]?", re.IGNORECASE)
 
 
+QC_BLOCK = re.compile(r"\s*QC\s+Standard", re.IGNORECASE)  # "QC Standard Median Titres"
+
+
 class VIDRLError(SheetError):
     pass
 
@@ -448,6 +451,10 @@ class SheetReader:
         antigens, titres = [], []
         for r in range(self.header.first_antigen_row, len(self.s.rows)):
             raw = self.s.cell(r, name_col)
+            if QC_BLOCK.match(raw):
+                # QC standards' median titres under the table ("A. A/<strain>"): not this test
+                self.warnings.append(f"{self.s.where(r, name_col)}: {raw!r} block not read")
+                break
             has_titres = self._has_titres(r, serum_cols)
             if not raw:
                 if has_titres:
