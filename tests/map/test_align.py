@@ -5,6 +5,7 @@ import pytest
 
 from af.chart.model import Antigen, Chart, Projection, Serum, Titres
 from af.map.align import AlignmentError, chart_points, match_points, orient
+from af.map.matching import match_by_identity, orient_by_identity
 
 
 def name(place: str, n: int) -> str:
@@ -38,7 +39,7 @@ def test_identity_matches_across_place_spellings_and_fits_exactly() -> None:
     """One virus spelled two ways (the lab's spelling vs a rewritten one) still matches."""
     a = chart(["NEWTOWN"] * 4, DATES, ["S1", "S2"], rotated(BASE, 30, (2, -1)))
     b = chart(["NEW TOWN"] * 4, DATES, ["S1", "S2"], BASE)
-    al = orient(a, b)
+    al = orient_by_identity(a, b)
     assert al.match.mode == "identity"
     assert al.match.counts["matched_antigen"] == 4 and al.match.counts["matched_serum"] == 2
     assert al.fit.rmsd < 1e-9
@@ -49,7 +50,7 @@ def test_counts_unmatched_and_duplicates() -> None:
     a = chart(["NEWTOWN"] * 4, DATES, ["S1", "S1"], BASE)
     a.sera[1] = Serum(a.sera[0].name, serum_id="S1")  # one serum twice: same name, same id
     b = chart(["NEWTOWN"] * 3, DATES[:3], ["S1", "S9"], BASE[[0, 1, 2, 4, 5]])
-    m = match_points(a, b)
+    m = match_by_identity(a, b)
     assert m.counts["matched_antigen"] == 3
     assert m.counts["unmatched_a_antigen"] == 1  # the fourth antigen has no partner
     assert m.counts["duplicate_key_a_serum"] == 2  # dropped, never merged
@@ -59,10 +60,10 @@ def test_counts_unmatched_and_duplicates() -> None:
 def test_works_without_projections_and_refuses_to_guess_a_layout() -> None:
     a = chart(["NEWTOWN"] * 4, DATES, ["S1", "S2"], None)
     b = chart(["NEWTOWN"] * 4, DATES, ["S1", "S2"], BASE)
-    assert len(match_points(a, b).pairs) == 6
+    assert len(match_by_identity(a, b).pairs) == 6
     with pytest.raises(ValueError, match="chart A has no projection"):
-        orient(a, b)
-    al = orient(a, b, layout_a=rotated(BASE, -45, (0, 0)))
+        orient_by_identity(a, b)
+    al = orient_by_identity(a, b, layout_a=rotated(BASE, -45, (0, 0)))
     assert al.fit.rmsd < 1e-9
 
 
@@ -97,11 +98,26 @@ def test_layouts_of_different_dimension_are_refused_by_name() -> None:
     a = chart(["NEWTOWN"] * 4, DATES, ["S1", "S2"], None)
     b = chart(["NEWTOWN"] * 4, DATES, ["S1", "S2"], BASE)
     with pytest.raises(AlignmentError, match="3-D and chart B's is 2-D"):
-        orient(a, b, layout_a=np.zeros((6, 3)))
+        orient_by_identity(a, b, layout_a=np.zeros((6, 3)))
 
 
 def test_too_few_points_is_an_alignment_error() -> None:
     a = chart(["NEWTOWN"] * 4, DATES, ["S1", "S2"], BASE)
     b = chart(["ELSEWHERE"] * 4, ["2020-01-01"] * 4, ["X", "Y"], BASE)  # nothing matches
     with pytest.raises(AlignmentError, match="only 0 matched points"):
-        orient(a, b)
+        orient_by_identity(a, b)
+
+
+def test_the_core_refuses_without_a_matching_rule() -> None:
+    """No silent default: pairs, key or match must be given, and the error says where af's is."""
+    a = chart(["NEWTOWN"] * 4, DATES, ["S1", "S2"], BASE)
+    with pytest.raises(AlignmentError, match="af.map.matching.orient_by_identity"):
+        orient(a, a)
+    with pytest.raises(AlignmentError, match="no matching rule of its own"):
+        match_points(a, a)
+
+
+def test_core_records_interpret_nothing() -> None:
+    """The core's point records carry the passage as written, never a passage class."""
+    rec = chart_points(chart(["NEWTOWN"] * 4, DATES, ["S1", "S2"], BASE))[0]
+    assert "passage_class" not in rec and rec["passage"] == "SIAT1"

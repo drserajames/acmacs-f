@@ -9,20 +9,18 @@ reviews; Sarah, 1 Oct 2026). Three pieces, each usable alone:
   translation; never scaling, since map units are log2 fold), with RMSD and per-point
   distances.
 
-How points are matched, in order of precedence:
+How points are matched: the CALLER says, always (the same principle as column bases and
+disconnected points: the caller resolves identity). In order of precedence:
 
-1. ``pairs``: the caller says which rows are the same point. Nothing is matched here.
-2. ``key``: a callable from a point record to a key string, or None for "matches nothing". Two
+1. ``match``: a :class:`PointMatch` the caller built (af's flu identity matching does this:
+   :func:`af.map.matching.orient_by_identity`).
+2. ``pairs``: the caller says which rows are the same point.
+3. ``key``: a callable from a point record to a key string, or None for "matches nothing". Two
    points pair when their keys are equal and each key occurs once on its side. Nothing falls
-   back: a None key is unmatched and counted. A caller with its own rule supplies it here (or
-   as ``pairs``, when its rule pairs repeated keys by order, which a key cannot), so any
-   fallback is the caller's decision, visible in the caller's code.
-3. Default: the identity matching the report comparison uses (:func:`af.report.compare.maps.
-   keyed_points`, mode ``identity``): isolate number, year, passage class and isolation date
-   (sera: isolate, year, serum id), the location left out, because af keeps each lab's spelling
-   of a place. A point with no identity, or one its identity cannot pair, is keyed by its
-   spelling-normalised name instead, on both sides. That fallback is part of the comparison's
-   rule (11-reports #162), and how many points took it is in the counts, never silent.
+   back: a None key is unmatched and counted.
+
+With none of them the aligner refuses (:class:`AlignmentError`): it never picks a matching rule
+of its own, because any rule that pairs viruses across charts knows how they are named.
 
 In every mode a key that occurs twice on one side is dropped and counted, never merged.
 """
@@ -39,10 +37,16 @@ from numpy.typing import NDArray
 
 from af.chart.model import Chart
 from af.chart.procrustes import ProcrustesResult, procrustes
-from af.map.vaccines import passage_class
-from af.report.compare.maps import keyed_points
 
 Point = dict[str, Any]
+
+
+#: Why the aligner refuses without a matching rule, and where af's rule is.
+NO_MATCHING = (
+    "orient/match_points need pairs=, key= or match=: the aligner has no matching rule of its own. "
+    "For af's influenza identity matching (isolate/year/passage class/date, as the report "
+    "comparison uses), call af.map.matching.orient_by_identity or match_by_identity."
+)
 
 
 class AlignmentError(ValueError):
@@ -59,22 +63,23 @@ def chart_points(chart: Chart) -> list[Point]:
 
     ``index`` is the row in the chart's layout (sera follow the antigens), so a pair of records
     gives the two layout rows directly. Fields: ``kind`` ("antigen"/"serum"), ``id`` ("ag<i>" /
-    "sr<j>"), ``name``, ``reassortant``, ``annotations``, ``passage``, ``passage_class``,
-    ``date`` (antigens; None if unknown) and ``serum_id`` (sera).
+    "sr<j>"), ``name``, ``reassortant``, ``annotations``, ``passage`` (as written),
+    ``date`` (antigens; None if unknown) and ``serum_id`` (sera). Nothing interpreted: a key
+    that needs more (a passage class, a parsed strain name) computes it itself.
     """
     out: list[Point] = []
     for i, a in enumerate(chart.antigens):
         out.append({
             "kind": "antigen", "index": i, "id": f"ag{i}", "name": a.name,
             "reassortant": a.reassortant, "annotations": tuple(a.annotations),
-            "passage": a.passage, "passage_class": passage_class(a.passage, a.reassortant),
+            "passage": a.passage,
             "date": a.date[:10] or None, "serum_id": None,
         })  # fmt: skip
     for j, s in enumerate(chart.sera):
         out.append({
             "kind": "serum", "index": chart.n_antigens + j, "id": f"sr{j}", "name": s.name,
             "reassortant": s.reassortant, "annotations": tuple(s.annotations),
-            "passage": s.passage, "passage_class": passage_class(s.passage, s.reassortant),
+            "passage": s.passage,
             "date": None, "serum_id": s.serum_id or None,
         })  # fmt: skip
     return out
@@ -97,38 +102,48 @@ class PointMatch:
 
 
 def match_points(a: Chart, b: Chart, *, key: MatchKey | None = None) -> PointMatch:
-    """Match A's points to B's. ``key`` overrides the default identity matching (see module)."""
+    """Match A's points to B's by ``key`` (see the module docstring). ``key`` is required: the
+    aligner has no matching rule of its own, and refuses rather than guess one."""
+    if key is None:
+        raise AlignmentError(NO_MATCHING)
     pa, pb = chart_points(a), chart_points(b)
     pairs: list[tuple[int, int]] = []
     keys: list[str] = []
-    counts: Counter[str] = Counter()
+    counts: dict[str, int] = {}
     for kind in ("antigen", "serum"):
-        ka_pts = [p for p in pa if p["kind"] == kind]
-        kb_pts = [p for p in pb if p["kind"] == kind]
-        if key is None:
-            ka, kb, fallback = keyed_points(ka_pts, kb_pts, "identity")
-            for reason, n in fallback.items():
-                counts[f"fallback_{reason}_{kind}"] += n
-            ka_opt: list[tuple[str | None, Point]] = list(ka)
-            kb_opt: list[tuple[str | None, Point]] = list(kb)
-        else:
-            ka_opt = [(key(p), p) for p in ka_pts]
-            kb_opt = [(key(p), p) for p in kb_pts]
-        ua, dup_a, none_a = _unique(ka_opt)
-        ub, dup_b, none_b = _unique(kb_opt)
-        common = sorted(ua.keys() & ub.keys())
-        pairs += [(ua[k]["index"], ub[k]["index"]) for k in common]
-        keys += common
-        counts[f"matched_{kind}"] = len(common)
-        counts[f"unmatched_a_{kind}"] = len(ua) - len(common) + dup_a + none_a
-        counts[f"unmatched_b_{kind}"] = len(ub) - len(common) + dup_b + none_b
-        counts[f"duplicate_key_a_{kind}"] = dup_a
-        counts[f"duplicate_key_b_{kind}"] = dup_b
-        if key is not None:
-            counts[f"no_key_a_{kind}"] = none_a
-            counts[f"no_key_b_{kind}"] = none_b
-    arr = np.array(pairs, dtype=np.intp).reshape(-1, 2)
-    return PointMatch(arr, tuple(keys), "identity" if key is None else "key", dict(counts))
+        ka = [(key(p), p) for p in pa if p["kind"] == kind]
+        kb = [(key(p), p) for p in pb if p["kind"] == kind]
+        kp, kk, kc = pair_keyed(ka, kb, kind)
+        pairs += kp
+        keys += kk
+        counts.update(kc)
+    return PointMatch(np.array(pairs, dtype=np.intp).reshape(-1, 2), tuple(keys), "key", counts)
+
+
+Keyed = Sequence[tuple[str | None, Point]]
+
+
+def pair_keyed(
+    keyed_a: Keyed, keyed_b: Keyed, kind: str
+) -> tuple[list[tuple[int, int]], list[str], dict[str, int]]:
+    """Pair two sides' keyed records of one kind: equal keys that occur once on each side.
+
+    Returns the (row in A, row in B) pairs, their keys, and the counts: matched, unmatched per
+    side, keys dropped as duplicates per side, records with no key per side.
+    """
+    ua, dup_a, none_a = _unique(keyed_a)
+    ub, dup_b, none_b = _unique(keyed_b)
+    common = sorted(ua.keys() & ub.keys())
+    counts = {
+        f"matched_{kind}": len(common),
+        f"unmatched_a_{kind}": len(ua) - len(common) + dup_a + none_a,
+        f"unmatched_b_{kind}": len(ub) - len(common) + dup_b + none_b,
+        f"duplicate_key_a_{kind}": dup_a,
+        f"duplicate_key_b_{kind}": dup_b,
+        f"no_key_a_{kind}": none_a,
+        f"no_key_b_{kind}": none_b,
+    }
+    return [(ua[k]["index"], ub[k]["index"]) for k in common], common, counts
 
 
 def _unique(
@@ -161,25 +176,32 @@ def orient(
     layout_b: NDArray[np.float64] | None = None,
     key: MatchKey | None = None,
     pairs: Sequence[tuple[int, int]] | NDArray[np.intp] | None = None,
+    match: PointMatch | None = None,
     allow_reflection: bool = True,
 ) -> Alignment:
     """Fit A's layout onto B's over their matched points.
 
     Layouts default to each chart's first projection as drawn (its transformation applied). A
-    chart with no projection needs its layout passed in; it is never guessed. ``pairs``, if
-    given, replaces matching entirely; otherwise ``key`` or the default identity matching
-    decides (see the module docstring).
+    chart with no projection needs its layout passed in; it is never guessed. Points are paired
+    by ``match``, ``pairs`` or ``key``, in that order; with none of them this refuses (see the
+    module docstring).
     """
     la = _layout(a, layout_a, "A")
     lb = _layout(b, layout_b, "B")
+    if match is not None:
+        pairs = match.pairs
     if pairs is not None:
         arr = np.asarray(pairs, dtype=np.intp).reshape(-1, 2)
         for side, col, n in (("A", 0, len(la)), ("B", 1, len(lb))):
             if len(arr) and (arr[:, col].min() < 0 or arr[:, col].max() >= n):
                 raise ValueError(f"a supplied pair names a row outside chart {side}'s layout")
-        match = PointMatch(arr, tuple(f"{i}-{j}" for i, j in arr), "pairs", {"supplied": len(arr)})
-    else:
+        if match is None:
+            supplied = {"supplied": len(arr)}
+            match = PointMatch(arr, tuple(f"{i}-{j}" for i, j in arr), "pairs", supplied)
+    elif key is not None:
         match = match_points(a, b, key=key)
+    else:
+        raise AlignmentError(NO_MATCHING)
     if la.shape[1] != lb.shape[1]:
         raise AlignmentError(
             f"chart A's layout is {la.shape[1]}-D and chart B's is {lb.shape[1]}-D: "
