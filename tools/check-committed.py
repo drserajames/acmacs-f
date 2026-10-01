@@ -10,6 +10,12 @@ and runs every check there, with no caches:
 - `af` is imported from the export, not from the worktree. Python runs with `-S`
   (so the editable install's import hook is not loaded) and the current
   environment's site-packages is put on PYTHONPATH for the dependencies.
+- Child pythons that tests start without `-S` (``sys.executable -m af...``) would load
+  that hook and import af from wherever the environment was installed from: an older
+  worktree, say, so those tests silently checked other code (found 1 Oct 2026, when a
+  driver test failed on a config key HEAD supports). A ``sitecustomize`` put first on
+  PYTHONPATH drops every import finder that resolves af outside the export, and the
+  check stops if a child still imports af from elsewhere.
 - The environment must have everything CI installs: the core dependencies and every
   extra (`pip install -e '.[dev,geo]'`). The check reads HEAD's pyproject.toml and
   stops, naming what is missing, before a test fails at collection for want of it.
@@ -56,6 +62,7 @@ def main() -> int:
     head = git("rev-parse", "--short", "HEAD")
     dirty = git("status", "--porcelain", "--untracked-files=no")
     export = Path(tempfile.mkdtemp(prefix=f"af-check-{head}-"))
+    shim: Path | None = None
     try:
         archive = subprocess.run(
             ["git", "-C", str(repo), "archive", "--format=tar", "HEAD"],
@@ -76,6 +83,12 @@ def main() -> int:
             print(f"STOP: {stale}")
             return 1
         copied = copy_compiled_extensions(export)
+        shim = write_site_shim()
+        env = check_environment(export, shim)
+        wrong = child_af_outside_export(export, env)
+        if wrong:
+            print(f"STOP: a child python without -S imports af from {wrong}, not the export")
+            return 1
         print(f"checking committed HEAD {head} in {export}")
         if dirty:
             print("note: uncommitted changes in the worktree are NOT checked")
@@ -87,9 +100,11 @@ def main() -> int:
             + ("" if Path(af_data).is_dir() else " (absent: real-data tests skip)")
         )
         failed = [
-            name for name, command in checks(export) if not run(name, command, export, af_data)
+            name for name, command in checks(export) if not run(name, command, export, env, af_data)
         ]
     finally:
+        if shim is not None:
+            shutil.rmtree(shim, ignore_errors=True)
         if args.keep:
             print(f"kept {export}")
         else:
@@ -111,13 +126,66 @@ def checks(export: Path) -> list[tuple[str, list[str]]]:
     ]
 
 
-def run(name: str, command: list[str], export: Path, af_data: str) -> bool:
-    env = dict(os.environ)
-    env["AF_DATA"] = af_data
-    env["PYTHONPATH"] = os.pathsep.join([str(export), *site.getsitepackages()])
+def run(name: str, command: list[str], export: Path, env: dict[str, str], af_data: str) -> bool:
     print(f"\n== {name}", flush=True)
-    result = subprocess.run(command, cwd=export, env=env)
+    result = subprocess.run(command, cwd=export, env={**env, "AF_DATA": af_data})
     return result.returncode == 0
+
+
+def check_environment(export: Path, shim: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    env["AF_CHECK_EXPORT"] = str(export)
+    env["PYTHONPATH"] = os.pathsep.join([str(shim), str(export), *site.getsitepackages()])
+    return env
+
+
+SITE_SHIM = '''"""Written by af's tools/check-committed.py for one run; see its docstring.
+
+Drops every import finder that would import af from outside the export under test (the
+editable install's redirecting finder), so child pythons started without -S test HEAD.
+"""
+
+import os
+import sys
+
+_export = os.path.realpath(os.environ["AF_CHECK_EXPORT"]) + os.sep
+
+
+def _imports_af_elsewhere(finder):
+    if isinstance(finder, type) or not hasattr(finder, "find_spec"):
+        return False  # the class-level finders (PathFinder) follow sys.path: export first
+    try:
+        spec = finder.find_spec("af", None)
+    except Exception:
+        return False
+    origin = (spec.origin or "") if spec is not None else ""
+    return spec is not None and not os.path.realpath(origin).startswith(_export)
+
+
+sys.meta_path[:] = [f for f in sys.meta_path if not _imports_af_elsewhere(f)]
+'''
+
+
+def write_site_shim() -> Path:
+    """A directory holding only the sitecustomize above (kept out of the export, which is HEAD)."""
+    shim = Path(tempfile.mkdtemp(prefix="af-check-site-"))
+    (shim / "sitecustomize.py").write_text(SITE_SHIM)
+    return shim
+
+
+def child_af_outside_export(export: Path, env: dict[str, str]) -> str | None:
+    """Where a child python started WITHOUT -S imports af from, if not the export."""
+    result = subprocess.run(
+        [sys.executable, "-c", "import af; print(af.__file__)"],
+        cwd=export.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return f"nowhere (import failed: {result.stderr.strip()[-300:]})"
+    location = Path(result.stdout.strip()).resolve()
+    return None if location.is_relative_to(export.resolve()) else str(location)
 
 
 def optional_extras(export: Path) -> list[str]:
