@@ -106,7 +106,7 @@ def test_reads_the_2013_19_layout(tmp_path: Path, rules: Rules):
     assert t.antigens[0].annotations == []
     # the sheep serum and the normal serum are not antisera: dropped by rule, counted
     assert t.dropped["sera: control"] == 2
-    assert [s.serum_id for s in t.sera] == ["CDC T30-001", "CDC T30-002, 003", "CDC T31-004"]
+    assert [s.serum_id for s in t.sera] == ["CDC T30-001", "CDC T30-002,003", "CDC T31-004"]
     assert t.sera[0].name == "B/EXAMPLETOWN/1/2030"  # a two-digit year, before the test year
     assert [s.annotations for s in t.sera] == [["BOOSTED"], ["CONC 2:1"], []]
     assert t.sera[2].source["boosted"] == "PRE BOOST BLEED"
@@ -149,3 +149,16 @@ def test_a_titre_column_with_no_serum_letter_is_an_error(tmp_path: Path, rules: 
     # serum BB loses its letter, in the header and in the antisera block: its titres remain
     res = cdc_xlsx.read([workbook(tmp_path / "old.xlsx", cells={"J7": None, "A23": None})], rules)
     assert len(res.errors) == 1 and "a titre in a column with no serum letter" in res.errors[0]
+
+
+@pytest.mark.parametrize(
+    ("lot", "expected"),
+    [
+        ("2030-002, 003", "2030-002,2030-003"),  # later lots of the year as bare numbers
+        ("2030-042,043,044", "2030-042,2030-043,2030-044"),
+        ("2030-001", "2030-001"),
+        ("T30-002, 003", "T30-002,003"),  # not a year: left as written, spaces aside
+    ],
+)
+def test_pooled_lots_are_written_in_full(lot: str, expected: str):
+    assert cdc_xlsx._expand_lots(lot) == expected
