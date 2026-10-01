@@ -24,7 +24,7 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -415,6 +415,9 @@ class MapResult:
     figures: tuple[Path, ...]
     flags: tuple[str, ...]
     seconds: float
+    # Antigens of a lineage other than the map's, by code: drawn, and counted in the build's own
+    # report so nobody has to open a figure to learn of them.
+    lineage_minority: dict[str, int] = field(default_factory=dict)
 
 
 def build_map(
@@ -668,7 +671,13 @@ def build_map(
             flags=flags,
         )
         figures.append(result.i7)
-    return MapResult(cfg.folder, tuple(figures), tuple(flags), time.monotonic() - started)
+    return MapResult(
+        cfg.folder,
+        tuple(figures),
+        tuple(flags),
+        time.monotonic() - started,
+        dict(decisions.get("lineage_minority", {}).get("other", {})),
+    )
 
 
 # ---------------------------------------------------------------- the command
@@ -747,7 +756,10 @@ def build(
         )
         results.append(result)
         flags = f" flags={len(result.flags)}" if result.flags else ""
-        log(f"{cfg.folder:24s} {result.seconds:5.1f}s  {len(result.figures)} figures{flags}")
+        other = sum(result.lineage_minority.values())
+        lineage = f" other-lineage antigens={other} {result.lineage_minority}" if other else ""
+        n = len(result.figures)
+        log(f"{cfg.folder:24s} {result.seconds:5.1f}s  {n} figures{flags}{lineage}")
         for f in result.flags:
             log(f"    flag: {f}")
     return results

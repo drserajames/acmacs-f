@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from af.chart.model import Chart
 from af.clades.colours import ColourScheme as CladeColourScheme
@@ -27,11 +27,11 @@ from af.clades.colours import shadowed_entries
 from af.map.config import ColouringConfig
 from af.map.style import ColourRow, ColourScheme
 from af.seq.matching_rules import MatchingRules
+from af.serology.joins import preparation_key
 from af.store.store import Store
 
 if TYPE_CHECKING:
     from af.serology.outputs import SubtypeColouring
-    from af.serology.query import Preparation  # noqa: F401  (named in a cast)
 
 
 class MapColouringError(ValueError):
@@ -144,10 +144,10 @@ class StoreColours:
         )
         keys = key_for_legend(colouring.scheme)
         labels, sequenced = [], []
-        for a in chart.antigens:
-            prep = _PreparationKey(subtype, a.name, a.reassortant, tuple(a.annotations), a.passage)
-            labels.append(labels_for(style(cast("Preparation", prep)).label, keys))
-            sequenced.append(prep.key() in self._sequences)
+        for i in range(chart.n_antigens):
+            key = preparation_key(chart, "antigen", i)  # serology's one copy of the key (rule 6)
+            labels.append(labels_for(style(key).label, keys))
+            sequenced.append(key in self._sequences)
         scheme = map_scheme(colouring.scheme)
         # Rows a later row always overrides can never colour anything (trap T9). Not an error:
         # row order is the user's (Q80). Listed so a dead legend row is visible, not silent.
@@ -177,21 +177,3 @@ class StoreColours:
         for clade_subtype in sorted(set(CLADE_SUBTYPE.values())):
             refs.append(self._store.current("clades", dataset_for(clade_subtype)).to_json())
         return refs
-
-
-@dataclass(frozen=True)
-class _PreparationKey:
-    """The fields :func:`af.geo.colours.dot_styles` reads from a preparation, for a chart antigen.
-
-    A map antigen is not a serology :class:`~af.serology.query.Preparation` (it has no first lab
-    or first table date), but the colouring reads only these five fields.
-    """
-
-    subtype: str
-    name: str
-    reassortant: str
-    annotations: tuple[str, ...]
-    passage: str
-
-    def key(self) -> tuple[str, str, str, tuple[str, ...], str]:
-        return (self.subtype, self.name, self.reassortant, self.annotations, self.passage)

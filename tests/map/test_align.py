@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from af.chart.model import Antigen, Chart, Projection, Serum, Titres
-from af.map.align import chart_points, match_points, orient
+from af.map.align import AlignmentError, chart_points, match_points, orient
 
 
 def name(place: str, n: int) -> str:
@@ -91,3 +91,17 @@ def test_records_follow_layout_rows() -> None:
     rows = [p["index"] for p in chart_points(c)]
     assert rows == list(range(6))
     assert chart_points(c)[4]["kind"] == "serum" and chart_points(c)[4]["serum_id"] == "S1"
+
+
+def test_layouts_of_different_dimension_are_refused_by_name() -> None:
+    a = chart(["NEWTOWN"] * 4, DATES, ["S1", "S2"], None)
+    b = chart(["NEWTOWN"] * 4, DATES, ["S1", "S2"], BASE)
+    with pytest.raises(AlignmentError, match="3-D and chart B's is 2-D"):
+        orient(a, b, layout_a=np.zeros((6, 3)))
+
+
+def test_too_few_points_is_an_alignment_error() -> None:
+    a = chart(["NEWTOWN"] * 4, DATES, ["S1", "S2"], BASE)
+    b = chart(["ELSEWHERE"] * 4, ["2020-01-01"] * 4, ["X", "Y"], BASE)  # nothing matches
+    with pytest.raises(AlignmentError, match="only 0 matched points"):
+        orient(a, b)
