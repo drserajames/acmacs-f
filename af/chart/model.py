@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import logging
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -21,6 +22,8 @@ from typing import Any
 import numpy as np
 
 from af.chart.titre import MISSING_TITRE, Titre, TitreType, column_basis
+
+_log = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
 # antigens and sera
@@ -194,7 +197,7 @@ class Chart:
         are not raised: ae's stress takes them verbatim (cc/chart/v3/stress.cc).
         """
         if projection is not None and projection.forced_column_bases is not None:
-            return projection.forced_column_bases.copy()
+            return np.array(projection.forced_column_bases, dtype=float)  # a list stays not a list
         mcb = minimum_column_basis_value(minimum_column_basis)
         if self.forced_column_bases is not None:
             return np.maximum(np.asarray(self.forced_column_bases, dtype=float), mcb)
@@ -293,8 +296,10 @@ class Chart:
 
         Indices, not names: callers resolve their selection first (design rule 2 is about what
         a user writes, not this call). Reordering is not supported: indices must be unique,
-        in range and are kept in their original order. A selector "!i" that names a removed
-        point, or one whose antigen/serum switch "A" is missing, is an error rather than a guess.
+        in range and are kept in their original order. A plot-spec modifier whose single point
+        ("!i") is removed is dropped and logged (it has nothing left to style); one whose
+        antigen/serum switch "A" is missing is an error rather than a guess. A plot-spec "p"
+        shorter than the points (trailing points unstyled, valid .ace) stays so.
         """
         ag = _keep_indices(keep_ag, self.n_antigens, "antigen")
         sr = _keep_indices(keep_sr, self.n_sera, "serum")
@@ -384,7 +389,9 @@ def _select_extra(
     plot = out.get("p")
     if isinstance(plot, dict):  # legacy plot spec, point-indexed lists
         if "p" in plot:  # style index for each point, antigens then sera
-            plot["p"] = [plot["p"][i] for i in points]
+            # a list shorter than the points is valid .ace (trailing points unstyled); points are
+            # kept in order, so the styled ones stay a prefix
+            plot["p"] = [plot["p"][i] for i in points if i < len(plot["p"])]
         for key in ("d", "s"):  # drawing order; points shown on all maps
             if key in plot:
                 plot[key] = _renumber(plot[key], new_point)
@@ -393,15 +400,17 @@ def _select_extra(
     return out
 
 
-def _renumber_selectors(node: Any, new_ag: dict[int, int], new_sr: dict[int, int]) -> None:
+def _renumber_selectors(node: Any, new_ag: dict[int, int], new_sr: dict[int, int]) -> bool:
     """Semantic plot specs select single points with {"T": {"!i": index}, "A": 1|0}: an index
-    among antigens (A = 1) or sera (A = 0). Renumber in place; refuse what cannot be kept."""
+    among antigens (A = 1) or sera (A = 0). Renumber in place. A modifier whose single point was
+    removed has nothing left to style (e.g. a hide), so it is dropped, logged and counted: returns
+    False for the caller to remove it. One without A cannot be renumbered and is refused."""
     if isinstance(node, list):
-        for x in node:
-            _renumber_selectors(x, new_ag, new_sr)
-        return
+        kept = [x for x in node if _renumber_selectors(x, new_ag, new_sr)]
+        node[:] = kept
+        return True
     if not isinstance(node, dict):
-        return
+        return True
     t = node.get("T")
     if isinstance(t, dict) and "!i" in t:
         kind = node.get("A")
@@ -412,10 +421,13 @@ def _renumber_selectors(node: Any, new_ag: dict[int, int], new_sr: dict[int, int
         new, what = (new_ag, "antigen") if kind in (1, True) else (new_sr, "serum")
         old = int(t["!i"])
         if old not in new:
-            raise ValueError(f"select: a semantic plot spec selects removed {what} {old}")
+            _log.warning("select: dropped a plot-spec modifier for removed %s %d", what, old)
+            return False
         t["!i"] = new[old]
-    for value in node.values():
-        _renumber_selectors(value, new_ag, new_sr)
+    for key in list(node):
+        if not _renumber_selectors(node[key], new_ag, new_sr):
+            del node[key]
+    return True
 
 
 def empty_table(n_ag: int, n_sr: int) -> list[list[Titre]]:
