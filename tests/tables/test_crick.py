@@ -403,8 +403,9 @@ def test_a_sheep_pool_mark_written_without_its_star(serum_id, expected):
 
 
 def test_a_reference_with_no_passage_takes_its_serums_word(tmp_path, rules):
-    reference = [list(row) for row in REFERENCE]
-    reference[0][4] = ""  # B/Exampleville/12/2029: its serum's column says Egg
+    first_row = list(REFERENCE[0])
+    first_row[4] = ""  # B/Exampleville/12/2029: its serum's column says Egg
+    reference = [tuple(first_row), *REFERENCE[1:]]
     t = one_table(read(workbook(tmp_path / "labc-20300102.xlsx", reference=reference), rules))
     first = t.antigens[0]
     assert (first.name, first.passage, first.source["passage_from"]) == (
