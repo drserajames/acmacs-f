@@ -24,6 +24,7 @@ import datetime as dt
 import json
 import math
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -64,16 +65,40 @@ class GeoLimits:
     clade_frac_diff_max: float | None = None
 
 
+# What af.report.compare.draft writes into a drafted entry. A draft must never load as an
+# approved difference, so every one of these is refused when limits are loaded.
+DRAFT_APPROVER = "TO BE APPROVED"
+DRAFT_DATE = dt.date(1, 1, 1)
+DRAFT_REASON = "TO BE WRITTEN"
+
+
+def draft_problems(approved_by: str, decided: dt.date, reason: str) -> list[str]:
+    """Why an entry is still a draft (empty when it is a real, approved entry)."""
+    problems = []
+    if not approved_by.strip() or approved_by.strip() == DRAFT_APPROVER:
+        problems.append(f"approved_by is {approved_by!r}: not approved")
+    if decided == DRAFT_DATE:
+        problems.append(f"decided is the draft placeholder {DRAFT_DATE.isoformat()}")
+    if DRAFT_REASON in reason:
+        problems.append(f"reason still contains {DRAFT_REASON!r}")
+    return problems
+
+
 @dataclass(frozen=True)
 class Expected:
     """A named, approved known difference. Who approved it and when are required: an
-    expectation without them is how exception lists rot."""
+    expectation without them is how exception lists rot. A drafted entry is refused."""
 
     slot: str
     check: str
     reason: str
     approved_by: str
     decided: dt.date
+
+    def __post_init__(self) -> None:
+        problems = draft_problems(self.approved_by, self.decided, self.reason)
+        if problems:
+            raise ValueError(f"expected {self.slot} / {self.check}: {'; '.join(problems)}")
 
 
 @dataclass(frozen=True)
@@ -117,6 +142,11 @@ class Excused:
     reason: str
     approved_by: str
     decided: dt.date
+
+    def __post_init__(self) -> None:
+        problems = draft_problems(self.approved_by, self.decided, self.reason)
+        if problems:
+            raise ValueError(f"excused {self.points}: {'; '.join(problems)}")
 
 
 @dataclass(frozen=True)
@@ -314,6 +344,30 @@ def excuse_points(
             ),
         })  # fmt: skip
     return notes
+
+
+def load_limits(path: Path) -> Limits:
+    """Load a limits file, refusing any drafted (unapproved) [[expected]] or [[excused]] entry.
+
+    Checked on the raw tables first, so every draft is named in one ConfigError rather than the
+    first one ending the load.
+    """
+    with path.open("rb") as handle:
+        raw = tomllib.load(handle)
+    problems = []
+    for kind in ("expected", "excused"):
+        for i, entry in enumerate(raw.get(kind, [])):
+            decided = entry.get("decided")
+            found = draft_problems(
+                str(entry.get("approved_by", "")),
+                decided if isinstance(decided, dt.date) else dt.date(1970, 1, 1),
+                str(entry.get("reason", "")),
+            )
+            where = entry.get("slot") or entry.get("points") or f"#{i + 1}"
+            problems += [f"{kind}[{i}] ({where}): {p}" for p in found]
+    if problems:
+        raise ConfigError(path, problems)
+    return load_config(path, Limits)
 
 
 def compare_report(
@@ -628,7 +682,7 @@ def main(argv: list[str] | None = None) -> int:
         help="clades config (TOML): map tree clade labels to canonical names before comparing",
     )  # fmt: skip
     args = parser.parse_args(argv)
-    limits = load_config(args.limits, Limits)
+    limits = load_limits(args.limits)
     clades = load_clades(args.clades) if args.clades else None
     manifest = json.loads(args.record.read_text())
     rows, failed = compare_report(manifest, args.reference, limits, args.match, clades)
