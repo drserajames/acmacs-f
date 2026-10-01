@@ -1,0 +1,49 @@
+# Every influenza subtype af handles, and the facts about it that more than one part of af
+# needs. This is the one editable copy (design rule 6): code looks these up through
+# af.util.subtypes and never spells them out. A subtype or value absent here is an error
+# everywhere, never a silent default.
+#
+# [table_subtype."<name>"]: the titre tables' subtype field, and facts that belong to it
+#   rather than to one lineage.
+# [subtype.<key>]: one row per subtype; the key is its store dataset key (sequences/h3,
+#   clades/h3, ...). Sub-tables of a row (e.g. [subtype.h3.clades]) belong to the workstream
+#   that names them, and are validated there, not by the loader.
+# Rows are kept in this order wherever several match (B/Vic before B/Yam).
+
+[table_subtype."A(H1N1)"]
+geo = "h1"                      # geographic map files: geo/<geo>-YYYY-MM.pdf
+
+[table_subtype."A(H3N2)"]
+geo = "h3"
+
+[table_subtype."B"]
+geo = "b"                       # one geographic map for both lineages
+unresolved_group_prefix = "b"   # chart group prefix for a table that leaves the lineage unknown
+
+[subtype.h1]
+name = "A(H1N1)"                # af's name: sequences, clades, trees
+table_subtype = "A(H1N1)"
+lineage = ""                    # the titre tables' lineage field; B only
+group_prefix = "h1pdm"          # chart group prefix: h1pdm-hi-turkey-<lab>
+acmacs_data = "A(H1N1)"         # key in acmacs-data's clade definitions and curated vaccine list
+
+[subtype.h3]
+name = "A(H3N2)"
+table_subtype = "A(H3N2)"
+lineage = ""
+group_prefix = "h3"
+acmacs_data = "A(H3N2)"
+
+[subtype.bvic]
+name = "B/Vic"
+table_subtype = "B"
+lineage = "VICTORIA"
+group_prefix = "bvic"
+acmacs_data = "BV"
+
+[subtype.byam]
+name = "B/Yam"
+table_subtype = "B"
+lineage = "YAMAGATA"
+group_prefix = "byam"
+acmacs_data = "BY"
