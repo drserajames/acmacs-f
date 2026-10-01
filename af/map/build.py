@@ -22,6 +22,7 @@ import json
 import re
 import sys
 import time
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +60,7 @@ from af.map.vaccines import (
 )
 from af.store.ref import StoreRef
 from af.store.store import Store
+from af.util.subtypes import Subtype, SubtypeError, subtypes
 
 FloatArray = NDArray[np.float64]
 
@@ -150,6 +152,39 @@ def _labels_by_designation(chart: Chart) -> dict[str, frozenset[str]]:
     return out
 
 
+def chart_subtype(chart: Chart) -> Subtype:
+    """The chart's row in af's subtype table, from its own data: the chart's virus type ("V")
+    and the lineage code ("L", e.g. "V"; none for A subtypes) most of its antigens carry.
+
+    Never from the folder name (design rule 10), and never a "B means B/Vic" default: a B chart
+    whose antigens carry no lineage, or two lineages equally, is an error. A few antigens of
+    another lineage (a lab testing an old B/Yamagata strain against B/Victoria sera) do not
+    change the map's lineage; :func:`lineage_minority` reports them.
+    """
+    ranked = Counter(str(a.extra.get("L", "")) for a in chart.antigens).most_common()
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        counts = {c or "none": n for c, n in ranked}
+        raise BuildError(f"chart carries antigen lineages equally {counts}: which map is this?")
+    try:
+        return subtypes().for_chart(str(chart.info.get("V", "")), ranked[0][0] if ranked else "")
+    except SubtypeError as exc:
+        raise BuildError(str(exc)) from exc
+
+
+def lineage_minority(chart: Chart, row: Subtype) -> dict[str, Any]:
+    """Antigens whose lineage code is not the map's, by code, with a few names: drawn as the
+    chart has them, and reported (flagged means reported, not excluded)."""
+    other = [a for a in chart.antigens if str(a.extra.get("L", "")) != row.ace_lineage]
+    if not other:
+        return {}
+    by_code = Counter(str(a.extra.get("L", "")) or "none" for a in other)
+    return {
+        "map_lineage": row.ace_lineage,
+        "other": dict(sorted(by_code.items())),
+        "examples": sorted({a.name for a in other})[:5],
+    }
+
+
 def map_title(chart: Chart, configured: str | None) -> str:
     if configured:
         return configured
@@ -157,8 +192,7 @@ def map_title(chart: Chart, configured: str | None) -> str:
     assay = {"HI": "", "HINT": " HINT", "PRN": " neut", "FOCUS REDUCTION+FRA": " neut"}.get(
         info.get("A", ""), f" {info.get('A', '')}".rstrip()
     )
-    subtype = {"B": "B/Vic"}.get(info.get("V", ""), info.get("V", ""))
-    return f"{info.get('l', '')} {subtype}{assay} by clade"
+    return f"{info.get('l', '')} {chart_subtype(chart).name}{assay} by clade"
 
 
 # ---------------------------------------------------------------- steps
@@ -457,6 +491,8 @@ def build_map(
     # What was DECIDED about this map, as opposed to what it was built from: these carry reasons,
     # not content hashes, so they are not inputs.
     decisions: dict[str, Any] = {}
+    if minority := lineage_minority(chart, chart_subtype(chart)):
+        decisions["lineage_minority"] = minority
     if cfg.chain_until is not None:
         decisions["chain_until"] = {
             "table": cfg.chain_until.table,
@@ -557,7 +593,7 @@ def build_map(
         for c in cfg.vaccine_choose
     ]
     vrep = select_vaccines(
-        ags, vaccine_table_for(vaccine_table, subtype), disable=disable, choose=choose
+        ags, vaccine_table_for(vaccine_table, chart_subtype(chart)), disable=disable, choose=choose
     )
     ids = [f"ag{i}" for i in range(chart.n_antigens)] + [f"sr{j}" for j in range(chart.n_sera)]
     vlabels = {
@@ -746,25 +782,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-# The transition-period curated list keys B/Victoria as "BV", and carries "-disabled",
-# "-seasonal" and historical tables that are NOT the vaccines of a current map. Both quirks
-# belong to that file; they go when the curated list moves into af's own data.
-_VACCINE_TABLE_FOR_SUBTYPE = {"A(H1N1)": "A(H1N1)", "A(H3N2)": "A(H3N2)", "B": "BV"}
-
-
 def vaccine_table_for(
-    tables: Mapping[str, Sequence[Any]] | Sequence[Any], subtype: str
+    tables: Mapping[str, Sequence[Any]] | Sequence[Any], row: Subtype
 ) -> Sequence[Any]:
-    """The curated rows for one subtype. A subtype with no table is an error, not an empty map."""
+    """The curated rows for one subtype, under the key acmacs-data uses for it (the subtype
+    table's ``acmacs_data``: "BV" for B/Victoria). The list also carries "-disabled",
+    "-seasonal" and historical tables that are NOT a current map's vaccines; only the
+    subtype's own table is read. A subtype with no table is an error, not an empty map."""
     if not isinstance(tables, Mapping):
         return list(tables)  # already a flat list (a caller that selected for us)
-    key = _VACCINE_TABLE_FOR_SUBTYPE.get(subtype)
-    if key is None or key not in tables:
+    if row.acmacs_data not in tables:
         raise BuildError(
-            f"the curated vaccine list has no table for subtype {subtype!r} "
+            f"the curated vaccine list has no table {row.acmacs_data!r} for {row.name} "
             f"(it has {', '.join(sorted(tables))})"
         )
-    return tables[key]
+    return tables[row.acmacs_data]
 
 
 def _passage(word: str) -> Any:
