@@ -634,8 +634,10 @@ def fit_antigen_reactivity(
     the same titres it was fitted to: on real tables that flags noise for most antigens. It is
     harmless in ae only because ae never applies the result, so do not read it as a safe rule
     for applying adjustments. The penalty is the brake here, and its default (1, Racmacs's) is
-    **uncalibrated**, a placeholder until a held-out-titre comparison decides it
-    (notes/optimiser/REACTIVITY.md).
+    **uncalibrated**, a placeholder for Sarah to decide. Held-out-titre tests on three real
+    charts (notes/optimiser/REACTIVITY.md): ae's rule, applied, made prediction worse on all
+    three; with ``column_bases="recompute"`` every penalty from 0.25 to 2 beat no reactivity;
+    with fixed bases no single penalty did (1 was worse than none on one chart).
 
     ``column_bases``: ``"fixed"`` keeps the problem's column bases (af, interface I1, ae).
     ``"recompute"`` recomputes them from the adjusted titres, as Racmacs does, so raising the
