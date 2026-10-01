@@ -28,10 +28,31 @@ key = ("A(H3N2)", "A(H3N2)/EXAMPLETOWN/1/2021", "", (), "SIAT1 (2021-02-01)")
 # ... or from a chart point: key = preparation_key(chart, "antigen", index)
 found = sequences.get(key)  # None: no row of this preparation found a usable sequence
 
+
+def clade_of(found):
+    """The preparation's one clade, as colouring decides it; None when it is unknown."""
+    if found is None:
+        return None  # no usable sequence
+    if found.epi_isl is not None:
+        return found.clade  # None: no clade row for the sequence; "": no clade named
+    clades = {c.clade for c in found.tied or found.alternatives}  # nothing chosen
+    if len(clades) == 1:
+        return clades.pop()  # every candidate agrees
+    return found.ranked.clade if found.ranked else None  # a split tie: ae's pick
+
+
 clade_set = clade_set_for(store, store.current("clades", dataset_for("A(H3N2)")), clones)
-if found is not None and found.clade:
-    lineage = (*reversed(clade_set.ancestors(found.clade)), found.clade)  # root -> leaf
+clade = clade_of(found)
+if clade is None:
+    lineage = None  # unknown: no sequence, no clade row, or candidates that disagree
+elif clade == "":
+    lineage = ()  # the nomenclature names no clade here: nothing to know
+else:
+    lineage = (*reversed(clade_set.ancestors(clade)), clade)  # root -> leaf
 ```
+
+Keep the three outcomes apart: `None` is "unknown", `()` is "known to have no clade". A
+consumer that collapses them would read a missing sequence as a virus outside every clade.
 
 ## What "the sequence of a preparation" means
 
@@ -52,9 +73,11 @@ matches the preparation's is taken (`resolution == "rows.passage-matched"`); oth
 and `alternatives` lists them.
 
 A preparation with no sequence (`epi_isl is None`) may still have one clade: when every tied
-candidate or alternative carries the same clade. `af.geo.colours.dot_styles` applies exactly
-these rules for colour; anything that needs a clade per antigen should take the same answer
-rather than re-deriving it.
+candidate or alternative carries the same clade, or, for a tie that splits, the clade of ae's
+`ranked` pick (`clade_of` above). `af.geo.colours.dot_styles` applies the same order of rules
+for colour, comparing the candidates' colours rather than their clades (two clades can share a
+colour row); anything that needs a clade per antigen should follow `clade_of` rather than
+re-derive it.
 
 ## Reproducing a result
 
