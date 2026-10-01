@@ -5,6 +5,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <limits>
 #include <stdexcept>
 
 #include "grid_test.hh"
@@ -189,6 +190,17 @@ PYBIND11_MODULE(_core, m)
                 return result;
             },
             py::arg("layout"))
+        .def("table_distances",
+             [](const Problem& p) {
+                 // NaN where the titre is not fitted: the same cells as stress_table
+                 py::array_t<double> result({static_cast<py::ssize_t>(p.n_antigens), static_cast<py::ssize_t>(p.n_sera)});
+                 std::fill_n(result.mutable_data(), result.size(), std::numeric_limits<double>::quiet_NaN());
+                 const auto td = table_distances(p);
+                 for (const auto* entries : {&td.regular, &td.less_than})
+                     for (const auto& entry : *entries)
+                         result.mutable_data()[entry.p1 * p.n_sera + (entry.p2 - p.n_antigens)] = entry.distance;
+                 return result;
+             })
         .def("n_table_distances",
              [](const Problem& p) {
                  const auto td = table_distances(p);
