@@ -14,9 +14,9 @@ How points are matched, in order of precedence:
 1. ``pairs``: the caller says which rows are the same point. Nothing is matched here.
 2. ``key``: a callable from a point record to a key string, or None for "matches nothing". Two
    points pair when their keys are equal and each key occurs once on its side. Nothing falls
-   back: a None key is unmatched and counted. A caller with its own rule (pyacmapcheck's
-   af-strict matching with a name fallback where passage or serum id is missing, Sarah 1 Oct)
-   supplies it here, so the fallback is the caller's decision, visible in the caller's code.
+   back: a None key is unmatched and counted. A caller with its own rule supplies it here (or
+   as ``pairs``, when its rule pairs repeated keys by order, which a key cannot), so any
+   fallback is the caller's decision, visible in the caller's code.
 3. Default: the identity matching the report comparison uses (:func:`af.report.compare.maps.
    keyed_points`, mode ``identity``): isolate number, year, passage class and isolation date
    (sera: isolate, year, serum id), the location left out, because af keeps each lab's spelling
@@ -43,6 +43,14 @@ from af.map.vaccines import passage_class
 from af.report.compare.maps import keyed_points
 
 Point = dict[str, Any]
+
+
+class AlignmentError(ValueError):
+    """The two charts cannot be fitted: layouts of different dimension, or too few matched
+    points with coordinates. A subclass of ValueError, so existing handlers still catch it, but
+    distinct, so a caller can tell "these charts do not align" from any other failure."""
+
+
 MatchKey = Callable[[Mapping[str, Any]], "str | None"]
 
 
@@ -172,6 +180,20 @@ def orient(
         match = PointMatch(arr, tuple(f"{i}-{j}" for i, j in arr), "pairs", {"supplied": len(arr)})
     else:
         match = match_points(a, b, key=key)
+    if la.shape[1] != lb.shape[1]:
+        raise AlignmentError(
+            f"chart A's layout is {la.shape[1]}-D and chart B's is {lb.shape[1]}-D: "
+            "a rigid fit needs both in the same dimension"
+        )
+    usable = int(
+        (np.isfinite(la[match.pairs[:, 0]]).all(axis=1)
+         & np.isfinite(lb[match.pairs[:, 1]]).all(axis=1)).sum()
+    ) if len(match.pairs) else 0  # fmt: skip
+    if usable < la.shape[1] + 1:
+        raise AlignmentError(
+            f"only {usable} matched points have coordinates on both sides; a {la.shape[1]}-D "
+            f"fit needs at least {la.shape[1] + 1} ({match.mode} matching: {dict(match.counts)})"
+        )
     fit = procrustes(lb[match.pairs[:, 1]], la[match.pairs[:, 0]], allow_reflection)
     counts = dict(match.counts)
     counts["fitted"] = fit.n_common
@@ -187,6 +209,6 @@ def _layout(chart: Chart, given: NDArray[np.float64] | None, side: str) -> NDArr
     else:
         raise ValueError(f"chart {side} has no projection: pass its layout explicitly")
     n = chart.n_antigens + chart.n_sera
-    if layout.shape[0] != n:
-        raise ValueError(f"chart {side}: layout has {layout.shape[0]} rows for {n} points")
+    if layout.ndim != 2 or layout.shape[0] != n:
+        raise AlignmentError(f"chart {side}: layout has shape {layout.shape} for {n} points")
     return layout
