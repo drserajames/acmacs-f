@@ -543,9 +543,21 @@ def _cell(check: dict[str, Any]) -> str:
     return f"{check['value']:.3f}{mark}"
 
 
+@dataclass(frozen=True)
+class Sides:
+    """What the two sides of a comparison are, in words a reader deciding something can't misread.
+
+    "ref" and "new" alone are ambiguous where two builds of one round exist (e.g. the round as
+    shipped by another toolchain, and af's rebuild of it), so every report names both.
+    """
+
+    ref: str = "the reference figures"
+    new: str = "af's figures"
+
+
 def markdown(
     manifest: dict[str, Any], rows: list[dict[str, Any]], limits_name: str, how: str,
-    adoption: Adoption,
+    adoption: Adoption, sides: Sides | None = None,
 ) -> str:  # fmt: skip
     status = (
         f"**Limits {adoption.status.upper()}**: adopted by {adoption.adopted_by} on "
@@ -555,6 +567,8 @@ def markdown(
     changes = [f"- amended {a.date.isoformat()} by {a.by}: {a.change}" for a in adoption.amendments]
     lines = [
         f"# Same-science comparison: {manifest['report']}", "",
+        f"- **ref** = {(sides or Sides()).ref}",
+        f"- **new** = {(sides or Sides()).new}", "",
         f"Report built {manifest['built']}; limits `{limits_name}`; points matched by {how}.", "",
         status, *changes, "",
         "| Slot | Status | antigens only ref / only new | sera only ref / only new | "
@@ -666,6 +680,26 @@ def _one_sided(slot: str, antigens: dict[str, Any], sera: dict[str, Any]) -> lis
     return out
 
 
+def add_side_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--ref-label",
+        help="what the reference side is (e.g. the round as shipped by another toolchain); "
+        "default: the reference directory",
+    )
+    parser.add_argument(
+        "--new-label",
+        help="what the compared side is; default: af's report id and the af commit that built it",
+    )
+
+
+def sides_from(args: argparse.Namespace, manifest: dict[str, Any]) -> Sides:
+    commit = str(manifest.get("af", {}).get("commit") or "unknown")[:12]
+    return Sides(
+        ref=args.ref_label or f"the reference I7s in {args.reference}",
+        new=args.new_label or f"af's report {manifest.get('report')} (af {commit})",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Compare a built report with a reference.")
     parser.add_argument("record", type=Path, help="the build record, <report id>.build.json")
@@ -677,6 +711,7 @@ def main(argv: list[str] | None = None) -> int:
         "back to loose (name spelling-normalised + passage class); see maps.identity_key",
     )  # fmt: skip
     parser.add_argument("--out", type=Path, required=True)
+    add_side_arguments(parser)
     parser.add_argument(
         "--clades", type=Path,
         help="clades config (TOML): map tree clade labels to canonical names before comparing",
@@ -688,7 +723,8 @@ def main(argv: list[str] | None = None) -> int:
     rows, failed = compare_report(manifest, args.reference, limits, args.match, clades)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "COMPARISON.json").write_text(json.dumps(rows, indent=1))
-    report_md = markdown(manifest, rows, args.limits.name, args.match, limits.adoption)
+    sides = sides_from(args, manifest)
+    report_md = markdown(manifest, rows, args.limits.name, args.match, limits.adoption, sides)
     (args.out / "COMPARISON.md").write_text(report_md)
     missing = sum(r["status"] == "no reference" for r in rows)
     print(

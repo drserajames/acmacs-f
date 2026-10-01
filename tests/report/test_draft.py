@@ -129,3 +129,23 @@ def test_the_drafted_toml_carries_the_measurement_and_is_refused(tmp_path: Path)
         load_limits(path)
     md = draft.draft_markdown(got, "a report vs a reference", all_failing=False)
     assert "map/a/12m / antigens jaccard" in md and "## Gaps" in md
+
+
+def test_both_sides_are_named_in_every_output(tmp_path: Path) -> None:
+    import argparse
+
+    from af.report.compare.run import Sides, markdown, sides_from
+
+    sides = Sides(ref="the round as shipped by toolchain X", new="af's rebuild of that round")
+    limits = _limits(tmp_path, [])
+    text = markdown({"report": "r", "built": "b"}, [], "l.toml", "identity", limits.adoption, sides)
+    assert "- **ref** = the round as shipped by toolchain X" in text
+    assert "- **new** = af's rebuild of that round" in text
+    got = draft.classify([], limits, [], "abc123", all_failing=False)
+    assert "**ref** = the round as shipped" in draft.draft_markdown(got, "s", False, sides)
+    assert "# ref = the round as shipped" in draft.draft_toml(got, "s", sides)
+    # unlabelled: still says what each side is, never a bare "ref"/"new"
+    args = argparse.Namespace(ref_label=None, new_label=None, reference=tmp_path / "ref-i7")
+    default = sides_from(args, {"report": "rep-1", "af": {"commit": "0123456789abcdef"}})
+    assert default.ref == f"the reference I7s in {tmp_path / 'ref-i7'}"
+    assert default.new == "af's report rep-1 (af 0123456789ab)"
