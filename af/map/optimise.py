@@ -545,6 +545,25 @@ def point_stress(problem: MapProblem, layout: FloatArray) -> FloatArray:
     return np.concatenate([np.nansum(table, axis=1), np.nansum(table, axis=0)])
 
 
+def table_distances(problem: MapProblem) -> FloatArray:
+    """The target map distance of each fitted titre, ``[n_antigens, n_sera]``: column basis
+    minus log2(titre/10) minus the two avidity adjustments, clipped at 0 (ae's rule). NaN in
+    exactly the cells where :func:`stress_table` is NaN.
+
+    :func:`stress_table` is squared, so it says how badly a titre is fitted but not which way.
+    The signed residual is **target minus map distance**,
+    ``table_distances(problem) - D`` with ``D[ag, sr]`` the antigen-serum map distance:
+
+    - positive: the map puts the pair **too close** for its titre;
+    - negative: **too far apart**.
+
+    For a ``<`` titre the target is a lower bound: the map distance should be at least the
+    target plus 1, so only ``target + 1 - D > 0`` (too close) is an error. ae's error lines
+    draw that as ``(target + 1 - D) * sqrt(sigmoid(10 * (target + 1 - D)))``.
+    """
+    return np.asarray(problem._core_problem.table_distances())
+
+
 def gradient(problem: MapProblem, layout: FloatArray) -> FloatArray:
     """Analytic gradient of the stress (zero rows for unmovable and disconnected points)."""
     return np.asarray(problem._core_problem.gradient(_layout(problem, layout)))

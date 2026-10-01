@@ -792,3 +792,24 @@ def test_stress_table_agrees_term_by_term_with_the_stub_optimiser():
     np.testing.assert_allclose(stub_terms, terms[ag, sr], rtol=1e-12)
     stub_total, _ = stub_optimiser.stress_and_gradient(filled.ravel(), t, layout.shape[1])
     assert stub_total == pytest.approx(opt.stress(problem, layout), rel=1e-12)
+
+
+def test_table_distances_match_the_written_out_targets_and_stress():
+    problem, layout = mixed_table()
+    targets = opt.table_distances(problem)
+    terms = opt.stress_table(problem, layout)
+    _, expected = reference_terms(problem, layout)
+    assert targets.shape == problem.titre_value.shape
+    np.testing.assert_array_equal(np.isnan(targets), np.isnan(terms))
+    np.testing.assert_allclose(targets, expected, rtol=1e-12, equal_nan=True)
+    assert np.nanmin(targets) >= 0.0  # clipped at 0, as ae
+    # the documented sign convention: residual = target - map distance, and for regular,
+    # unweighted titres its square is the stress term
+    n_ag = problem.n_antigens
+    plain = with_changes(problem, weights=None)
+    regular = (plain.titre_type == TitreType.REGULAR) & ~np.isnan(targets)
+    D = np.linalg.norm(layout[:n_ag, None, :] - layout[None, n_ag:, :], axis=2)
+    residual = targets - D
+    np.testing.assert_allclose(
+        residual[regular] ** 2, opt.stress_table(plain, layout)[regular], rtol=1e-12
+    )
