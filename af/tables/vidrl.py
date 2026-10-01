@@ -59,6 +59,9 @@ DATE_CELL = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}")
 REASSORTANT_ONLY = re.compile(r"[A-Z]+-\d+[A-Z]?", re.IGNORECASE)
 
 
+QC_BLOCK = re.compile(r"\s*QC\s+Standard", re.IGNORECASE)  # "QC Standard Median Titres"
+
+
 class VIDRLError(SheetError):
     pass
 
@@ -448,6 +451,10 @@ class SheetReader:
         antigens, titres = [], []
         for r in range(self.header.first_antigen_row, len(self.s.rows)):
             raw = self.s.cell(r, name_col)
+            if QC_BLOCK.match(raw):
+                # QC standards' median titres under the table ("A. A/<strain>"): not this test
+                self.warnings.append(f"{self.s.where(r, name_col)}: {raw!r} block not read")
+                break
             has_titres = self._has_titres(r, serum_cols)
             if not raw:
                 if has_titres:
@@ -470,9 +477,17 @@ class SheetReader:
             )
             self.warnings.extend(f"{self.s.where(r, name_col)}: {p}" for p in problems)
             raw_passage = self.s.cell(r, passage_col) if passage_col is not None else ""
-            passage = self._passage(raw_passage, r, passage_col)
-            collected = self.s.cell(r, date_col) if date_col is not None else ""
             lab_id = self.s.cell(r, id_col) if id_col is not None else ""
+            # no passage column (h3-fra 2023-02-14): the ID column holds the reference
+            # antigens' passages and the test antigens' ids
+            no_column = passage_col is None and lab_id and not LAB_ID.fullmatch(lab_id)
+            if no_column and self._reads_as_passage(lab_id):
+                raw_passage, lab_id = lab_id, ""
+                self.warnings.append(
+                    f"{self.s.where(r, id_col)}: no passage column; the passage is in the ID column"
+                )
+            passage = self._passage(raw_passage, r, id_col if passage_col is None else passage_col)
+            collected = self.s.cell(r, date_col) if date_col is not None else ""
             collected, lab_id = ("" if _is_label(v) else v for v in (collected, lab_id))
             if re.fullmatch(r"[\s/.-]*", collected):  # "//": a date left blank
                 collected = ""
@@ -583,8 +598,9 @@ def _passage_text(raw: str, parser: PassageParser | None = None) -> str:
     with ',' as well as '/' and '+' ("MDCK3, MDCK1", "C1+1"), writes counts after a space,
     hyphen or '#' ("MDCK 1", "MDCK-1", "MDCK#1") or before the name ("P1 SIAT"), marks QMC
     passages for HI ("QMC2-HI"), and writes a bare count for another passage of the previous
-    step ("C2, 2") and a bare name for an unknown count ("X, SIAT1")."""
-    text = raw.strip()
+    step ("C2, 2") and a bare name for an unknown count ("X, SIAT1"). "N/A" (not available)
+    is an unknown step, X ("N/A, MDCK1" reads as "X, MDCK1")."""
+    text = re.sub(r"\bN/A\b", "X", raw.strip(), flags=re.IGNORECASE)
     text = re.sub(r"-HI\b", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\bP(\d+)\s+([A-Za-z]+)", r"\2\1", text)
     text = re.sub(r"(?<=[A-Za-z])\s*[-#]?\s*(?=\d)", "", text)
