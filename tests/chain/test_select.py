@@ -10,6 +10,7 @@ from af.chart.ace import read_chart
 from af.chart.model import Antigen, Chart, Serum, Titres, empty_table
 from af.chart.titre import Titre
 
+from .sera_markers import write_markers
 from .test_engine import config, reused, run, tables  # noqa: F401  (tables is a fixture)
 
 
@@ -105,6 +106,7 @@ def test_toml_rules(tables, tmp_path):  # noqa: F811
     path.write_text(
         head
         + 'group = "h9-hi-test-lab"\n'
+        + f'[select]\nnon_ferret_markers = "{write_markers(tmp_path / "markers.tsv")}"\n'
         + '[[select.remove]]\nwhat = "sera"\npassage = "egg"\nreason = "egg-free map"\n'
         + '[[select.remove]]\nwhat = "antigens"\ndesignation = "TEST-201 MDCK1"\n'
         + 'reason = "curated out"\n'

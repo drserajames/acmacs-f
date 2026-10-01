@@ -13,6 +13,8 @@ from af.chain.tables import cell_titre, table_chart, tables_from_store
 from af.store.store import Provenance, Store
 from af.tables.model import Antigen, Serum, Table, canonical_json
 
+from .sera_markers import select_block
+
 DATASET = "testlab/h9-hi-turkey-testlab"
 
 
@@ -109,7 +111,9 @@ def test_only_map_changes_restart(tmp_path):
 def test_chain_file_reads_tables_from_the_run_configs_store(tmp_path):
     publish(tmp_path / "store", [make_table(k) for k in range(3)])
     chain = tmp_path / "chain.toml"
-    chain.write_text(f'name = "x"\nseed = 1\n[tables]\ndataset = "{DATASET}"\n')
+    chain.write_text(
+        f'name = "x"\nseed = 1\n[tables]\ndataset = "{DATASET}"\n' + select_block(tmp_path)
+    )
     cfg = load_chain_config(chain, tmp_path / "inputs", tables_store=tmp_path / "store")
     assert len(cfg.tables) == 3 and cfg.tables_source is not None
     with pytest.raises(ChainConfigError, match="need an inputs directory and a store"):

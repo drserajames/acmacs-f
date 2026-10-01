@@ -62,6 +62,11 @@ def build_review(chain_root: Path, thresholds: Thresholds = THRESHOLDS) -> Path:
         record["repeat_drops"] = repeat_drops.get(s["table_id"], [])
         if record["repeat_drops"]:
             record["flags"].append(f"{len(record['repeat_drops'])} cells dropped within the table")
+        sera = record.get("non_ferret_sera", {})
+        sera_reports = sera.values() if "non_ferret" not in sera else [sera]
+        n_sera = sum(len(x["non_ferret"]) for x in sera_reports if x.get("removed"))
+        if n_sera:
+            record["flags"].append(f"{n_sera} non-ferret sera removed (ferret only)")
         record["distinct_marked"] = distinct_marked.get(s["table_id"], [])
         if record["distinct_marked"]:
             record["flags"].append(
@@ -358,6 +363,12 @@ def _page(doc: dict, steps: list[Step]) -> str:
         '<i class="sq"></i>serum '
         '<i class="ring"></i>trapped (grid test). Maps oriented to the previous step.'
     )
+    sera = doc.get("non_ferret_sera", {})
+    if sera.get("verification"):  # always shown: zero removals is when a map looks clean
+        removed = sum(sera.get("removed_rows_by_test", {}).values())
+        meta += (
+            f" · ferret sera only: {removed} non-ferret rows removed. {_e(sera['verification'])}"
+        )
     rows = "".join(_step_row(s, r, t) for s, r, t in steps)
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
