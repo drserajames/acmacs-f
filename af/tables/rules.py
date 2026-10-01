@@ -164,6 +164,14 @@ class Rules:
             scope=("lab", "subtype", "applies_to"),
             required=("kind", "pattern", "canonical", "min_titre", "min_fraction"),
         )
+        for rule in self.strain_aliases.rules:
+            # canonical is the name as written: a regex row matches, it does not substitute,
+            # so "B/\1" would become the name itself (it once did, 1 Oct 2026)
+            if re.search(r"\\\d|\\g<", rule["canonical"]):
+                raise ValueError(
+                    f"{rule.where}: canonical {rule['canonical']!r} has a group reference; "
+                    "strain_aliases canonicals are taken literally"
+                )
         self.name_rewrites = RuleTable(
             directory / "name_rewrites.tsv",
             scope=("lab",),
