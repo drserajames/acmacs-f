@@ -95,3 +95,46 @@ def test_each_stage_keeps_its_bases_through_ace(tmp_path):
     assert back.projections[0].forced_column_bases is None
     assert np.array_equal(bases(back.projections[1]), bases(second))
     assert np.array_equal(back.column_bases(projection=back.projections[1]), bases(second))
+
+
+def _merged_with_a_greater_than():
+    """Two synthetic tables, one with a `>` cell: the merge forces every serum's basis."""
+    from af.chart.merge import MergeOptions, MergeType, merge
+    from af.chart.model import Antigen, Chart, Serum, Titres, empty_table
+    from af.chart.titre import Titre
+
+    def table(cells, date):
+        t = empty_table(2, 2)
+        for (i, j), v in cells.items():
+            t[i][j] = Titre.parse(v)
+        return Chart(
+            info={"D": date},
+            antigens=[Antigen("TEST-A0", passage="MDCK1"), Antigen("TEST-A1", passage="MDCK1")],
+            sera=[Serum("TEST-S0", serum_id="S0"), Serum("TEST-S1", serum_id="S1")],
+            titres=Titres(t),
+        )
+
+    a = table({(0, 0): "40", (0, 1): "80", (1, 0): "20", (1, 1): "40"}, "20210115")
+    b = table({(0, 0): ">1280", (0, 1): "80", (1, 0): "20", (1, 1): "40"}, "20210215")
+    merged, _ = merge(a, b, MergeOptions(merge_type=MergeType.SIMPLE))
+    assert merged.forced_column_bases is not None
+    return merged
+
+
+def test_minimum_column_basis_raises_forced_chart_bases_as_ae():
+    # ae: Chart::column_bases applies mcb to the forced basis too (max(forced, mcb))
+    merged = _merged_with_a_greater_than()
+    forced = np.asarray(merged.forced_column_bases, dtype=float)
+    assert np.array_equal(merged.column_bases("none"), forced)
+    raised = merged.column_bases("2560")  # log2(2560/10) = 8
+    assert np.array_equal(raised, np.maximum(forced, 8.0))
+    assert not np.array_equal(raised, merged.column_bases("none"))
+
+
+def test_projection_forced_bases_are_used_verbatim_as_ae():
+    from af.chart.model import Projection
+
+    merged = _merged_with_a_greater_than()
+    own = np.array([1.0, 2.0])  # below any minimum
+    p = Projection(layout=np.zeros((merged.n_points, 2)), forced_column_bases=own)
+    assert np.array_equal(merged.column_bases("2560", projection=p), own)
