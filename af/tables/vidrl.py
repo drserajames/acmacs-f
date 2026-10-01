@@ -598,8 +598,9 @@ def _passage_text(raw: str, parser: PassageParser | None = None) -> str:
     with ',' as well as '/' and '+' ("MDCK3, MDCK1", "C1+1"), writes counts after a space,
     hyphen or '#' ("MDCK 1", "MDCK-1", "MDCK#1") or before the name ("P1 SIAT"), marks QMC
     passages for HI ("QMC2-HI"), and writes a bare count for another passage of the previous
-    step ("C2, 2") and a bare name for an unknown count ("X, SIAT1")."""
-    text = raw.strip()
+    step ("C2, 2") and a bare name for an unknown count ("X, SIAT1"). "N/A" (not available)
+    is an unknown step, X ("N/A, MDCK1" reads as "X, MDCK1")."""
+    text = re.sub(r"\bN/A\b", "X", raw.strip(), flags=re.IGNORECASE)
     text = re.sub(r"-HI\b", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\bP(\d+)\s+([A-Za-z]+)", r"\2\1", text)
     text = re.sub(r"(?<=[A-Za-z])\s*[-#]?\s*(?=\d)", "", text)

@@ -158,6 +158,7 @@ def test_an_ambiguous_abbreviation_is_an_error(tmp_path, rules):
         ("C1+1, MDCK1", "MDCK1/MDCK1/MDCK1"),
         ("C2, 2", "MDCK2/MDCK2"),
         ("X, SIAT1", "X?/SIAT1"),
+        ("N/A, MDCK1", "X?/MDCK1"),  # not available: an unknown step
         ("P1 SIAT, MDCK1", "SIAT1/MDCK1"),
         ("QMC2-HI", "QMC2"),
         ("SIAT2 SIAT2", "SIAT2/SIAT2"),
