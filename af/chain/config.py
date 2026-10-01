@@ -60,6 +60,11 @@ class MapOptions:
     # Group-aware trap pass after the trapped-point loop (af.map.optimise.resolve_trapped;
     # Sarah, Q61, 26 Sep 2026). Moves points stuck together in a worse place; changes maps.
     move_groups: bool = False
+    # One step instead of a chain: merge every selected table in order (simple merge, no layout
+    # carried), then map the result from scratch. The round's own download_full does this (ae:
+    # merge_type "simple", 10,000 optimisations); Sarah, 1 Oct 2026: all 18 maps from scratch
+    # until chains' composition and selection issues are settled. Set scratch_starts with it.
+    merge_all: bool = False
 
     def __post_init__(self) -> None:
         ColumnBasisConvention(self.column_bases)  # raises on an unknown convention
@@ -68,7 +73,7 @@ class MapOptions:
 # Options added after chains were first published, with the value that reproduces them. They
 # enter a step's parameters (and chain.json) only when set otherwise, so adding one neither
 # reruns nor republishes existing chains.
-LATER_OPTIONS = {"move_groups": False}
+LATER_OPTIONS = {"move_groups": False, "merge_all": False}
 
 
 def option_parameters(options: MapOptions) -> dict[str, Any]:
@@ -137,6 +142,10 @@ class ChainConfig:
     remove: list[RemoveRule] = field(default_factory=list)  # applied to each table (select)
 
     def __post_init__(self) -> None:
+        if self.options.merge_all and self.first_map is not None:
+            raise ChainConfigError(
+                f"{self.name}: merge_all maps the tables from scratch; no first_map"
+            )
         if self.remove and self.first_map is not None:
             # the seed map would lose its stress (Chart.select unsets it: stale), which step 0
             # records; the round's selections apply to tables, so rules go with tables only
