@@ -37,6 +37,7 @@ from typing import Any
 from af.clades.assign import Assignment
 from af.clades.local import extend_from_file
 from af.clades.nomenclature import CladeSet, Pin, load_clade_set
+from af.clades.subtypes import CladeSubtypeError, clade_dataset, subtype_for_dataset
 from af.store import ExternalInput, Provenance, Store, StoreRef
 from af.store.ref import Input
 
@@ -59,11 +60,6 @@ COLUMNS: dict[str, str] = {
 #: How a clade was decided. Recorded per row because the two are not equally strong: a
 #: tree assignment uses the virus's ancestry, a fallback only its own sequence.
 METHODS = ("tree", "fallback")
-
-#: af subtype name -> store dataset key. B/Yamagata is deliberately absent: Sarah decided
-#: on 25 Sep 2026 that B/Yam trees and maps carry no clade labels for now, so there is no
-#: clades/byam dataset and asking for one must fail rather than return nothing.
-DATASETS = {"A(H1N1)": "h1", "A(H3N2)": "h3", "B/Vic": "bvic"}
 
 
 class CladeStoreError(RuntimeError):
@@ -97,14 +93,16 @@ class CladeRow:
 
 
 def dataset_for(subtype: str) -> str:
-    """The store dataset key for ``subtype``; an unknown one is fatal (design rule 4)."""
+    """The store dataset key for ``subtype``; an unknown or unlabelled one is fatal.
+
+    Which subtypes have clade labels is the subtype table's ``clades.labels`` (B/Yam: none,
+    Sarah, 25 Sep 2026), so asking for one without them fails with that row's reason rather
+    than returning nothing (design rule 4).
+    """
     try:
-        return DATASETS[subtype]
-    except KeyError:
-        known = ", ".join(sorted(DATASETS))
-        raise CladeStoreError(
-            f"no clade dataset for subtype {subtype!r}; there are clade definitions for: {known}"
-        ) from None
+        return clade_dataset(subtype)
+    except CladeSubtypeError as error:
+        raise CladeStoreError(f"no clade dataset for subtype {subtype!r}: {error}") from None
 
 
 def rows_from_assignments(
@@ -280,10 +278,10 @@ def clade_set_for(
     """
     if ref.kind != "clades":
         raise CladeStoreError(f"{ref}: expected a clades version, got kind {ref.kind!r}")
-    subtypes = {dataset: subtype for subtype, dataset in DATASETS.items()}
-    if ref.dataset not in subtypes:
-        raise CladeStoreError(f"{ref}: no clade set for dataset {ref.dataset!r}")
-    subtype = subtypes[ref.dataset]
+    try:
+        subtype = subtype_for_dataset(ref.dataset)
+    except CladeSubtypeError:
+        raise CladeStoreError(f"{ref}: no clade set for dataset {ref.dataset!r}") from None
     recorded = str(read_report(store, ref)["clade_set_version"])
     upstream, _, local_part = recorded.partition("+local:")
     repository, at, commit = upstream.partition("@")

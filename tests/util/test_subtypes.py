@@ -113,6 +113,7 @@ def test_a_miss_is_an_error_that_lists_what_exists(call: Any, names: str) -> Non
 def test_sections_pass_through_raw() -> None:
     data = packaged()
     data["subtype"]["h3"]["clades"] = {"labels": True, "anything": [1, 2]}
+    data["subtype"]["h1"].pop("clades", None)  # a row without sections, whatever the package has
     table = Subtypes(data, "test")
     assert table.by_key("h3").sections == {"clades": {"labels": True, "anything": [1, 2]}}
     assert table.by_key("h1").sections == {}

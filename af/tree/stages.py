@@ -148,7 +148,7 @@ class SubtypeInputs:
     """Start CMAPLE from ``previous`` rather than from scratch. Off by default: the incremental
     topology is not yet tested against a from-scratch build (notes/trees/CUT-NODE.md §3b)."""
     clade_set: str | None = None
-    """The nomenclature's subtype name (a key of af.clades.nomenclature.HA_REPOSITORIES)."""
+    """The nomenclature's subtype name (one with clade labels in af/subtypes.toml)."""
     nomenclature_repository: str | None = None
     """The clone's directory name, when it is not the usual one for ``clade_set``."""
     clade_pin: str | None = None
@@ -665,12 +665,14 @@ def clade_source(inputs: SubtypeInputs, clones: Path | None) -> CladeSource | No
         return None
     if clones is None:
         raise StageError(f"clade_set {inputs.clade_set!r} needs [paths] nomenclature")
-    from af.clades.nomenclature import HA_REPOSITORIES, head_commit
+    from af.clades.nomenclature import head_commit
+    from af.clades.subtypes import CladeSubtypeError, clade_subtypes, nomenclature_repository
 
-    repository = inputs.nomenclature_repository or HA_REPOSITORIES.get(inputs.clade_set)
-    if repository is None:
-        known = ", ".join(sorted(HA_REPOSITORIES))
-        raise StageError(f"clade_set {inputs.clade_set!r} is not one of: {known}")
+    try:
+        repository = inputs.nomenclature_repository or nomenclature_repository(inputs.clade_set)
+    except CladeSubtypeError:
+        known = ", ".join(clade_subtypes())
+        raise StageError(f"clade_set {inputs.clade_set!r} is not one of: {known}") from None
     clone = clones / repository
     commit = inputs.clade_pin or head_commit(clone)
     return CladeSource(subtype=inputs.clade_set, clone=clone, commit=commit)

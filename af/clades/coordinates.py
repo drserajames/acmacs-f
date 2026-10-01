@@ -19,11 +19,8 @@ silently dropped — :func:`convert` returns them as :class:`Unexpressible`, and
 report them (design rule 1). They are unobservable rather than false: a sequence that
 starts at the mature HA carries no evidence either way.
 
-Offsets were derived empirically and re-checked in September 2026 against the WHO CC
-trees and against Nextclade's placements; see ``notes/clades/ENGINE-COMPARISON.md``.
-B/Vic is 347, not the 346 recorded in earlier notes: of 1,242 sequences Nextclade places
-in B/Vic A.1, 1,157 carry that clade's defining HA2 151K at mature position 347+151 and
-none at 346+151.
+Each subtype's two numbers are data, not code: the ``clades`` section of its row in
+``af/subtypes.toml``, with their source (:func:`af.clades.subtypes.coordinates_for`).
 """
 
 from __future__ import annotations
@@ -49,14 +46,6 @@ class Coordinates:
 
     ha1_length: int
     nuc_offset: int
-
-
-#: Per subtype, as used by the WHO CC trees and seqdb. Keys are af subtype names.
-COORDINATES: dict[str, Coordinates] = {
-    "A(H1N1)": Coordinates(ha1_length=327, nuc_offset=71),
-    "A(H3N2)": Coordinates(ha1_length=329, nuc_offset=65),
-    "B/Vic": Coordinates(ha1_length=347, nuc_offset=78),
-}
 
 
 @dataclass(frozen=True)
@@ -87,15 +76,6 @@ class Unexpressible:
 
 class UnknownLocusError(ValueError):
     """An upstream file used a locus name this module does not know."""
-
-
-def coordinates_for(subtype: str) -> Coordinates:
-    """Coordinates for ``subtype``; an unknown subtype is fatal (design rule 4)."""
-    try:
-        return COORDINATES[subtype]
-    except KeyError:
-        known = ", ".join(sorted(COORDINATES))
-        raise KeyError(f"no clade coordinates for subtype {subtype!r}; known: {known}") from None
 
 
 def convert(

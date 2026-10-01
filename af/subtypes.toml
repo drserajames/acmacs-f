@@ -27,12 +27,26 @@ lineage = ""                    # the titre tables' lineage field; B only
 group_prefix = "h1pdm"          # chart group prefix: h1pdm-hi-turkey-<lab>
 acmacs_data = "A(H1N1)"         # key in acmacs-data's clade definitions and curated vaccine list
 
+[subtype.h1.clades]
+labels = true
+repository = "seasonal_A-H1N1pdm_HA"   # upstream nomenclature clone (influenza-clade-nomenclature)
+ha1_length = 327
+nuc_offset = 71
+source = "HA1 length (= offset added to an upstream HA2 position) and nucleotide offset (subtracted from an upstream nuc position) for af's mature-HA sequences, as the WHO CC trees and seqdb use them; derived empirically and re-checked Sep 2026 against the WHO CC trees and Nextclade's placements (notes/clades/ENGINE-COMPARISON.md)"
+
 [subtype.h3]
 name = "A(H3N2)"
 table_subtype = "A(H3N2)"
 lineage = ""
 group_prefix = "h3"
 acmacs_data = "A(H3N2)"
+
+[subtype.h3.clades]
+labels = true
+repository = "seasonal_A-H3N2_HA"   # upstream nomenclature clone (influenza-clade-nomenclature)
+ha1_length = 329
+nuc_offset = 65
+source = "HA1 length (= offset added to an upstream HA2 position) and nucleotide offset (subtracted from an upstream nuc position) for af's mature-HA sequences, as the WHO CC trees and seqdb use them; derived empirically and re-checked Sep 2026 against the WHO CC trees and Nextclade's placements (notes/clades/ENGINE-COMPARISON.md)"
 
 [subtype.bvic]
 name = "B/Vic"
@@ -41,9 +55,20 @@ lineage = "VICTORIA"
 group_prefix = "bvic"
 acmacs_data = "BV"
 
+[subtype.bvic.clades]
+labels = true
+repository = "seasonal_B-Vic_HA"   # upstream nomenclature clone (influenza-clade-nomenclature)
+ha1_length = 347
+nuc_offset = 78
+source = "HA1 length (= offset added to an upstream HA2 position) and nucleotide offset (subtracted from an upstream nuc position) for af's mature-HA sequences, as the WHO CC trees and seqdb use them; derived empirically and re-checked Sep 2026 against the WHO CC trees and Nextclade's placements (notes/clades/ENGINE-COMPARISON.md); B/Vic is 347, not the 346 in earlier notes: of 1,242 sequences Nextclade places in B/Vic A.1, 1,157 carry that clade's defining HA2 151K at mature position 347+151 and none at 346+151"
+
 [subtype.byam]
 name = "B/Yam"
 table_subtype = "B"
 lineage = "YAMAGATA"
 group_prefix = "byam"
 acmacs_data = "BY"
+
+[subtype.byam.clades]
+labels = false
+source = "Sarah, 25 Sep 2026: B/Yamagata trees and maps carry no clade labels for now, so there is no clades/byam dataset and asking for one fails"
