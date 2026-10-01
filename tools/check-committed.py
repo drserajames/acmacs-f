@@ -27,6 +27,12 @@ and runs every check there, with no caches:
   built from the same C++ as HEAD: the check compares the `cpp/` sources of the checkout
   the environment's af was installed from with HEAD's, and stops if they differ
   (a stale binary silently tests old C++). Rebuild with `pip install -e .` here.
+  It also stops when a source in that `cpp/` is newer than the compiled module: a
+  rebase or merge that brings in C++ changes leaves the sources matching HEAD but the
+  binary old. Unstopped, that showed as ~18 failures in tests/map/test_optimise.py,
+  ``AttributeError: 'af.map._core.Problem' object has no attribute ...``, on a committed
+  HEAD and in files the branch never touched, so it read as someone else's broken
+  branch (05-trees, twice, 1-2 Oct 2026).
 
 Usage (from a checkout, with the dev environment's python):
 
@@ -236,7 +242,36 @@ def stale_extension_reason(export: Path) -> str | None:
             f"{installed_from}, whose cpp/ differs from HEAD's. Rebuild into this environment "
             f"from this checkout (pip install -e .) and run the check again."
         )
-    return None
+    return older_binary_reason(installed_from)
+
+
+def older_binary_reason(installed_from: Path) -> str | None:
+    """Why the compiled optimiser predates its own checkout's cpp/, or None."""
+    binaries = [
+        built
+        for base in site.getsitepackages()
+        if Path(base, "af").is_dir()
+        for built in Path(base, "af").rglob("_core*.so")
+    ]
+    if not binaries:
+        return None
+    built_at = min(path.stat().st_mtime for path in binaries)
+    newer = sorted(
+        path.relative_to(installed_from).as_posix()
+        for path in (installed_from / "cpp").rglob("*")
+        if path.is_file() and path.stat().st_mtime > built_at
+    )
+    if not newer:
+        return None
+    shown = ", ".join(newer[:3]) + (f" and {len(newer) - 3} more" if len(newer) > 3 else "")
+    return (
+        f"the compiled optimiser (af.map._core) is older than its checkout's C++ "
+        f"({installed_from}: {shown} changed since it was built, e.g. by a rebase or merge). "
+        f'Unrebuilt, tests/map/test_optimise.py fails with "AttributeError: '
+        f"'af.map._core.Problem' object has no attribute ...\", which looks like someone "
+        f"else's broken branch. Rebuild (unsandboxed): pip install -e '.[dev,geo]' in "
+        f"{installed_from}, then run the check again."
+    )
 
 
 def tree_hash(directory: Path) -> str:
