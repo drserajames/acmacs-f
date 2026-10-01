@@ -626,18 +626,34 @@ def fit_antigen_reactivity(
     Minimises ``stress + sum((penalty * r) ** 2)`` over the layout and all antigens'
     reactivities together, from ``layout`` (normally a relaxed map), in one minimisation with
     an analytic gradient. This is Racmacs's ``optimizeAgReactivity`` objective; Racmacs
-    re-relaxes the map for every finite-difference step, which this avoids.
+    re-relaxes the map for every finite-difference step, which this avoids. Measured against
+    Racmacs 1.2.9 with the same settings (fixed bases, no clip, penalty 1): identical on 3 of
+    4 charts (adjustments to 4e-4); on the 4th (144 antigens) the two reach different optima,
+    and this one is 3% lower on Racmacs's own objective (171.41 vs 176.63). Racmacs took
+    143-174 s at 141-144 antigens and its time grows roughly with the cube of the antigen
+    count; this takes under 0.4 s on a 2,584-point map.
 
     **Overfitting.** Each reactivity is a free parameter, and a free parameter can only lower
     the fitted stress. ae's ``avidity_test`` (reproduced by :func:`antigen_reactivity_scan`)
     flags an adjustment whenever the stress drops *at all*, judged one antigen at a time on
     the same titres it was fitted to: on real tables that flags noise for most antigens. It is
     harmless in ae only because ae never applies the result, so do not read it as a safe rule
-    for applying adjustments. The penalty is the brake here, and its default (1, Racmacs's) is
-    **uncalibrated**, a placeholder for Sarah to decide. Held-out-titre tests on three real
-    charts (notes/optimiser/REACTIVITY.md): ae's rule, applied, made prediction worse on all
-    three; with ``column_bases="recompute"`` every penalty from 0.25 to 2 beat no reactivity;
-    with fixed bases no single penalty did (1 was worse than none on one chart).
+    for applying adjustments.
+
+    **The penalty is not optional.** With ``penalty=0`` and clipping, an antigen whose targets
+    all clip to 0 no longer affects the stress, so its adjustment runs away (measured on
+    invented tables: adjustments up to 1,800, and over half of unshifted antigens adjusted).
+    The default, 1 (Racmacs's), is **uncalibrated**.
+
+    **What the defaults cost** (held-out titres: 10% hidden, 5 splits, three real charts,
+    RMSE in log2 units; notes/optimiser/REACTIVITY.md). Fitting nothing: 0.634 / 1.207 /
+    0.831. The default, fixed column bases with penalty 1: 0.637 / 1.247 / 0.770, i.e.
+    **worse than fitting nothing on one of the three charts**, and no single penalty was
+    safe with fixed bases. ``column_bases="recompute"`` with penalty 1: 0.623 / 1.118 /
+    0.722, better than nothing on all three, and so was every penalty from 0.25 to 4.
+    Fixed stays the default (Sarah, 1 Oct 2026) because it matches interface I1 and the
+    chains, which keep the caller's column bases; a recompute fit must be applied with its
+    returned ``column_bases``.
 
     ``column_bases``: ``"fixed"`` keeps the problem's column bases (af, interface I1, ae).
     ``"recompute"`` recomputes them from the adjusted titres, as Racmacs does, so raising the
@@ -707,12 +723,17 @@ def antigen_reactivity_scan(
     minimum_column_basis: float = 0.0,
     method: Method = "cg",
 ) -> list[ReactivityTest]:
-    """ae's ``projection.avidity_test``, for comparison with ae: each antigen alone, each
-    grid adjustment set on that antigen only, one fine relax of the whole map from ``layout``,
-    ``best`` = the adjustment with the lowest stress if it is below the original.
+    """ae's ``projection.avidity_test``, for parity with ae: each antigen alone, each grid
+    adjustment set on that antigen only, one fine relax of the whole map from ``layout``,
+    ``best`` = the adjustment with the lowest stress if it is below the original. Matches ae
+    exactly (3 charts, 268 antigens x 12 adjustments: stress changes to 6.4e-10, same best).
 
-    A report, not a rule: the "any decrease" choice is fitted and judged on the same titres
-    and flags noise (see :func:`fit_antigen_reactivity`). O(antigens x adjustments) relaxes.
+    **Unsafe for adjusting a map: it overfits. Do not apply its ``best`` values.** The "any
+    decrease" rule is fitted and judged on the same titres. It flagged 39/41, 52/86 and
+    115/141 antigens on three real charts, and applying its choices made held-out titres
+    *worse* on all three (RMSE 0.634 -> 0.749, 1.207 -> 1.281, 0.831 -> 0.887; 10% of titres
+    hidden, 5 splits). It is kept as a report, for comparison with ae (Sarah, 1 Oct 2026);
+    use :func:`fit_antigen_reactivity` to fit adjustments. O(antigens x adjustments) relaxes.
     Target distances are always clipped at 0 here (as ae); ``column_bases="recompute"``
     recomputes the bases from the adjusted titres (not something ae does).
     """
