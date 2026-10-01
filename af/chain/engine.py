@@ -19,6 +19,7 @@ Each step is an `af.pipeline` step whose inputs are the table and the previous s
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import hashlib
 import json
@@ -26,6 +27,7 @@ import logging
 import platform
 import shutil
 import sys
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -184,6 +186,8 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
     }
     if cfg.remove:  # only a chain that selects points gets the key: others keep their steps
         common["select_remove"] = [r.to_json() for r in cfg.remove]
+    if cfg.options.merge_all:
+        return [_merge_all_step_def(cfg, root, mapper, common)]
     steps = []
     d0 = step_dir(root, 0)
     first_outputs = [d0 / CHOSEN, d0 / STEP_RECORD] + (
@@ -225,6 +229,20 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
             )
         )
     return steps
+
+
+def _merge_all_step_def(cfg: ChainConfig, root: Path, mapper: Mapper, common: dict) -> Step:
+    """The single step of a merge_all chain: every table is an input, so any change remakes it."""
+    d0 = step_dir(root, 0)
+    outputs = [d0 / n for n in ("merge.ace", "scratch.ace", CHOSEN)]
+    return Step(
+        name="step-0000",
+        action=_action(functools.partial(_merge_all_step, cfg, mapper=mapper), d0),
+        inputs={f"table-{i:04d}": t.path for i, t in enumerate(cfg.tables)},
+        outputs=[Artefact(p, parse=_ace) for p in outputs]
+        + [Artefact(d0 / STEP_RECORD, parse=_json)],
+        parameters={**common, "index": 0, "tables": [t.table_id for t in cfg.tables]},
+    )
 
 
 def _action(work: Callable[[Path, Runner], None], directory: Path) -> Callable[[StepContext], None]:
@@ -439,6 +457,75 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
     _write_step_record(directory, record)
 
 
+def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Mapper) -> None:
+    """Merge every table in order, as ae's download_full does (merge_type "simple": no layout is
+    carried, so the order changes only which preparation a cell's readings come from), then map
+    the merged chart from scratch."""
+    o = cfg.options
+    options = dataclasses.replace(_merge_options(cfg), merge_type=MergeType.SIMPLE)
+    merged: Chart | None = None
+    outcomes: Counter = Counter()
+    removed: dict[str, list[dict]] = {}
+    for t in cfg.tables:
+        table, rule_report = select.apply(cfg.remove, read_chart(t.path))
+        if cfg.remove:
+            removed[t.table_id] = rule_report
+        if merged is None:
+            merged = table
+            continue
+        merged, report = merge(merged, table, options)
+        outcomes.update({str(k): v for k, v in report.outcomes.items()})
+    assert merged is not None  # ChainConfig refuses a chain without tables
+    write_chart(merged, directory / "merge.ace")
+    arrays = merged.optimiser_arrays(
+        o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
+    )
+    seed = _step_seed(cfg, 0, [t.path for t in cfg.tables])
+    all_maps = mapper.make(
+        runner,
+        f"{cfg.name}/0000/scratch",
+        arrays,
+        o.scratch_starts,
+        o.dimensions,
+        seed,
+        None,
+        move_groups=o.move_groups,
+    )
+    chart = _map_chart(
+        merged,
+        _projections(
+            distinct_basins(all_maps, o.projections_to_keep), arrays, o.minimum_column_basis
+        ),
+    )
+    write_chart(chart, directory / "scratch.ace")
+    shutil.copyfile(directory / "scratch.ace", directory / CHOSEN)
+    record = {
+        "index": 0,
+        "table_id": cfg.tables[-1].table_id,
+        "merge_all": [
+            {"table_id": t.table_id, "table_sha256": sha256_path(t.path)} for t in cfg.tables
+        ],
+        "optimiser": mapper.optimiser.name,
+        "chosen": "scratch",
+        "stress": {"scratch": all_maps[0]["stress"]},
+        "start_stresses": {"scratch": [r["stress"] for r in all_maps]},
+        "trapped_loop": {"scratch": _loop(all_maps)},
+        "merge": {
+            "antigens": merged.n_antigens,
+            "sera": merged.n_sera,
+            "layers": len(merged.titres.layers),
+            "outcomes": dict(outcomes),
+        },
+        **({"removed": removed} if cfg.remove else {}),
+    }
+    diagnostics = step_diagnostics(chart, None, None, None, arrays, mapper.optimiser, cfg)
+    diagnostics.update(run_threads({"scratch": _threads(all_maps)}))
+    if o.move_groups:
+        diagnostics["group_moves"] = group_moves(chart, _loop(all_maps).get("groups"))
+    record["diagnostics"] = diagnostics
+    _write_step_record(directory, record)
+
+
 def _merge_step(
     cfg: ChainConfig,
     directory: Path,
@@ -545,7 +632,9 @@ def _write_chain_record(
     root: Path, cfg: ChainConfig, results: list[StepResult], optimiser: Optimiser, n_steps: int
 ) -> None:
     """chain.json lists the current steps in order: consumers never glob or sort directories."""
-    doc = {
+    doc: dict[str, Any] = {
+        # "merge_all": one step, all tables merged then mapped from scratch, not a chain
+        "mode": "merge_all" if cfg.options.merge_all else "chain",
         "config": config_to_json(cfg),
         "optimiser": optimiser.name,
         "complete": len(results) == n_steps,

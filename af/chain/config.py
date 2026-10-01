@@ -60,6 +60,11 @@ class MapOptions:
     # Group-aware trap pass after the trapped-point loop (af.map.optimise.resolve_trapped;
     # Sarah, Q61, 26 Sep 2026). Moves points stuck together in a worse place; changes maps.
     move_groups: bool = False
+    # One step instead of a chain: merge every selected table in order (simple merge, no layout
+    # carried), then map the result from scratch. The round's own download_full does this (ae:
+    # merge_type "simple", 10,000 optimisations); Sarah, 1 Oct 2026: all 18 maps from scratch
+    # until chains' composition and selection issues are settled. Set scratch_starts with it.
+    merge_all: bool = False
 
     def __post_init__(self) -> None:
         ColumnBasisConvention(self.column_bases)  # raises on an unknown convention
@@ -68,7 +73,7 @@ class MapOptions:
 # Options added after chains were first published, with the value that reproduces them. They
 # enter a step's parameters (and chain.json) only when set otherwise, so adding one neither
 # reruns nor republishes existing chains.
-LATER_OPTIONS = {"move_groups": False}
+LATER_OPTIONS = {"move_groups": False, "merge_all": False}
 
 
 def option_parameters(options: MapOptions) -> dict[str, Any]:
@@ -135,8 +140,15 @@ class ChainConfig:
     first_map: Path | None = None
     tables_source: dict[str, str] | None = None  # the store ref the tables came from
     remove: list[RemoveRule] = field(default_factory=list)  # applied to each table (select)
+    # How the tables were chosen (dataset or directory, date_from/date_to, exclude), as written
+    # in the chain file. For a merge_all map it IS the map's definition, so it is published.
+    selection: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        if self.options.merge_all and self.first_map is not None:
+            raise ChainConfigError(
+                f"{self.name}: merge_all maps the tables from scratch; no first_map"
+            )
         if self.remove and self.first_map is not None:
             # the seed map would lose its stress (Chart.select unsets it: stale), which step 0
             # records; the round's selections apply to tables, so rules go with tables only
@@ -176,12 +188,27 @@ def load_chain_config(
             if (start is None or x.date >= start) and (end is None or x.date <= end)
         ]
         return ChainConfig(
-            s.name, tables, s.options, s.seed, s.first_map, ref.to_json(), s.select.remove
+            s.name,
+            tables,
+            s.options,
+            s.seed,
+            s.first_map,
+            ref.to_json(),
+            s.select.remove,
+            _selection(t),
         )
     if t.directory is not None and t.group is not None and t.dataset is None:
         tables = tables_from_directory(t.directory, t.group, start, end, set(t.exclude))
-        return ChainConfig(s.name, tables, s.options, s.seed, s.first_map, None, s.select.remove)
+        return ChainConfig(
+            s.name, tables, s.options, s.seed, s.first_map, None, s.select.remove, _selection(t)
+        )
     raise ChainConfigError(f"{path}: [tables] needs either dataset or directory + group")
+
+
+def _selection(t: TableSelection) -> dict[str, Any]:
+    """The chain file's [tables] as written (store excluded: refused above)."""
+    out = {k: v for k, v in asdict(t).items() if k != "store" and v not in (None, [])}
+    return {k: str(v) if isinstance(v, Path) else v for k, v in out.items()}
 
 
 def _date(text: str | None) -> datetime.date | None:
@@ -233,6 +260,7 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
         "tables_source": cfg.tables_source,
         "options": option_parameters(cfg.options),
         **({"select_remove": [r.to_json() for r in cfg.remove]} if cfg.remove else {}),
+        **({"selection": cfg.selection} if cfg.selection else {}),
         "tables": [
             {
                 "table_id": t.table_id,
