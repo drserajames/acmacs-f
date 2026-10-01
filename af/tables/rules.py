@@ -221,6 +221,26 @@ class Rules:
             if tags.exists()
             else RuleTable.empty(tags, tag_scope)
         )
+        self._check_alias_canonicals()
+
+    def _check_alias_canonicals(self) -> None:
+        """A strain_aliases canonical is a curated name, so it must parse cleanly. A name
+        the parser cannot read is only a warning in a table (1,700 CDC sample ids are), so
+        a malformed canonical would pass unseen. The titre check passes it too, since it
+        checks the readings, not the label: a bad name published that way on 1 Oct 2026."""
+        from .names import parse  # names imports this module
+
+        for rule in self.strain_aliases.rules:
+            canonical = rule["canonical"]
+            subtype = rule["subtype"]
+            if subtype == "*":
+                subtype = "B" if canonical.upper().startswith("B/") else "A(H3N2)"
+            name = parse(canonical, subtype, self.reassortants, rule["lab"])
+            if name.problems:
+                raise ValueError(
+                    f"{rule.where}: canonical {canonical!r} does not parse: "
+                    + "; ".join(name.problems)
+                )
 
     def tables(self) -> list[RuleTable]:
         return [
