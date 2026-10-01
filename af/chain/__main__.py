@@ -40,20 +40,24 @@ every step.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from af.chain.backend import optimiser_by_key
 from af.chain.config import ChainConfigError, ChainSettings, load_chain_config
 from af.chain.engine import SplitStarts, run_chain
 from af.chain.publish import publish_chain
 from af.chain.review import build_review
+from af.chart.ace import read_chart
 from af.pipeline.config import RunnerSettings, make_runner
 from af.run.job import run_main
 from af.run.runtime import release_info, require_python
 from af.store.work import PathsConfig, Work
+from af.util.artefacts import sha256_path
 from af.util.config import load_config
 
 
@@ -74,6 +78,8 @@ class RunSettings:
     publish: bool = True
     runner: RunnerSettings = field(default_factory=lambda: RunnerSettings(kind="local"))
     split: SplitSettings | None = None
+    # Where this machine keeps reference maps (a chain's [reference] chart is relative to it)
+    references: Path | None = None
 
 
 def dataset_from_path(chain: Path) -> str:
@@ -102,6 +108,51 @@ def check_tables_dataset(chain: Path, dataset: str) -> None:
             f"{chain}: [tables] dataset {tables!r} is not this chain's {lab_group!r}"
             " (from its path)"
         )
+
+
+def measure_reference(cfg: Any, run: RunSettings, root: Path) -> None:
+    """Measure the finished map against the chain's reference map (af.chain.reference) and add
+    the result to chain.json, which the review page shows and publishing keeps. Cached on the
+    chosen map's and the reference's sha256 and the start count: a rerun that changed nothing
+    measures nothing."""
+    from af.chain.reference import reference_check
+
+    ref = cfg.reference
+    if run.references is None:
+        raise ChainConfigError(f"{cfg.name}: [reference] needs `references` in the run config")
+    ref_path = Path(run.references) / ref.chart
+    if not ref_path.is_file():
+        raise ChainConfigError(f"{cfg.name}: reference map missing: {ref_path}")
+    doc_path = root / "chain.json"
+    doc = json.loads(doc_path.read_text())
+    chosen = root / doc["steps"][-1]["directory"] / doc["steps"][-1]["chosen_file"]
+    key = {
+        "map_sha256": sha256_path(chosen),
+        "reference_sha256": sha256_path(ref_path),
+        "starts": ref.starts,
+    }
+    cache = root / "reference.json"
+    check = None
+    if cache.exists():
+        old = json.loads(cache.read_text())
+        if old.get("key") == key:
+            check = old["check"]
+    if check is None:
+        logging.info(
+            "%s: measuring against reference %s (%d seeded starts)", cfg.name, ref.chart, ref.starts
+        )
+        check = reference_check(
+            read_chart(chosen),
+            read_chart(ref_path),
+            starts=ref.starts,
+            seed=cfg.seed,
+            threads=run.threads,
+        )
+        cache.write_text(json.dumps({"key": key, "check": check}, indent=1))
+    doc["reference"] = {"chart": ref.chart, **key, **check}
+    tmp = doc_path.with_suffix(".json.tmp")  # as the engine writes it: never half a chain.json
+    tmp.write_text(json.dumps(doc, indent=1))
+    tmp.replace(doc_path)
 
 
 def main(argv: list[str]) -> int:
@@ -145,6 +196,8 @@ def main(argv: list[str]) -> int:
             remade,
             len(results) - remade,
         )
+    if cfg.reference is not None and not args.review:
+        measure_reference(cfg, run, work.root)
     page = build_review(work.root)
     logging.info("review page: %s", page)
     if run.publish and not args.review:

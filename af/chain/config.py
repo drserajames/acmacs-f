@@ -106,6 +106,16 @@ class TableSelection:
 
 
 @dataclass(frozen=True)
+class Reference:
+    """A reference map of the same data to measure the finished map against (af.chain.reference):
+    `chart` is relative to the run config's `references` directory (where reference maps live
+    is a fact about the machine). Measurement only: nothing from it enters the map."""
+
+    chart: str
+    starts: int = 50  # seeded relaxations for the basin measurement
+
+
+@dataclass(frozen=True)
 class ChainSettings:
     """The TOML schema."""
 
@@ -115,6 +125,7 @@ class ChainSettings:
     first_map: Path | None = None  # a seed chart with a projection (today's `first_source`)
     options: MapOptions = field(default_factory=MapOptions)
     select: Selection = field(default_factory=Selection)
+    reference: Reference | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +158,7 @@ class ChainConfig:
     selection: dict[str, Any] | None = None
     # Ferret sera only (af.chart.sera), applied to every table before the merge
     sera_policy: SeraPolicy = field(default_factory=SeraPolicy)
+    reference: Reference | None = None  # measured against after the run; not a step parameter
 
     def __post_init__(self) -> None:
         if self.options.merge_all and self.first_map is not None:
@@ -201,6 +213,7 @@ def load_chain_config(
             s.select.remove,
             _selection(t),
             _sera_policy(path, s.select),
+            s.reference,
         )
     if t.directory is not None and t.group is not None and t.dataset is None:
         tables = tables_from_directory(t.directory, t.group, start, end, set(t.exclude))
@@ -214,6 +227,7 @@ def load_chain_config(
             s.select.remove,
             _selection(t),
             _sera_policy(path, s.select),
+            s.reference,
         )
     raise ChainConfigError(f"{path}: [tables] needs either dataset or directory + group")
 
@@ -297,6 +311,11 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
         **({"select_remove": [r.to_json() for r in cfg.remove]} if cfg.remove else {}),
         **({"selection": cfg.selection} if cfg.selection else {}),
         "non_ferret_sera": cfg.sera_policy.to_json(),
+        **(
+            {"reference": {"chart": cfg.reference.chart, "starts": cfg.reference.starts}}
+            if cfg.reference
+            else {}
+        ),
         "tables": [
             {
                 "table_id": t.table_id,
