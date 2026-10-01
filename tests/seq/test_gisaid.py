@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
 
 import pytest
@@ -237,3 +238,39 @@ def test_a_full_date_that_disagrees_with_the_defline_is_flagged() -> None:
     assert str(records[0].collection_date) == "2020-05-05"  # the workbook still wins
     assert "date.defline-conflict" in records[0].problems
     assert (counts.defline_date_differs, counts.defline_date_conflicts) == (1, 1)
+
+
+class TestNameYearCategory:
+    """The name's year against the collection year (task 2.8): report, bucketed, never exclude."""
+
+    def category(self, year: int, date: str, precision: str = "day") -> str | None:
+        name = f"A(H3N2)/EXAMPLETOWN/7/{year}"
+        return gisaid.name_year_category(name, datetime.date.fromisoformat(date), precision)
+
+    def test_the_same_year_is_no_disagreement(self) -> None:
+        assert self.category(2024, "2024-03-15") is None
+
+    @pytest.mark.parametrize("month", ["11", "12"])
+    def test_a_year_ahead_collected_late_is_the_season_convention(self, month: str) -> None:
+        assert self.category(2025, f"2024-{month}-20") == gisaid.NAME_YEAR_SEASON
+
+    def test_a_year_ahead_collected_early_is_a_real_disagreement(self) -> None:
+        assert self.category(2025, "2024-03-15") == gisaid.NAME_YEAR_DIFFERS
+
+    def test_a_year_behind_or_far_off_is_a_real_disagreement(self) -> None:
+        assert self.category(2023, "2024-11-20") == gisaid.NAME_YEAR_DIFFERS
+        assert self.category(2025, "1905-07-17") == gisaid.NAME_YEAR_DIFFERS
+
+    def test_a_year_precision_date_cannot_be_the_season_convention(self) -> None:
+        """With only a year there is no month, so the convention cannot be established."""
+        assert self.category(2025, "2024-01-01", "year") == gisaid.NAME_YEAR_DIFFERS
+
+    def test_a_name_whose_shape_is_already_a_problem_is_left_to_the_name_flags(self) -> None:
+        assert (
+            gisaid.name_year_category("EXAMPLETOWN/EXAMPLE1/2025", datetime.date(2025, 3, 1), "day")
+            is None
+        )
+        assert (
+            gisaid.name_year_category("A/EXAMPLETOWN/7/XX", datetime.date(2025, 3, 1), "day")
+            is None
+        )
