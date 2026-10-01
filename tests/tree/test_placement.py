@@ -123,7 +123,7 @@ def write(path: Path, body: str) -> Path:
 def test_limits_load_with_their_reasons(tmp_path: Path) -> None:
     path = write(
         tmp_path / "p.tsv",
-        "# a comment row\t\t\t\nh3\t0.85\ttwo trees: ae round 0.966, af seeded 0.982\t2\n"
+        "h3\t0.85\ttwo trees: ae round 0.966, af seeded 0.982\t2\n"
         "B/Vic\t0.75\tone tree only: ae round 0.903, the noisiest\t1\n",
     )
     limits = load_placement_limits(path)
@@ -153,3 +153,18 @@ def test_a_subtype_with_no_row_is_an_error(tmp_path: Path) -> None:
     limits = load_placement_limits(write(tmp_path / "p.tsv", "h3\t0.85\twhy\t2\n"))
     with pytest.raises(PlacementError, match="no placement limit for 'h1'"):
         limit_for(limits, "h1")
+
+
+def test_a_preamble_before_the_header_is_skipped(tmp_path: Path) -> None:
+    """The real file explains where its numbers came from, above the header (design rule 11)."""
+    path = tmp_path / "p.tsv"
+    path.write_text(
+        "# Minimum placement correlation per subtype.\n"
+        "# Sarah, 30 September 2026.\n"
+        "subtype\tmin_correlation\treason\ttrees\n"
+        "h3\t0.85\ttwo trees\t2\n"
+        "# bvic is still being calibrated\n"
+    )
+    limits = load_placement_limits(path)
+    assert sorted(limits) == ["h3"]
+    assert limits["h3"].min_correlation == 0.85
