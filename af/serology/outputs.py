@@ -44,7 +44,7 @@ from af.serology.rows import IdentityRules
 from af.serology.update import require_current
 from af.stat.counts import stat_counts
 from af.stat.output import Previous, write_stat
-from af.store import ExternalInput, Store, StoreRef
+from af.store import ExternalInput, Store, StoreError, StoreRef
 from af.util.artefacts import sha256_path
 
 #: Store datasets whose isolates the location lookup learns from.
@@ -164,7 +164,7 @@ def _styles(
     report.matching_inputs = matching.provenance()
     report.matching_rules = matching.counts()
     links = preparation_sequences(con, matching.passages)
-    aligned = aligned_sequences(store, con)
+    aligned = aligned_sequences(store, con, report.links)
     styles = {}
     for subtype, setting in colouring.items():
         styles[subtype], report.colours[subtype] = dot_styles(
@@ -189,17 +189,21 @@ class AlignedSequences(dict[tuple[str, str], AlignedSequence]):
         return self.get((epi_isl, accession))
 
 
-def aligned_sequences(store: Store, con: Any) -> AlignedSequences:
+def aligned_sequences(store: Store, con: Any, links: LinkCounts) -> AlignedSequences:
     """Aligned amino acids of every sequence an antigen matched (doubtful matches included:
     colouring uses those ae uses) or tied on, from the sequence store (Q81).
 
     Nextclade alignments of observed sequences: a gap there is a deletion. Needs the
     ``antigen_sequences`` view (:func:`af.serology.joins.link_sequences`). Public because
-    the antigenic maps colour through the same path as geo (Q46).
+    the antigenic maps colour through the same path as geo (Q46). ``links`` is that join's
+    result: the alignments come from the sequence versions it read (``links.refs``), pinned
+    or CURRENT, never from a version the join did not see.
     """
+    if "sequences" not in links.refs:
+        raise StoreError("aligned_sequences needs the refs of a link_from_store join")
     paths = [
         path.as_posix()
-        for ref in store.list_datasets("sequences")
+        for ref in (StoreRef.from_json(r) for r in links.refs["sequences"].values())
         for path in sorted((store.resolve(ref) / "sequences").glob("*/*.parquet"))
     ]
     rows = con.execute(

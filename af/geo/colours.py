@@ -70,8 +70,11 @@ def dot_styles(
     group_set: GroupSet | None = None,
     *,
     use_proxies: bool = True,
-) -> tuple[Callable[[Preparation], DotStyle], ColourCounts]:
+) -> tuple[Callable[[Preparation | PreparationKey], DotStyle], ColourCounts]:
     """A function giving each preparation its style, and the counts it keeps as it goes.
+
+    The function takes a serology :class:`~af.serology.query.Preparation` (geo) or its key
+    directly (:func:`af.serology.joins.preparation_key`, the maps): one key, one copy.
 
     ``aligned(epi_isl, accession)`` returns the sequence the groups are tested against
     (from the sequence store); None means the sequence store has no aligned sequence.
@@ -79,8 +82,8 @@ def dot_styles(
     counts = ColourCounts()
     cache: dict[PreparationKey, DotStyle] = {}
 
-    def style(prep: Preparation) -> DotStyle:
-        key = (prep.subtype, prep.name, prep.reassortant, prep.annotations, prep.passage)
+    def style(prep: Preparation | PreparationKey) -> DotStyle:
+        key = prep if isinstance(prep, tuple) else prep.key()
         if key not in cache:
             cache[key], reason = _style(key)
             if reason:

@@ -55,6 +55,10 @@ class Preparation:
     first_lab: str  # lab of the earliest table that titrated it
     first_table_date: datetime.date
 
+    def key(self) -> tuple[str, str, str, tuple[str, ...], str]:
+        """Its :data:`af.serology.joins.PreparationKey`."""
+        return (self.subtype, self.name, self.reassortant, self.annotations, self.passage)
+
 
 def preparations(con: Any) -> list[Preparation]:
     """Every antigen preparation, DISTINCT points excluded.
