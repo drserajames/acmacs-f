@@ -121,11 +121,16 @@ jobs:
       # full TeX on the macOS runner is slow, so macOS skips pdflatex explicitly (below).
       # Fail fast, and never hide the other tools: this step once sat wedged for 90+ min
       # (PR #202, 1 Oct 2026) while the same step on master passed, leaving the whole
-      # job's result unknown. So it has a time limit, and continue-on-error lets the tool
-      # tests run anyway; with TeX missing, --require-tools fails only the pdflatex test,
-      # by name. man-db's trigger is switched off first: rebuilding the man index after a
-      # TeX install is the slowest part of it on GitHub's Ubuntu runners, and CI has no use
-      # for man pages. apt retries downloads and waits a bounded time for the dpkg lock.
+      # job's result unknown.
+      # How long it normally takes (all 38 completed runs on 1 Oct 2026): median 1.25 min,
+      # 29 under 2.5 min, then a tail of 2.6, 3.0, 3.8, 6.0, 6.4, 7.1, 7.5, 9.3, 20.6 min,
+      # plus that one wedge. A few minutes is the known tail, not a new problem.
+      # So: a 25-minute limit (above the worst completed run), and continue-on-error so
+      # the tool tests run anyway; with TeX missing, --require-tools fails only the
+      # pdflatex test, by name. man-db's trigger is switched off first (CI has no use for
+      # man pages, and re-indexing them is slow on some runners); whether that shortens
+      # the tail is unmeasured. apt retries downloads and waits a bounded time for the
+      # dpkg lock.
       - name: LaTeX (Linux)
         if: runner.os == 'Linux'
         timeout-minutes: 25
