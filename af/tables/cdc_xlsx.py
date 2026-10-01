@@ -73,6 +73,19 @@ class CDCSheetError(SheetError):
     pass
 
 
+def _expand_lots(lot: str) -> str:
+    """A pooled serum's lots as CDC's TSV and season files write them: "2013-029, 030" ->
+    "2013-029,2013-030" (the 2013-19 sheets give later lots of the year as bare numbers)."""
+    out, year = [], ""
+    for part in (p.strip() for p in lot.split(",")):
+        if m := re.fullmatch(r"(\d{4})-\d+", part):
+            year = m[1]
+        elif year and re.fullmatch(r"\d{3}", part):
+            part = f"{year}-{part}"
+        out.append(part)
+    return ",".join(out)
+
+
 def _is_dilution(n: int) -> bool:
     """10 x 2^k: a value off the series is a typing error (32 for 320, 2180 for 1280)."""
     return n >= 10 and n % 10 == 0 and (n // 10) & (n // 10 - 1) == 0
@@ -536,7 +549,7 @@ class SheetReader:
             serum = Serum(
                 name=name.name,
                 raw_name=raw,
-                serum_id=f"CDC {lot}" if lot else "",  # no lot: no identity across tables
+                serum_id=f"CDC {_expand_lots(lot)}" if lot else "",  # no lot: no identity
                 passage=passage,
                 passage_class=self.passages.passage_class(passage),
                 passage_date=harvest,

@@ -344,6 +344,7 @@ def _read_cdc(inputs: CDCInputs, rules: Rules) -> tuple[list[Table], list[str], 
         errors.extend(xl.errors)
         errors.extend(duplicates(result.tables, xl.tables))
         tables.extend(xl.tables)
+    main = list(tables)  # the TSV and the workbooks: season tables join their lots and dates
     for season_file in inputs.season:
         from . import cdc_season
 
@@ -356,7 +357,10 @@ def _read_cdc(inputs: CDCInputs, rules: Rules) -> tuple[list[Table], list[str], 
         )
         errors.extend(season.errors)
         errors.extend(duplicates(result.tables, season.tables))
-        joined = cdc_season.join_harvest_dates(season.tables, result.tables)
+        errors.extend(duplicates([t for t in main if " xlsx " in t.source_key], season.tables))
+        if lots := cdc_season.join_lots(season.tables, main):
+            report.append("  lots: " + ", ".join(f"{k} {v}" for k, v in sorted(lots.items())))
+        joined = cdc_season.join_harvest_dates(season.tables, main)
         if joined:
             report.append(
                 "  harvest dates: " + ", ".join(f"{k} {v}" for k, v in sorted(joined.items()))

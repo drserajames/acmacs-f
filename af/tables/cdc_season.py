@@ -49,9 +49,14 @@ COLUMNS = [
     "reported_by_fra",
     "tested_by_fra",
 ]
+# CDC's 2015-16 file has no lot column: its sera carry only ferret ids, and get the lot of the
+# same serum (name + passage) in the main tables by join_lots
+COLUMNS_NO_LOT = [c for c in COLUMNS if c != "lot #"]
 ASSAYS = {"HI": "HI", "FRA": "FRA"}
 KEY = "assay_date+subtype+assay-type"  # the only table_key this reader implements
-JOIN = "from-tsv"  # the only harvest_dates value: see join_harvest_dates
+# the only harvest_dates value: see join_harvest_dates. It predates the workbooks, which the
+# join now reads too (the 2013-19 B/Vic tables); the name is kept so the rules need no change
+JOIN = "from-tsv"
 
 
 def read(path: Path, rules: Rules) -> ReadResult:
@@ -59,7 +64,7 @@ def read(path: Path, rules: Rules) -> ReadResult:
     lines, rejoined = _records(data.decode("utf-8").splitlines(), path)
     reader = csv.DictReader(lines, delimiter="\t", quoting=csv.QUOTE_NONE)
     header = reader.fieldnames or []
-    if sorted(header) != sorted(COLUMNS):
+    if sorted(header) not in (sorted(COLUMNS), sorted(COLUMNS_NO_LOT)):
         raise CDCFormatError(f"{path}: columns {header} are not the season-file columns")
     selected = [r for r in rules.season_files.rules if r["file"] == path.name]
     if not selected:
@@ -73,6 +78,7 @@ def read(path: Path, rules: Rules) -> ReadResult:
         result.dropped["records rejoined (a line break inside a field)"] = rejoined
     for no, row in enumerate(reader, start=2):
         row = {k: (v or "").strip() for k, v in row.items()}
+        row.setdefault("lot #", "")
         row["_line"] = str(no)
         matched = _rule_for(row, selected)
         if matched is None:
@@ -166,7 +172,7 @@ def _make_table(
             dropped["rows: control serum"] += 1
             continue
         ag_key = (row["virus_strain"], row["virus_strain_passage"], row["virus_cdc_id"])
-        sr_key = (row["serum_strain"], lot)
+        sr_key = (row["serum_strain"], lot or "ferret " + row["ferret_id"])
         if ag_key not in antigens:
             antigens[ag_key] = _antigen(row, subtype, lineage, rules, passages, warnings)
         if sr_key not in sera:
@@ -254,7 +260,7 @@ def _serum(
     serum = Serum(
         name=name.name,
         raw_name=row["serum_strain"],
-        serum_id=f"CDC {lot}",
+        serum_id=f"CDC {lot}" if lot else "",  # no lot column: join_lots
         passage=passage.text,
         passage_class=passages.passage_class(passage.text),
         reassortant=name.reassortant,
@@ -276,46 +282,78 @@ def _titre(row: dict[str, str], assay: str, rules: Rules) -> str | None:
     raise CDCFormatError(f"line {row['_line']}: titre {raw!r} matches no titre_tokens rule")
 
 
-def join_harvest_dates(season: list[Table], tsv: list[Table]) -> Counter[str]:
-    """Give the season tables that ask for it (``meta["harvest_dates"]``) the main TSV's
-    harvest dates, so that their reference antigens and sera are the same points as in the
-    TSV tables that follow (Sarah, Q83 (a)). An antigen matches on name and passage, a serum
-    on name, passage and lot (serum id). When the TSV has several harvest dates for a point,
-    the latest on or before the season test is the stock in use then; a point the TSV does
-    not have, or has only harvested later, keeps no date. Each joined point records it in
-    its ``source``; the counts are returned for the run's report."""
-    antigen_dates: dict[tuple[str, str], set[str]] = {}
-    serum_dates: dict[tuple[str, str, str], set[str]] = {}
-    for table in tsv:
+def join_lots(season: list[Table], main: list[Table]) -> Counter[str]:
+    """A serum from a file with no lot column (CDC's 2015-16 season file) takes the lot of
+    the same serum, name and passage, in the main tables: the lot in use in the latest main
+    table on or before the season test. A serum the main tables never have, or have under two
+    lots in that table, keeps no id."""
+    used: dict[tuple[str, str], list[tuple[str, set[str]]]] = {}
+    for table in main:
+        lots: dict[tuple[str, str], set[str]] = {}
+        for sr in table.sera:
+            if sr.serum_id:
+                lots.setdefault((sr.name, sr.passage), set()).add(sr.serum_id)
+        for key, ids in lots.items():
+            used.setdefault(key, []).append((table.date, ids))
+    counts: Counter[str] = Counter()
+    for table in season:
+        for sr in table.sera:
+            if sr.serum_id:
+                continue
+            earlier = sorted(e for e in used.get((sr.name, sr.passage), []) if e[0] <= table.date)
+            if not earlier or len(earlier[-1][1]) != 1:
+                counts["sera: no lot (none, or two, in the main tables)"] += 1
+                continue
+            date, (serum_id,) = earlier[-1][0], earlier[-1][1]
+            sr.serum_id = serum_id
+            sr.source["lot_from"] = f"main table {date}, name+passage"
+            counts["sera: lot from the main tables"] += 1
+    return counts
+
+
+def join_harvest_dates(season: list[Table], main: list[Table]) -> Counter[str]:
+    """Give the season tables that ask for it (``meta["harvest_dates"]``) the harvest dates
+    of the main tables, CDC's TSV and its workbooks, so that their reference antigens and
+    sera are the same points as in the main tables around them (Sarah, Q83 (a)). An antigen
+    matches on name and passage, a serum on name, passage and lot (serum id). When the main
+    tables have several harvest dates for a point, the latest on or before the season test
+    is the stock in use then; a point they do not have, or have only harvested later, keeps
+    no date. Each joined point records it, and where the date came from, in its ``source``;
+    the counts are returned for the run's report."""
+    Dates = dict[str, str]  # harvest date -> "CDC TSV" or "CDC workbook"
+    antigen_dates: dict[tuple[str, str], Dates] = {}
+    serum_dates: dict[tuple[str, str, str], Dates] = {}
+    for table in main:
+        origin = "CDC workbook" if " xlsx " in table.source_key else "CDC TSV"
         for a in table.antigens:
             if a.passage_date:
-                antigen_dates.setdefault((a.name, a.passage), set()).add(a.passage_date)
+                antigen_dates.setdefault((a.name, a.passage), {}).setdefault(a.passage_date, origin)
         for sr in table.sera:
             if sr.passage_date:
-                serum_dates.setdefault((sr.name, sr.passage, sr.serum_id), set()).add(
-                    sr.passage_date
-                )
+                key = (sr.name, sr.passage, sr.serum_id)
+                serum_dates.setdefault(key, {}).setdefault(sr.passage_date, origin)
     counts: Counter[str] = Counter()
     for table in season:
         if table.meta.get("harvest_dates") != JOIN:
             continue
-        points: list[tuple[Antigen | Serum, set[str]]] = [
-            (a, antigen_dates.get((a.name, a.passage), set())) for a in table.antigens
+        points: list[tuple[Antigen | Serum, Dates]] = [
+            (a, antigen_dates.get((a.name, a.passage), {})) for a in table.antigens
         ]
         points += [
-            (sr, serum_dates.get((sr.name, sr.passage, sr.serum_id), set())) for sr in table.sera
+            (sr, serum_dates.get((sr.name, sr.passage, sr.serum_id), {})) for sr in table.sera
         ]
         for point, dates in points:
             kind = "antigens" if isinstance(point, Antigen) else "sera"
             earlier = sorted(d for d in dates if d <= table.date)
             if point.passage_date or not earlier:
-                counts[f"{kind}: no TSV harvest date"] += 1
+                counts[f"{kind}: no harvest date in the main tables"] += 1
                 continue
             point.passage_date = earlier[-1]
             point.source["passage_date_from"] = (
-                "CDC TSV, "
+                dates[earlier[-1]]
+                + ", "
                 + ("name+passage" if kind == "antigens" else "name+passage+lot")
                 + ("" if len(dates) == 1 else f", latest of {len(dates)} on or before the test")
             )
-            counts[f"{kind}: harvest date from the TSV"] += 1
+            counts[f"{kind}: harvest date from the {dates[earlier[-1]]}"] += 1
     return counts
