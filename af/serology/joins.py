@@ -36,10 +36,12 @@ from typing import Any
 
 import pyarrow as pa
 
+from af.chart.model import Chart
 from af.seq.matching import Match, SequenceIndex
 from af.seq.matching_rules import MatchingRules
 from af.seq.passage_match import PassageMatcher
 from af.serology.store import StoreError
+from af.store import StoreRef
 
 STATUSES = ("matched", "doubtful", "unmatched")
 SEVERAL_DATASETS = "serology.matched-in-several-datasets"
@@ -75,6 +77,9 @@ class LinkCounts:
     # clade dataset -> (sequences version it labelled, or None if its provenance names none,
     # current sequences version), for every clade table behind the sequence store
     clades_behind: dict[str, tuple[str | None, str]] = field(default_factory=dict)
+    # the store versions the join read (link_from_store): {"sequences": {dataset: ref json},
+    # "clades": [ref json, ...]}, so a result can be reproduced from them (design rule 5)
+    refs: dict[str, Any] = field(default_factory=dict)
 
 
 def link_sequences(
@@ -308,6 +313,27 @@ PreparationKey = tuple[
     str, str, str, tuple[str, ...], str
 ]  # subtype, name, reass., annot., passage
 
+
+def preparation_key(chart: Chart, kind: str, index: int) -> PreparationKey:
+    """The serology preparation a chart point is: the key :func:`preparation_sequences` uses.
+
+    The one copy of that key (Q46: maps and geo colour through the same join). A chart's
+    passage ("P") is already the identity passage serology keys by: the lab's passage with its
+    harvest date (:meth:`af.tables.model.Antigen.ae_passage`), so it is used as written. The
+    subtype is the chart's own ("V"), the table subtype. Only antigens are preparations: a
+    serum is not, and asking for one is an error.
+    """
+    if kind != "antigen":
+        raise ValueError(f"preparation_key: {kind!r} points are not preparations (antigen only)")
+    subtype = chart.info.get("V")
+    if not subtype:
+        raise ValueError("preparation_key: the chart has no subtype (info 'V')")
+    if not 0 <= index < len(chart.antigens):
+        raise IndexError(f"preparation_key: antigen {index} of {len(chart.antigens)}")
+    a = chart.antigens[index]
+    return (str(subtype), a.name, a.reassortant, tuple(a.annotations), a.passage)
+
+
 _PREP = "t.subtype, a.name, a.reassortant, a.annotations, a.identity_passage"
 _ROWS = """FROM antigen_sequences s
         JOIN antigens a ON a.table_id = s.table_id AND a.position = s.position
@@ -486,8 +512,15 @@ def link_from_store(
     *,
     with_clades: bool,
     class_of: ClassOf = passage_class_column,
+    sequences: Mapping[str, StoreRef] | None = None,
+    clades: Sequence[StoreRef] | None = None,
 ) -> LinkCounts:
-    """:func:`link_sequences` over the CURRENT ``sequences/*`` (and ``clades/*``) datasets.
+    """:func:`link_sequences` over the ``sequences/*`` (and ``clades/*``) datasets.
+
+    By default the CURRENT versions; ``sequences`` (dataset -> ref, one for every dataset the
+    join reads) and ``clades`` (the clade dataset refs) pin them instead, so a result can be
+    reproduced after CURRENT moves (design rule 5). Either way the versions read are returned
+    in ``LinkCounts.refs``.
 
     ``with_clades=False`` is the deliberate sequences-only join; with ``True`` a missing
     clade dataset is an error, not an empty join. ``rules`` are the matcher's tables
@@ -503,21 +536,24 @@ def link_from_store(
         check_lab_submitters,
         equivalents_table,
         index_from_store,
+        sequences_ref,
     )
 
     datasets = sorted({d for group in DATASETS_FOR.values() for d in group})
-    present = {ref.dataset for ref in store.list_datasets("sequences")}
-    missing = [d for d in datasets if d not in present]
-    if missing:
-        raise StoreError(f"sequence datasets missing from the store: {', '.join(missing)}")
+    if sequences is None:
+        present = {ref.dataset for ref in store.list_datasets("sequences")}
+        missing = [d for d in datasets if d not in present]
+        if missing:
+            raise StoreError(f"sequence datasets missing from the store: {', '.join(missing)}")
+    read = {d: sequences_ref(store, d, sequences) for d in datasets}
     if rules.submitters:
         # a submitter name that no longer appears in the store would silently stop breaking ties
-        check_lab_submitters(store, datasets, dict(rules.submitters))
+        check_lab_submitters(store, datasets, dict(rules.submitters), read)
         _check_submitter_labs(con, rules.submitters)
     if rules.equivalents:
         # a GISAID spelling no stored sequence has would silently do nothing
-        check_equivalents(store, datasets, list(rules.equivalents))
-    indexes = {d: index_from_store(store, [d], rules.passage) for d in datasets}
+        check_equivalents(store, datasets, list(rules.equivalents), read)
+    indexes = {d: index_from_store(store, [d], rules.passage, read) for d in datasets}
     for index in indexes.values():
         index.submitters = dict(rules.submitters)
         index.number_rules = dict(rules.number_rules)
@@ -525,25 +561,34 @@ def link_from_store(
     isolates = [
         path
         for d in datasets
-        for path in sorted(
-            (store.resolve(store.current("sequences", d)) / "isolates").glob("*/*.parquet")
-        )
+        for path in sorted((store.resolve(read[d]) / "isolates").glob("*/*.parquet"))
     ]
-    clades = None
+    clade_paths = None
+    clade_refs: list[StoreRef] = []
     behind: dict[str, tuple[str | None, str]] = {}
     if with_clades:
-        refs = store.list_datasets("clades")
-        if not refs:
-            raise StoreError("no clades datasets in the store")
-        clades = [p for ref in refs for p in sorted(store.resolve(ref).glob("*.parquet"))]
-        behind = _clades_behind(store, refs)
-    counts = link_sequences(con, indexes, isolates, clades, class_of)
+        clade_refs = list(clades) if clades is not None else list(store.list_datasets("clades"))
+        if not clade_refs:
+            raise StoreError("no clades datasets given or in the store")
+        clade_paths = [
+            p for ref in clade_refs for p in sorted(store.resolve(ref).glob("*.parquet"))
+        ]
+        behind = _clades_behind(store, clade_refs, read)
+    elif clades is not None:
+        raise StoreError("clades pinned for a sequences-only join (with_clades=False)")
+    counts = link_sequences(con, indexes, isolates, clade_paths, class_of)
     counts.clades_behind = behind
+    counts.refs = {
+        "sequences": {d: ref.to_json() for d, ref in read.items()},
+        "clades": [ref.to_json() for ref in clade_refs],
+    }
     return counts
 
 
-def _clades_behind(store: Any, refs: Sequence[Any]) -> dict[str, tuple[str | None, str]]:
-    """Clade tables labelled from an older sequences version than the current one.
+def _clades_behind(
+    store: Any, refs: Sequence[Any], read: Mapping[str, StoreRef]
+) -> dict[str, tuple[str | None, str]]:
+    """Clade tables labelled from another sequences version than the one the join read.
 
     A clade table covers the sequences version its provenance names; sequences added since
     have no row until the clade table is refreshed, and show up as "matched without clade
@@ -558,7 +603,9 @@ def _clades_behind(store: Any, refs: Sequence[Any]) -> dict[str, tuple[str | Non
             if "store" in item and item["store"].get("kind") == "sequences"
             and item["store"].get("dataset") == ref.dataset
         ]  # fmt: skip
-        current = store.current("sequences", ref.dataset).version
+        current = (
+            read[ref.dataset] if ref.dataset in read else store.current("sequences", ref.dataset)
+        ).version
         version = labelled[0] if len(labelled) == 1 else None
         if version != current:
             out[ref.dataset] = (version, current)

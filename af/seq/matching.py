@@ -49,7 +49,7 @@ from pathlib import Path
 
 import duckdb
 
-from af.store import Store
+from af.store import Store, StoreRef
 
 EGG, CELL, ORIGINAL, MIXED, UNKNOWN = "egg", "cell", "original", "mixed", "unknown"
 
@@ -437,13 +437,32 @@ def _one_sequence(tier: list[Candidate], flags: list[str], ambiguous_flag: str) 
     return None
 
 
+def sequences_ref(
+    store: Store, dataset: str, refs: Mapping[str, StoreRef] | None = None
+) -> StoreRef:
+    """The ``sequences/<dataset>`` version to read: pinned in ``refs``, else CURRENT.
+
+    A result read from CURRENT cannot be reproduced once CURRENT moves (design rule 5), so a
+    caller that must reproduce one pins the versions; a pin list without the dataset is an
+    error, never a silent fall-back to CURRENT.
+    """
+    if refs is None:
+        return store.current("sequences", dataset)
+    if dataset not in refs:
+        raise ValueError(f"no pinned sequences version for {dataset!r} (pinned: {sorted(refs)})")
+    return refs[dataset]
+
+
 def index_from_store(
-    store: Store, datasets: Iterable[str], passage_rules: Sequence[PassageRule]
+    store: Store,
+    datasets: Iterable[str],
+    passage_rules: Sequence[PassageRule],
+    refs: Mapping[str, StoreRef] | None = None,
 ) -> SequenceIndex:
-    """Candidates from the CURRENT versions of ``sequences/<dataset>``."""
+    """Candidates from ``sequences/<dataset>``: the ``refs`` versions, else CURRENT."""
     index = SequenceIndex()
     for dataset in datasets:
-        version = store.resolve(store.current("sequences", dataset))
+        version = store.resolve(sequences_ref(store, dataset, refs))
         isolates = str(version / "isolates" / "*" / "*.parquet")
         # A store without submitters gives none: the own-lab rule then never applies, and
         # check_lab_submitters reports every named submitter as missing.
@@ -514,7 +533,10 @@ def check_lab_codes(table: Mapping[str, object], labs: Iterable[str], what: str)
 
 
 def check_lab_submitters(
-    store: Store, datasets: Iterable[str], submitters: dict[str, frozenset[str]]
+    store: Store,
+    datasets: Iterable[str],
+    submitters: dict[str, frozenset[str]],
+    refs: Mapping[str, StoreRef] | None = None,
 ) -> None:
     """Every submitter named in the table must submit something in these store datasets.
 
@@ -522,7 +544,7 @@ def check_lab_submitters(
     breaking ties.
     """
     paths = [
-        str(store.resolve(store.current("sequences", d)) / "isolates" / "*" / "*.parquet")
+        str(store.resolve(sequences_ref(store, d, refs)) / "isolates" / "*" / "*.parquet")
         for d in datasets
     ]
     seen = {
@@ -587,7 +609,10 @@ def equivalents_table(rows: Iterable[Equivalent]) -> dict[tuple[str, str], tuple
 
 
 def check_equivalents(
-    store: Store, datasets: Iterable[str], rows: Sequence[Equivalent]
+    store: Store,
+    datasets: Iterable[str],
+    rows: Sequence[Equivalent],
+    refs: Mapping[str, StoreRef] | None = None,
 ) -> dict[tuple[str, str, str], int]:
     """Stored sequences under each row's GISAID spelling; a row with none is an error.
 
@@ -595,7 +620,7 @@ def check_equivalents(
     nothing, silently. Rows marked optional may match nothing; they are counted, not refused.
     """
     paths = [
-        str(store.resolve(store.current("sequences", d)) / "isolates" / "*" / "*.parquet")
+        str(store.resolve(sequences_ref(store, d, refs)) / "isolates" / "*" / "*.parquet")
         for d in datasets
     ]
     held = Counter(

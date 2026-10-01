@@ -334,3 +334,69 @@ def test_a_doubtful_match_ae_uses_is_coloured_and_counted(tmp_path: Path, syn: A
     assert report.links is not None and report.links.by_status["doubtful"] == 1
     assert report.colours[H3].coloured == {"Clade P.1": 1}
     assert report.colours[H3].doubtful == {"match.egg-antigen-non-egg-sequence": 1}
+
+
+def test_pinned_sequences_and_clades_reproduce_a_join_after_current_moves(
+    tmp_path: Path, syn: Any
+) -> None:
+    """Design rule 5: a join read from CURRENT cannot be repeated once CURRENT moves; one read
+    from pinned refs can, and LinkCounts.refs says which versions were read."""
+    import pytest
+
+    from af.serology import query
+    from af.serology.joins import link_from_store
+    from af.serology.outputs import aligned_sequences
+    from af.serology.store import StoreError
+    from af.store import StoreRef
+
+    store, _, _ = _roots(tmp_path, syn)
+    _clades(store, tmp_path)
+    rules = matching_rules(
+        write_af_data(tmp_path / "af-data", submitters="", number="", equivalents="")
+    )
+    con = query.connect(store.resolve(store.current("serology", "all")))
+    first = link_from_store(con, store, rules, with_clades=True)
+    pinned_h3 = store.current("sequences", "h3")
+    assert first.by_status["matched"] == 1  # EXAMPLETOWN/1 by its EPI_ISL
+    assert first.refs["sequences"]["h3"] == pinned_h3.to_json()
+    assert [r["dataset"] for r in first.refs["clades"]] == ["h3"]
+
+    # CURRENT moves: a new h3 version without the antigen's isolate
+    isolates, sequences = tmp_path / "iso-2.parquet", tmp_path / "seq-2.parquet"
+    duckdb.execute(
+        f"COPY (SELECT 'EPI_ISL_2' AS epi_isl, 'ACC2' AS accession, '{_name('A', 2)}' AS name, "
+        "'SIAT1' AS passage, 'Exampleland' AS country, 'Example Continent' AS region, "
+        "'EXAMPLETOWN' AS place, '2021-01-01' AS collection_date, []::VARCHAR[] AS problems) "
+        f"TO '{isolates.as_posix()}' (FORMAT parquet)"
+    )
+    duckdb.execute(
+        f"COPY (SELECT 'EPI_ISL_2' AS epi_isl, 'ACC2' AS accession, 'hash2' AS seq_hash, "
+        f"'{'K' * 40}' AS aa_aligned) TO '{sequences.as_posix()}' (FORMAT parquet)"
+    )
+    with store.build("sequences", "h3") as builder:
+        builder.copy(isolates, "isolates/pull=test2/part-0.parquet")
+        builder.copy(sequences, "sequences/pull=test2/part-0.parquet")
+        builder.publish(_provenance("sequences-test-2"))
+    assert store.current("sequences", "h3") != pinned_h3
+
+    con = query.connect(store.resolve(store.current("serology", "all")))
+    moved = link_from_store(con, store, rules, with_clades=True)
+    assert moved.by_status["matched"] == 0  # the isolate is gone from CURRENT
+
+    pins = {d: StoreRef.from_json(r) for d, r in first.refs["sequences"].items()}
+    clade_pins = [StoreRef.from_json(r) for r in first.refs["clades"]]
+    con = query.connect(store.resolve(store.current("serology", "all")))
+    again = link_from_store(con, store, rules, with_clades=True, sequences=pins, clades=clade_pins)
+    assert again.by_status == first.by_status and again.refs == first.refs
+    # judged against the sequences read: the pinned version, as the first run, not CURRENT
+    assert again.clades_behind == first.clades_behind
+    assert moved.clades_behind["h3"][1] == store.current("sequences", "h3").version
+    assert again.clades_behind["h3"][1] == pinned_h3.version
+    assert ("EPI_ISL_1", "ACC1") in aligned_sequences(store, con, again)  # from the pinned version
+
+    with pytest.raises(
+        ValueError, match=r"no pinned sequences version for 'bvic' \(pinned: \['h3'\]\)"
+    ):
+        link_from_store(con, store, rules, with_clades=True, sequences={"h3": pinned_h3})
+    with pytest.raises(StoreError, match="sequences-only join"):
+        link_from_store(con, store, rules, with_clades=False, sequences=pins, clades=clade_pins)

@@ -310,3 +310,30 @@ def test_rows_naming_two_records_take_the_one_whose_passage_matches(
     assert both.resolution == ROWS_SEVERAL_MATCH and both.accession is None
     none = preps[syn.virus("NONETOWN", 1)]  # an egg preparation; neither record is E3
     assert none.resolution == ROWS_NONE_MATCH and none.accession is None
+
+
+def test_a_chart_antigen_has_the_same_preparation_key_as_serology(tmp_path: Path, syn: Any) -> None:
+    """preparation_key is the one copy of the key: a chart's passage is already the identity
+    passage (the lab's passage with its harvest date), so it equals serology's own key."""
+    from af.chart.model import Antigen, Chart, Serum, Titres
+    from af.chart.titre import Titre
+    from af.serology.joins import preparation_key
+
+    a = {"name": syn.virus("ONETOWN", 1), "passage": "SIAT2", "passage_date": "2021-03-01",
+         "reassortant": "", "annotations": ["CLONE-1"]}  # fmt: skip
+    serum = {"name": syn.virus("SOMEWHERE", 9), "serum_id": "S-1"}
+    build([syn.table("t1", [a], [serum], [[["40"]]])], tmp_path / "v", syn.rules)
+    (prep,) = query.preparations(query.connect(tmp_path / "v"))
+    chart = Chart(
+        {"V": "A(H3N2)"},
+        [Antigen(a["name"], passage="SIAT2 (2021-03-01)", annotations=("CLONE-1",))],
+        [Serum(serum["name"], serum_id="S-1")],
+        Titres([[Titre.parse("40")]]),
+    )
+    assert preparation_key(chart, "antigen", 0) == prep.key()
+    with pytest.raises(ValueError, match="not preparations"):
+        preparation_key(chart, "serum", 0)
+    with pytest.raises(IndexError):
+        preparation_key(chart, "antigen", 1)
+    with pytest.raises(ValueError, match="no subtype"):
+        preparation_key(Chart({}, chart.antigens, chart.sera, chart.titres), "antigen", 0)

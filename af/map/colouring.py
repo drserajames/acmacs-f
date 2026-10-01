@@ -108,7 +108,7 @@ class StoreColours:
         con = query.connect(store.resolve(self.serology))
         self.links = link_from_store(con, store, rules, with_clades=True)
         self._sequences = preparation_sequences(con, rules.passages)
-        self._aligned = aligned_sequences(store, con)
+        self._aligned = aligned_sequences(store, con, self.links)
         self._user = read_clade_tables(
             store, cfg.nomenclature, cfg.acmacs_data, list(CLADE_SUBTYPE)
         )
