@@ -32,15 +32,8 @@ from af.clades.coordinates import (
     Position,
     Unexpressible,
     convert,
-    coordinates_for,
 )
-
-#: The upstream repository for each subtype's HA segment.
-HA_REPOSITORIES: dict[str, str] = {
-    "A(H1N1)": "seasonal_A-H1N1pdm_HA",
-    "A(H3N2)": "seasonal_A-H3N2_HA",
-    "B/Vic": "seasonal_B-Vic_HA",
-}
+from af.clades.subtypes import CladeSubtypeError, coordinates_for, nomenclature_repository
 
 _SCALAR_KEYS = frozenset(
     {"name", "parent", "alias_of", "unaliased_name", "clade", "short_name", "revoked", "comment"}
@@ -266,10 +259,12 @@ def load_clade_set(
     clone must be at ``pin.commit``; pass ``check_commit=False`` only in tests that build
     a directory by hand.
     """
-    name = repository or (pin.repository if pin else HA_REPOSITORIES.get(subtype))
-    if name is None:
-        known = ", ".join(sorted(HA_REPOSITORIES))
-        raise NomenclatureError(f"no upstream repository known for subtype {subtype!r}; {known}")
+    try:
+        name = repository or (pin.repository if pin else nomenclature_repository(subtype))
+    except CladeSubtypeError as error:
+        raise NomenclatureError(
+            f"no upstream repository for subtype {subtype!r}: {error}"
+        ) from None
     root = Path(clones) / name
     if not root.is_dir():
         raise NomenclatureError(f"upstream clone not found: {root}")
