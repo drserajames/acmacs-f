@@ -11,7 +11,10 @@ what we write).
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -265,6 +268,149 @@ class Chart:
         if not dates:
             return ""
         return dates[0] if len(dates) == 1 else f"{min(dates)}-{max(dates)}"
+
+    # --- selecting points ---
+
+    def select(self, keep_ag: Sequence[int], keep_sr: Sequence[int]) -> Chart:
+        """A new chart with only the antigens `keep_ag` and sera `keep_sr` (indices into this
+        chart, in their original order), its maps kept.
+
+        Everything indexed by point follows its point, so no coordinate, setting or style
+        ends up on another point: the titre table and layers; each projection's layout rows,
+        forced column bases (per serum), avidity adjusts and gradient multipliers (per point),
+        and its disconnected / unmovable / unmovable-in-last-dimension ("u") index lists,
+        renumbered with removed points dropped; sera's homologous antigens ("h"); the plot
+        spec "p" (per-point style index, drawing order, points shown on all maps), REMAPPED
+        rather than dropped so each kept point keeps its style; and the antigen/serum index
+        selectors ("!i") of the semantic plot specs "R". Each projection keeps its
+        transformation, but its stress is set to None: the stored value was for the old point
+        set and is stale until the map is relaxed or the stress recomputed.
+
+        Indices, not names: callers resolve their selection first (design rule 2 is about what
+        a user writes, not this call). Reordering is not supported: indices must be unique,
+        in range and are kept in their original order. A selector "!i" that names a removed
+        point, or one whose antigen/serum switch "A" is missing, is an error rather than a guess.
+        """
+        ag = _keep_indices(keep_ag, self.n_antigens, "antigen")
+        sr = _keep_indices(keep_sr, self.n_sera, "serum")
+        new_ag = {old: new for new, old in enumerate(ag)}
+        new_sr = {old: new for new, old in enumerate(sr)}
+        points = ag + [self.n_antigens + j for j in sr]
+        new_point = {old: new for new, old in enumerate(points)}
+        titres = Titres(
+            [[self.titres.table[i][j] for j in sr] for i in ag],
+            [
+                {
+                    (new_ag[i], new_sr[j]): t
+                    for (i, j), t in layer.items()
+                    if i in new_ag and j in new_sr
+                }
+                for layer in self.titres.layers
+            ],
+        )
+        return Chart(
+            copy.deepcopy(self.info),
+            [copy.deepcopy(self.antigens[i]) for i in ag],
+            [_select_serum(self.sera[j], new_ag) for j in sr],
+            titres,
+            None
+            if self.forced_column_bases is None
+            else np.asarray(self.forced_column_bases)[sr].copy(),
+            [_select_projection(p, points, sr, new_point) for p in self.projections],
+            _select_extra(self.extra, points, new_point, new_ag, new_sr),
+        )
+
+
+def _keep_indices(keep: Sequence[int], n: int, what: str) -> list[int]:
+    out = [int(i) for i in keep]
+    if len(set(out)) != len(out):
+        raise ValueError(f"select: repeated {what} index")
+    if any(i < 0 or i >= n for i in out):
+        raise ValueError(f"select: {what} index out of range 0..{n - 1}")
+    if out != sorted(out):
+        raise ValueError(f"select: {what} indices must be in their original order (no reordering)")
+    return out
+
+
+def _renumber(indices: Any, new: dict[int, int]) -> list[int]:
+    """Indices into the old numbering -> the kept ones in the new numbering."""
+    return [new[int(i)] for i in indices if int(i) in new]
+
+
+def _select_serum(serum: Serum, new_ag: dict[int, int]) -> Serum:
+    s = copy.deepcopy(serum)
+    if "h" in s.extra:  # homologous antigens: antigen indices
+        s.extra["h"] = _renumber(s.extra["h"], new_ag)
+    return s
+
+
+def _per_point(a: np.ndarray | None, rows: list[int]) -> np.ndarray | None:
+    return None if a is None else np.asarray(a)[rows].copy()
+
+
+def _select_projection(
+    p: Projection, points: list[int], sr: list[int], new_point: dict[int, int]
+) -> Projection:
+    extra = copy.deepcopy(p.extra)
+    if "u" in extra:  # unmovable in the last dimension: point indices
+        extra["u"] = _renumber(extra["u"], new_point)
+    return dataclasses.replace(
+        p,
+        layout=np.asarray(p.layout)[points].copy(),
+        stress=None,  # stale: computed for the old point set
+        forced_column_bases=_per_point(p.forced_column_bases, sr),
+        transformation=None if p.transformation is None else np.array(p.transformation, copy=True),
+        disconnected=tuple(_renumber(p.disconnected, new_point)),
+        unmovable=tuple(_renumber(p.unmovable, new_point)),
+        avidity_adjusts=_per_point(p.avidity_adjusts, points),
+        gradient_multipliers=_per_point(p.gradient_multipliers, points),
+        extra=extra,
+    )
+
+
+def _select_extra(
+    extra: dict[str, Any],
+    points: list[int],
+    new_point: dict[int, int],
+    new_ag: dict[int, int],
+    new_sr: dict[int, int],
+) -> dict[str, Any]:
+    out = copy.deepcopy(extra)
+    plot = out.get("p")
+    if isinstance(plot, dict):  # legacy plot spec, point-indexed lists
+        if "p" in plot:  # style index for each point, antigens then sera
+            plot["p"] = [plot["p"][i] for i in points]
+        for key in ("d", "s"):  # drawing order; points shown on all maps
+            if key in plot:
+                plot[key] = _renumber(plot[key], new_point)
+    if "R" in out:
+        _renumber_selectors(out["R"], new_ag, new_sr)
+    return out
+
+
+def _renumber_selectors(node: Any, new_ag: dict[int, int], new_sr: dict[int, int]) -> None:
+    """Semantic plot specs select single points with {"T": {"!i": index}, "A": 1|0}: an index
+    among antigens (A = 1) or sera (A = 0). Renumber in place; refuse what cannot be kept."""
+    if isinstance(node, list):
+        for x in node:
+            _renumber_selectors(x, new_ag, new_sr)
+        return
+    if not isinstance(node, dict):
+        return
+    t = node.get("T")
+    if isinstance(t, dict) and "!i" in t:
+        kind = node.get("A")
+        if kind not in (0, 1, True, False):
+            raise ValueError(
+                "select: a '!i' selector without A = antigens or sera cannot be renumbered"
+            )
+        new, what = (new_ag, "antigen") if kind in (1, True) else (new_sr, "serum")
+        old = int(t["!i"])
+        if old not in new:
+            raise ValueError(f"select: a semantic plot spec selects removed {what} {old}")
+        t["!i"] = new[old]
+    for value in node.values():
+        _renumber_selectors(value, new_ag, new_sr)
 
 
 def empty_table(n_ag: int, n_sr: int) -> list[list[Titre]]:
