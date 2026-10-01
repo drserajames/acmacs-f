@@ -136,7 +136,8 @@ class ChainConfig:
 
     def __post_init__(self) -> None:
         if self.remove and self.first_map is not None:
-            # a seed map's layout would need remapping; the round's selections apply to tables
+            # the seed map would lose its stress (Chart.select unsets it: stale), which step 0
+            # records; the round's selections apply to tables, so rules go with tables only
             raise ChainConfigError(f"{self.name}: select.remove cannot be used with first_map")
         if not self.tables:
             raise ChainConfigError(f"{self.name}: no tables")

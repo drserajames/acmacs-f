@@ -26,10 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import numpy as np
-
 from af.chart.ace import read_chart
-from af.chart.model import Antigen, Chart, Serum, Titres
+from af.chart.model import Antigen, Chart, Serum
 from af.map.vaccines import passage_class
 
 WHAT = ("antigens", "sera")
@@ -96,47 +94,15 @@ def removed_by(rules: list[RemoveRule], chart: Chart) -> list[dict]:
 def apply(rules: list[RemoveRule], chart: Chart) -> tuple[Chart, list[dict]]:
     """`chart` without the points any rule removes, and what each rule removed.
 
-    Only a table (no projections) is accepted: removing points from a map would also need its
-    layout and per-point settings remapped, and chains apply rules to tables only."""
+    The removal itself is `Chart.select`, the one copy of how points are taken out of a chart
+    (titres, layers, per-point map settings, plot styles). Chains apply rules to tables, before
+    the merge; a chart with maps would come back with each map's stress unset (stale)."""
     report = removed_by(rules, chart)
     if not any(r["points"] for r in report):
         return chart, report
-    if chart.projections:
-        raise SelectError("select.remove applies to tables, not to charts with projections")
-    drop_ag = {i for i, a in enumerate(chart.antigens) if _removed(rules, "antigens", a)}
-    drop_sr = {j for j, s in enumerate(chart.sera) if _removed(rules, "sera", s)}
-    keep_ag = [i for i in range(chart.n_antigens) if i not in drop_ag]
-    keep_sr = [j for j in range(chart.n_sera) if j not in drop_sr]
-    new_ag = {old: new for new, old in enumerate(keep_ag)}
-    new_sr = {old: new for new, old in enumerate(keep_sr)}
-    titres = Titres(
-        [[chart.titres.table[i][j] for j in keep_sr] for i in keep_ag],
-        [
-            {
-                (new_ag[i], new_sr[j]): t
-                for (i, j), t in layer.items()
-                if i in new_ag and j in new_sr
-            }
-            for layer in chart.titres.layers
-        ],
-    )
-    forced = (
-        None
-        if chart.forced_column_bases is None
-        else np.asarray(chart.forced_column_bases)[keep_sr]
-    )
-    # per-point plot styles ("p") would no longer line up; a chain restyles anyway
-    extra = {k: v for k, v in chart.extra.items() if k != "p"}
-    kept = Chart(
-        chart.info,
-        [chart.antigens[i] for i in keep_ag],
-        [chart.sera[j] for j in keep_sr],
-        titres,
-        forced,
-        [],
-        extra,
-    )
-    return kept, report
+    keep_ag = [i for i, a in enumerate(chart.antigens) if not _removed(rules, "antigens", a)]
+    keep_sr = [j for j, s in enumerate(chart.sera) if not _removed(rules, "sera", s)]
+    return chart.select(keep_ag, keep_sr), report
 
 
 def _removed(rules: list[RemoveRule], what: str, point: Antigen | Serum) -> bool:
