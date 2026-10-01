@@ -54,6 +54,26 @@ DEFAULT_LOOK = Look()
 EGG_SHAPED = ("egg", "reassortant")
 
 
+def ugly_egg_path(x: float, y: float, r: float) -> Any:
+    """ae's serum marker for egg-grown sera ("U"; kateri draw_on_pdf.dart, PointShape.uglyegg):
+    a hexagon with vertices (0, r), (r, 0.6r), (0.8r, -0.6r), (0, -r), (-0.8r, -0.6r),
+    (-r, 0.6r). It fills the same box as a cell serum's square (half-width ``r``), and its wide
+    end is DOWN on the page, like the egg's.
+
+    Sarah, 1 Oct 2026: "Egg sera should be ugly egg shaped", which is ae's stated convention.
+    The Sep 2026 shipped PDFs did NOT draw it: they contain no hexagon, and their egg and
+    reassortant sera are drawn as plain eggs (measured: notes/maps/egg-marker/).
+    """
+    from matplotlib.path import Path as MplPath
+
+    verts = [
+        (x, y + r), (x + r, y + 0.6 * r), (x + 0.8 * r, y - 0.6 * r), (x, y - r),
+        (x - 0.8 * r, y - 0.6 * r), (x - r, y + 0.6 * r), (x, y + r),
+    ]  # fmt: skip
+    codes = [MplPath.MOVETO] + [MplPath.LINETO] * 5 + [MplPath.CLOSEPOLY]
+    return MplPath(verts, codes)
+
+
 def egg_path(x: float, y: float, r: float) -> Any:
     """The egg marker reports have always used: kateri's ovoid (draw_on_pdf.dart, PointShape.egg).
 
@@ -139,9 +159,11 @@ def draw_pdf(
         z = order(p) + 1
         if p.kind == "serum":
             s = look.serum_half_side
-            ax.add_patch(
-                Rectangle((x - s, y - s), 2 * s, 2 * s, fc="none", ec=SERUM_OUTLINE, lw=1, zorder=z)
-            )
+            style: dict[str, Any] = {"fc": "none", "ec": SERUM_OUTLINE, "lw": 1, "zorder": z}
+            if p.passage_class in EGG_SHAPED:
+                ax.add_patch(PathPatch(ugly_egg_path(x, y, s), **style))
+            else:
+                ax.add_patch(Rectangle((x - s, y - s), 2 * s, 2 * s, **style))
             continue
         grey = p.greyed or p.colour is None
         fill = GREY if grey else p.colour
