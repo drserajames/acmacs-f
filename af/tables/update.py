@@ -45,7 +45,7 @@ from af.store import ExternalInput, PathsConfig, Provenance, Store, Work
 from af.util.artefacts import Artefact
 from af.util.config import load_config, parse_config
 
-from . import cdc, identity, ids
+from . import cdc, identity, ids, warnings
 from .model import Table
 from .rules import Rules
 from .store import KIND, current_tables, previous_index, publish
@@ -164,6 +164,8 @@ def update(
     merged = [w for t in tables for w in t.warnings if w.startswith(cdc.MERGED_ISOLATES)]
     report.append(f"flagged ({cdc.MERGED_ISOLATES}; kept merged, Q13): {len(merged)}")
     report.extend(f"  {w}" for w in merged)
+    report.extend(warnings.report(tables))
+    errors.extend(warnings.curated_errors(tables))
     errors.extend(f"rule never matched: {r.where}" for t in rules.tables() for r in t.unmatched())
     suffixed = [t.table_id for t in tables if t.date_suffix > 1]
     report.append(f"tables sharing a date (suffix .2+): {len(suffixed)} {suffixed}")
