@@ -283,6 +283,8 @@ class PreparationSequence:
 
     epi_isl: str | None
     accession: str | None
+    # the chosen sequence's clade: None = no clade row (unknown), "" = the nomenclature names
+    # none (nothing to know). For a preparation's one clade, use preparation_clade().
     clade: str | None
     pairing: str  # "exact" if any row is an exact pairing, else "proxy" or ""
     conflict: bool  # its rows point at different sequences: none is chosen
@@ -311,6 +313,31 @@ ROWS_SEVERAL_MATCH = "rows.agree.several-records-match-passage"
 PreparationKey = tuple[
     str, str, str, tuple[str, ...], str
 ]  # subtype, name, reass., annot., passage
+
+
+def preparation_clade(found: PreparationSequence | None) -> str | None:
+    """A preparation's one clade, decided as colouring decides it. Three answers, kept apart:
+
+    - ``None``: **unknown**. No usable sequence; a sequence with no clade row; or candidates
+      (a refused tie, rows naming two unresolved records) whose clades disagree, with no
+      ranked pick;
+    - ``""``: **known to have no clade**: the nomenclature names none for its sequence;
+    - a clade name.
+
+    A consumer must not collapse the first two: that reads a missing sequence as a virus
+    outside every clade. With no chosen sequence, the candidates' common clade is the answer,
+    else (a tie that splits) the clade of ae's ranked pick. Candidates are compared by clade,
+    stricter than colouring's comparison by colour (two clades can share a colour row).
+    ``af.clades`` turns the answer into a lineage (None stays None, "" becomes ()).
+    """
+    if found is None:
+        return None
+    if found.epi_isl is not None:
+        return found.clade
+    clades = {c.clade for c in found.tied or found.alternatives}
+    if len(clades) == 1:
+        return clades.pop()
+    return found.ranked.clade if found.ranked is not None else None
 
 
 def preparation_key(chart: Chart, kind: str, index: int) -> PreparationKey:

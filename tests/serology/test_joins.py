@@ -337,3 +337,31 @@ def test_a_chart_antigen_has_the_same_preparation_key_as_serology(tmp_path: Path
         preparation_key(chart, "antigen", 1)
     with pytest.raises(ValueError, match="no subtype"):
         preparation_key(Chart({}, chart.antigens, chart.sera, chart.titres), "antigen", 0)
+
+
+def test_a_preparations_one_clade_keeps_unknown_apart_from_no_clade() -> None:
+    """None is unknown; "" is known to have no clade; collapsing them would read a missing
+    sequence as a virus outside every clade."""
+    from af.serology.joins import PreparationSequence, TiedSequence, preparation_clade
+
+    def chosen(clade: str | None) -> PreparationSequence:
+        return PreparationSequence("EPI_ISL_1", "ACC1", clade, "", conflict=False)
+
+    def unchosen(
+        *clades: str | None, ranked: str | None = None, tie: bool = True
+    ) -> PreparationSequence:
+        seqs = tuple(TiedSequence(f"EPI_ISL_{i}", f"ACC{i}", c) for i, c in enumerate(clades))
+        pick = TiedSequence("EPI_ISL_9", "ACC9", ranked) if ranked is not None else None
+        if tie:
+            return PreparationSequence(None, None, None, "", conflict=False, tied=seqs, ranked=pick)
+        return PreparationSequence(None, None, None, "", conflict=True, alternatives=seqs)
+
+    assert preparation_clade(None) is None  # no usable sequence
+    assert preparation_clade(chosen(None)) is None  # a sequence with no clade row
+    assert preparation_clade(chosen("")) == ""  # the nomenclature names none
+    assert preparation_clade(chosen("P.1")) == "P.1"
+    assert preparation_clade(unchosen("P.1", "P.1")) == "P.1"  # a tie that agrees
+    assert preparation_clade(unchosen("P.1", "P.2", ranked="P.2")) == "P.2"  # split: ae's pick
+    assert preparation_clade(unchosen("P.1", "P.2", tie=False)) is None  # conflict, disagreeing
+    assert preparation_clade(unchosen("P.1", "P.1", tie=False)) == "P.1"  # conflict, agreeing
+    assert preparation_clade(unchosen("", "")) == ""  # agreeing on no clade
