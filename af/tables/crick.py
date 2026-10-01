@@ -341,6 +341,7 @@ class SheetReader:
         titres = [[row[i] for i in used] for row in titres]
         keep = [i for i, row in enumerate(titres) if any(row)]
         self.dropped["antigens: no readings"] += len(titres) - len(keep)
+        self._passage_from_serum([antigens[i] for i in keep], [rows[i] for i in keep], sera)
         return Table(
             table_id="",
             group=group,
@@ -400,6 +401,11 @@ class SheetReader:
         fr = self.header.ferret_row
         raw_id = self.s.cell(fr, c)
         serum_id, marks = _serum_id(raw_id)
+        if not marks and (lost := _lost_mark(serum_id, legend)) is not None:
+            serum_id, marks = lost
+            self.warnings.append(
+                f"{self.s.where(fr, c)}: {raw_id!r}: footnote {marks[0]} written without '*'"
+            )
         if unknown := [m for m in marks if m not in legend]:
             # an error only if a bare "<" needs it (see _titre)
             self.warnings.append(f"{self.s.where(fr, c)}: footnote {unknown} not in the legend")
@@ -512,6 +518,25 @@ class SheetReader:
         return found if not annotation else ""
 
     # -- antigens -------------------------------------------------------------------------
+
+    def _passage_from_serum(self, antigens: list[Antigen], rows: list[int], sera: list[Serum]):
+        """A reference antigen with no passage written takes its homologous serum's passage
+        word (Egg -> E?, MDCK -> MDCK?), as ae read it: with no passage it has no identity, and
+        its copies in other tables would collide in a merge (h1 2019-20, a reference row
+        written without a passage on five tables)."""
+        for antigen, r in zip(antigens, rows, strict=True):
+            if antigen.passage:
+                continue
+            words = {s.passage for s in sera if s.name == antigen.name and s.passage}
+            if len(words) != 1:
+                continue
+            antigen.passage = words.pop()
+            antigen.passage_class = self.passages.passage_class(antigen.passage)
+            antigen.source["passage_from"] = "homologous serum"
+            self.warnings.append(
+                f"{self.s.where(r)}: {antigen.raw_name!r}: no passage written; "
+                f"{antigen.passage} from its serum"
+            )
 
     def _antigens(self) -> tuple[list[Antigen], list[int]]:
         """The antigens and the sheet row of each (titres are read once the sera are)."""
@@ -672,6 +697,21 @@ class SheetReader:
             return text
         self.dropped["cells: decimal rounded"] += 1
         return sign + str(int(decimal.Decimal(number).quantize(0, decimal.ROUND_HALF_UP)))
+
+
+def _lost_mark(serum_id: str, legend: dict[str, dict[str, str]]) -> tuple[str, list[str]] | None:
+    """A sheep pool whose last number is one digit longer than the others and ends in a
+    legend mark: the mark lost its '*'. From 2022-11-29 Crick writes the B/Vic hyperimmune
+    sheep pool "Sh n, n, ..., n*1" as "..., nn1", which would otherwise read as another serum,
+    and not a sheep one."""
+    m = re.fullmatch(r"(SH(?:\d+/)+)(\d+)", serum_id)
+    if m is None:
+        return None
+    widths = {len(n) for n in m[1][2:-1].split("/")}
+    last = m[2]
+    if len(widths) == 1 and len(last) == widths.pop() + 1 and last[-1] in legend:
+        return m[1] + last[:-1], [last[-1]]
+    return None
 
 
 def _serum_id(raw: str) -> tuple[str, list[str]]:

@@ -26,7 +26,9 @@ def tallies(doc: dict[str, Any]) -> tuple[dict[str, Counter[str]], dict[str, Cou
 
 
 def _diff(a: Counter[str], b: Counter[str]) -> dict[str, Any]:
-    keys = sorted(a.keys() | b.keys(), key=lambda k: -abs(a[k] - b[k]))  # largest change first
+    # Largest change first; ties by name, so the order never depends on the hash seed (set
+    # iteration order varies between processes, design rule 8).
+    keys = sorted(a.keys() | b.keys(), key=lambda k: (-abs(a[k] - b[k]), k))
     moved = sum(abs(a[k] - b[k]) for k in keys)
     total = max(1, sum(a.values()) + sum(b.values()))
     return {
@@ -34,7 +36,7 @@ def _diff(a: Counter[str], b: Counter[str]) -> dict[str, Any]:
         "keys_only_ref": len(a.keys() - b.keys()), "keys_only_new": len(b.keys() - a.keys()),
         "abs_diff": moved,
         "frac_diff": moved / total,  # 0 = identical, 1 = disjoint
-        "largest": [f"{k}: {a[k]} -> {b[k]}" for k in keys[:3]],
+        "largest": [f"{k}: {a[k]} -> {b[k]}" for k in keys[:3] if a[k] != b[k]],  # changes only
     }  # fmt: skip
 
 

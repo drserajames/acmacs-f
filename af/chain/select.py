@@ -28,6 +28,7 @@ from pathlib import Path
 
 from af.chart.ace import read_chart
 from af.chart.model import Antigen, Chart, Serum
+from af.chart.sera import FERRET_ONLY, Marker, non_ferret
 from af.map.vaccines import passage_class
 
 WHAT = ("antigens", "sera")
@@ -78,6 +79,50 @@ class Selection:
     """The `[select]` table of a chain config."""
 
     remove: list[RemoveRule] = field(default_factory=list)
+    # Ferret sera only (af.chart.sera.FERRET_ONLY): "exclude" is the default for every map; a
+    # map that needs other sera says "keep" and why.
+    non_ferret_sera: str = "exclude"
+    non_ferret_reason: str = ""
+    # The markers file; default: <data repo>/rules/sera/non_ferret_markers.tsv next to chains/
+    non_ferret_markers: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.non_ferret_sera not in ("exclude", "keep"):
+            raise SelectError("select.non_ferret_sera must be exclude or keep")
+        if self.non_ferret_sera == "keep" and not self.non_ferret_reason.strip():
+            raise SelectError("select.non_ferret_sera = keep needs a non_ferret_reason")
+
+
+@dataclass(frozen=True)
+class SeraPolicy:
+    """The ferret-only policy as one chain applies it."""
+
+    mode: str = "exclude"  # or "keep" (with reason)
+    reason: str = ""
+    markers: tuple[Marker, ...] = ()  # empty: species only (a chain built in code, e.g. tests)
+    markers_path: str | None = None
+    markers_sha256: str | None = None
+
+    def to_json(self) -> dict:
+        out: dict[str, object] = {"mode": self.mode, "policy": FERRET_ONLY}
+        if self.reason:
+            out["reason"] = self.reason
+        if self.markers_path:
+            out["markers"] = {"path": self.markers_path, "sha256": self.markers_sha256}
+        return out
+
+
+def apply_sera_policy(policy: SeraPolicy, chart: Chart) -> tuple[Chart, dict]:
+    """`chart` without its non-ferret sera (unless the chain keeps them), and the report: what
+    was removed and by which test, and how many sera are ferret only by default."""
+    report = non_ferret(chart, list(policy.markers))
+    out = {**report.to_json(), "removed": policy.mode == "exclude" and bool(report.non_ferret)}
+    if policy.mode == "keep" or not report.non_ferret:
+        return chart, out
+    gone = {j for j, _, _ in report.non_ferret}
+    return chart.select(
+        range(chart.n_antigens), [j for j in range(chart.n_sera) if j not in gone]
+    ), out
 
 
 def removed_by(rules: list[RemoveRule], chart: Chart) -> list[dict]:

@@ -127,6 +127,10 @@ class CladeResult:
     parents: Mapping[str, str | None] = field(default_factory=dict)
     deletion_defined_positions: tuple[int, ...] = ()
     """Positions whose defining state is a deletion. A gap-blind backend cannot see these."""
+    review: Mapping[str, Any] = field(default_factory=dict)
+    """The engine's sibling-conflict review (af.clades.assign.conflict_review), written to
+    tree.json as ``counts.clade_review`` so the clades step can refuse a tree that hides one.
+    Empty from an engine that makes none; then no key is written."""
 
 
 CladeAssigner = Callable[[Sequence[CladeInput]], CladeResult]
@@ -388,6 +392,8 @@ def populate(
         leaf_calls = [populated.clades[node.id_hex] for node in tree.leaves()]
         counts["leaves_without_clade"] = sum(call.clade is None for call in leaf_calls)
         counts["clade_set_version"] = version
+        if clade_result.review:
+            counts["clade_review"] = dict(clade_result.review)
 
     return populated
 
@@ -430,6 +436,9 @@ def af_clades_assigner(clade_set: Any, *, require_gap_support: bool = True) -> C
             for item in inputs
         ]
         result = assign.assign_tree(nodes, clade_set, require_gap_support=require_gap_support)
+        review = assign.conflict_review(
+            assign.sibling_conflicts(nodes, result, clade_set), result.ties
+        )
         calls = {
             name: CladeCall(a.clade, a.support, a.unobservable, a.inherited)
             for name, a in result.assignments.items()
@@ -445,7 +454,7 @@ def af_clades_assigner(clade_set: Any, *, require_gap_support: bool = True) -> C
                 }
             )
         )
-        return CladeResult(str(result.clade_set_version), calls, parents, deletions)
+        return CladeResult(str(result.clade_set_version), calls, parents, deletions, review)
 
     return run
 

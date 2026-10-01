@@ -24,6 +24,18 @@ Two consequences are the point of using a tree:
 Sequences with no place on a tree — map antigens before the tree is built, viruses that
 never made it into one — are assigned by the fallback engine instead
 (:mod:`af.clades.fallback`), which Sarah chose to be Nextclade.
+
+**Known limitation: a sibling clade cannot be recovered once the walk has gone down the
+wrong branch, and this happens silently.** Candidates at a node are the inherited clade and
+its descendants only, so a node whose sequence fully matches a *sibling* of its inherited
+clade is never tested against that sibling. Example (October 2026, an H3 tree whose ancestral
+states put a sister clade's marker too high): a node of 3,700 leaves gained the sibling
+clade's own defining substitution on its edge and matched that sibling's whole signature with
+the same support as its inherited clade, yet kept the inherited label, and every leaf below
+it followed; the sibling clade was assigned nowhere. Labelling is deliberately left as it is
+(changing candidate selection would move every tree's labels); instead
+:func:`sibling_conflicts` reports every such node, and :attr:`TreeAssignment.ties` every
+exact tie between candidates that only the name decided.
 """
 
 from __future__ import annotations
@@ -37,6 +49,34 @@ from af.clades.sequence import AlignedSequence, Evidence, GapSupport
 
 class AssignmentError(ValueError):
     """The tree or its sequences cannot support clade assignment."""
+
+
+@dataclass(frozen=True)
+class NameTie:
+    """A node where candidates tied on everything but the name; ``chosen`` won by name."""
+
+    node: str
+    chosen: str
+    others: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SiblingConflict:
+    """A node labelled ``label`` whose sequence also fully matches ``other``, a clade outside
+    ``label``'s lineage, with at least the same support: the walk may have gone down the
+    wrong branch above it (see the module docstring)."""
+
+    node: str
+    label: str
+    other: str
+    leaves: int
+    label_support: int
+    """Matching loci of ``label`` at this node; -1 when the node contradicts it."""
+    other_support: int
+    gained_on_edge: bool
+    """``other``'s own defining loci match here but not all at the parent."""
+    topmost: bool
+    """No ancestor of this node has the same (label, other) conflict."""
 
 
 @dataclass(frozen=True)
@@ -80,6 +120,8 @@ class TreeAssignment:
     subtype: str
     assignments: Mapping[str, Assignment]
     founders: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    ties: tuple[NameTie, ...] = ()
+    """Nodes where two candidates tied on standing, depth and support, so the name chose."""
 
     def clade(self, node: str) -> str | None:
         try:
@@ -129,10 +171,11 @@ def assign_tree(
 
     assignments: dict[str, Assignment] = {}
     founders: dict[str, list[str]] = {}
+    ties: list[NameTie] = []
     stack: list[tuple[str, str | None]] = [(root, None) for root in roots]
     while stack:
         name, inherited = stack.pop()
-        assignment = _assign_node(by_name[name], inherited, clade_set)
+        assignment = _assign_node(by_name[name], inherited, clade_set, ties)
         assignments[name] = assignment
         if assignment.clade is not None and assignment.clade != inherited:
             founders.setdefault(assignment.clade, []).append(name)
@@ -147,11 +190,21 @@ def assign_tree(
         subtype=clade_set.subtype,
         assignments=assignments,
         founders={clade: tuple(nodes) for clade, nodes in founders.items()},
+        ties=tuple(ties),
     )
 
 
-def _assign_node(node: Node, inherited: str | None, clade_set: CladeSet) -> Assignment:
-    """The deepest candidate the sequence does not contradict, else the inherited clade."""
+def _assign_node(
+    node: Node,
+    inherited: str | None,
+    clade_set: CladeSet,
+    ties: list[NameTie] | None = None,
+) -> Assignment:
+    """The deepest candidate the sequence does not contradict, else the inherited clade.
+
+    A tie on standing, depth and support is decided by the name, deterministically; each
+    such tie is appended to ``ties`` so it is reported rather than silent.
+    """
     # Restrict to the inherited clade's subtree — but by its deepest *published* ancestor.
     # A label with no published ancestry (a locally defined pre-nomenclature lineage) makes
     # no claim about where the virus sits in the nomenclature, so it must not shut the
@@ -161,6 +214,7 @@ def _assign_node(node: Node, inherited: str | None, clade_set: CladeSet) -> Assi
     candidates = clade_set.descendants(anchor) if anchor else clade_set.names
     best: Assignment | None = None
     best_key: tuple[int, int, int, str] | None = None
+    tied: list[str] = []
     for candidate in candidates:
         if clade_set[candidate].revoked and candidate != inherited:
             continue
@@ -186,10 +240,16 @@ def _assign_node(node: Node, inherited: str | None, clade_set: CladeSet) -> Assi
             support,
             candidate,
         )
+        if best_key is not None and key[:3] == best_key[:3]:
+            tied.append(candidate if key < best_key else best_key[3])
+        elif best_key is None or key[:3] > best_key[:3]:
+            tied = []
         if best_key is None or key > best_key:
             best, best_key = Assignment(node.name, candidate, support, unobservable), key
     if best is None:
         return Assignment(node.name, inherited, inherited=True)
+    if tied and ties is not None:
+        ties.append(NameTie(node.name, str(best.clade), tuple(sorted(set(tied) - {best.clade}))))
     return replace(best, inherited=best.clade == inherited)
 
 
@@ -305,3 +365,139 @@ def published_labels_changed(
         if was != now:
             changed[node] = (was, now)
     return changed
+
+
+def sibling_conflicts(
+    nodes: Iterable[Node], result: TreeAssignment, clade_set: CladeSet
+) -> tuple[SiblingConflict, ...]:
+    """Every node labelled X whose sequence also fully matches a clade Y outside X's lineage
+    (neither X, nor an ancestor, nor a descendant of X), with support at least X's.
+
+    "Fully matches" is the engine's own test: Y's whole signature uncontradicted and at least
+    one of Y's own loci observed. Reported, never acted on (the module docstring says why).
+    Y's own loci are checked first, so the full test runs only where Y could match at all.
+    """
+    by_name = {node.name: node for node in nodes}
+    children = _children(by_name)
+    leaves = _leaf_counts(by_name, children)
+    own = {
+        name: tuple(clade_set[name].mutations)
+        for name in clade_set.names
+        if not clade_set[name].revoked and clade_set[name].mutations
+    }
+    lineage = {
+        name: {name, *clade_set.ancestors(name), *clade_set.descendants(name)}
+        for name in clade_set.names
+    }
+    found: list[SiblingConflict] = []
+    flagged: dict[str, set[tuple[str, str]]] = {}
+    order = _preorder(by_name, children)
+    for name in order:
+        node = by_name[name]
+        label = result.assignments[name].clade
+        parent_flags = flagged.get(node.parent or "", set())
+        here: set[tuple[str, str]] = set()
+        if label is not None:
+            mine = _test(node, clade_set, label)
+            label_support = mine[0] if mine is not None else -1
+            for other, mutations in own.items():
+                if other in lineage[label] or not _own_observed(node, mutations):
+                    continue
+                verdict = _test(node, clade_set, other)
+                if verdict is None or verdict[0] < label_support:
+                    continue
+                parent = by_name.get(node.parent) if node.parent else None
+                gained = parent is not None and not _own_observed(parent, mutations, every=True)
+                here.add((label, other))
+                found.append(
+                    SiblingConflict(
+                        name,
+                        label,
+                        other,
+                        leaves[name],
+                        label_support,
+                        verdict[0],
+                        gained,
+                        (label, other) not in parent_flags,
+                    )
+                )
+        flagged[name] = here
+    return tuple(found)
+
+
+def _own_observed(node: Node, mutations: tuple, *, every: bool = False) -> bool:
+    """Whether the node matches its own loci: none contradicted and one observed (or, with
+    ``every``, all of them matched)."""
+    matched = 0
+    for position in mutations:
+        evidence = node.sequence.evidence(position.alphabet, position.position, position.state)
+        if evidence is Evidence.CONTRADICTS:
+            return False
+        if evidence is Evidence.MATCHES:
+            matched += 1
+        elif every:
+            return False
+    return matched == len(mutations) if every else matched > 0
+
+
+def _preorder(by_name: Mapping[str, Node], children: Mapping[str, list[str]]) -> list[str]:
+    roots = [name for name, node in by_name.items() if node.parent not in by_name]
+    order: list[str] = []
+    stack = list(roots)
+    while stack:
+        name = stack.pop()
+        order.append(name)
+        stack.extend(children.get(name, ()))
+    return order
+
+
+def _leaf_counts(by_name: Mapping[str, Node], children: Mapping[str, list[str]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for name in reversed(_preorder(by_name, children)):
+        below = children.get(name, ())
+        counts[name] = sum(counts[child] for child in below) if below else 1
+    return counts
+
+
+#: How many of the largest topmost conflicts a review keeps; the summary counts cover all.
+REVIEW_KEEP = 20
+
+
+def conflict_review(
+    conflicts: Iterable[SiblingConflict], ties: Iterable[NameTie], *, keep: int = REVIEW_KEEP
+) -> dict[str, object]:
+    """A tree's sibling-conflict review, as it is written into the tree's metadata.
+
+    Counts always cover every conflict; the list keeps the ``keep`` largest *topmost* ones
+    (a conflict's descendants repeat it) so the metadata stays readable and diff-able.
+    """
+    found = list(conflicts)
+    top = sorted((c for c in found if c.topmost), key=lambda c: (-c.leaves, c.node))
+    tied = list(ties)
+    return {
+        "counts": {
+            "all": len(found),
+            "multi_leaf": sum(1 for c in found if c.leaves > 1),
+            "topmost": len(top),
+            "topmost_multi_leaf": sum(1 for c in top if c.leaves > 1),
+        },
+        "topmost": [
+            {
+                "node": c.node,
+                "label": c.label,
+                "other": c.other,
+                "leaves": c.leaves,
+                "label_support": c.label_support,
+                "other_support": c.other_support,
+                "gained_on_edge": c.gained_on_edge,
+            }
+            for c in top[:keep]
+        ],
+        "topmost_truncated": max(0, len(top) - keep),
+        "ties": {
+            "count": len(tied),
+            "examples": [
+                {"node": t.node, "chosen": t.chosen, "others": list(t.others)} for t in tied[:keep]
+            ],
+        },
+    }

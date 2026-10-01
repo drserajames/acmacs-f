@@ -33,8 +33,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from af.chain.select import RemoveRule, Selection
+from af.chain.select import RemoveRule, Selection, SeraPolicy
 from af.chart.merge import ColumnBasisConvention
+from af.chart.sera import read_markers
+from af.util.artefacts import sha256_path
 from af.util.config import load_config
 
 
@@ -143,6 +145,8 @@ class ChainConfig:
     # How the tables were chosen (dataset or directory, date_from/date_to, exclude), as written
     # in the chain file. For a merge_all map it IS the map's definition, so it is published.
     selection: dict[str, Any] | None = None
+    # Ferret sera only (af.chart.sera), applied to every table before the merge
+    sera_policy: SeraPolicy = field(default_factory=SeraPolicy)
 
     def __post_init__(self) -> None:
         if self.options.merge_all and self.first_map is not None:
@@ -196,13 +200,44 @@ def load_chain_config(
             ref.to_json(),
             s.select.remove,
             _selection(t),
+            _sera_policy(path, s.select),
         )
     if t.directory is not None and t.group is not None and t.dataset is None:
         tables = tables_from_directory(t.directory, t.group, start, end, set(t.exclude))
         return ChainConfig(
-            s.name, tables, s.options, s.seed, s.first_map, None, s.select.remove, _selection(t)
+            s.name,
+            tables,
+            s.options,
+            s.seed,
+            s.first_map,
+            None,
+            s.select.remove,
+            _selection(t),
+            _sera_policy(path, s.select),
         )
     raise ChainConfigError(f"{path}: [tables] needs either dataset or directory + group")
+
+
+def _sera_policy(chain_path: Path, select: Selection) -> SeraPolicy:
+    """The ferret-only policy with its markers file: `[select] non_ferret_markers`, or else
+    rules/sera/non_ferret_markers.tsv in the data repo the chain file lives in (the directory
+    holding chains/). The file is required either way."""
+    path = select.non_ferret_markers
+    if path is None:
+        root = next((d.parent for d in chain_path.resolve().parents if d.name == "chains"), None)
+        if root is None:
+            raise ChainConfigError(
+                f"{chain_path}: no [select] non_ferret_markers and no chains/ directory above it"
+            )
+        path = root / "rules" / "sera" / "non_ferret_markers.tsv"
+    markers = read_markers(path)  # missing or malformed: an error
+    return SeraPolicy(
+        select.non_ferret_sera,
+        select.non_ferret_reason,
+        tuple(markers),
+        str(path),
+        sha256_path(path),
+    )
 
 
 def _selection(t: TableSelection) -> dict[str, Any]:
@@ -261,6 +296,7 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
         "options": option_parameters(cfg.options),
         **({"select_remove": [r.to_json() for r in cfg.remove]} if cfg.remove else {}),
         **({"selection": cfg.selection} if cfg.selection else {}),
+        "non_ferret_sera": cfg.sera_policy.to_json(),
         "tables": [
             {
                 "table_id": t.table_id,

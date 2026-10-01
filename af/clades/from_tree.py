@@ -31,6 +31,7 @@ from typing import Any
 
 from af.clades.agreement import AgreementCheck, AgreementLimit, check_agreement
 from af.clades.assign import Assignment
+from af.clades.conflicts import ConflictLimit, check_conflicts
 from af.clades.fallback import StoreFallback, assign_from_store, disagreements
 from af.clades.nomenclature import CladeSet
 from af.clades.store import CladeRow, CladeStoreError, dataset_for, publish, rows_from_assignments
@@ -102,6 +103,8 @@ def publish_from_tree(
     sequences: StoreRef | None = None,
     agreement: AgreementLimit | None = None,
     accept_disagreement: str | None = None,
+    conflicts: ConflictLimit | None = None,
+    accept_conflict: str | None = None,
 ) -> StoreRef:
     """Publish ``clades/<subtype>`` from the tree version ``tree``, which is its input.
 
@@ -118,6 +121,8 @@ def publish_from_tree(
         started=started,
         agreement=agreement,
         accept_disagreement=accept_disagreement,
+        conflicts=conflicts,
+        accept_conflict=accept_conflict,
     )
 
 
@@ -132,6 +137,8 @@ def publish_clades(
     started: datetime.datetime,
     agreement: AgreementLimit | None = None,
     accept_disagreement: str | None = None,
+    conflicts: ConflictLimit | None = None,
+    accept_conflict: str | None = None,
 ) -> StoreRef:
     """One ``clades/<subtype>`` table: the tree's calls, and the fallback's for the rest.
 
@@ -149,6 +156,10 @@ def publish_clades(
 
     With both, ``agreement`` is required: a tree that disagrees with the fallback beyond it
     is refused unless ``accept_disagreement`` names a reason (:mod:`af.clades.agreement`).
+
+    With a tree, ``conflicts`` is required too: a tree whose largest topmost sibling conflict
+    covers at least the limit's leaves is refused unless ``accept_conflict`` names a reason
+    (:mod:`af.clades.conflicts`), and so is a tree carrying no conflict review at all.
     """
     if tree is None and sequences is None:
         raise CladeStoreError(f"{subtype}: give a tree version, a sequence version, or both")
@@ -157,12 +168,20 @@ def publish_clades(
             f"{subtype}: a tree with a fallback needs an agreement limit (af.clades.agreement); "
             "a tree is never published unchecked when there is something to check it against"
         )
+    if tree is not None and conflicts is None:
+        raise CladeStoreError(
+            f"{subtype}: a tree needs a sibling-conflict limit (af.clades.conflicts); a tree is "
+            "never published without checking it hides no sibling clade"
+        )
+    if accept_conflict is not None and tree is None:
+        raise CladeStoreError(f"{subtype}: accept_conflict given, but there is no tree to check")
     if accept_disagreement is not None and (tree is None or sequences is None):
         raise CladeStoreError(
             f"{subtype}: accept_disagreement given, but there is no tree and fallback to compare"
         )
     rows: list[CladeRow] = []
     check: AgreementCheck | None = None
+    conflict_check: dict[str, Any] | None = None
     report: dict[str, Any] = {}
     inputs: list[StoreRef] = []
     if tree is not None:
@@ -171,7 +190,14 @@ def publish_clades(
         directory = store.resolve(tree, verify=True)
         rows = rows_from_tree(directory, subtype, clade_set)
         check_tree_identities(store, tree, rows)
-        report = _tree_report(tree, i6.read_metadata(directory), i6.read_excluded(directory))
+        meta = i6.read_metadata(directory)
+        report = _tree_report(tree, meta, i6.read_excluded(directory))
+        assert conflicts is not None  # required above
+        review = meta.get("counts", {}).get("clade_review")
+        conflict_check = check_conflicts(
+            review, conflicts, str(tree), accept_conflict=accept_conflict
+        )
+        report["sibling_conflicts"] = {**(review or {}), "check": conflict_check}
         inputs.append(tree)
     if sequences is not None:
         if sequences.kind != "sequences":
@@ -187,6 +213,14 @@ def publish_clades(
             report["agreement"] = check.to_json()
         report.setdefault("not_on_tree", {})["labelled_by"] = "fallback, in this table"
         inputs += [sequences, fallback.dataset]
+    # the limits, their reasons and any override decided whether this version could exist
+    parameters: dict[str, Any] = {}
+    if check is not None:
+        parameters["agreement"] = check.provenance()
+    if conflict_check is not None:
+        parameters["sibling_conflicts"] = {
+            key: conflict_check[key] for key in ("max_topmost_conflict_leaves", "accepted")
+        }
     return publish(
         store,
         subtype,
@@ -198,9 +232,7 @@ def publish_clades(
         engine="+".join(name for name, ref in (("tree", tree), ("fallback", sequences)) if ref),
         extra_inputs=inputs[1:],
         extra_report=report,
-        # the limit, its reason and any override go into provenance too: they decided
-        # whether this version could exist at all
-        extra_parameters=None if check is None else {"agreement": check.provenance()},
+        extra_parameters=parameters or None,
     )
 
 

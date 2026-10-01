@@ -38,6 +38,7 @@ from af.chart.column_bases import (
     apply_column_base_override,
 )
 from af.chart.model import Chart
+from af.chart.sera import FERRET_ONLY, Marker, non_ferret, read_markers
 from af.map.colouring import MapColouringError, StoreColours
 from af.map.config import MapConfig, MapsConfig
 from af.map.curate import (
@@ -63,6 +64,9 @@ from af.store.store import Store
 from af.util.subtypes import Subtype, SubtypeError, subtypes
 
 FloatArray = NDArray[np.float64]
+
+#: Where the non-ferret sera markers live under the acmacs-f-data checkout (af_data).
+SERA_MARKERS = Path("rules/sera/non_ferret_markers.tsv")
 
 _DATE_IN_PASSAGE = re.compile(r" \(\d{4}-\d{2}-\d{2}\)")
 
@@ -418,6 +422,8 @@ class MapResult:
     # Antigens of a lineage other than the map's, by code: drawn, and counted in the build's own
     # report so nobody has to open a figure to learn of them.
     lineage_minority: dict[str, int] = field(default_factory=dict)
+    # Sera on the chart that are not ferret (species or marker): drawn, reported, counted here.
+    non_ferret_sera: int = 0
 
 
 def build_map(
@@ -430,11 +436,16 @@ def build_map(
     vaccine_defaults: dict[str, tuple[VaccineDisable, ...]],
     created: dt.datetime,
     colours: StoreColours | None = None,
+    sera_markers: list[Marker] | None = None,
 ) -> MapResult:
     """Build every window of one map. Raises :class:`BuildError` with the folder named.
 
     ``colours`` is the run's store colouring when the round's ``[colouring] source`` is
     "store"; without it the map is painted from its stand-in chart, as in bring-up.
+    ``sera_markers`` (the non-ferret markers) make the map REPORT any serum that is not ferret
+    (Sarah, 1 Oct: ferret sera only). It reports and does not refuse: the build draws whatever
+    chart it is given, and refusing is a deliberate later change, once every map comes from a
+    path that already filters.
     """
     started = time.monotonic()
     inputs: dict[str, Any] = {}
@@ -494,6 +505,15 @@ def build_map(
     # What was DECIDED about this map, as opposed to what it was built from: these carry reasons,
     # not content hashes, so they are not inputs.
     decisions: dict[str, Any] = {}
+    non_ferret_count = 0
+    if sera_markers is not None:
+        sera = non_ferret(chart, sera_markers)
+        non_ferret_count = len(sera.non_ferret)
+        decisions["sera"] = {
+            "rule": FERRET_ONLY,
+            **sera.to_json(),
+            "verification": sera.verification(),
+        }
     if minority := lineage_minority(chart, chart_subtype(chart)):
         decisions["lineage_minority"] = minority
     if cfg.chain_until is not None:
@@ -677,6 +697,7 @@ def build_map(
         tuple(flags),
         time.monotonic() - started,
         dict(decisions.get("lineage_minority", {}).get("other", {})),
+        non_ferret_count,
     )
 
 
@@ -739,9 +760,13 @@ def build(
             require_current(store)
         except StoreError as exc:
             raise BuildError(str(exc)) from exc
-        assert config.colouring.af_data is not None  # checked by the config
-        colours = StoreColours(store, config.colouring, matching_rules(config.colouring.af_data))
+        if config.af_data is None:
+            raise BuildError("store colouring needs af_data (the acmacs-f-data checkout)")
+        colours = StoreColours(store, config.colouring, matching_rules(config.af_data))
         log(f"{'colouring':24s} {time.monotonic() - started:5.1f}s  store join and user tables")
+    # Read once per run. Every map built from a round config reports its non-ferret sera; a
+    # config made in code without af_data reports none.
+    markers = read_markers(config.af_data / SERA_MARKERS) if config.af_data is not None else None
     results = []
     for cfg in wanted:
         result = build_map(
@@ -753,11 +778,14 @@ def build(
             vaccine_defaults=vaccine_defaults,
             created=created,
             colours=colours if config.colour_source(cfg) == "store" else None,
+            sera_markers=markers,
         )
         results.append(result)
         flags = f" flags={len(result.flags)}" if result.flags else ""
         other = sum(result.lineage_minority.values())
         lineage = f" other-lineage antigens={other} {result.lineage_minority}" if other else ""
+        if result.non_ferret_sera:
+            lineage += f" NON-FERRET SERA={result.non_ferret_sera}"
         n = len(result.figures)
         log(f"{cfg.folder:24s} {result.seconds:5.1f}s  {n} figures{flags}{lineage}")
         for f in result.flags:
