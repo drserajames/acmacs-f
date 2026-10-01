@@ -632,7 +632,9 @@ def _write_chain_record(
     root: Path, cfg: ChainConfig, results: list[StepResult], optimiser: Optimiser, n_steps: int
 ) -> None:
     """chain.json lists the current steps in order: consumers never glob or sort directories."""
-    doc = {
+    doc: dict[str, Any] = {
+        # "merge_all": one step, all tables merged then mapped from scratch, not a chain
+        "mode": "merge_all" if cfg.options.merge_all else "chain",
         "config": config_to_json(cfg),
         "optimiser": optimiser.name,
         "complete": len(results) == n_steps,

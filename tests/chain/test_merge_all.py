@@ -36,7 +36,9 @@ def test_one_step_holds_every_table(tables, tmp_path):  # noqa: F811
     assert merged.projections and merged.projections[0].stress is not None
     doc = json.loads((results[0].directory.parent.parent / "chain.json").read_text())
     assert doc["complete"] is True and len(doc["steps"]) == 1
-    assert build_review(results[0].directory.parent.parent).exists()
+    assert doc["mode"] == "merge_all"  # never mistaken for a chain
+    page = build_review(results[0].directory.parent.parent)
+    assert "one-step merge, mapped from scratch" in page.read_text()
 
 
 def test_rerun_reuses_and_any_changed_table_remakes(tables, tmp_path):  # noqa: F811
@@ -69,3 +71,15 @@ def test_merge_all_and_a_seed_map_do_not_mix(tables, tmp_path):  # noqa: F811
             MapOptions(merge_all=True),
             first_map=tmp_path / "seed.ace",
         )
+
+
+def test_the_selection_is_published(tables, tmp_path):  # noqa: F811
+    from af.chain.config import config_to_json, load_chain_config
+
+    path = tmp_path / "chain.toml"
+    path.write_text(
+        f'name = "h9-hi-test-lab"\nseed = 3\n[tables]\ndirectory = "{tables}"\n'
+        'group = "h9-hi-test-lab"\ndate_from = "2021-02-01"\n[options]\nmerge_all = true\n'
+    )
+    sel = config_to_json(load_chain_config(path))["selection"]
+    assert sel == {"directory": str(tables), "group": "h9-hi-test-lab", "date_from": "2021-02-01"}

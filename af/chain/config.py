@@ -140,6 +140,9 @@ class ChainConfig:
     first_map: Path | None = None
     tables_source: dict[str, str] | None = None  # the store ref the tables came from
     remove: list[RemoveRule] = field(default_factory=list)  # applied to each table (select)
+    # How the tables were chosen (dataset or directory, date_from/date_to, exclude), as written
+    # in the chain file. For a merge_all map it IS the map's definition, so it is published.
+    selection: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.options.merge_all and self.first_map is not None:
@@ -185,12 +188,27 @@ def load_chain_config(
             if (start is None or x.date >= start) and (end is None or x.date <= end)
         ]
         return ChainConfig(
-            s.name, tables, s.options, s.seed, s.first_map, ref.to_json(), s.select.remove
+            s.name,
+            tables,
+            s.options,
+            s.seed,
+            s.first_map,
+            ref.to_json(),
+            s.select.remove,
+            _selection(t),
         )
     if t.directory is not None and t.group is not None and t.dataset is None:
         tables = tables_from_directory(t.directory, t.group, start, end, set(t.exclude))
-        return ChainConfig(s.name, tables, s.options, s.seed, s.first_map, None, s.select.remove)
+        return ChainConfig(
+            s.name, tables, s.options, s.seed, s.first_map, None, s.select.remove, _selection(t)
+        )
     raise ChainConfigError(f"{path}: [tables] needs either dataset or directory + group")
+
+
+def _selection(t: TableSelection) -> dict[str, Any]:
+    """The chain file's [tables] as written (store excluded: refused above)."""
+    out = {k: v for k, v in asdict(t).items() if k != "store" and v not in (None, [])}
+    return {k: str(v) if isinstance(v, Path) else v for k, v in out.items()}
 
 
 def _date(text: str | None) -> datetime.date | None:
@@ -242,6 +260,7 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
         "tables_source": cfg.tables_source,
         "options": option_parameters(cfg.options),
         **({"select_remove": [r.to_json() for r in cfg.remove]} if cfg.remove else {}),
+        **({"selection": cfg.selection} if cfg.selection else {}),
         "tables": [
             {
                 "table_id": t.table_id,

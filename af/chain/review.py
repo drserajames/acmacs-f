@@ -335,6 +335,8 @@ def _step_row(s: dict, r: dict, thumb: Path) -> str:
 
 def _page(doc: dict, steps: list[Step]) -> str:
     name = doc["config"]["name"]
+    # a merge_all map is one merge mapped from scratch, not a chain: the page must not read as one
+    kind = "one-step merge, mapped from scratch" if doc.get("mode") == "merge_all" else "chain"
     flagged = [(s, r) for s, r, _ in steps if r["flags"]]
     summary = "".join(
         f'<li><a href="#step-{s["index"]}">step {s["index"]} · {_e(s["table_id"])}</a>: '
@@ -360,8 +362,8 @@ def _page(doc: dict, steps: list[Step]) -> str:
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>{_e(name)} chain</title><style>{_asset('review.css')}</style></head><body>"
-        f'<h1>{_e(name)} chain</h1><p class="meta">{meta}</p><p class="legend">{legend}</p>'
+        f"<title>{_e(name)} {kind}</title><style>{_asset('review.css')}</style></head><body>"
+        f'<h1>{_e(name)} {kind}</h1><p class="meta">{meta}</p><p class="legend">{legend}</p>'
         f"<h2>Flagged steps ({len(flagged)})</h2>"
         f'<ul class="summary">{summary or "<li>No step flagged.</li>"}</ul>'
         f'{_stress_chart(steps)}<h2>Steps</h2><table class="steps">{rows}</table>'
