@@ -284,7 +284,8 @@ class Chart:
         rather than dropped so each kept point keeps its style; and the antigen/serum index
         selectors ("!i") of the semantic plot specs "R". Each projection keeps its
         transformation, but its stress is set to None: the stored value was for the old point
-        set and is stale until the map is relaxed or the stress recomputed.
+        set and is stale until the map is relaxed or the stress recomputed. None means unknown,
+        not zero: it is not a perfect fit.
 
         Indices, not names: callers resolve their selection first (design rule 2 is about what
         a user writes, not this call). Reordering is not supported: indices must be unique,
