@@ -38,9 +38,12 @@ from af.report.compare.run import (
     Excused,
     Expected,
     Limits,
+    Sides,
+    add_side_arguments,
     compare_report,
     load_clades,
     load_limits,
+    sides_from,
 )
 
 CHECK_LISTS = ("checks", "tree_checks", "geo_checks")
@@ -162,9 +165,11 @@ def _toml_string(text: str) -> str:
     return json.dumps(text, ensure_ascii=False)  # a JSON string is a valid TOML basic string
 
 
-def draft_toml(draft: Draft, source: str) -> str:
+def draft_toml(draft: Draft, source: str, sides: Sides | None = None) -> str:
+    sides = sides or Sides()
     lines = [
         f"# DRAFT [[expected]] entries from {source}.",
+        f"# ref = {sides.ref}; new = {sides.new}.",
         f"# They will NOT load: approved_by, decided and the reason's {DRAFT_REASON!r} are",
         "# placeholders the limits loader refuses. For each, write the justification, then the",
         "# approver and the date of the decision.",
@@ -189,8 +194,10 @@ def _entry(entry: Expected) -> str:
     return f"{reason} ({entry.approved_by}, {entry.decided.isoformat()})"
 
 
-def draft_markdown(draft: Draft, source: str, all_failing: bool) -> str:
-    lines = [f"# Known differences to re-derive: {source}", ""]
+def draft_markdown(draft: Draft, source: str, all_failing: bool, sides: Sides | None = None) -> str:
+    sides = sides or Sides()
+    lines = [f"# Known differences to re-derive: {source}", "",
+             f"- **ref** = {sides.ref}", f"- **new** = {sides.new}", ""]  # fmt: skip
     title = "Failing checks to approve" if all_failing else "Failing checks no entry covers"
     lines += [f"## {title} ({len(draft.new)}), drafted in DRAFT-expected.toml", ""]
     lines += [f"- {i['slot']} / {i['check']}: {i['measured']}" for i in draft.new] or ["- none"]
@@ -249,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all-failing", action="store_true",
                         help="draft every failing check, also those an entry covers")  # fmt: skip
     parser.add_argument("--out", type=Path, required=True)
+    add_side_arguments(parser)
     args = parser.parse_args(argv)
     limits = load_limits(args.limits)
     clades = load_clades(args.clades) if args.clades else None
@@ -256,8 +264,9 @@ def main(argv: list[str] | None = None) -> int:
     draft = run(record, args.reference, limits, args.match, clades, args.all_failing)
     source = f"{record.get('report', args.record.name)} vs {args.reference}"
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "DRAFT-expected.toml").write_text(draft_toml(draft, source))
-    (args.out / "DRAFT.md").write_text(draft_markdown(draft, source, args.all_failing))
+    sides = sides_from(args, record)
+    (args.out / "DRAFT-expected.toml").write_text(draft_toml(draft, source, sides))
+    (args.out / "DRAFT.md").write_text(draft_markdown(draft, source, args.all_failing, sides))
     print(f"{len(draft.new)} drafted, {len(draft.covered)} covered, {len(draft.stale)} stale, "
           f"{len(draft.excused)} excused lists not holding, {len(draft.gaps)} gaps -> {args.out}",
           file=sys.stderr)  # fmt: skip
