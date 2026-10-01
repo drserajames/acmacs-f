@@ -14,6 +14,16 @@ and refuses a tree whose leaves that version does not hold. So the version must 
 tree was built from, not whatever is CURRENT when the clades step runs; ``export.json`` carries
 it, and the build stage checks the alignment it is given is the one exported with it.
 
+**Why the order is shuffled.** `af.seq.select` returns its keys sorted by collection date, and this
+export used to write them that way: 100% non-decreasing by year. CMAPLE from scratch places
+sequences in input order, so a date-sorted alignment is the least helpful order there is, and it
+*caused* the pre-2023 lineages to be buried inside the modern radiation — placement correlation
+0.204 against 0.982 for the same export shuffled (`notes/trees/H3-OLD-LINEAGE-PLACEMENT.md`, 1 Oct
+2026). So the alignment is written in a **shuffled order with a recorded seed**: reproducible, as
+design rule 8 asks, without carrying a date signal the leaf order should never have carried. The
+**outgroup is written first** whatever the seed, because CMAPLE takes the first record as its
+reference; that belongs here rather than in a caller, so a future export cannot lose it.
+
 **Embargo.** Embargoed sequences may be used in WHO reports, not in publications. Nothing here
 drops them; the flag travels with each leaf into the tree store, and the count is in
 ``export.json``, so every consumer can tell.
@@ -31,6 +41,7 @@ import argparse
 import dataclasses
 import datetime
 import json
+import random
 import sys
 import tomllib
 from collections.abc import Sequence
@@ -46,10 +57,15 @@ from af.tree.io.fasta import write_alignment
 from af.tree.populate import LeafRecord, leaf_key
 from af.util.artefacts import sha256_path
 
+SHUFFLE_SEED = 20261001
+"""The seed the alignment order is shuffled with, recorded in ``export.json``. Changing it changes
+the order, so a build re-runs; it is a constant rather than config because nothing should depend on
+the order, and a run that wants to prove that can pass ``shuffle_seed``."""
+
 ALIGNMENT_FILE = "alignment.fasta"
 LEAVES_FILE = "leaves.parquet"
 EXPORT_FILE = "export.json"
-FORMAT = 1
+FORMAT = 2  # 1 had no alignment_order: its alignment was written in selection (date) order
 
 
 class ExportError(RuntimeError):
@@ -79,6 +95,7 @@ class ExportRecord:
     leaves_sha256: str
     test_only: str | None  # the reason, or None for a real export
     counts: list[dict[str, Any]]
+    shuffle_seed: int  # the seed the alignment order was shuffled with
 
 
 def export(
@@ -88,6 +105,7 @@ def export(
     directory: Path,
     *,
     test_only: TestOnly | None = None,
+    shuffle_seed: int = SHUFFLE_SEED,
 ) -> ExportRecord:
     """Select, then write the three files into ``directory`` (created; must be empty)."""
     directory = Path(directory)
@@ -106,7 +124,7 @@ def export(
 
     alignment_path = directory / ALIGNMENT_FILE
     leaves_path = directory / LEAVES_FILE
-    write_alignment(alignment_path, sequences)
+    write_alignment(alignment_path, _shuffled(sequences, selection.outgroup, shuffle_seed))
     write_leaves(leaves, leaves_path)
     record = ExportRecord(
         subtype=subtype,
@@ -118,6 +136,7 @@ def export(
         leaves_sha256=sha256_path(leaves_path),
         test_only=None if test_only is None else test_only.reason,
         counts=[dataclasses.asdict(count) for count in selection.counts],
+        shuffle_seed=shuffle_seed,
     )
     meta = _to_json(record, selection)
     if test_only is not None:
@@ -128,6 +147,18 @@ def export(
         }
     (directory / EXPORT_FILE).write_text(json.dumps(meta, indent=1, sort_keys=True) + "\n")
     return record
+
+
+def _shuffled(sequences: dict[str, str], outgroup: Key, seed: int) -> dict[str, str]:
+    """The same sequences, outgroup first, the rest in a seeded shuffle.
+
+    A dict preserves insertion order, and ``write_alignment`` writes it in that order, so this is
+    the order the builder sees.
+    """
+    first = leaf_key(*outgroup)
+    rest = [key for key in sequences if key != first]
+    random.Random(seed).shuffle(rest)
+    return {first: sequences[first], **{key: sequences[key] for key in rest}}
 
 
 def read_export(path: Path) -> ExportRecord:
@@ -149,6 +180,7 @@ def read_export(path: Path) -> ExportRecord:
         leaves_sha256=data["files"][LEAVES_FILE],
         test_only=None if test_only is None else test_only["reason"],
         counts=data["counts"],
+        shuffle_seed=data["alignment_order"]["shuffled_with_seed"],
     )
 
 
@@ -180,6 +212,12 @@ def _to_json(record: ExportRecord, selection: Selection) -> dict[str, Any]:
         "leaves": record.leaves,
         "embargoed": record.embargoed,
         "counts": record.counts,
+        "alignment_order": {
+            "shuffled_with_seed": record.shuffle_seed,
+            "outgroup_first": True,
+            "why": "a date-sorted alignment made CMAPLE bury the old lineages; see "
+            "notes/trees/H3-OLD-LINEAGE-PLACEMENT.md",
+        },
         "files": {ALIGNMENT_FILE: record.alignment_sha256, LEAVES_FILE: record.leaves_sha256},
     }
 
