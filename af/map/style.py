@@ -26,6 +26,12 @@ from numpy.typing import NDArray
 
 Array = NDArray[np.float64]
 PointKind = Literal["antigen", "serum"]
+#: Marker shapes the renderer can draw. Shape names only: which points get which shape is decided
+#: when the scene is built, never by the renderer.
+Marker = Literal["circle", "egg", "box", "uglyegg"]
+MARKERS: tuple[Marker, ...] = ("circle", "egg", "box", "uglyegg")
+#: The shape a point gets when the scene names none.
+PLAIN_MARKER: dict[str, Marker] = {"antigen": "circle", "serum": "box"}
 
 
 @dataclass(frozen=True)
@@ -74,6 +80,9 @@ class PointIn:
     serum_id: str | None = None
     sequenced: bool = False  # has a sequence, so the colour scheme could paint it
     hide: str | None = None  # a named hide rule that selected this point
+    # The marker shape, chosen when the scene is built (af side: af.map.vaccines.marker_for);
+    # None draws the plain shape for the kind. The renderer draws what it is given.
+    marker: Marker | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,7 @@ class ScenePoint:
     serum_id: str | None
     vaccine: str | None = None  # label text if marked as a vaccine
     sequenced: bool = False
+    marker: Marker = "circle"
 
 
 @dataclass
@@ -227,6 +237,7 @@ def style_points(
                 sequenced=p.sequenced,
                 serum_id=p.serum_id,
                 vaccine=vaccines.get(p.id),
+                marker=p.marker or PLAIN_MARKER[p.kind],
             )
         )
     legend = [(row.legend, row.colour, counts[row.legend]) for row in reversed(scheme.rows)]

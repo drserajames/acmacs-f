@@ -28,7 +28,7 @@ from numpy.typing import NDArray
 
 from af.chart.model import Chart
 from af.map.style import PointIn, Scene, Window, style_points
-from af.map.vaccines import passage_class
+from af.map.vaccines import marker_for, passage_class
 from af.map.viewport import Frame
 
 if TYPE_CHECKING:
@@ -86,6 +86,7 @@ def chart_points(
                 bool((a.extra.get("T") or {}).get("R")),
                 sequenced=sequenced[i],
                 hide=hidden.get(i),
+                marker=marker_for("antigen", passage_class(a.passage, a.reassortant)),
             )
         )
     for j, s in enumerate(chart.sera):
@@ -99,6 +100,7 @@ def chart_points(
                 (float(xy[k, 0]), float(xy[k, 1])) if ok else None,
                 passage_class=passage_class(s.passage, s.reassortant),
                 serum_id=s.serum_id,
+                marker=marker_for("serum", passage_class(s.passage, s.reassortant)),
             )
         )
     return points
