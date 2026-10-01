@@ -62,6 +62,11 @@ def build_review(chain_root: Path, thresholds: Thresholds = THRESHOLDS) -> Path:
         record["repeat_drops"] = repeat_drops.get(s["table_id"], [])
         if record["repeat_drops"]:
             record["flags"].append(f"{len(record['repeat_drops'])} cells dropped within the table")
+        sera = record.get("non_ferret_sera", {})
+        sera_reports = sera.values() if "non_ferret" not in sera else [sera]
+        n_sera = sum(len(x["non_ferret"]) for x in sera_reports if x.get("removed"))
+        if n_sera:
+            record["flags"].append(f"{n_sera} non-ferret sera removed (ferret only)")
         record["distinct_marked"] = distinct_marked.get(s["table_id"], [])
         if record["distinct_marked"]:
             record["flags"].append(

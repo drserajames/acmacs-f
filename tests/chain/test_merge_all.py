@@ -10,6 +10,7 @@ from af.chain.review import build_review
 from af.chain.select import RemoveRule
 from af.chart.ace import read_chart
 
+from .sera_markers import select_block
 from .test_engine import config, reused, run, tables  # noqa: F401  (tables is a fixture)
 
 
@@ -80,6 +81,7 @@ def test_the_selection_is_published(tables, tmp_path):  # noqa: F811
     path.write_text(
         f'name = "h9-hi-test-lab"\nseed = 3\n[tables]\ndirectory = "{tables}"\n'
         'group = "h9-hi-test-lab"\ndate_from = "2021-02-01"\n[options]\nmerge_all = true\n'
+        + select_block(tmp_path)
     )
     sel = config_to_json(load_chain_config(path))["selection"]
     assert sel == {"directory": str(tables), "group": "h9-hi-test-lab", "date_from": "2021-02-01"}

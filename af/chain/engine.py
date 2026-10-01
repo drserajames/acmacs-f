@@ -44,6 +44,7 @@ from af.chart.ace import read_chart, read_json, write_chart
 from af.chart.merge import ColumnBasisConvention, MergeOptions, MergeType, merge
 from af.chart.model import Chart, Projection
 from af.chart.procrustes import procrustes
+from af.chart.sera import non_ferret
 from af.chart.titre import MergeSettings
 from af.pipeline import Pipeline, Step, StepContext
 from af.run.job import Job, Resources, Runner
@@ -186,6 +187,8 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
     }
     if cfg.remove:  # only a chain that selects points gets the key: others keep their steps
         common["select_remove"] = [r.to_json() for r in cfg.remove]
+    if _removes_sera(cfg):  # likewise: only a chain whose tables HAVE non-ferret sera changes
+        common["non_ferret_sera"] = cfg.sera_policy.to_json()
     if cfg.options.merge_all:
         return [_merge_all_step_def(cfg, root, mapper, common)]
     steps = []
@@ -229,6 +232,37 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
             )
         )
     return steps
+
+
+def _sera_summary(cfg: ChainConfig, results: list[StepResult], root: Path) -> dict:
+    """Ferret-only for the whole map: what the policy removed (and by which test) across the
+    tables, and on the final map how many sera are ferret only by default (species unrecorded)."""
+    removed: Counter = Counter()
+    for r in results:
+        per_table = r.record.get("non_ferret_sera", {})
+        reports = per_table.values() if "non_ferret" not in per_table else [per_table]
+        for rep in reports:
+            if rep.get("removed"):
+                removed.update(x["caught_by"] for x in rep["non_ferret"])
+    out: dict[str, Any] = {**cfg.sera_policy.to_json(), "removed_rows_by_test": dict(removed)}
+    if results:
+        final = read_chart(results[-1].directory / CHOSEN)
+        rep = non_ferret(final, list(cfg.sera_policy.markers))
+        out.update(
+            final_sera=final.n_sera,
+            ferret_recorded=rep.ferret_recorded,
+            ferret_by_default=rep.ferret_by_default,
+            non_ferret_on_final_map=len(rep.non_ferret),
+        )
+    return out
+
+
+def _removes_sera(cfg: ChainConfig) -> bool:
+    """Whether the ferret-only policy takes any serum out of this chain's tables."""
+    if cfg.sera_policy.mode != "exclude":
+        return False
+    markers = list(cfg.sera_policy.markers)
+    return any(non_ferret(read_chart(t.path), markers).non_ferret for t in cfg.tables)
 
 
 def _merge_all_step_def(cfg: ChainConfig, root: Path, mapper: Mapper, common: dict) -> Step:
@@ -415,7 +449,8 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
         _write_step_record(directory, record)
         return
     t = cfg.tables[0]
-    table, removed = select.apply(cfg.remove, read_chart(t.path))
+    table, sera = select.apply_sera_policy(cfg.sera_policy, read_chart(t.path))
+    table, removed = select.apply(cfg.remove, table)
     arrays = table.optimiser_arrays(
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
     )
@@ -448,6 +483,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
         "start_stresses": {"scratch": [r["stress"] for r in all_maps]},
         "trapped_loop": {"scratch": _loop(all_maps)},
         **({"removed": removed} if cfg.remove else {}),
+        "non_ferret_sera": sera,
     }
     diagnostics = step_diagnostics(chart, None, None, None, arrays, optimiser, cfg)
     diagnostics.update(run_threads({"scratch": _threads(all_maps)}))
@@ -466,8 +502,10 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
     merged: Chart | None = None
     outcomes: Counter = Counter()
     removed: dict[str, list[dict]] = {}
+    sera: dict[str, dict] = {}
     for t in cfg.tables:
-        table, rule_report = select.apply(cfg.remove, read_chart(t.path))
+        table, sera[t.table_id] = select.apply_sera_policy(cfg.sera_policy, read_chart(t.path))
+        table, rule_report = select.apply(cfg.remove, table)
         if cfg.remove:
             removed[t.table_id] = rule_report
         if merged is None:
@@ -517,6 +555,7 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
             "outcomes": dict(outcomes),
         },
         **({"removed": removed} if cfg.remove else {}),
+        "non_ferret_sera": sera,
     }
     diagnostics = step_diagnostics(chart, None, None, None, arrays, mapper.optimiser, cfg)
     diagnostics.update(run_threads({"scratch": _threads(all_maps)}))
@@ -539,7 +578,8 @@ def _merge_step(
     o = cfg.options
     optimiser = mapper.optimiser
     previous = read_chart(previous_path)
-    table, removed = select.apply(cfg.remove, read_chart(table_ref.path))
+    table, sera = select.apply_sera_policy(cfg.sera_policy, read_chart(table_ref.path))
+    table, removed = select.apply(cfg.remove, table)
     merged, report = merge(previous, table, _merge_options(cfg))
     write_chart(merged, directory / "merge.ace")
     arrays = merged.optimiser_arrays(
@@ -601,6 +641,7 @@ def _merge_step(
         },
         "trapped_loop": {"incremental": _loop(all_incremental), "scratch": _loop(all_scratch)},
         **({"removed": removed} if cfg.remove else {}),
+        "non_ferret_sera": sera,
         "merge": {
             "antigens": merged.n_antigens,
             "sera": merged.n_sera,
@@ -650,6 +691,7 @@ def _write_chain_record(
             for r in results
         ],
     }
+    doc["non_ferret_sera"] = _sera_summary(cfg, results, root)
     # directories left from a longer chain (a table removed): not part of this chain
     doc["stale_step_directories"] = sorted(
         p.name

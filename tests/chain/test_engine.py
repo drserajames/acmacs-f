@@ -21,6 +21,8 @@ from af.chain.synthetic import make_tables
 from af.chart.ace import read_chart, write_chart
 from af.chart.titre import Titre
 
+from .sera_markers import select_block, write_markers
+
 GROUP = "h9-hi-test-lab"
 OPTS = MapOptions(scratch_starts=4, incremental_starts=3, grid_test=False)
 
@@ -107,6 +109,7 @@ def test_toml_config(tables, tmp_path):
     (tmp_path / "chain.toml").write_text(
         f'name = "{GROUP}"\nseed = 3\n[tables]\ndirectory = "tables"\ngroup = "{GROUP}"\n'
         'date_from = "2021-02-01"\n[options]\nscratch_starts = 4\nincremental_starts = 3\n'
+        + select_block(tmp_path)
     )
     cfg = load_chain_config(tmp_path / "chain.toml")
     assert [t.table_id for t in cfg.tables][0] == f"{GROUP}-20210215" and len(cfg.tables) == 3
@@ -160,6 +163,7 @@ def chain_toml(tmp_path, dataset="testlab/h9/main", extra=""):
     """A directory-tables chain config at <tmp>/chains/<dataset>.toml."""
     path = tmp_path / "chains" / f"{dataset}.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
+    write_markers(tmp_path / "rules" / "sera" / "non_ferret_markers.tsv")  # beside chains/
     path.write_text(
         f'name = "{GROUP}"\nseed = 3\n[tables]\ndirectory = "{tmp_path / "tables"}"\n'
         f'group = "{GROUP}"\n{extra}'
