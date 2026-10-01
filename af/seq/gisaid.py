@@ -67,6 +67,14 @@ UPDATE_COLUMN = "Update_Date"
 #: bare year read as an Excel serial day lands before it for any year below 3652.
 EXCEL_SERIAL_BEFORE = datetime.date(1910, 1, 1)
 
+#: A name's year may legitimately be one ahead of the collection year: a virus collected late in a
+#: season is named for the season it belongs to. Counted apart from the rest, because most
+#: disagreements are this (measured: 1,977 of 3,016) and mixing them buries the real ones
+#: (DECISIONS 25 Sep: report, bucketed by category and submitting lab).
+SEASON_NAMING_MONTHS = (11, 12)
+NAME_YEAR_SEASON = "date.name-year-season"  # name a year ahead, collected November or December
+NAME_YEAR_DIFFERS = "date.name-year-differs"  # any other disagreement: the ones worth reading
+
 _XL_DATE = 3  # xlrd.XL_CELL_DATE
 _FIELD = re.compile(r"_\|_|\|")
 _UNKNOWN = re.compile(r"N")
@@ -104,6 +112,25 @@ class SequenceRecord:
         return (self.epi_isl, self.accession)
 
 
+def name_year_category(name: str, collection: datetime.date, precision: str) -> str | None:
+    """Which bucket a name-year/collection-year disagreement falls in, or None if they agree.
+
+    ``name`` is the normalised name; its year is the last part. Only the year is compared: a
+    day-precision date is not needed, and a year-precision date has nothing finer to compare.
+    """
+    parts = name.split("/")
+    if len(parts) != 4 or not parts[3].isdigit():
+        return None  # a name whose shape is already a problem: name.* covers it
+    stated = int(parts[3])
+    if stated == collection.year:
+        return None
+    if stated == collection.year + 1 and (
+        precision != "year" and collection.month in SEASON_NAMING_MONTHS
+    ):
+        return NAME_YEAR_SEASON
+    return NAME_YEAR_DIFFERS
+
+
 @dataclass
 class PullCounts:
     """What a read of one pull did, so a step can report it (design rule 1 and 3)."""
@@ -116,6 +143,8 @@ class PullCounts:
     defline_date_conflicts: int = 0
     unreadable_date: int = 0
     excel_serial_date: int = 0
+    #: (category, submitting lab) -> records, so a one-lab one-month batch shows as a batch.
+    name_year: Counter[tuple[str, str]] = field(default_factory=Counter)
     name_problems: Counter[str] = field(default_factory=Counter)
     #: N, i.e. "not known". Counted apart from R/Y/W…, which state a real ambiguity;
     #: Nextclade's QC treats the two differently and so must any threshold of ours.
@@ -132,6 +161,7 @@ class PullCounts:
             "defline_date_conflicts": self.defline_date_conflicts,
             "unreadable_date": self.unreadable_date,
             "excel_serial_date": self.excel_serial_date,
+            "name_year": {f"{c}\t{lab}": n for (c, lab), n in sorted(self.name_year.items())},
             "name_problems": dict(self.name_problems),
             "unknown_bases": self.unknown_bases,
             "ambiguous_bases": self.ambiguous_bases,
@@ -303,6 +333,17 @@ def join(
         for problem in name.problems:
             counts.name_problems[problem] += 1
         problems.extend(name.problems)
+
+        if collection_date is not None:
+            # The name's year against the collection year (task 2.8; DECISIONS 25 Sep: report,
+            # bucketed, never exclude). Both buckets are flags, so a consumer can tell the
+            # ordinary season convention from a date worth reading.
+            category = name_year_category(
+                name.name, collection_date.first, collection_date.precision.value
+            )
+            if category is not None:
+                counts.name_year[(category, row.get("Submitting_Lab", "").strip())] += 1
+                problems.append(category)
 
         out.append(
             SequenceRecord(
