@@ -29,7 +29,7 @@ from . import aliases, dates
 from .cdc import LAB, ReadResult, _titre_order
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
-from .rules import Rules
+from .rules import Rule, Rules
 from .sheet import Sheet, SheetError, apply_cell_fixes, load
 
 TITLE = r"HEMAGGLUTINATION INHIBITION REACTIONS OF INFLUENZA (.+) VIRUSES"
@@ -40,6 +40,7 @@ TITLE_SUBTYPES = {
     "H1N1PDM09": ("A(H1N1)", "", "h1pdm"),
     "B/VICTORIA": ("B", "VICTORIA", "bvic"),
     "B VICTORIA LINEAGE": ("B", "VICTORIA", "bvic"),
+    "TYPE B VICTORIA LINEAGE": ("B", "VICTORIA", "bvic"),  # 2013-19 layout
 }
 RBC = {"GUINEA PIG": "guinea-pig", "TURKEY": "turkey"}
 # The passage cell: "S1(07/19/2024)<NY>", "E4/E1(9/13/2024)LOT#10", "S2".
@@ -48,11 +49,57 @@ PASSAGE_CELL = re.compile(
 )
 SITE = re.compile(r"<?([A-Z]{2})>?")  # the state lab that isolated it: kept in source
 LOT = re.compile(r"LOT\s*#\s*\d+", re.IGNORECASE)  # distinguishes egg lots: an annotation
-SECTION = re.compile(r"(REFERENCE|TEST) VIRUSES", re.IGNORECASE)
+TITRE_LIKE = re.compile(r"[<>]?\s*\d+")
+LETTER = re.compile(r"[A-Z]|([A-Z])\1")  # serum letters: A ... Z, AA, BB ...
+# the BOOSTED column: Y/N since 2024; words in the 2013-19 sheets, where a pre-boost bleed is
+# the ferret's serum before its boost, so not boosted
+BOOSTED = {
+    "Y": True,
+    "BOOSTED": True,
+    "N": False,
+    "": False,
+    "NOT BOOSTED": False,
+    "UN BOOSTED": False,
+    "PRE BOOST BLEED": False,
+    "NOT BOOSTED (PRE BOOST BLEED)": False,
+}
+SECTION = re.compile(r"(REFERENCE|TEST) (VIRUSES|ANTIGENS)", re.IGNORECASE)
+# the reference label: "REFERENCE VIRUSES"; the 2013-16 sheets say "REFERENCE ANTIGENS"
+REFERENCE = r"REFERENCE (VIRUSES|ANTIGENS)"
+TESTED = r"(?:DATE TESTED|Test Date):\s*(.+)|TESTED\s+(\d.+)"
 
 
 class CDCSheetError(SheetError):
     pass
+
+
+def _is_dilution(n: int) -> bool:
+    """10 x 2^k: a value off the series is a typing error (32 for 320, 2180 for 1280)."""
+    return n >= 10 and n % 10 == 0 and (n // 10) & (n // 10 - 1) == 0
+
+
+def cdc_passage(text: str, parser: PassageParser) -> str:
+    """The 2013-19 sheets' passage notation in the form the parser reads. A comma joins
+    steps ("CX,C4/C2" is written "CXC4/C2" in CDC's season files), and '+' adds passages, a
+    bare count repeating the previous step ("E3+3/E2" is E3/E3/E2, as ae read it)."""
+    text = re.sub(r"(?<=[A-Z0-9?])\s*,\s*(?=[A-Z]+\d|[A-Z]+X\b)", "", text, flags=re.IGNORECASE)
+    if "+" not in text:
+        return text
+    out: list[str] = []
+    for part in re.split(r"\s*[/+]\s*", text):
+        if re.fullmatch(r"\d+", part):
+            if not out or (name := parser.last_step_name(out[-1])) is None:
+                raise ValueError(f"passage {text!r}: nothing before {part!r} to repeat")
+            part = name + part
+        out.append(part)
+    return "/".join(out)
+
+
+def _next_letter(letters: str) -> str:
+    """CDC's serum letters: A ... Z, then doubled, AA, BB, CC."""
+    if letters == "Z":
+        return "AA"
+    return chr(ord(letters[0]) + 1) * len(letters)
 
 
 def read(paths: list[Path], rules: Rules) -> ReadResult:
@@ -65,7 +112,7 @@ def read(paths: list[Path], rules: Rules) -> ReadResult:
             "reader": "af.tables.cdc_xlsx",
         }
         for sheet in load(path):
-            if not sheet.find(r"REFERENCE VIRUSES"):
+            if not sheet.find(REFERENCE):
                 result.skipped_tests.append(
                     f"{sheet.where(0)}: no REFERENCE VIRUSES label, not a titre sheet"
                 )
@@ -105,12 +152,13 @@ class SheetReader:
         test_date = self._test_date()
         rbc = self._rbc()
         group = "-".join((prefix, "hi", rbc, LAB.lower()))
-        ref_row, _ = self.s.find_one(r"REFERENCE VIRUSES")
+        ref_row, _ = self.s.find_one(REFERENCE)
         columns = self._serum_columns(ref_row)
         label_row = self._label_row(ref_row)
         sera = self._sera(columns, subtype, test_date)
+        last_letter = max(columns.values())
         columns = {letter: columns[letter] for letter, _ in sera}  # control sera removed
-        antigens, titres = self._antigens(label_row, columns, subtype, test_date)
+        antigens, titres = self._antigens(label_row, columns, last_letter, subtype, test_date)
         return Table(
             table_id="",
             group=group,
@@ -142,10 +190,11 @@ class SheetReader:
 
     def _test_date(self) -> dt.date:
         found = set()
-        for r, c in self.s.find(r"(DATE TESTED|Test Date):\s*(.+)"):
-            text = re.fullmatch(
-                r"(?:DATE TESTED|Test Date):\s*(.+)", self.s.cell(r, c), re.IGNORECASE
-            )[1]  # type: ignore[index]
+        # "DATE TESTED: 9/12/2024"; the 2013-19 sheets write "TESTED 2/11/2014"
+        for r, c in self.s.find(TESTED):
+            m = re.fullmatch(TESTED, self.s.cell(r, c), re.IGNORECASE)
+            assert m is not None  # find() matched the same pattern
+            text = m[1] or m[2]
             iso, warning = dates.parse(text, self.date_order)
             if warning:
                 self.warnings.append(f"{self.s.where(r, c)}: {warning}")
@@ -164,23 +213,28 @@ class SheetReader:
     # -- layout ---------------------------------------------------------------------------
 
     def _serum_columns(self, ref_row: int) -> dict[str, int]:
-        """Letter -> column, from the nearest letters row at or above REFERENCE VIRUSES."""
+        """Letter -> column, from the nearest letters row at or above REFERENCE VIRUSES: the
+        first run of consecutive letters. The 2013-18 sheets continue a sequence across tests
+        (M, N ... Z, AA, BB), so the run may start at any letter."""
         for r in range(ref_row, max(ref_row - 6, -1), -1):
             row = self.s.rows[r]
-            if "A" in row:
-                c0 = row.index("A")
+            for c0, first in enumerate(row):
+                if not LETTER.fullmatch(first):
+                    continue
                 letters = {}
+                expected = first
                 for c in range(c0, len(row)):
-                    expected = chr(ord("A") + c - c0)
                     if row[c] != expected:
                         break
                     letters[expected] = c
+                    expected = _next_letter(expected)
                 if len(letters) >= 2:
                     return letters
         raise self.fail(ref_row, None, "no serum letters row (A, B, C ...) above REFERENCE VIRUSES")
 
     def _label_row(self, ref_row: int) -> int:
-        for r in (ref_row, ref_row + 1):
+        # the 2013-19 sheets put the serum abbreviations between the two rows
+        for r in (ref_row, ref_row + 1, ref_row + 2):
             if any(v.upper() == "CDC ID#" for v in self.s.rows[r]):
                 return r
         raise self.fail(
@@ -200,7 +254,12 @@ class SheetReader:
     # -- antigens -------------------------------------------------------------------------
 
     def _antigens(
-        self, label_row: int, columns: dict[str, int], subtype: str, test_date: dt.date
+        self,
+        label_row: int,
+        columns: dict[str, int],
+        last_letter: int,
+        subtype: str,
+        test_date: dt.date,
     ) -> tuple[list[Antigen], list[list[list[str]]]]:
         titre_cols = list(columns.values())
         first_titre = min(titre_cols)
@@ -211,15 +270,19 @@ class SheetReader:
         if not passage_cols:
             raise self.fail(label_row, None, "no PASSAGE column")
         name_col = self._name_column(label_row + 1, end, first_titre)
+        self._no_unlettered_titres(label_row + 1, end, last_letter, passage_cols)
         antigens, titres = [], []
         for r in range(label_row + 1, end):
             name_raw = self.s.cell(r, name_col)
             cells = [self.s.cell(r, c) for c in titre_cols]
             if not name_raw and not any(cells):
                 continue
-            if SECTION.fullmatch(name_raw) or (
-                SECTION.fullmatch(self.s.cell(r, 0)) and not any(cells)
-            ):
+            if SECTION.fullmatch(name_raw):
+                continue
+            if SECTION.fullmatch(self.s.cell(r, 0)) and not name_raw:
+                # a section label; the 2016 sheets write notes on it ("RECEIVED AS ...")
+                if notes := [v for v in self.s.rows[r][1:] if v]:
+                    self.warnings.append(f"{self.s.where(r)}: note on the section row: {notes}")
                 continue
             if self.rules.control_antigens.find(name_raw, lab=LAB) is not None:
                 self.dropped["antigens: control"] += 1
@@ -232,10 +295,11 @@ class SheetReader:
                 subtype=subtype,
                 applies_to="antigen",
                 warnings=problems,
+                not_after=test_date.year,
             )
             self.warnings.extend(f"{self.s.where(r, name_col)}: {p}" for p in problems)
             passage, harvest, annotations, site = self._passage_cell(r, passage_cols, test_date)
-            collected = self.s.cell(r, date_col)
+            collected = self._collected(r, date_col, test_date)
             antigens.append(
                 Antigen(
                     name=name.name,
@@ -243,7 +307,7 @@ class SheetReader:
                     passage=passage,
                     passage_class=self.passages.passage_class(passage),
                     passage_date=harvest,
-                    date=dates.parse(collected, self.date_order)[0] if collected else None,
+                    date=collected,
                     lab_ids=[f"CDC#{self.s.cell(r, id_col)}"] if self.s.cell(r, id_col) else [],
                     reassortant=name.reassortant,
                     annotations=name.annotations + annotations,
@@ -261,6 +325,29 @@ class SheetReader:
         keep = [i for i, row in enumerate(titres) if any(row)]
         self.dropped["antigens: no readings"] += len(titres) - len(keep)
         return [antigens[i] for i in keep], [titres[i] for i in keep]
+
+    def _collected(self, r: int, c: int, test_date: dt.date) -> str | None:
+        """The collection date; one after the test date is a typing error (fix the cell)."""
+        if not (text := self.s.cell(r, c)):
+            return None
+        try:
+            iso, warning = dates.parse(text, self.date_order, not_after=test_date)
+        except dates.DateError as err:
+            raise self.fail(r, c, str(err)) from None
+        if warning:
+            self.warnings.append(f"{self.s.where(r, c)}: {warning}")
+        if dt.date.fromisoformat(iso) > test_date:
+            raise self.fail(r, c, f"collection date {iso} is after the test date {test_date}")
+        return iso
+
+    def _no_unlettered_titres(self, start: int, end: int, last: int, passages: list[int]) -> None:
+        """Titres right of the last lettered column, before the PASSAGE column, belong to a
+        serum with no letter (2017-03-21 lists two sera so): an error, never a silent loss."""
+        right = [c for c in passages if c > last]
+        for r in range(start, end):
+            for c in range(last + 1, min(right) if right else last + 1):
+                if TITRE_LIKE.fullmatch(self.s.cell(r, c)):
+                    raise self.fail(r, c, "a titre in a column with no serum letter")
 
     def _merge_repeats(
         self, antigens: list[Antigen], titres: list[list[list[str]]]
@@ -350,7 +437,10 @@ class SheetReader:
         """ "S1(07/19/2024)<NY>" -> ("SIAT1", "2024-07-19", [], "NY")."""
         m = PASSAGE_CELL.fullmatch(text)
         assert m is not None  # every group is optional
-        passage = self.passages.parse(m["passage"].strip())
+        try:
+            passage = self.passages.parse(cdc_passage(m["passage"].strip(), self.passages))
+        except ValueError as err:
+            raise self.fail(r, c, str(err)) from None
         self.warnings.extend(f"{self.s.where(r, c)}: {p}" for p in passage.problems)
         harvest = None
         if m["date"] is not None and not m["close"]:
@@ -358,7 +448,10 @@ class SheetReader:
                 f"{self.s.where(r, c)}: passage {text!r} has no closing parenthesis"
             )
         if m["date"]:
-            harvest, warning = dates.parse(m["date"], self.date_order, not_after=test_date)
+            try:
+                harvest, warning = dates.parse(m["date"], self.date_order, not_after=test_date)
+            except dates.DateError as err:
+                raise self.fail(r, c, f"passage {text!r}: {err}") from None
             if warning:
                 self.warnings.append(f"{self.s.where(r, c)}: {warning}")
         extra, annotations, site = m["extra"].strip(), [], ""
@@ -378,26 +471,46 @@ class SheetReader:
         if (rule := self.rules.titre_tokens.find(raw, lab=LAB, assay="HI")) is not None:
             return [] if rule["titre"] == "*" else [rule["titre"]]
         if re.fullmatch(r"[<>]?[1-9]\d*", raw) and (raw[0] in "<>" or int(raw) >= 10):
+            if not _is_dilution(int(raw.lstrip("<>"))):
+                raise self.fail(r, c, f"titre {raw!r} is not a dilution (10 x 2^k): a typing error")
             return [raw]
         raise self.fail(r, c, f"titre {raw!r} matches no titre_tokens rule")
 
     # -- sera -----------------------------------------------------------------------------
 
+    def _concentration(self, r: int, labels: dict[str, int]) -> list[str]:
+        """The 2016-18 sheets' CONC. column ("2:1"): a concentrated serum is another
+        preparation of the lot, so an annotation (identity), as ae read it."""
+        if "CONC." not in labels or not (value := self.s.cell(r, labels["CONC."])):
+            return []
+        return [f"CONC {value}"]
+
+    def _control_serum(self, **fields: str) -> Rule | None:
+        """The first control_sera rule naming the serum by any of its fields (lot, name,
+        species): the 2013-19 sheets list WHO kit sheep sera, goat plasmas and normal sera
+        beside the ferret antisera."""
+        for field, text in fields.items():
+            if (rule := self.rules.control_sera.find(text, lab=LAB, field=field)) is not None:
+                return rule
+        return None
+
     def _sera(
         self, columns: dict[str, int], subtype: str, test_date: dt.date
     ) -> list[tuple[str, Serum]]:
         r0, _ = self.s.find_one(r"REFERENCE ANTISER(A|UM)")
-        labels = {v.upper(): c for c, v in enumerate(self.s.rows[r0]) if v}
+        # "LOT" since 2024, "LOT #" in the 2013-19 sheets
+        labels = {re.sub(r"\s*#$", "", v.upper()): c for c, v in enumerate(self.s.rows[r0]) if v}
         for need in ("LOT", "PASSAGE", "BOOSTED", "SPECIES"):
             if need not in labels:
                 raise self.fail(r0, None, f"no {need} column in the antisera block")
         by_letter: dict[str, Serum] = {}
         r = r0 + 1
-        while re.fullmatch(r"[A-Z]", self.s.cell(r, 0)):
+        while LETTER.fullmatch(self.s.cell(r, 0)):
             letter = self.s.cell(r, 0)
             raw = self.s.cell(r, 1)
             lot = self.s.cell(r, labels["LOT"])
-            rule = self.rules.control_sera.find(lot, lab=LAB)
+            species = self.s.cell(r, labels["SPECIES"]).upper()
+            rule = self._control_serum(lot=lot, name=raw, species=species)
             if rule is not None and rule["action"] == "drop":
                 self.dropped["sera: control"] += 1
                 by_letter[letter] = None  # type: ignore[assignment]
@@ -405,20 +518,25 @@ class SheetReader:
                 continue
             problems: list[str] = []
             name, serum_renamed = aliases.parse_name(
-                self.rules, raw, lab=LAB, subtype=subtype, applies_to="serum", warnings=problems
+                self.rules,
+                raw,
+                lab=LAB,
+                subtype=subtype,
+                applies_to="serum",
+                warnings=problems,
+                not_after=test_date.year,
             )
             self.warnings.extend(f"{self.s.where(r, 1)}: {p}" for p in problems)
             passage, harvest, annotations, _ = self.passage_text(
                 self.s.cell(r, labels["PASSAGE"]), r, labels["PASSAGE"], test_date
             )
-            boosted = self.s.cell(r, labels["BOOSTED"]).upper()
-            if boosted not in ("Y", "N", ""):
-                raise self.fail(r, labels["BOOSTED"], f"BOOSTED {boosted!r}")
-            species = self.s.cell(r, labels["SPECIES"]).upper()
+            boosted_cell = self.s.cell(r, labels["BOOSTED"])
+            if (boosted := BOOSTED.get(re.sub(r"[\s-]+", " ", boosted_cell.upper()))) is None:
+                raise self.fail(r, labels["BOOSTED"], f"BOOSTED {boosted_cell!r}")
             serum = Serum(
                 name=name.name,
                 raw_name=raw,
-                serum_id=f"CDC {lot}",
+                serum_id=f"CDC {lot}" if lot else "",  # no lot: no identity across tables
                 passage=passage,
                 passage_class=self.passages.passage_class(passage),
                 passage_date=harvest,
@@ -426,7 +544,8 @@ class SheetReader:
                 reassortant=name.reassortant,
                 annotations=name.annotations
                 + annotations
-                + (["BOOSTED"] if boosted == "Y" else []),
+                + (["BOOSTED"] if boosted else [])
+                + self._concentration(r, labels),
                 source={
                     "row": r + 1,
                     "letter": letter,
@@ -436,6 +555,9 @@ class SheetReader:
             )
             if serum_renamed:
                 serum.source[aliases.SOURCE_KEY] = serum_renamed
+            if boosted_cell.upper() not in ("Y", "N", ""):
+                # the 2013-19 words, e.g. a pre-boost bleed read as not boosted, stay visible
+                serum.source["boosted"] = boosted_cell
             if letter in by_letter:
                 raise self.fail(r, 0, f"serum letter {letter} twice")
             by_letter[letter] = serum
@@ -449,7 +571,7 @@ class SheetReader:
             serum = by_letter[letter]
             if serum is None:
                 continue
-            rule = self.rules.control_sera.find(serum.source["lot"], lab=LAB)
+            rule = self.rules.control_sera.find(serum.source["lot"], lab=LAB, field="lot")
             if rule is not None and rule["action"] == "species":
                 serum.species = rule["value"]
             out.append((letter, serum))

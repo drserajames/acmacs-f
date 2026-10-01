@@ -151,6 +151,9 @@ def update(
     state = state_dir(paths, settings)
     previous = previous_index(store)
     tables, report, errors = _read_all(settings, rules)
+    tables, repeats = exact_repeats(tables)
+    report.append(f"tests entered twice (dropped, the first kept): {len(repeats)}")
+    report.extend(f"  {line}" for line in repeats)
     errors.extend(identity.assign(tables, previous))
     shape_counts, shape_flags = ids.check(tables, rules)
     report.extend(rules.usage_report())
@@ -403,6 +406,36 @@ def _external(path: Path) -> ExternalInput:
     )
     commit = git.stdout.strip() if git.returncode == 0 and git.stdout.strip() else None
     return ExternalInput.of(path, version=commit)
+
+
+def _content(table: Table) -> tuple[Any, ...]:
+    """Everything a test measured: antigens and sera as identified, and every reading."""
+    return (
+        table.group,
+        table.date,
+        [
+            (a.name, a.reassortant, a.annotations, a.passage, a.passage_date, a.lab_ids)
+            for a in table.antigens
+        ],
+        [(s.name, s.reassortant, s.annotations, s.serum_id) for s in table.sera],
+        table.titres,
+    )
+
+
+def exact_repeats(tables: list[Table]) -> tuple[list[Table], list[str]]:
+    """A lab's export can hold one test twice under two test ids (CDC's TSV, 2022-11-21: two
+    test ids, the same antigens, sera and every reading). Read twice it would be two tables
+    and count every reading twice. The later one, in input order, is dropped and reported."""
+    first: dict[str, Table] = {}
+    kept, report = [], []
+    for table in tables:
+        key = repr(_content(table))
+        if (earlier := first.get(key)) is not None:
+            report.append(f"{table.source_key} repeats {earlier.source_key}")
+            continue
+        first[key] = table
+        kept.append(table)
+    return kept, report
 
 
 def duplicates(tsv: list[Table], xlsx: list[Table]) -> list[str]:
