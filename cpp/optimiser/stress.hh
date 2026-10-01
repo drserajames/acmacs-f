@@ -29,6 +29,11 @@ namespace af::map
         // stress. Unmovable points get a zero gradient, so no minimiser moves them.
         double value_and_gradient(std::span<const double> layout, std::size_t dimensions, std::span<double> gradient) const;
 
+        // Each titre's own term of value(), row-major [n_antigens * n_sera], NaN for titres
+        // that are not fitted (missing, ">", dodgy unless regular, touching a disconnected
+        // point). Summing the non-NaN cells gives value().
+        std::vector<double> titre_terms(std::span<const double> layout, std::size_t dimensions, std::size_t n_antigens, std::size_t n_sera) const;
+
         // The part of the stress that involves `point`: used by the grid test.
         double point_contribution(std::size_t point, std::span<const double> layout, std::size_t dimensions) const;
 

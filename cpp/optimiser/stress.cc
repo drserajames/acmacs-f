@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace af::map
 {
@@ -101,6 +102,20 @@ namespace af::map
                     std::fill_n(gradient.begin() + static_cast<std::ptrdiff_t>(point * dimensions), dimensions, 0.0);
             }
         }
+        return result;
+    }
+
+    std::vector<double> Stress::titre_terms(std::span<const double> layout, std::size_t dimensions, std::size_t n_antigens, std::size_t n_sera) const
+    {
+        std::vector<double> result(n_antigens * n_sera, std::numeric_limits<double>::quiet_NaN());
+        // an entry's p1 is the antigen, p2 is n_antigens + serum (table_distances())
+        const auto cell = [n_antigens, n_sera](const TableDistance& entry) { return entry.p1 * n_sera + (entry.p2 - n_antigens); };
+        for (const auto& entry : distances_.regular) {
+            const double diff = entry.distance - map_distance(layout, dimensions, entry.p1, entry.p2);
+            result[cell(entry)] = entry.weight * diff * diff;
+        }
+        for (const auto& entry : distances_.less_than)
+            result[cell(entry)] = entry.weight * less_than_error(entry.distance - map_distance(layout, dimensions, entry.p1, entry.p2) + 1.0);
         return result;
     }
 

@@ -654,3 +654,141 @@ def test_inherited_omp_num_threads_is_warned_about():
     assert "threads=0 resolved to 1 thread(s)" in result.stderr
     assert "OMP_NUM_THREADS=1" in result.stderr
     assert result.stderr.count("WARNING") == 1
+
+
+# ---------------------------------------------------------------------------------------
+# per-titre and per-point stress
+
+
+def reference_terms(problem: MapProblem, layout: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-titre stress terms and table distances written out independently of the C++ code
+    (NaN where a titre is not fitted)."""
+    n_ag, n_sr = problem.titre_value.shape
+    adjust = (
+        np.zeros(problem.n_points)
+        if problem.avidity_adjust is None
+        else np.log2(problem.avidity_adjust)
+    )
+    weights = np.ones((n_ag, n_sr)) if problem.weights is None else problem.weights
+    terms, targets = np.full((n_ag, n_sr), np.nan), np.full((n_ag, n_sr), np.nan)
+    for ag in range(n_ag):
+        for sr in range(n_sr):
+            kind = problem.titre_type[ag, sr]
+            if kind == TitreType.DODGY and problem.dodgy_is_regular:
+                kind = TitreType.REGULAR
+            if kind not in (TitreType.REGULAR, TitreType.LESS_THAN):
+                continue
+            if problem.disconnected[ag] or problem.disconnected[n_ag + sr]:
+                continue
+            target = max(
+                0.0,
+                problem.column_bases[sr]
+                - problem.titre_value[ag, sr]
+                - adjust[ag]
+                - adjust[n_ag + sr],
+            )
+            dist = np.linalg.norm(layout[ag] - layout[n_ag + sr])
+            targets[ag, sr] = target
+            if kind == TitreType.REGULAR:
+                terms[ag, sr] = weights[ag, sr] * (target - dist) ** 2
+            else:
+                diff = target - dist + 1.0
+                terms[ag, sr] = weights[ag, sr] * diff**2 / (1.0 + np.exp(-10.0 * diff))
+    return terms, targets
+
+
+def mixed_table(seed: int = 7) -> tuple[MapProblem, np.ndarray]:
+    """A table exercising every case: regular, '<', '>', missing and dodgy titres, weights,
+    avidity adjustments, and one disconnected antigen and one disconnected serum."""
+    problem, truth = synthetic_table(n_antigens=14, n_sera=6, noise=0.8, seed=seed)
+    rng = np.random.default_rng(seed)
+    kind = problem.titre_type.copy()
+    regular = np.argwhere(kind == TitreType.REGULAR)[:4]
+    kind[tuple(regular.T)] = TitreType.DODGY
+    value = problem.titre_value.copy()
+    more = np.argwhere(kind == TitreType.REGULAR)[4:7]
+    kind[tuple(more.T)] = TitreType.MORE_THAN  # '>' titres: never fitted
+    disconnected = np.zeros(problem.n_points, dtype=bool)
+    disconnected[[3, problem.n_antigens + 2]] = True
+    problem = with_changes(
+        problem,
+        titre_value=value,
+        titre_type=kind,
+        disconnected=disconnected,
+        weights=rng.uniform(0.5, 2.0, problem.titre_value.shape),
+        avidity_adjust=rng.uniform(0.7, 1.4, problem.n_points),
+    )
+    layout = truth + rng.normal(0.0, 1.0, truth.shape)
+    layout[[3, problem.n_antigens + 2]] = np.nan
+    return problem, layout
+
+
+@pytest.mark.parametrize("dodgy_is_regular", [False, True])
+def test_stress_table_matches_the_written_out_terms(dodgy_is_regular):
+    problem, layout = mixed_table()
+    problem = with_changes(problem, dodgy_is_regular=dodgy_is_regular)
+    kinds = set(problem.titre_type.ravel().tolist())
+    assert {
+        TitreType.REGULAR,
+        TitreType.LESS_THAN,
+        TitreType.MORE_THAN,
+        TitreType.MISSING,
+        TitreType.DODGY,
+    } <= kinds
+    expected_terms, _ = reference_terms(problem, layout)
+    terms = opt.stress_table(problem, layout)
+    assert terms.shape == problem.titre_value.shape
+    np.testing.assert_array_equal(np.isnan(terms), np.isnan(expected_terms))
+    np.testing.assert_allclose(terms, expected_terms, rtol=1e-12, equal_nan=True)
+    assert np.nansum(terms) == pytest.approx(opt.stress(problem, layout), rel=1e-12)
+
+
+def test_point_stress_counts_each_titre_at_both_ends():
+    problem, layout = mixed_table()
+    table, points = opt.stress_table(problem, layout), opt.point_stress(problem, layout)
+    assert points.shape == (problem.n_points,)
+    np.testing.assert_allclose(points[: problem.n_antigens], np.nansum(table, axis=1))
+    np.testing.assert_allclose(points[problem.n_antigens :], np.nansum(table, axis=0))
+    assert points.sum() == pytest.approx(2.0 * opt.stress(problem, layout), rel=1e-12)
+    assert points[3] == 0.0 and points[problem.n_antigens + 2] == 0.0  # the disconnected points
+
+
+def test_stress_table_agrees_term_by_term_with_the_stub_optimiser():
+    """af.chain.stub_optimiser keeps its own numpy copy of the formula so the chain runs without
+    the compiled core; this keeps the two implementations in step, titre by titre."""
+    from af.chain import stub_optimiser
+
+    problem, layout = mixed_table(seed=11)
+    arrays = {
+        "titre_value": problem.titre_value,
+        "titre_type": problem.titre_type,
+        "column_bases": problem.column_bases,
+        "disconnected": problem.disconnected,
+        "dodgy_is_regular": problem.dodgy_is_regular,
+        "weights": problem.weights,
+        "avidity_adjust": problem.avidity_adjust,
+    }
+    t = stub_optimiser.stress_terms(arrays)
+    ag, sr = t.p1, t.p2 - problem.n_antigens
+    terms = opt.stress_table(problem, layout)
+    _, targets = reference_terms(problem, layout)  # independently written formula
+    # the stub fits exactly the titres the core fits
+    stub_cells = np.zeros(terms.shape, dtype=bool)
+    stub_cells[ag, sr] = True
+    np.testing.assert_array_equal(stub_cells, ~np.isnan(terms))
+    np.testing.assert_allclose(t.distance, targets[ag, sr], rtol=1e-12)
+    assert np.array_equal(t.less_than, problem.titre_type[ag, sr] == TitreType.LESS_THAN)
+    # per-term stress from the stub's own fields and sigmoid
+    filled = np.where(np.isnan(layout), 0.0, layout)
+    diff = t.distance - np.linalg.norm(filled[t.p1] - filled[t.p2], axis=1)
+    shifted = diff + 1.0
+    stub_terms = np.where(
+        t.less_than,
+        t.weight
+        * shifted**2
+        * stub_optimiser._sigmoid(stub_optimiser.SIGMOID_MULTIPLIER * shifted),
+        t.weight * diff**2,
+    )
+    np.testing.assert_allclose(stub_terms, terms[ag, sr], rtol=1e-12)
+    stub_total, _ = stub_optimiser.stress_and_gradient(filled.ravel(), t, layout.shape[1])
+    assert stub_total == pytest.approx(opt.stress(problem, layout), rel=1e-12)
