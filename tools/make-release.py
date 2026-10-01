@@ -22,7 +22,11 @@ It makes ``<releases>/<sha12>/`` containing:
 - checks: af and its compiled optimiser import from inside the release; every tool test
   passes with ``--require-tools`` (pdflatex excepted); ``af.run.smoke --local`` passes;
 - ``RELEASE.toml`` (commit, compiler, versions, host, time), ``conda-explicit.txt`` and
-  ``pip-freeze.txt``, written last. The whole tree is then made read-only.
+  ``pip-freeze.txt``, written last. The whole tree is then made read-only;
+- ``CONTENTS.txt``: every pull request merged into the commit's history, newest first, one
+  per line (``#182<TAB>maps-align<TAB><merge sha><TAB><date><TAB><title>``). A project that
+  pins a release can see whether it has the change it needs with ``grep '^#182' CONTENTS.txt``,
+  without a clone or a git walk.
 
 The last line printed is the release's python, ``<release>/bin/python`` (``bin`` links
 to ``env/bin``). Launch runs with it, and every Python job
@@ -46,6 +50,7 @@ import datetime
 import fcntl
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -167,6 +172,7 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
         )
     )
     (release / "pip-freeze.txt").write_text(capture([python, "-m", "pip", "freeze"], build_env))
+    (release / "CONTENTS.txt").write_text(contents(args.repo, sha))
     write_release_file(args, release, sha, started, build_env)
     (release / "bin").symlink_to("env/bin")  # so <release>/bin/python, like o's env/bin/python
     make_read_only(release)
@@ -389,6 +395,30 @@ def run(command: list[str], env: dict[str, str], cwd: Path | str | None = None) 
 
 def capture(command: list[str], env: dict[str, str]) -> str:
     return subprocess.run(command, env=env, check=True, capture_output=True, text=True).stdout
+
+
+MERGED_PR = re.compile(r"Merge pull request (#\d+) from [^/\s]+/(\S+)")
+
+
+def contents(repo: Path, sha: str) -> str:
+    """The pull requests merged into ``sha``'s history: the merges on its first-parent line.
+
+    Every change reaches master through a pull request merged with a merge commit, whose
+    subject names the PR and branch and whose body is the PR title.
+    """
+    log = git(repo, "log", "--first-parent", "--merges", "--format=%h%x1f%ci%x1f%s%x1f%b%x1e", sha)
+    lines = []
+    for record in filter(None, (part.strip() for part in log.split("\x1e"))):
+        short, committed, subject, body = (record.split("\x1f") + ["", "", "", ""])[:4]
+        date = committed[:10]  # %ci, not %cs: older gits (o's) lack %cs
+        title = body.strip().splitlines()[0] if body.strip() else ""
+        found = MERGED_PR.match(subject)
+        if found:
+            lines.append("\t".join((found[1], found[2], short, date, title)))
+        else:
+            lines.append("\t".join(("-", subject, short, date, title)))
+    header = f"# pull requests merged into {sha} (newest first): pr, branch, merge, date, title\n"
+    return header + "\n".join(lines) + "\n"
 
 
 def git(repo: Path, *args: str) -> str:

@@ -77,3 +77,33 @@ def test_macos_rules(mr: ModuleType) -> None:
     assert mr.foreign_libraries(mr.parse_otool(homebrew), RELEASE, shipped, darwin=True) == [
         "/opt/homebrew/opt/libomp/lib/libomp.dylib"
     ]
+
+
+def test_contents_lists_merged_pull_requests_newest_first(mr: ModuleType, tmp_path: Path) -> None:
+    """CONTENTS.txt: a consumer greps for a PR number instead of walking git."""
+    import subprocess
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q")
+    git("symbolic-ref", "HEAD", "refs/heads/master")  # not `init -b`: git 2.23 lacks it
+    git("commit", "-q", "--allow-empty", "-m", "start")
+    for number, branch, title in [(1, "first-thing", "Add a"), (2, "second-thing", "Add b")]:
+        git("checkout", "-q", "-b", branch)
+        git("commit", "-q", "--allow-empty", "-m", f"work on {branch}")
+        git("checkout", "-q", "master")
+        message = f"Merge pull request #{number} from someone/{branch}\n\n{title}"
+        git("merge", "-q", "--no-ff", branch, "-m", message)
+    lines = mr.contents(tmp_path, "HEAD").splitlines()
+    assert lines[0].startswith("# pull requests merged into HEAD")
+    rows = [line.split("\t") for line in lines[1:]]
+    assert [(r[0], r[1], r[4]) for r in rows] == [
+        ("#2", "second-thing", "Add b"),
+        ("#1", "first-thing", "Add a"),
+    ]
+    assert all(len(r[3]) == 10 and r[3][4] == "-" for r in rows), "dates as YYYY-MM-DD"
