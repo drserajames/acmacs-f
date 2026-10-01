@@ -257,6 +257,7 @@ def test_a_clade_set_without_clones_fails(tmp_path: Path) -> None:
         leaves=tmp_path / "l.parquet",
         clade_set="A(H3N2)",
         clade_agreement=tmp_path / "agreement.tsv",
+        clade_conflicts=tmp_path / "conflicts.tsv",
         placement_limits=tmp_path / "placement.tsv",
     )
     with pytest.raises(stages.StageError, match=r"needs \[paths\] nomenclature"):
@@ -268,6 +269,17 @@ def test_a_clade_set_needs_agreement_limits(tmp_path: Path) -> None:
     with pytest.raises(stages.StageError, match="clade_set needs clade_agreement"):
         stages.SubtypeInputs(
             alignment=tmp_path / "a.fasta", leaves=tmp_path / "l.parquet", clade_set="A(H3N2)"
+        )
+
+
+def test_a_clade_set_needs_sibling_conflict_limits(tmp_path: Path) -> None:
+    """Without them the clades step would publish a tree that may hide a sibling clade."""
+    with pytest.raises(stages.StageError, match="clade_set needs clade_conflicts"):
+        stages.SubtypeInputs(
+            alignment=tmp_path / "a.fasta",
+            leaves=tmp_path / "l.parquet",
+            clade_set="A(H3N2)",
+            clade_agreement=tmp_path / "agreement.tsv",
         )
 
 
@@ -292,7 +304,11 @@ def with_clades(config: Path, pin: str | None = None) -> None:
     (config.parent / "agreement.tsv").write_text(
         "subtype\tmax_disagreement\treason\nA(H3N2)\t0.99\tsynthetic tree, not calibrated\n"
     )
-    text += 'clade_agreement = "agreement.tsv"\n'
+    (config.parent / "conflicts.tsv").write_text(
+        "subtype\tmax_topmost_conflict_leaves\treason\tevidence\n"
+        "A(H3N2)\t100\tsynthetic tree, not calibrated\tnone\n"
+    )
+    text += 'clade_agreement = "agreement.tsv"\nclade_conflicts = "conflicts.tsv"\n'
     if pin is not None:
         text += f'clade_pin = "{pin}"\n'
     config.write_text(text)
@@ -454,7 +470,9 @@ def test_a_clade_set_needs_the_shared_nomenclature_path(tmp_path: Path) -> None:
     """[paths] nomenclature is the one place the clones directory is configured."""
     config = make_project(tmp_path / "p")
     config.write_text(
-        config.read_text() + 'clade_set = "A(H3N2)"\nclade_agreement = "agreement.tsv"\n'
+        config.read_text()
+        + 'clade_set = "A(H3N2)"\nclade_agreement = "agreement.tsv"\n'
+        + 'clade_conflicts = "conflicts.tsv"\n'
     )
     with pytest.raises(Exception, match=r"\[paths\] nomenclature .* required"):
         stages.load_run_config(config)

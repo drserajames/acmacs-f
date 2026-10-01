@@ -23,7 +23,14 @@ from af.store import Store, StoreRef
 
 from .synthetic import build_clone, load_synthetic
 from .test_fallback_store import standard
-from .test_from_tree import STARTED, SUBTYPE, clade_set, nomenclature_input, tree_version
+from .test_from_tree import (
+    CONFLICTS,
+    STARTED,
+    SUBTYPE,
+    clade_set,
+    nomenclature_input,
+    tree_version,
+)
 
 HEADER = "subtype\tmax_disagreement\treason\n"
 
@@ -159,6 +166,7 @@ def publish(tmp_path: Path, store: Store, **kwargs: Any) -> StoreRef:
         sequences=sequences,
         nomenclature=[nomenclature_input(tmp_path)],
         started=STARTED,
+        conflicts=CONFLICTS,
         **kwargs,
     )
 
