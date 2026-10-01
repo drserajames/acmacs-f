@@ -45,6 +45,7 @@ def build_review(chain_root: Path, thresholds: Thresholds = THRESHOLDS) -> Path:
     key = ""
     warnings = {t["table_id"]: t.get("warnings", []) for t in doc["config"]["tables"]}
     repeat_drops = {t["table_id"]: t.get("repeat_drops", []) for t in doc["config"]["tables"]}
+    distinct_marked = {t["table_id"]: t.get("distinct_marked", []) for t in doc["config"]["tables"]}
     dropped_before: set[str] = set()
     for s in doc["steps"]:
         d = chain_root / s["directory"]
@@ -61,6 +62,11 @@ def build_review(chain_root: Path, thresholds: Thresholds = THRESHOLDS) -> Path:
         record["repeat_drops"] = repeat_drops.get(s["table_id"], [])
         if record["repeat_drops"]:
             record["flags"].append(f"{len(record['repeat_drops'])} cells dropped within the table")
+        record["distinct_marked"] = distinct_marked.get(s["table_id"], [])
+        if record["distinct_marked"]:
+            record["flags"].append(
+                f"{len(record['distinct_marked'])} repeated samples marked DISTINCT"
+            )
         dropped_now = {c["cell"] for c in record["diagnostics"].get("dropped_cells", [])}
         if newly := dropped_now - dropped_before:
             record["flags"].append(f"{len(newly)} cells newly dropped by the merge")
@@ -290,6 +296,9 @@ def _step_row(s: dict, r: dict, thumb: Path) -> str:
             _details("disconnected", [_e(x) for x in d.get("disconnected", [])]),
             _details("table warnings", [_e(x) for x in r["table_warnings"]]),
             _details("cells dropped within the table", [_e(x) for x in r.get("repeat_drops", [])]),
+            _details(
+                "repeated samples marked DISTINCT", [_e(x) for x in r.get("distinct_marked", [])]
+            ),
             _details(
                 "cells dropped by the merge",
                 [

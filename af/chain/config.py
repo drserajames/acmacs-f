@@ -120,6 +120,8 @@ class TableRef:
     # Cells the table's own repeat merge turned into `*` (af.chain.tables.repeat_drops): these
     # vanish before the chain sees them, so they are carried here to be reported.
     repeat_drops: tuple[str, ...] = ()
+    # Different samples sharing an identity key in the test; later ones marked DISTINCT
+    distinct_marked: tuple[str, ...] = ()
 
 
 @dataclass
@@ -239,6 +241,7 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
                 "suffix": t.suffix,
                 "warnings": list(t.warnings),
                 **({"repeat_drops": list(t.repeat_drops)} if t.repeat_drops else {}),
+                **({"distinct_marked": list(t.distinct_marked)} if t.distinct_marked else {}),
             }
             for t in cfg.tables
         ],
