@@ -9,7 +9,10 @@ The chart copies ae's representation of a table (whocc-cdc-tsv-ace), so cross-ta
 identity works as in today's chains:
 * a passage carries its harvest date: "MDCK2/SIAT1 (2016-05-12)" (`ae_passage`);
 * repeated readings of one cell in one test are merged with the lispmds rules, which is
-  how ae's CDC reader collapsed them (eu-ae: whocc-cdc-tsv-ace -> titer_merge).
+  how ae's CDC reader collapsed them (eu-ae: whocc-cdc-tsv-ace -> titer_merge);
+* two DIFFERENT samples with the same identity key in one test (same name and passage, other lab
+  ids) keep both: the later one is annotated DISTINCT, as ae's .ace does (03-tables, 1 Oct 2026:
+  22 VIDRL tables; without it the merge refuses the table). Counted per table, not silent.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from pathlib import Path
 
 from af.chain.config import ChainConfigError, TableRef
 from af.chart.ace import write_chart
-from af.chart.merge import DROPPING
+from af.chart.merge import DROPPING, antigen_key, serum_key
 from af.chart.model import Antigen, Chart, Serum, Titres, empty_table
 from af.chart.titre import Titre, merge_titres
 from af.store.ref import StoreRef
@@ -61,6 +64,39 @@ def cell_titre(readings: list[str]) -> Titre:
 
 def table_chart(table: Table) -> Chart:
     """An af table as a one-layer chart, in ae's representation (see the module docstring)."""
+    return table_chart_and_repeats(table)[0]
+
+
+def table_chart_and_repeats(table: Table) -> tuple[Chart, list[str]]:
+    """The chart, and the samples marked DISTINCT because an earlier one in the same test has
+    the same identity key (antigen: name, annotations, reassortant, passage; serum: ... serum id).
+    The first keeps its key; each later one becomes DISTINCT, so the merge keeps them apart."""
+    chart = _table_chart(table)
+    marked = _mark_repeats(chart.antigens, antigen_key, "AG") + _mark_repeats(
+        chart.sera, serum_key, "SR"
+    )
+    return chart, marked
+
+
+def _mark_repeats(points: list, key, kind: str) -> list[str]:
+    seen: set = set()
+    marked = []
+    for p in points:
+        if p.distinct:
+            continue
+        k = key(p)
+        if k in seen:
+            p.annotations = (*p.annotations, "DISTINCT")
+            ids = " ".join(getattr(p, "lab_ids", ()) or ())
+            marked.append(
+                f"{kind} {p.designation()}{f' ({ids})' if ids else ''}: repeated, marked DISTINCT"
+            )
+        else:
+            seen.add(k)
+    return marked
+
+
+def _table_chart(table: Table) -> Chart:
     antigens = [
         Antigen(
             name=a.name,
@@ -127,13 +163,23 @@ def tables_from_store(
         table = Table.from_json(json.loads(text))  # verifies the content hash
         if table.map_hash() != entry["map_hash"]:
             raise ChainConfigError(f"{table_id}: map hash differs from the store's index")
-        if not path.exists():
-            write_chart(table_chart(table), path)
+        chart, marked = table_chart_and_repeats(table)
+        # Written once per map hash. A table with repeats is rewritten: a chart cached before
+        # repeats were marked could never merge, so no reused step depends on it, and an
+        # unchanged file keeps its hash.
+        if marked or not path.exists():
+            write_chart(chart, path)
         date = datetime.date.fromisoformat(entry["date"])
         suffix = int(entry["date_suffix"])
         refs.append(
             TableRef(
-                table_id, path, date, suffix, tuple(table.warnings), tuple(repeat_drops(table))
+                table_id,
+                path,
+                date,
+                suffix,
+                tuple(table.warnings),
+                tuple(repeat_drops(table)),
+                tuple(marked),
             )
         )
     if not refs:

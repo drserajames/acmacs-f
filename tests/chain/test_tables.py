@@ -192,3 +192,53 @@ def test_publish_versions_share_unchanged_steps(tmp_path):
     (chain / "chain.json").write_text(json.dumps(doc))
     with pytest.raises(PublishError):
         publish_chain(tmp_path / "store", target, chain)
+
+
+def _with_repeats(k: int) -> Table:
+    """Antigen TEST-1 MDCK1 tested twice as different samples (other lab ids), serum LOT1 twice."""
+    t = make_table(k)
+    twin = Antigen("TEST-1", "TEST-1", passage="MDCK1", passage_date="2021-01-02")
+    twin.lab_ids = ["LABX#2"]
+    t.antigens[1].lab_ids = ["LABX#1"]
+    t.antigens.append(twin)
+    t.titres.append([["80"] for _ in t.sera])
+    third = Antigen("TEST-1", "TEST-1", passage="MDCK1", passage_date="2021-01-02")
+    third.lab_ids = ["LABX#3"]
+    t.antigens.append(third)
+    t.titres.append([["160"] for _ in t.sera])
+    t.sera.append(Serum("TEST-SR-1", "TEST-SR-1", serum_id="LOT1", passage="E3"))
+    for row in t.titres:
+        row.append(["40"])
+    return t
+
+
+def test_repeated_samples_are_marked_distinct_and_merge():
+    from af.chain.tables import table_chart_and_repeats
+    from af.chart.merge import MergeOptions, MergeType, find_duplicates, merge
+
+    chart, marked = table_chart_and_repeats(_with_repeats(0))
+    names = [
+        (a.name, a.annotations)
+        for a in chart.antigens
+        if a.name == "TEST-1" and a.passage.startswith("MDCK1")
+    ]
+    assert names == [("TEST-1", ()), ("TEST-1", ("DISTINCT",)), ("TEST-1", ("DISTINCT",))]
+    assert [s.annotations for s in chart.sera if s.serum_id == "LOT1"] == [(), ("DISTINCT",)]
+    assert len(marked) == 3 and any("LABX#2" in m for m in marked)
+    assert find_duplicates(chart) == []  # the merge now accepts it
+    merged, _ = merge(table_chart(make_table(1)), chart, MergeOptions(merge_type=MergeType.SIMPLE))
+    mdck = [a for a in merged.antigens if a.name == "TEST-1" and a.passage.startswith("MDCK1")]
+    assert len(mdck) == 3  # the first merges with table 0's, the two DISTINCT samples stay apart
+
+
+def test_a_table_without_repeats_is_unchanged():
+    from af.chain.tables import table_chart_and_repeats
+
+    chart, marked = table_chart_and_repeats(make_table(0))
+    assert marked == [] and not any("DISTINCT" in a.annotations for a in chart.antigens)
+
+
+def test_distinct_marks_reach_the_chain_record(tmp_path):
+    publish(tmp_path / "store", [make_table(0), _with_repeats(1)])
+    ref, tables = tables_from_store(tmp_path / "store", DATASET, tmp_path / "inputs")
+    assert [len(t.distinct_marked) for t in tables] == [0, 3]
