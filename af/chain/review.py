@@ -338,6 +338,52 @@ def _step_row(s: dict, r: dict, thumb: Path) -> str:
     )
 
 
+def _reference_section(doc: dict) -> str:
+    """Sarah, 1 Oct 2026: differences from the reference map are declared on every page, and
+    the composition and basin figures appear together (a Jaccard alone reads as agreement)."""
+    ref = doc.get("reference")
+    if not ref:
+        return ""
+    from af.chain.reference import sentences
+
+    c, b = ref["composition"], ref["basin"]
+    parts = "".join(f"<p>{_e(x)}</p>" for x in sentences(ref, f"the reference map {ref['chart']}"))
+
+    def listed(side: dict) -> list[str]:
+        more = side["count"] - len(side["listed"])
+        return [_e(n) for n in side["listed"]] + ([f"… and {more} more"] if more > 0 else [])
+
+    details = "".join(
+        [
+            _details(
+                "Placed most differently from the reference-seeded layout",
+                [f"{_e(m['point'])}: {m['distance']:.2f}" for m in b["movers"]],
+            ),
+            _details(
+                "Antigens only here",
+                listed(c["map_only"]["antigens"]),
+            ),
+            _details(
+                "Antigens only in the reference",
+                listed(c["reference_only"]["antigens"]),
+            ),
+            _details("Sera only here", listed(c["map_only"]["sera"])),
+            _details(
+                "Sera only in the reference",
+                listed(c["reference_only"]["sera"]),
+            ),
+            _details(
+                "Matched by stage",
+                [
+                    f"{kind}: " + ", ".join(f"{_e(k)} {v}" for k, v in stages.items())
+                    for kind, stages in c["matched_by_stage"].items()
+                ],
+            ),
+        ]
+    )
+    return f'<h2>Against the reference map</h2><div class="reference">{parts}{details}</div>'
+
+
 def _page(doc: dict, steps: list[Step]) -> str:
     name = doc["config"]["name"]
     # a merge_all map is one merge mapped from scratch, not a chain: the page must not read as one
@@ -375,6 +421,7 @@ def _page(doc: dict, steps: list[Step]) -> str:
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{_e(name)} {kind}</title><style>{_asset('review.css')}</style></head><body>"
         f'<h1>{_e(name)} {kind}</h1><p class="meta">{meta}</p><p class="legend">{legend}</p>'
+        f"{_reference_section(doc)}"
         f"<h2>Flagged steps ({len(flagged)})</h2>"
         f'<ul class="summary">{summary or "<li>No step flagged.</li>"}</ul>'
         f'{_stress_chart(steps)}<h2>Steps</h2><table class="steps">{rows}</table>'
