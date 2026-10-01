@@ -174,6 +174,21 @@ PYBIND11_MODULE(_core, m)
                 return layout_array(gradient, dimensions);
             },
             py::arg("layout"))
+        .def(
+            "stress_table",
+            [](const Problem& p, const carray<double>& layout) {
+                std::size_t dimensions = 0;
+                auto args = layout_vector(p, layout, dimensions);
+                for (std::size_t point = 0; point < p.n_points(); ++point) {
+                    if (p.disconnected[point])
+                        std::fill_n(args.begin() + static_cast<std::ptrdiff_t>(point * dimensions), dimensions, 0.0);
+                }
+                const auto terms = Stress{table_distances(p), p.n_points()}.titre_terms(args, dimensions, p.n_antigens, p.n_sera);
+                py::array_t<double> result({static_cast<py::ssize_t>(p.n_antigens), static_cast<py::ssize_t>(p.n_sera)});
+                std::copy(terms.begin(), terms.end(), result.mutable_data());
+                return result;
+            },
+            py::arg("layout"))
         .def("n_table_distances",
              [](const Problem& p) {
                  const auto td = table_distances(p);

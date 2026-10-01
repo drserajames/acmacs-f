@@ -519,6 +519,32 @@ def stress(problem: MapProblem, layout: FloatArray) -> float:
     return float(problem._core_problem.stress(_layout(problem, layout)))
 
 
+def stress_table(problem: MapProblem, layout: FloatArray) -> FloatArray:
+    """Each titre's own stress term, ``[n_antigens, n_sera]``: what :func:`stress` adds up.
+
+    For diagnostics (which titres a map fits badly). A regular titre contributes
+    ``w * (d - D)**2``, a ``<`` titre ``w * (d + 1 - D)**2 * sigmoid(10 * (d + 1 - D))``, with
+    ``d`` its table distance (column basis minus log2(titre/10) minus the avidity
+    adjustments, clipped at 0) and ``D`` the map distance. Cells are
+    NaN where a titre is not fitted: missing, ``>``, dodgy unless ``dodgy_is_regular``, or
+    touching a disconnected point. ``np.nansum(stress_table(...)) == stress(...)``.
+    """
+    return np.asarray(problem._core_problem.stress_table(_layout(problem, layout)))
+
+
+def point_stress(problem: MapProblem, layout: FloatArray) -> FloatArray:
+    """Each point's share of the stress, ``[n_points]`` (antigens then sera): the sum of the
+    stress terms of the titres it takes part in (row sums of :func:`stress_table` for antigens,
+    column sums for sera; 0 for a point with no fitted titre).
+
+    Every titre joins one antigen and one serum, so it counts at both ends:
+    ``point_stress(...).sum() == 2 * stress(...)``. This is the quantity the grid test minimises
+    for one point at a time.
+    """
+    table = stress_table(problem, layout)
+    return np.concatenate([np.nansum(table, axis=1), np.nansum(table, axis=0)])
+
+
 def gradient(problem: MapProblem, layout: FloatArray) -> FloatArray:
     """Analytic gradient of the stress (zero rows for unmovable and disconnected points)."""
     return np.asarray(problem._core_problem.gradient(_layout(problem, layout)))
