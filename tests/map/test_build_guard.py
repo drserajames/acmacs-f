@@ -27,8 +27,8 @@ def test_stale_serology_stops_the_build_before_any_map(tmp_path: Path) -> None:
             "store",
             acmacs_data=tmp_path / "acmacs-data",
             nomenclature=tmp_path / "clones",
-            af_data=tmp_path / "af-data",
         ),
+        af_data=tmp_path / "af-data",
     )
     built: list[str] = []
     with pytest.raises(BuildError, match="serology"):

@@ -234,7 +234,8 @@ class ColouringConfig:
     ``"store"``: the shared clade colouring geo uses (Sarah, Q46). Each antigen is matched to
     its sequence, takes the store's clade, and is coloured by the user's scheme from
     ``acmacs_data``; which entry wins is decided by the shared rule (the scheme's row order,
-    Sarah, Q80), not by the map. The join's rule tables come from ``af_data``.
+    Sarah, Q80), not by the map. The join's rule tables come from the config's top-level
+    ``af_data`` (one root for acmacs-f-data, used by everything that reads it).
 
     ``source`` is the default for every map; a map's own ``colouring`` overrides it, so maps can
     switch one at a time (Sarah, 29 Sep). A mixed round can draw one virus in two colours on
@@ -244,9 +245,6 @@ class ColouringConfig:
     source: str
     acmacs_data: Path | None = None
     nomenclature: Path | None = None  # the influenza-clade-nomenclature clones
-    # The acmacs-f-data checkout: the antigen -> sequence matcher's rule tables are read from
-    # it by af.seq.matching_rules, the one loader geo uses too, so the two joins cannot differ.
-    af_data: Path | None = None
 
     def __post_init__(self) -> None:
         if self.source not in COLOUR_SOURCES:
@@ -256,7 +254,7 @@ class ColouringConfig:
 
     def missing_for_store(self) -> list[str]:
         """The inputs store colouring needs that are not configured."""
-        return [k for k in ("acmacs_data", "nomenclature", "af_data") if getattr(self, k) is None]
+        return [k for k in ("acmacs_data", "nomenclature") if getattr(self, k) is None]
 
 
 @dataclass(frozen=True)
@@ -266,6 +264,10 @@ class MapsConfig:
     maps: tuple[MapConfig, ...]
     vaccine_defaults: Path | None = None  # shared subtype defaults (acmacs-f-data)
     colouring: ColouringConfig = ColouringConfig("stand-in")
+    # The acmacs-f-data checkout: the one root for everything the maps read from it (the
+    # matcher's rule tables for store colouring, the non-ferret sera markers). Required by the
+    # round config loader; None only for a config built in code that reads nothing from it.
+    af_data: Path | None = None
 
     def __post_init__(self) -> None:
         store = [m for m in self.maps if self.colour_source(m) == "store"]

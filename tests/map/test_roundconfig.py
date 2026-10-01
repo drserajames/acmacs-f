@@ -9,6 +9,7 @@ from af.map.roundconfig import ConfigError, load_maps_config
 
 GOOD = """
 vaccine_list = "vaccines.py"
+af_data = "shared/acmacs-f-data"
 vaccine_defaults = "shared/vaccine-defaults.toml"
 
 [defaults]
@@ -111,7 +112,6 @@ STORE_COLOURING = """
 source = "store"
 acmacs_data = "shared/acmacs-data"
 nomenclature = "shared/nomenclature"
-af_data = "shared/acmacs-f-data"
 """
 
 
@@ -125,7 +125,7 @@ def test_store_colouring_resolves_its_paths(tmp_path: Path) -> None:
     c = config.colouring
     assert c.source == "store"
     assert c.acmacs_data == (tmp_path / "shared/acmacs-data").resolve()
-    assert c.af_data == (tmp_path / "shared/acmacs-f-data").resolve()
+    assert config.af_data == (tmp_path / "shared/acmacs-f-data").resolve()
 
 
 def test_colouring_source_must_be_said(tmp_path: Path) -> None:
@@ -135,8 +135,8 @@ def test_colouring_source_must_be_said(tmp_path: Path) -> None:
 
 
 def test_store_colouring_needs_its_inputs(tmp_path: Path) -> None:
-    text = GOOD + STORE_COLOURING.replace('af_data = "shared/acmacs-f-data"\n', "")
-    with pytest.raises(ConfigError, match="needs colouring.af_data"):
+    text = GOOD + STORE_COLOURING.replace('nomenclature = "shared/nomenclature"\n', "")
+    with pytest.raises(ConfigError, match="needs colouring.nomenclature"):
         load_maps_config(write(tmp_path, text))
 
 
@@ -198,4 +198,17 @@ def test_a_map_can_stay_on_the_stand_in_under_a_store_default(tmp_path: Path) ->
 def test_unknown_map_colouring(tmp_path: Path) -> None:
     text = map_colouring("chart")
     with pytest.raises((ConfigError, ValueError), match="expected one of"):
+        load_maps_config(write(tmp_path, text))
+
+
+def test_af_data_is_required(tmp_path: Path) -> None:
+    """One root for acmacs-f-data, required: the sera markers are read for every map."""
+    text = GOOD.replace('af_data = "shared/acmacs-f-data"\n', "")
+    with pytest.raises(ConfigError, match="af_data .* is required"):
+        load_maps_config(write(tmp_path, text))
+
+
+def test_colouring_may_not_carry_its_own_af_data(tmp_path: Path) -> None:
+    text = GOOD + STORE_COLOURING + 'af_data = "elsewhere"\n'
+    with pytest.raises(ConfigError, match="moved to the top-level af_data"):
         load_maps_config(write(tmp_path, text))

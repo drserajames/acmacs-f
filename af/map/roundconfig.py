@@ -68,7 +68,7 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
         data = tomllib.load(f)
     _known(
         data,
-        {"defaults", "frames", "maps", "vaccine_list", "vaccine_defaults", "colouring"},
+        {"defaults", "frames", "maps", "vaccine_list", "vaccine_defaults", "colouring", "af_data"},
         str(path),
     )
 
@@ -115,6 +115,11 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
     if not maps:
         raise ConfigError("maps: nothing to build")
 
+    if "af_data" not in data:
+        raise ConfigError(
+            f"{path}: af_data (the acmacs-f-data checkout) is required: the non-ferret sera "
+            "markers and the store colouring's matching rules are read from it"
+        )
     if "vaccine_list" not in data:
         raise ConfigError(f"{path}: vaccine_list (the curated list) is required")
     try:
@@ -126,13 +131,14 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
             if "vaccine_defaults" in data
             else None,
             colouring=_colouring(data.get("colouring"), base),
+            af_data=_path(data["af_data"], base) if "af_data" in data else None,
         )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     return config, _path(data["vaccine_list"], base)
 
 
-_COLOURING_PATHS = ("acmacs_data", "nomenclature", "af_data")
+_COLOURING_PATHS = ("acmacs_data", "nomenclature")
 
 
 def _colouring(c: dict[str, Any] | None, base: Path) -> ColouringConfig:
@@ -140,6 +146,10 @@ def _colouring(c: dict[str, Any] | None, base: Path) -> ColouringConfig:
     present, ``source`` must be said outright."""
     if c is None:
         return ColouringConfig("stand-in")
+    if "af_data" in c:
+        raise ConfigError(
+            "colouring.af_data has moved to the top-level af_data: one root for acmacs-f-data"
+        )
     _known(c, {"source", *_COLOURING_PATHS}, "colouring")
     if "source" not in c:
         raise ConfigError("colouring: source is required (stand-in or store)")
