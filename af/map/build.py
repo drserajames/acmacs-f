@@ -48,15 +48,15 @@ from af.map.curate import (
     apply_block_offset,
     apply_move,
 )
+from af.map.figure import chart_points
 from af.map.finish import finish_map
 from af.map.labels import label_text
 from af.map.orient import Orientation, RotationOverride, drawn_pairs, orient
-from af.map.style import ColourRow, ColourScheme, PointIn, Window
+from af.map.style import ColourRow, ColourScheme, Window
 from af.map.vaccines import (
     MapAntigen,
     VaccineChoice,
     VaccineDisable,
-    passage_class,
     select_vaccines,
 )
 from af.store.ref import StoreRef
@@ -88,14 +88,6 @@ def designation(a: Any) -> str:
 def clade_labels(a: Any) -> frozenset[str]:
     """Clade and aa labels the chart carries for this antigen (semantic attribute "C")."""
     return frozenset((a.extra.get("T") or {}).get("C") or ())
-
-
-def parse_date(text: str) -> dt.date | None:
-    """An isolation date, parsed. Never inferred from anything else (design rule 7)."""
-    try:
-        return dt.date.fromisoformat(text[:10])
-    except (ValueError, TypeError):
-        return None
 
 
 def table_counts(chart: Chart) -> tuple[list[int], list[dt.date | None]]:
@@ -631,36 +623,7 @@ def build_map(
     if vrep.unused_optional_rules:
         decisions["vaccine_rules_unused_optional"] = list(vrep.unused_optional_rules)
 
-    points: list[PointIn] = []
-    for i, a in enumerate(chart.antigens):
-        ok = bool(np.isfinite(xy[i]).all())
-        points.append(
-            PointIn(
-                ids[i],
-                a.name,
-                "antigen",
-                (float(xy[i, 0]), float(xy[i, 1])) if ok else None,
-                labels[i],
-                parse_date(a.date),
-                passage_class(a.passage, a.reassortant),
-                bool((a.extra.get("T") or {}).get("R")),
-                sequenced=sequenced[i],
-                hide=hidden.get(i),
-            )
-        )
-    for j, s in enumerate(chart.sera):
-        k = chart.n_antigens + j
-        ok = bool(np.isfinite(xy[k]).all())
-        points.append(
-            PointIn(
-                ids[k],
-                s.name,
-                "serum",
-                (float(xy[k, 0]), float(xy[k, 1])) if ok else None,
-                passage_class=passage_class(s.passage, s.reassortant),
-                serum_id=s.serum_id,
-            )
-        )
+    points = chart_points(chart, xy, labels=labels, sequenced=sequenced, hidden=hidden)
 
     size = config.frame_size(chart.info.get("V", ""), chart.info.get("A", ""))
     title_base = map_title(chart, cfg.title)

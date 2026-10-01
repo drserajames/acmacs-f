@@ -125,23 +125,50 @@ def draw_pdf(
     out_pdf: Path,
     look: Look = DEFAULT_LOOK,
 ) -> None:
-    """Draw ``scene`` inside ``frame`` to ``out_pdf`` (one page)."""
+    """Draw ``scene`` inside ``frame`` to ``out_pdf`` (one page). The drawing itself is
+    :func:`draw_scene`, shared with :func:`af.map.figure.draw_axes`."""
     import matplotlib
 
     matplotlib.use("pdf")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Circle, PathPatch, Rectangle
 
     side = look.page_points / 72.0
     fig = plt.figure(figsize=(side, side), dpi=72)
     ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+    draw_scene(ax, scene, frame, labels, look)
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_pdf)
+    plt.close(fig)
+    if not out_pdf.is_file() or out_pdf.stat().st_size == 0:
+        raise RuntimeError(f"map PDF not written: {out_pdf}")
+
+
+def draw_scene(
+    ax: Any,
+    scene: Scene,
+    frame: Frame,
+    labels: Mapping[str, Placed],
+    look: Look,
+    *,
+    scale: float = 1.0,
+    legend: bool = True,
+    title: bool = True,
+) -> None:
+    """Draw a scene on an Axes whose data limits become the page (0..1, y down).
+
+    ``scale`` multiplies every text size and line width: 1.0 on the report page; the Axes'
+    side over ``look.page_points`` for a panel (:func:`af.map.figure.draw_axes`), so a panel is
+    the page shrunk. Everything else is in page fractions already.
+    """
+    from matplotlib.patches import Circle, PathPatch, Rectangle
+
     ax.set_xlim(0, 1)
     ax.set_ylim(1, 0)  # y grows downward, as in the map frame
     ax.axis("off")
     for k in range(int(frame.size) + 1):
         g = k / frame.size
-        ax.plot([g, g], [0, 1], color="#dddddd", lw=0.8, zorder=0)
-        ax.plot([0, 1], [g, g], color="#dddddd", lw=0.8, zorder=0)
+        ax.plot([g, g], [0, 1], color="#dddddd", lw=0.8 * scale, zorder=0)
+        ax.plot([0, 1], [g, g], color="#dddddd", lw=0.8 * scale, zorder=0)
     page = frame.page(scene.xy())
 
     def order(p: ScenePoint) -> int:
@@ -159,7 +186,7 @@ def draw_pdf(
         z = order(p) + 1
         if p.kind == "serum":
             s = look.serum_half_side
-            style: dict[str, Any] = {"fc": "none", "ec": SERUM_OUTLINE, "lw": 1, "zorder": z}
+            style: dict[str, Any] = {"fc": "none", "ec": SERUM_OUTLINE, "lw": scale, "zorder": z}
             if p.passage_class in EGG_SHAPED:
                 ax.add_patch(PathPatch(ugly_egg_path(x, y, s), **style))
             else:
@@ -172,29 +199,34 @@ def draw_pdf(
         if p.vaccine:
             edge = "black"
         if p.passage_class in EGG_SHAPED:
-            ax.add_patch(PathPatch(egg_path(x, y, r), fc=fill, ec=edge, lw=0.8, zorder=z))
+            ax.add_patch(PathPatch(egg_path(x, y, r), fc=fill, ec=edge, lw=0.8 * scale, zorder=z))
         else:
-            ax.add_patch(Circle((x, y), r, fc=fill, ec=edge, lw=0.8, zorder=z))
+            ax.add_patch(Circle((x, y), r, fc=fill, ec=edge, lw=0.8 * scale, zorder=z))
     for lab in labels.values():
         ax.text(
             lab.box[0],
             lab.box[3],
             lab.text,
-            fontsize=look.label_size,
+            fontsize=look.label_size * scale,
             va="bottom",
             ha="left",
             zorder=8,
         )
-    ax.text(0.024, 0.015, scene.title, fontsize=look.title_size, weight="bold", va="top", zorder=9)
-    _draw_legend(ax, scene, look)
-    out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_pdf)
-    plt.close(fig)
-    if not out_pdf.is_file() or out_pdf.stat().st_size == 0:
-        raise RuntimeError(f"map PDF not written: {out_pdf}")
+    if title:
+        ax.text(
+            0.024,
+            0.015,
+            scene.title,
+            fontsize=look.title_size * scale,
+            weight="bold",
+            va="top",
+            zorder=9,
+        )
+    if legend:
+        _draw_legend(ax, scene, look, scale)
 
 
-def _draw_legend(ax: Any, scene: Scene, look: Look) -> None:
+def _draw_legend(ax: Any, scene: Scene, look: Look, scale: float = 1.0) -> None:
     from matplotlib.patches import Circle, Rectangle
 
     box = legend_box(scene, look)
@@ -205,12 +237,12 @@ def _draw_legend(ax: Any, scene: Scene, look: Look) -> None:
             box.bottom - box.top,
             fc="white",
             ec="black",
-            lw=1,
+            lw=1 * scale,
             zorder=10,
         )
     )
     h = look.legend_row_height
-    font = h * look.page_points * 0.62
+    font = h * look.page_points * 0.62 * scale
     for k, (text, colour, count) in enumerate(scene.legend):
         y = box.top + look.legend_pad + h * (k + 0.5)
         ax.add_patch(
@@ -219,7 +251,7 @@ def _draw_legend(ax: Any, scene: Scene, look: Look) -> None:
                 h * 0.35,
                 fc=colour,
                 ec="black",
-                lw=0.6,
+                lw=0.6 * scale,
                 zorder=11,
             )
         )
