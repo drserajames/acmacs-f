@@ -102,6 +102,7 @@ jobs:
     # (Sarah, Q26). Installing the environment also proves it solves on both platforms.
     name: tool tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60   # a hung step anywhere fails the job instead of running for 6 h
     strategy:
       fail-fast: false
       matrix:
@@ -118,9 +119,22 @@ jobs:
       # LaTeX for the report tests: Ubuntu's TeX Live on Linux. conda-forge's texlive-core
       # is unusable (no pdflatex.fmt; and it cannot be solved with environment.yml), and a
       # full TeX on the macOS runner is slow, so macOS skips pdflatex explicitly (below).
+      # Fail fast, and never hide the other tools: this step once sat wedged for 90+ min
+      # (PR #202, 1 Oct 2026) while the same step on master passed, leaving the whole
+      # job's result unknown. So it has a time limit, and continue-on-error lets the tool
+      # tests run anyway; with TeX missing, --require-tools fails only the pdflatex test,
+      # by name. man-db's trigger is switched off first: rebuilding the man index after a
+      # TeX install is the slowest part of it on GitHub's Ubuntu runners, and CI has no use
+      # for man pages. apt retries downloads and waits a bounded time for the dpkg lock.
       - name: LaTeX (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends texlive-latex-extra
+        timeout-minutes: 25
+        continue-on-error: true
+        run: |
+          sudo rm -f /var/lib/man-db/auto-update
+          apt="-o Acquire::Retries=3 -o DPkg::Lock::Timeout=120"
+          sudo apt-get $apt update
+          sudo apt-get $apt install -y --no-install-recommends texlive-latex-extra
       # Apple clang on macOS: conda-forge's clang cannot link with recent Xcode linkers
       # (`-lto_library` rejected); Apple clang gives bit-identical optimiser results.
       - name: Install af into the environment
