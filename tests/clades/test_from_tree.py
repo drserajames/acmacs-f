@@ -17,6 +17,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from af.clades.assign import conflict_review
+from af.clades.conflicts import ConflictLimit
 from af.clades.from_tree import publish_from_tree, rows_from_tree
 from af.clades.nomenclature import CladeSet
 from af.clades.store import ASSIGNMENTS_FILE, CladeStoreError, publish, read_report
@@ -29,6 +31,8 @@ from .synthetic import build_clone, load_synthetic
 
 SUBTYPE = "A(H3N2)"
 STARTED = datetime.datetime(2026, 9, 25, 9, 0, tzinfo=datetime.UTC)
+#: Every tree publish needs a sibling-conflict limit; the synthetic trees have no conflict.
+CONFLICTS = ConflictLimit("A(H3N2)", 100, "test limit", "synthetic trees")
 
 
 def clade_set(tmp_path: Path) -> CladeSet:
@@ -39,7 +43,7 @@ def nomenclature_input(tmp_path: Path) -> ExternalInput:
     return ExternalInput.of(tmp_path / "clone" / "synthetic_HA" / "subclades")
 
 
-def stub_engine(version: str, *, deeper: str = "P.1"):
+def stub_engine(version: str, *, deeper: str = "P.1", review: dict[str, Any] | None = None):
     """Leaves with the K2E change are in ``deeper``, the one with a deletion is unnamed."""
 
     def engine(nodes: Sequence[CladeInput]) -> CladeResult:
@@ -48,7 +52,11 @@ def stub_engine(version: str, *, deeper: str = "P.1"):
                 return CladeCall(None)
             return CladeCall(deeper if node.nucleotides.startswith("ATGG") else "P", support=1)
 
-        return CladeResult(version, {node.node_id: call(node) for node in nodes})
+        calls = {node.node_id: call(node) for node in nodes}
+        # what a real engine writes when it finds no sibling conflict
+        return CladeResult(
+            version, calls, review=conflict_review((), ()) if review is None else review
+        )
 
     return engine
 
@@ -107,6 +115,7 @@ def test_one_row_per_leaf_keyed_by_its_sequence_ids(tmp_path: Path) -> None:
         clades,
         nomenclature=[nomenclature_input(tmp_path)],
         started=STARTED,
+        conflicts=CONFLICTS,
     )
     table = duckdb.read_parquet(str(store.resolve(ref) / ASSIGNMENTS_FILE)).fetchall()
     by_key = {(row[0], row[1]): row for row in table}
@@ -125,7 +134,13 @@ def test_the_tree_version_is_the_input_and_the_report_says_what_is_not_labelled(
     dropped = [{"leaf_id": "EPI_ISL_900099|EPI900099", "reason": "long_branch"}]
     tree = tree_version(store, clades.version, excluded=dropped)
     ref = publish_from_tree(
-        store, tree, SUBTYPE, clades, nomenclature=[nomenclature_input(tmp_path)], started=STARTED
+        store,
+        tree,
+        SUBTYPE,
+        clades,
+        nomenclature=[nomenclature_input(tmp_path)],
+        started=STARTED,
+        conflicts=CONFLICTS,
     )
     provenance = json.loads((store.resolve(ref) / "PROVENANCE.json").read_text())
     assert {"store": tree.to_json()} in provenance["inputs"]
@@ -186,6 +201,7 @@ def test_refuses_a_reference_that_is_not_a_tree(tmp_path: Path) -> None:
             clades,
             nomenclature=[nomenclature_input(tmp_path)],
             started=STARTED,
+            conflicts=CONFLICTS,
         )
 
 
@@ -209,7 +225,13 @@ def test_extra_report_keys_cannot_replace_the_standard_counts(tmp_path: Path) ->
 
 def publish_tree(store: Store, tree: StoreRef, tmp_path: Path, clades: CladeSet) -> StoreRef:
     return publish_from_tree(
-        store, tree, SUBTYPE, clades, nomenclature=[nomenclature_input(tmp_path)], started=STARTED
+        store,
+        tree,
+        SUBTYPE,
+        clades,
+        nomenclature=[nomenclature_input(tmp_path)],
+        started=STARTED,
+        conflicts=CONFLICTS,
     )
 
 

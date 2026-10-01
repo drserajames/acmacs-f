@@ -457,3 +457,47 @@ def _leaf_counts(by_name: Mapping[str, Node], children: Mapping[str, list[str]])
         below = children.get(name, ())
         counts[name] = sum(counts[child] for child in below) if below else 1
     return counts
+
+
+#: How many of the largest topmost conflicts a review keeps; the summary counts cover all.
+REVIEW_KEEP = 20
+
+
+def conflict_review(
+    conflicts: Iterable[SiblingConflict], ties: Iterable[NameTie], *, keep: int = REVIEW_KEEP
+) -> dict[str, object]:
+    """A tree's sibling-conflict review, as it is written into the tree's metadata.
+
+    Counts always cover every conflict; the list keeps the ``keep`` largest *topmost* ones
+    (a conflict's descendants repeat it) so the metadata stays readable and diff-able.
+    """
+    found = list(conflicts)
+    top = sorted((c for c in found if c.topmost), key=lambda c: (-c.leaves, c.node))
+    tied = list(ties)
+    return {
+        "counts": {
+            "all": len(found),
+            "multi_leaf": sum(1 for c in found if c.leaves > 1),
+            "topmost": len(top),
+            "topmost_multi_leaf": sum(1 for c in top if c.leaves > 1),
+        },
+        "topmost": [
+            {
+                "node": c.node,
+                "label": c.label,
+                "other": c.other,
+                "leaves": c.leaves,
+                "label_support": c.label_support,
+                "other_support": c.other_support,
+                "gained_on_edge": c.gained_on_edge,
+            }
+            for c in top[:keep]
+        ],
+        "topmost_truncated": max(0, len(top) - keep),
+        "ties": {
+            "count": len(tied),
+            "examples": [
+                {"node": t.node, "chosen": t.chosen, "others": list(t.others)} for t in tied[:keep]
+            ],
+        },
+    }

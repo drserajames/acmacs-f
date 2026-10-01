@@ -20,6 +20,7 @@ from af.clades.store import ASSIGNMENTS_FILE, CladeStoreError, read_report
 from af.store import Provenance, Store, StoreRef
 
 from .test_from_tree import (
+    CONFLICTS,
     STARTED,
     SUBTYPE,
     clade_set,
@@ -148,6 +149,7 @@ def test_one_table_tree_calls_for_leaves_fallback_for_the_rest(tmp_path: Path) -
         nomenclature=[nomenclature_input(tmp_path)],
         started=STARTED,
         agreement=AGREEMENT,
+        conflicts=CONFLICTS,
     )
     rows = read_rows(store, ref)
     assert [rows[key] for key in TREE_LEAVES] == [
@@ -186,6 +188,7 @@ def test_a_tree_leaf_missing_from_the_sequences_is_fatal(tmp_path: Path) -> None
             nomenclature=[nomenclature_input(tmp_path)],
             started=STARTED,
             agreement=AGREEMENT,
+            conflicts=CONFLICTS,
         )
 
 

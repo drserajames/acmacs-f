@@ -160,6 +160,11 @@ class SubtypeInputs:
     their sequences do not say is the fault that produced trees/h3/weekly@79a55f78 (correlation
     0.206), and the clock guard cannot see it."""
     clade_agreement: Path | None = None
+    clade_conflicts: Path | None = None
+    """The clades step's sibling-conflict limits (``subtype, max_topmost_conflict_leaves, reason,
+    evidence``; the data repo's ``clades/sibling-conflicts.tsv``): a tree whose ancestral states
+    hid a sibling clade over at least that many leaves is not published (af.clades.conflicts).
+    Required with ``clade_set``."""
     """The clades step's agreement limits (``subtype, max_disagreement, reason``; the data repo's
     ``clades/agreement.tsv``): a tree whose calls disagree with the fallback beyond its
     subtype's limit is not published (af.clades.agreement). Required with ``clade_set``."""
@@ -167,7 +172,10 @@ class SubtypeInputs:
 
     def __post_init__(self) -> None:
         if self.clade_set is None and (
-            self.nomenclature_repository or self.clade_pin or self.clade_agreement
+            self.nomenclature_repository
+            or self.clade_pin
+            or self.clade_agreement
+            or self.clade_conflicts
         ):
             raise StageError(
                 "nomenclature_repository, clade_pin and clade_agreement need a clade_set"
@@ -176,6 +184,11 @@ class SubtypeInputs:
             raise StageError(
                 "clade_set needs clade_agreement: the agreement limits the clades step checks "
                 "the tree against (af.clades.agreement)"
+            )
+        if self.clade_set is not None and self.clade_conflicts is None:
+            raise StageError(
+                "clade_set needs clade_conflicts: the sibling-conflict limits the clades step "
+                "checks the tree against (af.clades.conflicts)"
             )
         if self.placement_limits is None:
             raise StageError(
@@ -410,7 +423,11 @@ def tree_steps(
         if inputs.clade_agreement is None:  # SubtypeInputs already refuses this; not an assert,
             # which python -O would remove
             raise StageError(f"{subtype}: clade_set needs clade_agreement")
-        steps.append(_clades_step(clades, inputs.clade_agreement, layout, store_root))
+        if inputs.clade_conflicts is None:  # likewise refused by SubtypeInputs
+            raise StageError(f"{subtype}: clade_set needs clade_conflicts")
+        steps.append(
+            _clades_step(clades, inputs.clade_agreement, inputs.clade_conflicts, layout, store_root)
+        )
     if jobs_from is not None:
         steps = [
             _as_job(step, subtype, settings, layout, jobs_from) if step.name in JOB_STAGES else step
@@ -822,15 +839,19 @@ def _publish_step(
     )
 
 
-def _clades_step(clades: CladeSource, agreement: Path, layout: Layout, store_root: Path) -> Step:
+def _clades_step(
+    clades: CladeSource, agreement: Path, conflicts: Path, layout: Layout, store_root: Path
+) -> Step:
     written = layout.stage(CLADES) / PUBLISHED_FILE
 
     def action(_: StepContext) -> None:
         from af.clades.agreement import limit_for, load_agreement_limits
+        from af.clades.conflicts import conflict_limit_for, load_conflict_limits
         from af.clades.from_tree import publish_from_tree
 
         started = datetime.datetime.now(datetime.UTC)
         limit = limit_for(load_agreement_limits(agreement), clades.subtype)
+        conflict_limit = conflict_limit_for(load_conflict_limits(conflicts), clades.subtype)
         tree = StoreRef.from_json(json.loads(layout.published.read_text()))
         ref = publish_from_tree(
             Store.open(store_root),
@@ -841,6 +862,7 @@ def _clades_step(clades: CladeSource, agreement: Path, layout: Layout, store_roo
             started=started,
             sequences=_source_sequences(layout),
             agreement=limit,
+            conflicts=conflict_limit,
         )
         written.parent.mkdir(parents=True, exist_ok=True)
         written.write_text(json.dumps(ref.to_json(), indent=1, sort_keys=True) + "\n")
@@ -853,6 +875,7 @@ def _clades_step(clades: CladeSource, agreement: Path, layout: Layout, store_roo
             "clades": clades.subclades,
             "build_meta": layout.build_meta,
             "agreement": agreement,  # a changed limit re-checks, and so re-runs, the step
+            "conflicts": conflicts,
         },
         parameters={"code_version": CODE_VERSION, "clade_set_version": clades.version},
         outputs=[Artefact(written, parse=_parse_json)],
