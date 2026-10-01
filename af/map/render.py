@@ -48,6 +48,33 @@ class Look:
 DEFAULT_LOOK = Look()
 
 
+#: Passage classes drawn egg-shaped. Reassortants are egg-grown, and the reports draw them as
+#: the same upright egg: ae's charts give them the egg shape with a 0.5 rad rotation, but the
+#: shipped PDFs (kateri) draw every egg upright, so the figures readers know have no tilt.
+EGG_SHAPED = ("egg", "reassortant")
+
+
+def egg_path(x: float, y: float, r: float) -> Any:
+    """The egg marker reports have always used: kateri's ovoid (draw_on_pdf.dart, PointShape.egg).
+
+    Two mirrored cubic Bezier curves between apexes ``r`` above and below the centre, with
+    control points at (+-1.4r, 0.95r) by the wide end and (+-0.8r, -0.98r) by the narrow end.
+    So it is as tall as a circle marker is wide (2r), 1.19 times as tall as it is wide, and the
+    wide end is DOWN on the page (page y grows downward here, as in kateri). Measured on the
+    shipped Sep 2026 PDFs: every egg upright, wide end down, height/width 1.191.
+    """
+    from matplotlib.path import Path as MplPath
+
+    verts = [
+        (x, y + r),
+        (x + 1.4 * r, y + 0.95 * r), (x + 0.8 * r, y - 0.98 * r), (x, y - r),
+        (x - 0.8 * r, y - 0.98 * r), (x - 1.4 * r, y + 0.95 * r), (x, y + r),
+        (x, y + r),
+    ]  # fmt: skip
+    codes = [MplPath.MOVETO] + [MplPath.CURVE4] * 6 + [MplPath.CLOSEPOLY]
+    return MplPath(verts, codes)
+
+
 def legend_box(scene: Scene, look: Look) -> Box:
     """Where the legend will be drawn, bottom-left; the frame search and label placer avoid it."""
     rows = len(scene.legend)
@@ -83,7 +110,7 @@ def draw_pdf(
 
     matplotlib.use("pdf")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Circle, Ellipse, Rectangle
+    from matplotlib.patches import Circle, PathPatch, Rectangle
 
     side = look.page_points / 72.0
     fig = plt.figure(figsize=(side, side), dpi=72)
@@ -122,8 +149,8 @@ def draw_pdf(
         r = look.antigen_radius * (look.vaccine_scale if p.vaccine else 1.0)
         if p.vaccine:
             edge = "black"
-        if p.passage_class == "egg":
-            ax.add_patch(Ellipse((x, y), 1.7 * r, 2.3 * r, fc=fill, ec=edge, lw=0.8, zorder=z))
+        if p.passage_class in EGG_SHAPED:
+            ax.add_patch(PathPatch(egg_path(x, y, r), fc=fill, ec=edge, lw=0.8, zorder=z))
         else:
             ax.add_patch(Circle((x, y), r, fc=fill, ec=edge, lw=0.8, zorder=z))
     for lab in labels.values():
