@@ -133,9 +133,26 @@ def test_bad_selections_are_refused(keep_ag, keep_sr, match):
         tagged_chart().select(keep_ag, keep_sr)
 
 
-def test_a_selector_naming_a_removed_point_is_refused():
-    with pytest.raises(ValueError, match="removed antigen 3"):
-        tagged_chart().select([0, 1, 2], [0, 1, 2])
+def test_a_modifier_for_a_removed_point_is_dropped(caplog):
+    # antigen 3 is removed: its modifier (e.g. a hide) has nothing left to style
+    new = tagged_chart().select([0, 1, 2], [0, 1, 2])
+    assert new.extra["R"]["style"]["A"] == [{"T": {"!i": 2}, "A": 0}]  # serum 2 kept as is
+    assert "removed antigen 3" in caplog.text
+
+
+def test_a_short_plot_spec_stays_short():
+    chart = tagged_chart()
+    chart.extra["p"]["p"] = [0, 1, 2]  # only the first 3 points styled: valid .ace
+    new = chart.select(KEEP_AG, KEEP_SR)
+    assert new.extra["p"]["p"] == [0, 2]  # kept points 0 and 2 keep their styles
+
+
+def test_projection_forced_bases_come_back_as_floats():
+    chart = tagged_chart()
+    p = chart.projections[0]
+    p.forced_column_bases = [7, 8, 9]  # type: ignore[assignment]  # a list, as some readers give
+    out = chart.column_bases(projection=p)
+    assert isinstance(out, np.ndarray) and out.dtype == float and out.tolist() == [7.0, 8.0, 9.0]
 
 
 def test_a_selector_without_antigen_or_serum_is_refused():
