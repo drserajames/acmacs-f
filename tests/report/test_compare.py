@@ -904,3 +904,14 @@ def test_colour_loss_counts_ref_coloured_antigens_af_leaves_uncoloured() -> None
     assert checks["colour loss"]["value"] == 1 / 8 and checks["colour loss"]["ok"] is None
     gated = {c["check"]: c for c in map_checks(res, MapLimits(colour_loss_max=0.01))}
     assert gated["colour loss"]["ok"] is False
+
+
+def test_geo_largest_changes_are_deterministic_and_only_changes() -> None:
+    from collections import Counter
+
+    from af.report.compare.geo import _diff
+
+    a = Counter({"PLACEB": 2, "PLACEA": 2, "PLACEC": 1, "PLACED": 5})
+    b = Counter({"PLACEB": 3, "PLACEA": 3, "PLACEC": 1, "PLACED": 5})
+    assert _diff(a, b)["largest"] == ["PLACEA: 2 -> 3", "PLACEB: 2 -> 3"]  # ties by name
+    assert _diff(a, a)["largest"] == []  # nothing differs, nothing listed
