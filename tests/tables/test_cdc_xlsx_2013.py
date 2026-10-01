@@ -162,3 +162,12 @@ def test_a_titre_column_with_no_serum_letter_is_an_error(tmp_path: Path, rules: 
 )
 def test_pooled_lots_are_written_in_full(lot: str, expected: str):
     assert cdc_xlsx._expand_lots(lot) == expected
+
+
+def test_a_harvest_after_the_test_is_left_out_not_moved_a_century(tmp_path: Path, rules: Rules):
+    # "4/20/32" on a 2031 test: a typo; read as 2032 and left out, never as 1932
+    res = cdc_xlsx.read([workbook(tmp_path / "old.xlsx", cells={"K13": "C1(4/20/32)"})], rules)
+    assert res.errors == []
+    (t,) = res.tables
+    assert t.antigens[2].passage == "MDCK1" and t.antigens[2].passage_date is None
+    assert any("is after the test; left out" in w for w in t.warnings)

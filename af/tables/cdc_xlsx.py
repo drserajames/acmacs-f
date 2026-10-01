@@ -471,6 +471,12 @@ class SheetReader:
                 raise self.fail(r, c, f"passage {text!r}: {err}") from None
             if warning:
                 self.warnings.append(f"{self.s.where(r, c)}: {warning}")
+            if harvest is not None and harvest > test_date.isoformat():
+                # after the test: a typo, and nothing says which way (2015-12-03 "11/15/16")
+                self.warnings.append(
+                    f"{self.s.where(r, c)}: date {m['date']!r} is after the test; left out"
+                )
+                harvest = None
         extra, annotations, site = m["extra"].strip(), [], ""
         if (s := SITE.fullmatch(extra)) is not None:
             site = s[1]
