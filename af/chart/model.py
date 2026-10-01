@@ -186,15 +186,19 @@ class Chart:
     ) -> np.ndarray:
         """Column bases a map of this chart uses.
 
-        Order of precedence, as ae: the projection's forced bases, then the chart's forced
-        bases (a merge with `>` titres sets these), then computed from the table. The
-        minimum column basis applies to computed bases only.
+        Order of precedence, as ae: the projection's forced bases, used as they are; then the
+        chart's forced bases (a merge with `>` titres sets these) or, without them, the bases
+        computed from the table. The minimum column basis applies to both of the latter, each
+        basis = max(basis, minimum), as ae's Chart::column_bases does (mcb.apply on the forced
+        and the computed basis alike, cc/chart/v3/chart.cc). A projection's own forced bases
+        are not raised: ae's stress takes them verbatim (cc/chart/v3/stress.cc).
         """
         if projection is not None and projection.forced_column_bases is not None:
             return projection.forced_column_bases.copy()
+        mcb = minimum_column_basis_value(minimum_column_basis)
         if self.forced_column_bases is not None:
-            return self.forced_column_bases.copy()
-        return np.maximum(self.raw_column_bases(), minimum_column_basis_value(minimum_column_basis))
+            return np.maximum(np.asarray(self.forced_column_bases, dtype=float), mcb)
+        return np.maximum(self.raw_column_bases(), mcb)
 
     # --- disconnection ---
 
