@@ -98,6 +98,19 @@ class SeraReport:
             "ferret_by_default": self.ferret_by_default,
         }
 
+    def verification(self) -> str:
+        """The honest statement, shown even when nothing was removed: zero removals is exactly
+        when a map would be assumed clean."""
+        total = self.ferret_recorded + self.ferret_by_default
+        if self.ferret_by_default == 0:
+            return f"VERIFIED: all {total} remaining sera have species FERRET recorded."
+        return (
+            f"UNVERIFIED: {self.ferret_by_default} of {total} remaining sera are ferret BY DEFAULT "
+            "(species not recorded, no marker matched). That this map is ferret sera only is an "
+            "assumption, not a verified fact: the rule catches only what a recorded non-ferret "
+            "species or a marker reveals."
+        )
+
 
 def non_ferret(chart: Chart, markers: list[Marker]) -> SeraReport:
     report = SeraReport()

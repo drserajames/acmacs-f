@@ -253,6 +253,7 @@ def _sera_summary(cfg: ChainConfig, results: list[StepResult], root: Path) -> di
             ferret_recorded=rep.ferret_recorded,
             ferret_by_default=rep.ferret_by_default,
             non_ferret_on_final_map=len(rep.non_ferret),
+            verification=rep.verification(),
         )
     return out
 

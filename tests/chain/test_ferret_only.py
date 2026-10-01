@@ -42,6 +42,14 @@ def test_a_mouse_serum_is_removed_and_reported(tables, tmp_path):  # noqa: F811
     summary = doc["non_ferret_sera"]
     assert summary["removed_rows_by_test"] == {"species MOUSE": 1}
     assert summary["non_ferret_on_final_map"] == 0 and "ferret sera only" in summary["policy"]
+    assert summary["verification"].startswith("VERIFIED")  # the synthetic sera record FERRET
+
+
+def test_the_statement_is_published_even_when_nothing_is_removed(tables, tmp_path):  # noqa: F811
+    results = run(config(tables), tmp_path / "s")
+    doc = json.loads((results[-1].directory.parent.parent / "chain.json").read_text())
+    assert doc["non_ferret_sera"]["removed_rows_by_test"] == {}
+    assert "verification" in doc["non_ferret_sera"]
 
 
 def test_keep_needs_a_reason_and_keeps(tables, tmp_path):  # noqa: F811

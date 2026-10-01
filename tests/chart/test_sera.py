@@ -52,3 +52,13 @@ def test_markers_file_is_required_and_checked(tmp_path):
         read_markers(path)
     path.write_text("# comment\nfield\tpattern\tkind\treason\tevidence\nname\tPOOL\tpooled\tr\tx\n")
     assert [m.pattern for m in read_markers(path)] == ["POOL"]
+
+
+def test_the_verification_statement_is_honest_about_the_blind_spot():
+    unrecorded = Chart({}, [], [Serum("TEST-1", serum_id="F1")], Titres(empty_table(0, 1)))
+    text = non_ferret(unrecorded, MARKERS).verification()
+    assert text.startswith("UNVERIFIED: 1 of 1") and "assumption, not a verified fact" in text
+    recorded = Chart(
+        {}, [], [Serum("TEST-1", serum_id="F1", species="FERRET")], Titres(empty_table(0, 1))
+    )
+    assert non_ferret(recorded, MARKERS).verification().startswith("VERIFIED: all 1")
