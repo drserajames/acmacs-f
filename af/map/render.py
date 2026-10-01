@@ -1,29 +1,24 @@
-"""Draw a styled map to PDF and describe it in an I7 JSON (interface I7, workstream 11).
+"""Draw a styled map scene: to a PDF page, or onto any matplotlib Axes.
 
-Why both at once: the report builder never looks inside a PDF. It embeds the PDF the I7 names (by
-sha256), and the comparison reads only the I7. So the I7 is written from the same :class:`Scene`
-the PDF is drawn from, and only after the PDF exists.
+The renderer knows shapes, colours and coordinates, never what a point is: each scene point
+carries its marker shape ("circle", "egg", "box", "uglyegg"), chosen when the scene is built.
+The I7 description of a figure is written by :mod:`af.map.i7`.
 
 Look: similar to today's report maps (DECISIONS: "similar look, a little flexibility"): square
-page, light 1-unit grid, sera as open squares, egg antigens as egg shapes, greyed antigens drawn
-first and small-looking, legend box bottom-left with counts, bold title top-left, vaccines
-enlarged with labels.
+page, light 1-unit grid, open serum markers, greyed points drawn first and small-looking, legend
+box bottom-left with counts, bold title top-left, marked points enlarged with labels.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 from af.map.labels import Placed
-from af.map.style import Scene, ScenePoint
+from af.map.style import MARKERS, Scene, ScenePoint
 from af.map.viewport import Box, Frame
 
 GREY = "#c8c8c8"
@@ -48,22 +43,10 @@ class Look:
 DEFAULT_LOOK = Look()
 
 
-#: Passage classes drawn egg-shaped. Reassortants are egg-grown, and the reports draw them as
-#: the same upright egg: ae's charts give them the egg shape with a 0.5 rad rotation, but the
-#: shipped PDFs (kateri) draw every egg upright, so the figures readers know have no tilt.
-EGG_SHAPED = ("egg", "reassortant")
-
-
 def ugly_egg_path(x: float, y: float, r: float) -> Any:
-    """ae's serum marker for egg-grown sera ("U"; kateri draw_on_pdf.dart, PointShape.uglyegg):
-    a hexagon with vertices (0, r), (r, 0.6r), (0.8r, -0.6r), (0, -r), (-0.8r, -0.6r),
-    (-r, 0.6r). It fills the same box as a cell serum's square (half-width ``r``), and its wide
-    end is DOWN on the page, like the egg's.
-
-    Sarah, 1 Oct 2026: "Egg sera should be ugly egg shaped", which is ae's stated convention.
-    The Sep 2026 shipped PDFs did NOT draw it: they contain no hexagon, and their egg and
-    reassortant sera are drawn as plain eggs (measured: notes/maps/egg-marker/).
-    """
+    """The "uglyegg" marker (kateri draw_on_pdf.dart, PointShape.uglyegg): a hexagon with
+    vertices (0, r), (r, 0.6r), (0.8r, -0.6r), (0, -r), (-0.8r, -0.6r), (-r, 0.6r). It fills the
+    same box as a "box" marker of half-width ``r``, wide end DOWN on the page."""
     from matplotlib.path import Path as MplPath
 
     verts = [
@@ -75,14 +58,10 @@ def ugly_egg_path(x: float, y: float, r: float) -> Any:
 
 
 def egg_path(x: float, y: float, r: float) -> Any:
-    """The egg marker reports have always used: kateri's ovoid (draw_on_pdf.dart, PointShape.egg).
-
-    Two mirrored cubic Bezier curves between apexes ``r`` above and below the centre, with
-    control points at (+-1.4r, 0.95r) by the wide end and (+-0.8r, -0.98r) by the narrow end.
-    So it is as tall as a circle marker is wide (2r), 1.19 times as tall as it is wide, and the
-    wide end is DOWN on the page (page y grows downward here, as in kateri). Measured on the
-    shipped Sep 2026 PDFs: every egg upright, wide end down, height/width 1.191.
-    """
+    """The "egg" marker (kateri draw_on_pdf.dart, PointShape.egg): two mirrored cubic Bezier
+    curves between apexes ``r`` above and below the centre, control points at (+-1.4r, 0.95r) by
+    the wide end and (+-0.8r, -0.98r) by the narrow end. As tall as a circle marker is wide (2r),
+    1.191 times as tall as wide, wide end DOWN on the page (page y grows downward here)."""
     from matplotlib.path import Path as MplPath
 
     verts = [
@@ -160,8 +139,6 @@ def draw_scene(
     side over ``look.page_points`` for a panel (:func:`af.map.figure.draw_axes`), so a panel is
     the page shrunk. Everything else is in page fractions already.
     """
-    from matplotlib.patches import Circle, PathPatch, Rectangle
-
     ax.set_xlim(0, 1)
     ax.set_ylim(1, 0)  # y grows downward, as in the map frame
     ax.axis("off")
@@ -187,21 +164,12 @@ def draw_scene(
         if p.kind == "serum":
             s = look.serum_half_side
             style: dict[str, Any] = {"fc": "none", "ec": SERUM_OUTLINE, "lw": scale, "zorder": z}
-            if p.passage_class in EGG_SHAPED:
-                ax.add_patch(PathPatch(ugly_egg_path(x, y, s), **style))
-            else:
-                ax.add_patch(Rectangle((x - s, y - s), 2 * s, 2 * s, **style))
-            continue
-        grey = p.greyed or p.colour is None
-        fill = GREY if grey else p.colour
-        edge = GREY if grey else "black"
-        r = look.antigen_radius * (look.vaccine_scale if p.vaccine else 1.0)
-        if p.vaccine:
-            edge = "black"
-        if p.passage_class in EGG_SHAPED:
-            ax.add_patch(PathPatch(egg_path(x, y, r), fc=fill, ec=edge, lw=0.8 * scale, zorder=z))
         else:
-            ax.add_patch(Circle((x, y), r, fc=fill, ec=edge, lw=0.8 * scale, zorder=z))
+            grey = p.greyed or p.colour is None
+            edge = "black" if p.vaccine else (GREY if grey else "black")
+            s = look.antigen_radius * (look.vaccine_scale if p.vaccine else 1.0)
+            style = {"fc": GREY if grey else p.colour, "ec": edge, "lw": 0.8 * scale, "zorder": z}
+        ax.add_patch(_marker_patch(p.marker, x, y, s, style))
     for lab in labels.values():
         ax.text(
             lab.box[0],
@@ -224,6 +192,21 @@ def draw_scene(
         )
     if legend:
         _draw_legend(ax, scene, look, scale)
+
+
+def _marker_patch(marker: str, x: float, y: float, size: float, style: dict[str, Any]) -> Any:
+    """One marker. ``size`` is the radius ("circle", "egg") or half-side ("box", "uglyegg")."""
+    from matplotlib.patches import Circle, PathPatch, Rectangle
+
+    if marker == "circle":
+        return Circle((x, y), size, **style)
+    if marker == "egg":
+        return PathPatch(egg_path(x, y, size), **style)
+    if marker == "box":
+        return Rectangle((x - size, y - size), 2 * size, 2 * size, **style)
+    if marker == "uglyegg":
+        return PathPatch(ugly_egg_path(x, y, size), **style)
+    raise ValueError(f"unknown marker shape {marker!r} (known: {', '.join(MARKERS)})")
 
 
 def _draw_legend(ax: Any, scene: Scene, look: Look, scale: float = 1.0) -> None:
@@ -265,115 +248,6 @@ def _draw_legend(ax: Any, scene: Scene, look: Look, scale: float = 1.0) -> None:
             ha="right",
             zorder=11,
         )
-
-
-def drawn_fill(p: ScenePoint) -> str:
-    """The fill actually drawn (I7 never has a null colour): sera are outline-only."""
-    if p.kind == "serum":
-        return "transparent"
-    return GREY if (p.greyed or p.colour is None) else p.colour
-
-
-def check_provenance_inputs(inputs: Any) -> None:
-    """Every input a figure was made from is named with its content hash (design rule 5)."""
-    if not isinstance(inputs, dict) or not inputs:
-        raise ValueError("provenance needs 'inputs': {name: {'sha256': ..., ...}}")
-    for name, item in inputs.items():
-        if not isinstance(item, dict) or len(str(item.get("sha256", ""))) != 64:
-            raise ValueError(f"provenance input {name!r} has no sha256")
-
-
-def i7_document(
-    scene: Scene,
-    frame: Frame,
-    labels: Mapping[str, Placed],
-    *,
-    chart: str,
-    pdf: Path,
-    created: dt.datetime,
-    provenance: dict[str, Any],
-    orientation: dict[str, object] | None = None,
-    flags: Sequence[str] = (),
-) -> dict[str, Any]:
-    """The I7 JSON for a rendered map (eu-23's I7 draft v1). ``created`` must carry a time zone."""
-    if created.tzinfo is None:
-        raise ValueError("I7 'created' needs a time zone")
-    check_provenance_inputs(provenance.get("inputs"))
-    digest = hashlib.sha256(pdf.read_bytes()).hexdigest()
-    page = frame.page(scene.xy())
-    inside = np.asarray((page >= 0).all(axis=1) & (page <= 1).all(axis=1), dtype=np.bool_)
-
-    def point(i: int, p: ScenePoint) -> dict[str, Any]:
-        d: dict[str, Any] = {
-            "id": p.id,
-            "name": p.name,
-            "passage_class": p.passage_class,
-            "date": p.date.isoformat() if p.date else None,
-            "xy": [round(p.xy[0], 4), round(p.xy[1], 4)] if p.xy is not None else None,
-            "shown": p.shown,
-            "in_viewport": bool(inside[i]) if p.xy is not None else False,
-            "clade": p.legend,
-            "colour": drawn_fill(p),
-            "greyed": p.greyed,
-            "vaccine": p.vaccine is not None,
-            "reference": p.reference,
-            "sequenced": p.sequenced,
-        }
-        if p.hidden_reason:
-            d["hidden_reason"] = p.hidden_reason
-        if p.kind == "serum":
-            d["serum_id"] = p.serum_id
-        if p.id in labels:
-            d["label"] = labels[p.id].text
-        return d
-
-    map_block: dict[str, Any] = {
-        "chart": chart,
-        "window": {
-            "name": scene.window.name,
-            "since": scene.window.since.isoformat() if scene.window.since else None,
-        },
-        "viewport": [frame.x, frame.y, frame.size, frame.size],
-        "clade_scheme": scene.scheme,
-        "legend": [{"clade": t, "count": n} for t, _, n in scene.legend],
-        "antigens": [point(i, p) for i, p in enumerate(scene.points) if p.kind == "antigen"],
-        "sera": [point(i, p) for i, p in enumerate(scene.points) if p.kind == "serum"],
-    }
-    shown_ag = [p for p in scene.points if p.kind == "antigen" and p.shown]
-    map_block["colour_coverage"] = {
-        "shown_antigens": len(shown_ag),
-        "sequenced": sum(p.sequenced for p in shown_ag),
-        "painted": sum(p.colour is not None for p in shown_ag),
-        "sequenced_unpainted": scene.sequenced_unpainted,
-        "unsequenced": sum(not p.sequenced for p in shown_ag),
-        "vaccines_recoloured_from_cell": scene.vaccines_recoloured,
-        "vaccines_without_cell_preparation": list(scene.vaccines_without_cell),
-    }
-    if flags:
-        # Short notes about what happened while the map was made: a curation rule that refused,
-        # a guard that fired. The comparison prints them, so a flagged map is never silently odd.
-        map_block["flags"] = list(flags)
-    if orientation is not None:
-        map_block["orientation"] = orientation
-    return {
-        "i7_version": 1,
-        "kind": "map",
-        "title": scene.title,
-        "placeholder": False,
-        "figure": {"pdf": pdf.name, "sha256": digest, "pages": 1},
-        "provenance": {"producer": "af.map.render", "created": created.isoformat(), **provenance},
-        "map": map_block,
-    }
-
-
-def write_i7(document: dict[str, Any], out_pdf: Path) -> Path:
-    """Write ``<pdf stem>.i7.json`` beside the PDF, after checking the PDF hash still matches."""
-    digest = hashlib.sha256(out_pdf.read_bytes()).hexdigest()
-    if document["figure"]["sha256"] != digest:
-        raise RuntimeError(f"{out_pdf} changed after its I7 was built")
-    target = out_pdf.with_name(out_pdf.stem + ".i7.json")
-    target.write_text(json.dumps(document, indent=1, allow_nan=False) + "\n")
-    return target
 
 
 def recent_hidden(scene: Scene, frame: Frame, furniture: Sequence[Box], since: dt.date) -> int:

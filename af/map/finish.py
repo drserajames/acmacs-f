@@ -15,17 +15,15 @@ from typing import Any
 
 import numpy as np
 
+from af.map.i7 import check_provenance_inputs, i7_document, write_i7
 from af.map.labels import Placed, place_labels
 from af.map.render import (
     DEFAULT_LOOK,
     Look,
-    check_provenance_inputs,
     draw_pdf,
-    i7_document,
     legend_box,
     recent_hidden,
     title_box,
-    write_i7,
 )
 from af.map.style import ColourScheme, PointIn, Scene, Window, style_points
 from af.map.viewport import Frame, FrameChoice, Priority, choose_frame

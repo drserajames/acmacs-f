@@ -20,6 +20,8 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
+from af.map.style import Marker
+
 PassageClass = Literal["egg", "cell", "reassortant"]
 PASSAGE_CLASSES: tuple[PassageClass, ...] = ("cell", "egg", "reassortant")
 
@@ -276,3 +278,19 @@ def _row_passage(table: str, word: str) -> PassageClass | None:
         if word == cls:
             return cls
     raise ValueError(f"vaccine table {table!r}: unknown passage {word!r}")
+
+
+#: Passage classes drawn egg-shaped. Reassortants are egg-grown, and the reports draw them as the
+#: same upright egg (ae's charts tilt reassortants by 0.5 rad, but the shipped PDFs never applied
+#: it). Egg-grown sera take ae's "ugly egg" (Sarah, 1 Oct 2026: "Egg sera should be ugly egg
+#: shaped"; the Sep 2026 ae round's PDFs drew them as plain eggs, notes/maps/egg-marker/).
+EGG_GROWN = ("egg", "reassortant")
+
+
+def marker_for(kind: str, passage: str | None) -> Marker:
+    """The marker shape for a point, from its kind and passage class: the one place a passage
+    becomes a shape, so the renderer never interprets a passage."""
+    egg = passage in EGG_GROWN
+    if kind == "serum":
+        return "uglyegg" if egg else "box"
+    return "egg" if egg else "circle"
