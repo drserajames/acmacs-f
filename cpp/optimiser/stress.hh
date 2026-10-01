@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <span>
 #include <vector>
@@ -18,6 +19,28 @@
 
 namespace af::map
 {
+    // The error terms shared by the stress and the reactivity fit (one copy of the formula).
+    namespace terms
+    {
+        constexpr double sigmoid_multiplier = 10.0;
+
+        inline double sigmoid(double x) { return 1.0 / (1.0 + std::exp(-x)); }
+
+        // Error of one "<" titre as a function of diff = target + 1 - map distance.
+        inline double less_than_error(double diff) { return diff * diff * sigmoid(sigmoid_multiplier * diff); }
+
+        // d(less_than_error)/d(diff)
+        inline double less_than_error_slope(double diff)
+        {
+            const double s = sigmoid(sigmoid_multiplier * diff);
+            return 2.0 * diff * s + diff * diff * s * (1.0 - s) * sigmoid_multiplier;
+        }
+
+        // Two points on top of each other have no direction; ae divides by 1e-5 instead of 0
+        // so the gradient stays finite (ae stress.cc non_zero()).
+        inline double nonzero(double distance) { return distance == 0.0 ? 1e-5 : distance; }
+    } // namespace terms
+
     class Stress
     {
       public:

@@ -6,6 +6,7 @@ pybind11_add_module(_core
   grid_test.cc
   minimise.cc
   problem.cc
+  reactivity.cc
   relax.cc
   stress.cc)
 target_link_libraries(_core PRIVATE af::alglib)

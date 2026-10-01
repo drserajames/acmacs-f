@@ -11,6 +11,7 @@
 #include "grid_test.hh"
 #include "problem.hh"
 #include "random.hh"
+#include "reactivity.hh"
 #include "relax.hh"
 #include "stress.hh"
 
@@ -305,6 +306,59 @@ PYBIND11_MODULE(_core, m)
             return py::array_t<double>(static_cast<py::ssize_t>(result.size()), result.data());
         },
         py::arg("titre_value"), py::arg("titre_type"), py::arg("minimum") = 0.0, "Column bases as ae computes them unforced (tests only).");
+
+    const auto reactivity_options = [](double penalty, const std::string& column_bases, bool clip, double minimum_column_basis, const std::string& method,
+                                       const std::string& precision) {
+        return ReactivityOptions{penalty, column_bases_mode_from_string(column_bases), clip, minimum_column_basis, method_from_string(method), precision_from_string(precision)};
+    };
+
+    m.def(
+        "fit_reactivity",
+        [reactivity_options](const Problem& problem, const carray<double>& layout, const carray<double>& start, const carray<double>& fixed, double penalty,
+                             const std::string& column_bases, bool clip, double minimum_column_basis, const std::string& method, const std::string& precision) {
+            std::size_t dimensions = 0;
+            const auto args = layout_vector(problem, layout, dimensions);
+            const auto start_v = to_vector(start), fixed_v = to_vector(fixed);
+            const auto options = reactivity_options(penalty, column_bases, clip, minimum_column_basis, method, precision);
+            ReactivityFit fit;
+            {
+                py::gil_scoped_release release;
+                fit = fit_reactivity(problem, args, dimensions, start_v, fixed_v, options);
+            }
+            py::dict out;
+            out["reactivity"] = py::array_t<double>(static_cast<py::ssize_t>(fit.reactivity.size()), fit.reactivity.data());
+            out["layout"] = layout_array(fit.layout, fit.dimensions);
+            out["stress"] = fit.stress;
+            out["objective"] = fit.objective;
+            out["column_bases"] = py::array_t<double>(static_cast<py::ssize_t>(fit.column_bases.size()), fit.column_bases.data());
+            out["n_iterations"] = fit.iterations;
+            out["termination"] = fit.termination;
+            return out;
+        },
+        py::arg("problem"), py::arg("layout"), py::arg("start"), py::arg("fixed"), py::kw_only(), py::arg("penalty"), py::arg("column_bases"), py::arg("clip"),
+        py::arg("minimum_column_basis"), py::arg("method") = "cg", py::arg("precision") = "fine");
+
+    m.def(
+        "reactivity_objective",
+        [reactivity_options](const Problem& problem, const carray<double>& layout, const carray<double>& reactivity, double penalty, const std::string& column_bases, bool clip,
+                             double minimum_column_basis) {
+            std::size_t dimensions = 0;
+            const auto args = layout_vector(problem, layout, dimensions);
+            const auto r = to_vector(reactivity);
+            std::vector<double> layout_gradient(args.size()), r_gradient(r.size());
+            const auto options = reactivity_options(penalty, column_bases, clip, minimum_column_basis, "cg", "fine");
+            const double value = reactivity_objective(problem, args, dimensions, r, options, layout_gradient, r_gradient);
+            return py::make_tuple(value, layout_array(layout_gradient, dimensions), py::array_t<double>(static_cast<py::ssize_t>(r_gradient.size()), r_gradient.data()));
+        },
+        py::arg("problem"), py::arg("layout"), py::arg("reactivity"), py::kw_only(), py::arg("penalty"), py::arg("column_bases"), py::arg("clip"), py::arg("minimum_column_basis"));
+
+    m.def(
+        "reactivity_column_bases",
+        [reactivity_options](const Problem& problem, const carray<double>& reactivity, const std::string& column_bases, double minimum_column_basis) {
+            const auto bases = reactivity_column_bases(problem, to_vector(reactivity), reactivity_options(0.0, column_bases, true, minimum_column_basis, "cg", "fine"));
+            return py::array_t<double>(static_cast<py::ssize_t>(bases.size()), bases.data());
+        },
+        py::arg("problem"), py::arg("reactivity"), py::kw_only(), py::arg("column_bases"), py::arg("minimum_column_basis"));
 
     m.def(
         "resolve_threads", [](int requested) { return resolve_threads(requested); }, py::arg("requested"),

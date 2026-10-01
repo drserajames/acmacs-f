@@ -31,17 +31,11 @@ namespace af::map
             throw std::invalid_argument{"unknown precision"};
         }
 
-        struct Objective
-        {
-            const Stress* stress;
-            std::size_t dimensions;
-        };
-
         void evaluate(const alglib::real_1d_array& x, double& value, alglib::real_1d_array& gradient, void* data)
         {
-            const auto* objective = static_cast<const Objective*>(data);
+            const auto* function = static_cast<const ValueAndGradient*>(data);
             const auto n = static_cast<std::size_t>(x.length());
-            value = objective->stress->value_and_gradient({x.getcontent(), n}, objective->dimensions, {gradient.getcontent(), n});
+            value = (*function)({x.getcontent(), n}, {gradient.getcontent(), n});
         }
 
         void set_disconnected_rows(std::span<double> layout, std::size_t dimensions, const std::vector<char>& disconnected, double value)
@@ -94,28 +88,25 @@ namespace af::map
         }
     } // namespace
 
-    Minimised minimise(const Stress& stress, std::span<double> layout, std::size_t dimensions, const std::vector<char>& disconnected, Method method, Precision precision)
+    Minimisation minimise_function(const ValueAndGradient& function, std::span<double> x_in, Method method, Precision precision)
     {
-        DisconnectedAtZero guard{layout, dimensions, disconnected};
-        require_no_nan(layout, dimensions);
-
         const auto [epsg, epsx] = tolerances(precision);
         const double epsf = 0.0;
         const alglib::ae_int_t unlimited_iterations = 0;
-        Objective objective{&stress, dimensions};
 
         alglib::real_1d_array x;
-        x.attach_to_ptr(static_cast<alglib::ae_int_t>(layout.size()), layout.data());
+        x.attach_to_ptr(static_cast<alglib::ae_int_t>(x_in.size()), x_in.data());
 
         int termination = 0;
         std::size_t iterations = 0, evaluations = 0;
+        void* data = const_cast<ValueAndGradient*>(&function);
         try {
             if (method == Method::cg) {
                 alglib::mincgstate state;
                 alglib::mincgreport report;
                 alglib::mincgcreate(x, state);
                 alglib::mincgsetcond(state, epsg, epsf, epsx, unlimited_iterations);
-                alglib::mincgoptimize(state, evaluate, nullptr, &objective);
+                alglib::mincgoptimize(state, evaluate, nullptr, data);
                 alglib::mincgresultsbuf(state, x, report);
                 termination = static_cast<int>(report.terminationtype);
                 iterations = static_cast<std::size_t>(report.iterationscount);
@@ -130,7 +121,7 @@ namespace af::map
                 alglib::minlbfgscreate(corrections, x, state);
                 alglib::minlbfgssetcond(state, epsg, epsf, epsx, unlimited_iterations);
                 alglib::minlbfgssetstpmax(state, max_step);
-                alglib::minlbfgsoptimize(state, evaluate, nullptr, &objective);
+                alglib::minlbfgsoptimize(state, evaluate, nullptr, data);
                 alglib::minlbfgsresultsbuf(state, x, report);
                 termination = static_cast<int>(report.terminationtype);
                 iterations = static_cast<std::size_t>(report.iterationscount);
@@ -142,8 +133,18 @@ namespace af::map
         }
         if (termination < 0)
             throw std::runtime_error{termination_error(termination)};
+        return {iterations, evaluations, termination};
+    }
 
-        return {stress.value(layout, dimensions), iterations, evaluations, termination};
+    Minimised minimise(const Stress& stress, std::span<double> layout, std::size_t dimensions, const std::vector<char>& disconnected, Method method, Precision precision)
+    {
+        DisconnectedAtZero guard{layout, dimensions, disconnected};
+        require_no_nan(layout, dimensions);
+        const ValueAndGradient function = [&stress, dimensions](std::span<const double> x, std::span<double> gradient) {
+            return stress.value_and_gradient(x, dimensions, gradient);
+        };
+        const auto result = minimise_function(function, layout, method, precision);
+        return {stress.value(layout, dimensions), result.iterations, result.evaluations, result.termination};
     }
 
     std::vector<double> reduce_dimensions(std::span<const double> layout, std::size_t n_points, std::size_t from, std::size_t to, const std::vector<char>& disconnected)
