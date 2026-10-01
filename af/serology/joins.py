@@ -42,20 +42,11 @@ from af.seq.matching_rules import MatchingRules
 from af.seq.passage_match import PassageMatcher
 from af.serology.store import StoreError
 from af.store import StoreRef
+from af.util.subtypes import SubtypeError, subtypes
 
 STATUSES = ("matched", "doubtful", "unmatched")
 SEVERAL_DATASETS = "serology.matched-in-several-datasets"
 NO_DATASET = "serology.no-sequence-dataset"
-
-#: Which sequence datasets an antigen is matched within, by (subtype, lineage). A B antigen
-#: of unknown lineage is matched across both B datasets.
-DATASETS_FOR: dict[tuple[str, str], tuple[str, ...]] = {
-    ("A(H1N1)", ""): ("h1",),
-    ("A(H3N2)", ""): ("h3",),
-    ("B", "VICTORIA"): ("bvic",),
-    ("B", "YAMAGATA"): ("byam",),
-    ("B", ""): ("bvic", "byam"),
-}
 
 ClassOf = Callable[[Mapping[str, Any]], str]
 
@@ -198,8 +189,16 @@ def _match_row(
     row: Mapping[str, Any], indexes: Mapping[str, SequenceIndex], class_of: ClassOf
 ) -> Match | None:
     """The matcher's answer for one antigen row; None if no dataset covers its subtype."""
-    datasets = DATASETS_FOR.get((row["subtype"], row.get("lineage") or ""))
-    if not datasets or any(d not in indexes for d in datasets):
+    # the sequence datasets an antigen is matched within, from the subtype table
+    # (af/subtypes.toml), in table order: a B antigen of unknown lineage is matched across both
+    # B datasets, B/Vic first. A subtype or lineage the table does not list is counted
+    # (NO_DATASET), not fatal for the whole join.
+    try:
+        rows = subtypes().for_table(row["subtype"], row.get("lineage") or "")
+    except SubtypeError:
+        return None
+    datasets = tuple(r.key for r in rows)
+    if any(d not in indexes for d in datasets):
         return None
     results = [
         indexes[d].match(
@@ -539,7 +538,7 @@ def link_from_store(
         sequences_ref,
     )
 
-    datasets = sorted({d for group in DATASETS_FOR.values() for d in group})
+    datasets = sorted(subtypes().keys())
     if sequences is None:
         present = {ref.dataset for ref in store.list_datasets("sequences")}
         missing = [d for d in datasets if d not in present]

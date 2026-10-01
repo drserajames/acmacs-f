@@ -46,11 +46,7 @@ from af.stat.counts import stat_counts
 from af.stat.output import Previous, write_stat
 from af.store import ExternalInput, Store, StoreError, StoreRef
 from af.util.artefacts import sha256_path
-
-#: Store datasets whose isolates the location lookup learns from.
-SEQUENCE_DATASETS = ("h1", "h3", "bvic", "byam")
-#: File-name prefix per subtype, as today's geo/<st>-YYYY-MM.pdf.
-GEO_PREFIX = {"A(H1N1)": "h1", "A(H3N2)": "h3", "B": "b"}
+from af.util.subtypes import subtypes
 
 
 @dataclass(frozen=True)
@@ -92,7 +88,7 @@ def make_geo_and_stat(
     previous_stat: Previous | None = None,
     colouring: Mapping[str, SubtypeColouring] | None = None,
     matching: MatchingRules | None = None,
-    split_by_lineage: tuple[str, ...] = ("B",),
+    split_by_lineage: tuple[str, ...] | None = None,
     identity_rules: IdentityRules | None = None,
 ) -> OutputsReport:
     """Write ``geo/<st>-records.json``, ``geo/<st>-YYYY-MM.pdf`` and ``stat/`` for a window.
@@ -104,7 +100,7 @@ def make_geo_and_stat(
     serology = store.current("serology", "all")
     con = query.connect(store.resolve(serology))
     tables = locations.LocationTables.read(location_tables)
-    lookup = locations.places_from_store(store, SEQUENCE_DATASETS, tables)
+    lookup = locations.places_from_store(store, subtypes().keys(), tables)
     preps, uses = query.preparations(con), query.serum_uses(con)
     report = OutputsReport(
         serology=serology,
@@ -124,7 +120,7 @@ def make_geo_and_stat(
     geo_dir = out_dir / "geo"
     geo_dir.mkdir(parents=True, exist_ok=True)
     for subtype in sorted({s for s, _, _, _ in geo.dots}):
-        prefix = GEO_PREFIX.get(subtype, subtype)
+        prefix = subtypes().table_subtype(subtype).geo
         doc = to_i7(geo, subtype)
         records = geo_dir / f"{prefix}-records.json"
         records.write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -144,7 +140,9 @@ def make_geo_and_stat(
 
     counts = stat_counts(
         preps, uses, first, last, locations.name_location, region,
-        split_by_lineage=split_by_lineage,
+        split_by_lineage=(
+            subtypes().split_by_lineage() if split_by_lineage is None else split_by_lineage
+        ),
     )  # fmt: skip
     report.files += write_stat(counts, first, last, out_dir / "stat", previous_stat)
     report.stat_unknown_region = dict(counts.unknown_continent)
