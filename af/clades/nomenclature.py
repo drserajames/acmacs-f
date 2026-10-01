@@ -245,6 +245,31 @@ class CladeSet:
         }
 
 
+def lineage(clade_set: CladeSet, clade: str | None) -> tuple[str, ...] | None:
+    """A clade's lineage, root first, keeping "unknown" and "no clade" apart.
+
+    ``clade`` is a clade as a consumer holds it, e.g. a preparation's from
+    :func:`af.serology.joins.preparation_clade`, or a ``clades/<subtype>`` row's:
+
+    - ``None``: **unknown** (no sequence, no clade row, or candidates that disagree)
+      -> ``None``;
+    - ``""``: **known to have no clade**: the nomenclature names none for this virus
+      -> ``()``;
+    - a clade name -> its ancestors from the root, then the clade itself.
+
+    The two empty answers must not be collapsed: writing ``(*reversed(ancestors(c)), c)``
+    by hand turns a missing sequence into a virus outside every clade, or fails on "". A
+    name that is not a clade of ``clade_set`` is an error, never an empty lineage.
+    """
+    if clade is None:
+        return None
+    if clade == "":
+        return ()
+    if clade not in clade_set:
+        raise NomenclatureError(f"{clade!r} is not a clade of {clade_set.version}")
+    return (*reversed(clade_set.ancestors(clade)), clade)
+
+
 def load_clade_set(
     subtype: str,
     clones: Path,
