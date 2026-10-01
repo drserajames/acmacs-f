@@ -813,3 +813,165 @@ def test_table_distances_match_the_written_out_targets_and_stress():
     np.testing.assert_allclose(
         residual[regular] ** 2, opt.stress_table(plain, layout)[regular], rtol=1e-12
     )
+
+
+# ---------------------------------------------------------------------------------------
+# antigen reactivity
+
+
+def planted_reactivity(
+    seed: int = 1, *, n_ag: int = 40, n_sr: int = 10, n_reactive: int = 8, size: float = 1.5
+):
+    """An invented table whose antigens' titres are shifted by known amounts: titre = column
+    basis - distance + shift. The fitted adjustment that undoes a shift is minus it."""
+    rng = np.random.default_rng(seed)
+    truth = rng.uniform(-4.0, 4.0, (n_ag + n_sr, 2))
+    dist = np.linalg.norm(truth[:n_ag, None] - truth[None, n_ag:], axis=2)
+    colbase = rng.uniform(7.0, 9.0, n_sr)
+    shift = np.zeros(n_ag)
+    reactive = rng.choice(n_ag, n_reactive, replace=False)
+    shift[reactive] = rng.choice([-1.0, 1.0], n_reactive) * size
+    value = colbase[None, :] - dist + shift[:, None]
+    kind = np.ones(value.shape, dtype=np.int8)
+    problem = MapProblem(
+        value, kind, colbase, np.zeros(n_ag + n_sr, dtype=bool), dodgy_is_regular=False
+    )
+    return problem, opt.relax(problem, n_starts=50, seed=seed).best.layout, shift
+
+
+@pytest.mark.parametrize("column_bases", ["fixed", "recompute"])
+@pytest.mark.parametrize("clip", [True, False])
+def test_reactivity_objective_gradient_matches_finite_differences(column_bases, clip):
+    problem, layout = mixed_table(seed=5)
+    rng = np.random.default_rng(2)
+    reactivity = rng.normal(0.0, 0.7, problem.n_antigens)
+    kw: dict[str, Any] = dict(
+        penalty=0.6, column_bases=column_bases, clip=clip, minimum_column_basis=1.0
+    )
+
+    def value(lay, r):
+        return opt._core.reactivity_objective(problem._core_problem, lay, r, **kw)[0]
+
+    _, g_layout, g_r = opt._core.reactivity_objective(
+        problem._core_problem, layout, reactivity, **kw
+    )
+    h = 1e-6
+    for index in map(tuple, np.argwhere(np.isfinite(layout))):
+        plus, minus = layout.copy(), layout.copy()
+        plus[index] += h
+        minus[index] -= h
+        assert g_layout[index] == pytest.approx(
+            (value(plus, reactivity) - value(minus, reactivity)) / (2 * h), abs=1e-5
+        )
+    for i in range(problem.n_antigens):
+        plus, minus = reactivity.copy(), reactivity.copy()
+        plus[i] += h
+        minus[i] -= h
+        assert g_r[i] == pytest.approx(
+            (value(layout, plus) - value(layout, minus)) / (2 * h), abs=1e-5
+        )
+
+
+def test_reactivity_objective_without_adjustment_is_the_stress():
+    problem, layout = mixed_table()
+    zero = np.zeros(problem.n_antigens)
+    value = opt._core.reactivity_objective(
+        problem._core_problem,
+        layout,
+        zero,
+        penalty=1.0,
+        column_bases="fixed",
+        clip=True,
+        minimum_column_basis=0.0,
+    )[0]
+    assert value == pytest.approx(opt.stress(problem, layout), rel=1e-12)
+
+
+def test_fit_recovers_planted_shifts_on_clean_data():
+    problem, layout, shift = planted_reactivity()
+    fit = opt.fit_antigen_reactivity(problem, layout, penalty=0.0)
+    # measured: RMSE 0.000 on noise-free data
+    np.testing.assert_allclose(fit.reactivity, -shift, atol=1e-3)
+    assert fit.stress < 1e-6 < fit.stress_before
+    assert fit.objective == pytest.approx(fit.stress)
+
+
+def test_a_large_penalty_gives_the_plain_map():
+    problem, layout, _ = planted_reactivity(seed=2)
+    fit = opt.fit_antigen_reactivity(problem, layout, penalty=1e3)
+    assert np.max(np.abs(fit.reactivity)) < 1e-3
+    assert fit.stress == pytest.approx(opt.optimise(problem, layout).stress, rel=1e-4)
+
+
+def test_held_antigens_keep_their_values():
+    problem, layout, _ = planted_reactivity(seed=3)
+    fixed = np.full(problem.n_antigens, np.nan)
+    fixed[[0, 5]] = [0.7, -1.2]
+    fit = opt.fit_antigen_reactivity(problem, layout, penalty=0.5, fixed=fixed)
+    assert fit.reactivity[0] == 0.7 and fit.reactivity[5] == -1.2
+    assert np.any(fit.reactivity[np.isnan(fixed)] != 0.0)
+
+
+@pytest.mark.parametrize("column_bases", ["fixed", "recompute"])
+def test_applying_the_fit_reproduces_its_stress(column_bases):
+    """The documented way to use a fit: avidity_adjust = 2 ** reactivity for the antigens, and the
+    returned column bases."""
+    problem, layout, _ = planted_reactivity(seed=4)
+    fit = opt.fit_antigen_reactivity(problem, layout, penalty=0.5, column_bases=column_bases)
+    avidity = np.concatenate([2.0**fit.reactivity, np.ones(problem.n_sera)])
+    applied = with_changes(problem, avidity_adjust=avidity, column_bases=fit.column_bases)
+    assert opt.stress(applied, fit.projection.layout) == pytest.approx(fit.stress, rel=1e-9)
+    if column_bases == "fixed":
+        np.testing.assert_array_equal(fit.column_bases, problem.column_bases)
+
+
+def test_recomputed_column_bases_follow_the_adjusted_titres():
+    problem, _ = mixed_table()
+    reactivity = np.random.default_rng(4).normal(0.0, 1.0, problem.n_antigens)
+    bases = opt._core.reactivity_column_bases(
+        problem._core_problem, reactivity, column_bases="recompute", minimum_column_basis=2.0
+    )
+    adjusted = problem.titre_value + reactivity[:, None]
+    np.testing.assert_allclose(bases, opt.column_bases(adjusted, problem.titre_type, minimum=2.0))
+
+
+def test_clip_matters_only_when_a_target_is_negative():
+    # no shifts: every target is a true distance, so none is negative
+    problem, layout, _ = planted_reactivity(seed=6, n_reactive=0)
+    kw: dict[str, Any] = dict(penalty=0.0, column_bases="fixed", minimum_column_basis=0.0)
+    zero = np.zeros(problem.n_antigens)
+    core = problem._core_problem
+    clipped = opt._core.reactivity_objective(core, layout, zero, clip=True, **kw)[0]
+    assert clipped == opt._core.reactivity_objective(core, layout, zero, clip=False, **kw)[0]
+    value = problem.titre_value.copy()
+    value[0, 0] = problem.column_bases[0] + 1.5  # a titre above its column basis: target -1.5
+    above = with_changes(problem, titre_value=value)._core_problem
+    with_clip = opt._core.reactivity_objective(above, layout, zero, clip=True, **kw)[0]
+    without = opt._core.reactivity_objective(above, layout, zero, clip=False, **kw)[0]
+    assert with_clip != without
+
+
+def test_reactivity_scan_follows_ae():
+    problem, layout, _ = planted_reactivity(seed=7, n_ag=12, n_sr=5, n_reactive=2)
+    grid = (1.0, -1.0, 2.0)
+    (result,) = opt.antigen_reactivity_scan(problem, layout, adjustments=grid, antigens=[3])
+    original = opt.stress(problem, layout)
+    for adjust in grid:
+        avidity = np.ones(problem.n_points)
+        avidity[3] = 2.0**adjust
+        expected = (
+            opt.optimise(with_changes(problem, avidity_adjust=avidity), layout).stress - original
+        )
+        assert result.stress_diff[adjust] == pytest.approx(expected, rel=1e-12)
+    best_adjust, best_diff = min(result.stress_diff.items(), key=lambda item: item[1])
+    assert result.best == (best_adjust if best_diff < 0 else 0.0)
+
+
+def test_reactivity_inputs_are_checked():
+    problem, layout, _ = planted_reactivity(seed=8, n_ag=10, n_sr=4, n_reactive=1)
+    with pytest.raises(ValueError, match="one entry per antigen"):
+        opt.fit_antigen_reactivity(problem, layout, fixed=np.zeros(3))
+    with pytest.raises(ValueError, match="penalty"):
+        opt.fit_antigen_reactivity(problem, layout, penalty=-1.0)
+    with pytest.raises(ValueError, match="column_bases"):
+        opt.fit_antigen_reactivity(problem, layout, column_bases="moving")  # type: ignore[arg-type]

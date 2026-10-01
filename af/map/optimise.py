@@ -564,6 +564,209 @@ def table_distances(problem: MapProblem) -> FloatArray:
     return np.asarray(problem._core_problem.table_distances())
 
 
+ColumnBasesMode = Literal["fixed", "recompute"]
+
+REACTIVITY_PENALTY = (
+    1.0  # Racmacs's default weight. UNCALIBRATED: a placeholder (see fit docstring)
+)
+AE_REACTIVITY_GRID = (
+    1.0,
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    6.0,
+    -1.0,
+    -2.0,
+    -3.0,
+    -4.0,
+    -5.0,
+    -6.0,
+)  # ae's order
+
+
+@dataclass(frozen=True)
+class ReactivityFit:
+    """Result of :func:`fit_antigen_reactivity`. Nothing in af applies it: to use it, a caller
+    passes ``avidity_adjust = 2 ** reactivity`` for the antigens (and, if ``column_bases`` was
+    ``"recompute"``, the returned ``column_bases``) in a new :class:`MapProblem`."""
+
+    # [n_antigens], log2: the adjustment ADDED to each antigen's log titres (Racmacs's
+    # agReactivityAdjustments, ae's logged avidity adjust). An antigen whose titres all read
+    # too high for its position gets a NEGATIVE adjustment.
+    reactivity: FloatArray
+    projection: Projection  # the map relaxed with these reactivities
+    stress: float  # map stress with the reactivities (penalty excluded)
+    objective: float  # stress + sum((penalty * reactivity) ** 2)
+    stress_before: float  # stress of the given layout without reactivity
+    column_bases: FloatArray  # the column bases the fit uses
+    penalty: float
+    column_bases_mode: ColumnBasesMode
+    clip: bool
+
+
+def fit_antigen_reactivity(
+    problem: MapProblem,
+    layout: FloatArray,
+    *,
+    penalty: float = REACTIVITY_PENALTY,
+    column_bases: ColumnBasesMode = "fixed",
+    clip: bool = True,
+    minimum_column_basis: float = 0.0,
+    fixed: FloatArray | None = None,
+    start: FloatArray | None = None,
+    method: Method = "cg",
+) -> ReactivityFit:
+    """Fit one reactivity adjustment per antigen jointly with the map.
+
+    The adjustment ``r_i`` is added to all of antigen i's log titres (Racmacs's convention,
+    and ae's avidity adjust), so its target distances become ``cb - log2(titre/10) - r_i``.
+    An antigen whose titres are uniformly too high for its position gets a negative ``r_i``.
+
+    Minimises ``stress + sum((penalty * r) ** 2)`` over the layout and all antigens'
+    reactivities together, from ``layout`` (normally a relaxed map), in one minimisation with
+    an analytic gradient. This is Racmacs's ``optimizeAgReactivity`` objective; Racmacs
+    re-relaxes the map for every finite-difference step, which this avoids. Measured against
+    Racmacs 1.2.9 with the same settings (fixed bases, no clip, penalty 1): identical on 3 of
+    4 charts (adjustments to 4e-4); on the 4th (144 antigens) the two reach different optima,
+    and this one is 3% lower on Racmacs's own objective (171.41 vs 176.63). Racmacs took
+    143-174 s at 141-144 antigens and its time grows roughly with the cube of the antigen
+    count; this takes under 0.4 s on a 2,584-point map.
+
+    **Overfitting.** Each reactivity is a free parameter, and a free parameter can only lower
+    the fitted stress. ae's ``avidity_test`` (reproduced by :func:`antigen_reactivity_scan`)
+    flags an adjustment whenever the stress drops *at all*, judged one antigen at a time on
+    the same titres it was fitted to: on real tables that flags noise for most antigens. It is
+    harmless in ae only because ae never applies the result, so do not read it as a safe rule
+    for applying adjustments.
+
+    **The penalty is not optional.** With ``penalty=0`` and clipping, an antigen whose targets
+    all clip to 0 no longer affects the stress, so its adjustment runs away (measured on
+    invented tables: adjustments up to 1,800, and over half of unshifted antigens adjusted).
+    The default, 1 (Racmacs's), is **uncalibrated**.
+
+    **What the defaults cost** (held-out titres: 10% hidden, 5 splits, three real charts,
+    RMSE in log2 units; notes/optimiser/REACTIVITY.md). Fitting nothing: 0.634 / 1.207 /
+    0.831. The default, fixed column bases with penalty 1: 0.637 / 1.247 / 0.770, i.e.
+    **worse than fitting nothing on one of the three charts**, and no single penalty was
+    safe with fixed bases. ``column_bases="recompute"`` with penalty 1: 0.623 / 1.118 /
+    0.722, better than nothing on all three, and so was every penalty from 0.25 to 4.
+    Fixed stays the default (Sarah, 1 Oct 2026) because it matches interface I1 and the
+    chains, which keep the caller's column bases; a recompute fit must be applied with its
+    returned ``column_bases``.
+
+    ``column_bases``: ``"fixed"`` keeps the problem's column bases (af, interface I1, ae).
+    ``"recompute"`` recomputes them from the adjusted titres, as Racmacs does, so raising the
+    antigen that sets a serum's basis raises the basis too (``minimum_column_basis`` applies
+    then). ``clip``: ae and af clip target distances at 0; Racmacs does not.
+
+    Antigens only, as both references: a serum's overall reactivity is already absorbed by its
+    column basis, so a serum offset would only trade off against the basis.
+
+    ``fixed`` ([n_antigens]): NaN marks an antigen to fit, a finite value holds it there.
+    Nothing in af applies the result automatically; see :class:`ReactivityFit`.
+    """
+    n_ag = problem.n_antigens
+    fixed_arr = np.full(n_ag, np.nan) if fixed is None else np.asarray(fixed, dtype=np.float64)
+    start_arr = np.zeros(n_ag) if start is None else np.asarray(start, dtype=np.float64)
+    if fixed_arr.shape != (n_ag,) or start_arr.shape != (n_ag,):
+        raise ValueError(f"fixed and start must have one entry per antigen ({n_ag})")
+    layout_arr = _layout(problem, layout)
+    raw = _core.fit_reactivity(
+        problem._core_problem,
+        layout_arr,
+        start_arr,
+        fixed_arr,
+        penalty=float(penalty),
+        column_bases=column_bases,
+        clip=bool(clip),
+        minimum_column_basis=float(minimum_column_basis),
+        method=method,
+    )
+    return ReactivityFit(
+        reactivity=np.asarray(raw["reactivity"]),
+        projection=Projection(
+            np.asarray(raw["layout"]),
+            float(raw["stress"]),
+            layout_arr.shape[1],
+            int(raw["n_iterations"]),
+            0,
+            0,
+            int(raw["termination"]),
+        ),
+        stress=float(raw["stress"]),
+        objective=float(raw["objective"]),
+        stress_before=stress(problem, layout_arr),
+        column_bases=np.asarray(raw["column_bases"]),
+        penalty=float(penalty),
+        column_bases_mode=column_bases,
+        clip=bool(clip),
+    )
+
+
+@dataclass(frozen=True)
+class ReactivityTest:
+    """One antigen in :func:`antigen_reactivity_scan`."""
+
+    antigen: int
+    best: float  # the grid adjustment with the lowest stress, if below the original; else 0
+    stress_diff: dict[float, float]  # adjustment -> relaxed stress minus original stress
+
+
+def antigen_reactivity_scan(
+    problem: MapProblem,
+    layout: FloatArray,
+    *,
+    adjustments: tuple[float, ...] = AE_REACTIVITY_GRID,
+    antigens: list[int] | None = None,
+    column_bases: ColumnBasesMode = "fixed",
+    minimum_column_basis: float = 0.0,
+    method: Method = "cg",
+) -> list[ReactivityTest]:
+    """ae's ``projection.avidity_test``, for parity with ae: each antigen alone, each grid
+    adjustment set on that antigen only, one fine relax of the whole map from ``layout``,
+    ``best`` = the adjustment with the lowest stress if it is below the original. Matches ae
+    exactly (3 charts, 268 antigens x 12 adjustments: stress changes to 6.4e-10, same best).
+
+    **Unsafe for adjusting a map: it overfits. Do not apply its ``best`` values.** The "any
+    decrease" rule is fitted and judged on the same titres. It flagged 39/41, 52/86 and
+    115/141 antigens on three real charts, and applying its choices made held-out titres
+    *worse* on all three (RMSE 0.634 -> 0.749, 1.207 -> 1.281, 0.831 -> 0.887; 10% of titres
+    hidden, 5 splits). It is kept as a report, for comparison with ae (Sarah, 1 Oct 2026);
+    use :func:`fit_antigen_reactivity` to fit adjustments. O(antigens x adjustments) relaxes.
+    Target distances are always clipped at 0 here (as ae); ``column_bases="recompute"``
+    recomputes the bases from the adjusted titres (not something ae does).
+    """
+    layout_arr = _layout(problem, layout)
+    original = stress(problem, layout_arr)
+    base = (
+        np.ones(problem.n_points)
+        if problem.avidity_adjust is None
+        else np.asarray(problem.avidity_adjust)
+    )
+    results = []
+    for antigen in range(problem.n_antigens) if antigens is None else antigens:
+        diffs: dict[float, float] = {}
+        for adjust in adjustments:
+            avidity = base.copy()
+            avidity[antigen] *= 2.0**adjust
+            changes: dict[str, object] = {"avidity_adjust": avidity}
+            if column_bases == "recompute":
+                reactivity = np.zeros(problem.n_antigens)
+                reactivity[antigen] = adjust
+                changes["column_bases"] = _core.reactivity_column_bases(
+                    problem._core_problem,
+                    reactivity,
+                    column_bases="recompute",
+                    minimum_column_basis=float(minimum_column_basis),
+                )
+            adjusted = dataclasses.replace(problem, **changes)  # type: ignore[arg-type]
+            diffs[adjust] = optimise(adjusted, layout_arr, method=method).stress - original
+        best_adjust, best_diff = min(diffs.items(), key=lambda item: item[1])
+        results.append(ReactivityTest(antigen, best_adjust if best_diff < 0 else 0.0, diffs))
+    return results
+
+
 def gradient(problem: MapProblem, layout: FloatArray) -> FloatArray:
     """Analytic gradient of the stress (zero rows for unmovable and disconnected points)."""
     return np.asarray(problem._core_problem.gradient(_layout(problem, layout)))

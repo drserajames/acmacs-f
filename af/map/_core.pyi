@@ -86,5 +86,35 @@ def grid_test(
 def column_bases(
     titre_value: npt.NDArray[np.float64], titre_type: npt.NDArray[np.int8], minimum: float = 0.0
 ) -> npt.NDArray[np.float64]: ...
+def fit_reactivity(
+    problem: Problem,
+    layout: npt.NDArray[np.float64],
+    start: npt.NDArray[np.float64],
+    fixed: npt.NDArray[np.float64],
+    *,
+    penalty: float,
+    column_bases: str,
+    clip: bool,
+    minimum_column_basis: float,
+    method: str = "cg",
+    precision: str = "fine",
+) -> dict[str, Any]: ...
+def reactivity_objective(
+    problem: Problem,
+    layout: npt.NDArray[np.float64],
+    reactivity: npt.NDArray[np.float64],
+    *,
+    penalty: float,
+    column_bases: str,
+    clip: bool,
+    minimum_column_basis: float,
+) -> tuple[float, npt.NDArray[np.float64], npt.NDArray[np.float64]]: ...
+def reactivity_column_bases(
+    problem: Problem,
+    reactivity: npt.NDArray[np.float64],
+    *,
+    column_bases: str,
+    minimum_column_basis: float,
+) -> npt.NDArray[np.float64]: ...
 def start_seed(seed: int, index: int) -> int: ...
 def resolve_threads(requested: int) -> int: ...

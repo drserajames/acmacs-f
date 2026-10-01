@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <span>
 #include <string>
 #include <vector>
@@ -25,6 +26,20 @@ namespace af::map
         std::size_t evaluations;
         int termination; // alglib termination type, always > 0 (failures throw)
     };
+
+    // Writes the gradient of a function at `x` into `gradient` and returns its value.
+    using ValueAndGradient = std::function<double(std::span<const double> x, std::span<double> gradient)>;
+
+    struct Minimisation
+    {
+        std::size_t iterations;
+        std::size_t evaluations;
+        int termination; // alglib termination type, always > 0 (failures throw)
+    };
+
+    // Minimises any smooth function from `x`, in place, with the same alglib settings as
+    // minimise() (which is this applied to the stress). `x` must be finite.
+    Minimisation minimise_function(const ValueAndGradient& function, std::span<double> x, Method method, Precision precision);
 
     // Minimises the stress starting from `layout`, in place. Rows of disconnected points
     // must be NaN; they are held at 0 during minimisation (alglib rejects NaN) and are NaN
