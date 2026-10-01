@@ -27,6 +27,8 @@ import hashlib
 from collections import Counter
 from pathlib import Path
 
+from af.util.subtypes import subtypes
+
 from . import aliases
 from .cdc import LAB, SUBTYPES, CDCFormatError, ReadResult, _titre_order
 from .model import Antigen, Serum, Table
@@ -152,7 +154,8 @@ def _make_table(
     date, test_subtype, assay_raw = key
     if test_subtype not in SUBTYPES or assay_raw not in ASSAYS:
         raise CDCFormatError(f"unknown subtype/assay {test_subtype!r}/{assay_raw!r}")
-    subtype, lineage, prefix = SUBTYPES[test_subtype]
+    subtype, lineage = SUBTYPES[test_subtype]
+    prefix = subtypes().group_prefix(subtype, lineage)
     assay = ASSAYS[assay_raw]
     default = rules.table_defaults.lookup(lab=LAB, subtype=subtype, assay=assay)
     if default is None:
