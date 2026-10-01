@@ -16,6 +16,7 @@ RULES: dict[str, list[str]] = {
         "CDC\tHINT\tregex\t[0-9]\t<10" + META,
         "CDC\t*\texact\t5\t<10" + META,
         "CDC\tHI\texact\tUnable to test\t*" + META + "yes",
+        "CDC\tHI\texact\tQNS\t*" + META + "yes",
         "LABX\t*\texact\t*\t*" + META + "yes",
         "LABX\t*\texact\t5\t<10" + META + "yes",
         "LABN\tHI\texact\t≧640\t>320" + META + "yes",
@@ -28,6 +29,8 @@ RULES: dict[str, list[str]] = {
         "lab\tfield\tkind\tpattern\taction\tvalue\tevidence\tadded_by\tadded_on\toptional",
         "CDC\tlot\tregex\t.*POOL.*\tdrop\thuman pool" + META,
         "CDC\tlot\tregex\t[0-9]{2}MouseS[0-9]+\tspecies\tMOUSE" + META + "yes",
+        "CDC\tspecies\tregex\tSHEEP|GOAT\tdrop\tnot ferret" + META + "yes",
+        "CDC\tname\tregex\t.*NORMAL FERRET.*\tdrop\tnormal serum" + META + "yes",
         "LABN\tname\tregex\tHuman pool .*\tdrop\thuman pool" + META + "yes",
         "LABV\tid\tregex\tSH\\s*[0-9]{4}.*\tdrop\thuman pool" + META + "yes",
         "LABV\tname\tregex\t.*pool.*\tdrop\thuman pool" + META + "yes",
@@ -96,6 +99,7 @@ RULES: dict[str, list[str]] = {
     "name_rewrites": [
         "lab\tkind\tpattern\treplacement\tevidence\tadded_by\tadded_on\toptional",
         "LABX\tregex\tBX/(.*)\tB/\\1" + META + "yes",
+        "CDC\tregex\t(.*\\S)\\s*\\(NEW\\)\t\\1" + META + "yes",
         "LABN\tregex\t(.*/[0-9]{4})\\s*pdm\\b\\s*(.*)\t\\1 \\2" + META + "yes",
         "LABV\tregex\t^((?:IVR|BVR)-?[0-9]+[A-Z]*)\\s*\\(\\s*([AB]/[^()]*?)\\s*\\)?$\t\\2 \\1"
         + META
