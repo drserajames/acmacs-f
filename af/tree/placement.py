@@ -100,8 +100,11 @@ class PlacementResult:
 def load_placement_limits(path: Path) -> dict[str, PlacementLimit]:
     """Read ``trees/placement.tsv``: one row per subtype, every column required."""
     path = Path(path)
-    with path.open(newline="") as stream:
-        rows = [row for row in csv.DictReader(stream, delimiter="\t") if not _is_comment(row)]
+    # Comment lines are dropped before the header is read, so the file can carry its preamble:
+    # where the numbers came from and who decided them (design rule 11). csv.DictReader would
+    # otherwise take the first comment line as the header.
+    body = [line for line in path.read_text().splitlines() if not line.lstrip().startswith("#")]
+    rows = list(csv.DictReader(body, delimiter="\t"))
     if not rows:
         raise PlacementError(f"{path}: no rows")
     missing = [c for c in COLUMNS if rows and c not in rows[0]]
@@ -128,11 +131,6 @@ def load_placement_limits(path: Path) -> dict[str, PlacementLimit]:
             raise PlacementError(f"{path}: {subtype}: trees must be at least 1")
         limits[subtype] = PlacementLimit(subtype, value, reason, trees)
     return limits
-
-
-def _is_comment(row: Mapping[str, str | None]) -> bool:
-    first = (row.get("subtype") or "").strip()
-    return first.startswith("#")
 
 
 def limit_for(limits: Mapping[str, PlacementLimit], subtype: str) -> PlacementLimit:
