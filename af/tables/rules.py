@@ -165,6 +165,14 @@ class Rules:
             required=("kind", "pattern", "canonical", "min_titre", "min_fraction"),
         )
         for rule in self.strain_aliases.rules:
+            if rule["applies_to"] == "antigen" or rule["min_titre"] or rule["min_fraction"]:
+                try:  # the titre check needs both (af.tables.aliases._check)
+                    int(rule["min_titre"]), float(rule["min_fraction"])
+                except ValueError:
+                    raise ValueError(
+                        f"{rule.where}: min_titre {rule['min_titre']!r} and min_fraction "
+                        f"{rule['min_fraction']!r} must be numbers"
+                    ) from None
             # canonical is the name as written: a regex row matches, it does not substitute,
             # so "B/\1" would become the name itself (it once did, 1 Oct 2026)
             if re.search(r"\\\d|\\g<", rule["canonical"]):
@@ -187,6 +195,13 @@ class Rules:
             scope=("lab",),
             required=("kind", "pattern", "ferret", "canonical", "min_titre", "min_fraction"),
         )
+        for rule in self.serum_ids.rules:
+            # the restored lot is written as is; it cannot be checked against the tables (the
+            # lab lost it everywhere), so at least it must be a plain value
+            if not rule["canonical"].strip() or re.search(r"\\\d|\\g<", rule["canonical"]):
+                raise ValueError(
+                    f"{rule.where}: canonical {rule['canonical']!r} is not a plain lot"
+                )
         self.season_files = RuleTable(
             directory / "season_files.tsv",
             scope=("lab",),

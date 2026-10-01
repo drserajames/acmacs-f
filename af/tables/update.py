@@ -165,6 +165,7 @@ def update(
     report.append(f"flagged ({cdc.MERGED_ISOLATES}; kept merged, Q13): {len(merged)}")
     report.extend(f"  {w}" for w in merged)
     report.extend(warnings.report(tables))
+    errors.extend(warnings.curated_errors(tables))
     errors.extend(f"rule never matched: {r.where}" for t in rules.tables() for r in t.unmatched())
     suffixed = [t.table_id for t in tables if t.date_suffix > 1]
     report.append(f"tables sharing a date (suffix .2+): {len(suffixed)} {suffixed}")

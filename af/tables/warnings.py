@@ -107,3 +107,39 @@ def report(tables: Iterable[Table]) -> list[str]:
         lines.append(f"  {cls} ({len(listed[cls])}), each:")
         lines.extend(f"    {line}" for line in sorted(listed[cls]))
     return lines
+
+
+RULE_OUTPUT = re.compile(r"name '.*' (?:rewritten|renamed) '(.*)' by (\S+)")
+NAME_PROBLEM = re.compile(r"name '(.*)': (?!.* by )")  # a parse problem with a name, not a rule
+FIXED_CELL = re.compile(r"^(\S+\[[^\]]*\]![A-Z]+\d+): .* fixed as .* by (cell_fixes\.tsv:\d+)")
+CELL = re.compile(r"^(\S+\[[^\]]*\]![A-Z]+\d+): ")
+
+
+def curated_errors(tables: list[Table]) -> list[str]:
+    """Located errors for a curated rule whose own output reads badly. A lab's raw text may
+    warn, but a value a rule wrote must read cleanly: 'B/\\1' was a warning among 1,700 on
+    1 Oct 2026 and was published (notes/tables/WARNINGS-CENSUS.md).
+
+    - a name written by name_rewrites or strain_aliases that the parser then flags;
+    - a cell written by cell_fixes that draws a tolerated or review warning.
+
+    A serum id restored by serum_ids cannot be checked against the tables: the lab lost that
+    lot everywhere, which is why the rule exists. Its evidence is the source's history, and
+    the rules loader refuses a blank or substituting canonical (af.tables.rules).
+    """
+    errors: list[str] = []
+    for table in tables:
+        where = table.table_id or table.source_key
+        outputs = {m[1]: m[2] for w in table.warnings if (m := RULE_OUTPUT.search(w))}
+        fixed = {m[1]: m[2] for w in table.warnings if (m := FIXED_CELL.match(w))}
+        for warning in table.warnings:
+            cls, _ = classify(warning)
+            if cls == "applied":
+                continue
+            if (m := NAME_PROBLEM.search(warning)) and m[1] in outputs:
+                errors.append(
+                    f"{where}: {outputs[m[1]]} wrote a name that does not parse: {warning}"
+                )
+            if (m := CELL.match(warning)) and m[1] in fixed:
+                errors.append(f"{where}: {fixed[m[1]]} wrote a cell that reads badly: {warning}")
+    return errors
