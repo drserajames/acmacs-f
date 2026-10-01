@@ -11,7 +11,12 @@ from pathlib import Path
 
 from af.clades.store import clade_set_for, dataset_for
 from af.serology import query
-from af.serology.joins import link_from_store, preparation_key, preparation_sequences
+from af.serology.joins import (
+    link_from_store,
+    preparation_clade,
+    preparation_key,
+    preparation_sequences,
+)
 from af.seq.matching_rules import matching_rules
 from af.store import Store
 
@@ -29,20 +34,8 @@ key = ("A(H3N2)", "A(H3N2)/EXAMPLETOWN/1/2021", "", (), "SIAT1 (2021-02-01)")
 found = sequences.get(key)  # None: no row of this preparation found a usable sequence
 
 
-def clade_of(found):
-    """The preparation's one clade, as colouring decides it; None when it is unknown."""
-    if found is None:
-        return None  # no usable sequence
-    if found.epi_isl is not None:
-        return found.clade  # None: no clade row for the sequence; "": no clade named
-    clades = {c.clade for c in found.tied or found.alternatives}  # nothing chosen
-    if len(clades) == 1:
-        return clades.pop()  # every candidate agrees
-    return found.ranked.clade if found.ranked else None  # a split tie: ae's pick
-
-
 clade_set = clade_set_for(store, store.current("clades", dataset_for("A(H3N2)")), clones)
-clade = clade_of(found)
+clade = preparation_clade(found)  # None: unknown; "": no clade named; or a name
 if clade is None:
     lineage = None  # unknown: no sequence, no clade row, or candidates that disagree
 elif clade == "":
@@ -74,9 +67,9 @@ and `alternatives` lists them.
 
 A preparation with no sequence (`epi_isl is None`) may still have one clade: when every tied
 candidate or alternative carries the same clade, or, for a tie that splits, the clade of ae's
-`ranked` pick (`clade_of` above). `af.geo.colours.dot_styles` applies the same order of rules
+`ranked` pick (`preparation_clade`). `af.geo.colours.dot_styles` applies the same order of rules
 for colour, comparing the candidates' colours rather than their clades (two clades can share a
-colour row); anything that needs a clade per antigen should follow `clade_of` rather than
+colour row); anything that needs a clade per antigen should call `preparation_clade` rather than
 re-derive it.
 
 ## Reproducing a result
