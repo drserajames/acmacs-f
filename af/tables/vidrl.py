@@ -470,9 +470,17 @@ class SheetReader:
             )
             self.warnings.extend(f"{self.s.where(r, name_col)}: {p}" for p in problems)
             raw_passage = self.s.cell(r, passage_col) if passage_col is not None else ""
-            passage = self._passage(raw_passage, r, passage_col)
-            collected = self.s.cell(r, date_col) if date_col is not None else ""
             lab_id = self.s.cell(r, id_col) if id_col is not None else ""
+            # no passage column (h3-fra 2023-02-14): the ID column holds the reference
+            # antigens' passages and the test antigens' ids
+            no_column = passage_col is None and lab_id and not LAB_ID.fullmatch(lab_id)
+            if no_column and self._reads_as_passage(lab_id):
+                raw_passage, lab_id = lab_id, ""
+                self.warnings.append(
+                    f"{self.s.where(r, id_col)}: no passage column; the passage is in the ID column"
+                )
+            passage = self._passage(raw_passage, r, id_col if passage_col is None else passage_col)
+            collected = self.s.cell(r, date_col) if date_col is not None else ""
             collected, lab_id = ("" if _is_label(v) else v for v in (collected, lab_id))
             if re.fullmatch(r"[\s/.-]*", collected):  # "//": a date left blank
                 collected = ""

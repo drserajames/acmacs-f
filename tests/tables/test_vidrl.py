@@ -181,3 +181,19 @@ def test_passages(rules, raw, expected):
 )
 def test_abbreviation_splits(text, splits):
     assert vidrl._splits(text) == splits
+
+
+def test_with_no_passage_column_the_id_column_holds_the_reference_passages(tmp_path, rules):
+    # h3-fra 2023-02-14 lays the table out so: the passage column is empty, and the ID column
+    # holds the reference antigens' passages above the test antigens' ids
+    titres = ["80", "40", "40", "160", "80"]
+    references = [("1", "SIAT3"), ("2", "E4"), ("3", "E3/D1"), ("4", "SIAT1")]
+    antigens = [(i, ANTIGENS[n][1], titres, "", "", p) for n, (i, p) in enumerate(references)] + [
+        ("", f"B/EXAMPLETOWN/{n}/2030", titres, "", "01/01/2030", f"VW1000000{n}")
+        for n in range(1, 6)
+    ]
+    t = one_table(read(workbook(tmp_path / "labv-20300102.xlsx", antigens=antigens), rules))
+    assert [a.passage for a in t.antigens] == ["SIAT3", "E4", "E3/D1", "SIAT1", "", "", "", "", ""]
+    assert [a.lab_ids for a in t.antigens[:4]] == [[], [], [], []]
+    assert t.antigens[4].lab_ids == ["LABV#VW10000001"]
+    assert sum("the passage is in the ID column" in w for w in t.warnings) == 4
