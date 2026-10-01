@@ -81,3 +81,12 @@ def test_clean_rule_outputs_are_not_errors(tmp_path):
         ],
     )
     assert warnings.curated_errors([table]) == []
+
+
+def test_a_harvest_before_its_collection_is_listed_for_review(tmp_path):
+    (table,) = read(tmp_path, [row()]).tables
+    antigen = table.antigens[0]
+    antigen.date, antigen.passage_date = "2030-01-19", "2028-04-07"
+    (line,) = warnings.date_contradictions([table])
+    assert "harvested 2028-04-07, collected 2030-01-19" in line
+    assert any("harvest date before the collection date (1)" in x for x in warnings.report([table]))

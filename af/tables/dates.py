@@ -49,7 +49,11 @@ def _build(parts: tuple[str, ...], order: str, not_after: dt.date | None) -> str
         return None
     year = int(parts[yi])
     if len(parts[yi]) == 2:
-        year += 2000 if not_after is None or 2000 + year <= not_after.year else 1900
+        # 20yy, unless that is after not_after and 19yy is a plausible influenza date (yy >= 50,
+        # an old reference strain's "1/1/87"). A lab's typo ("11/15/16" on a 2015 test) stays 2016,
+        # after the test, for the caller to report: the 1900 fallback once made it 1916, silently.
+        late = not_after is not None and 2000 + year > not_after.year
+        year += 1900 if late and year >= 50 else 2000
     elif len(parts[yi]) != 4:
         return None
     try:

@@ -32,3 +32,14 @@ def test_invalid_everywhere_is_an_error():
 def test_two_digit_year_pivots_on_the_table_date_not_today():
     assert dates.parse("1/2/95", "MDY", not_after=dt.date(1996, 1, 1))[0] == "1995-01-02"
     assert dates.parse("1/2/25", "MDY", not_after=dt.date(2030, 1, 1))[0] == "2025-01-02"
+
+
+@pytest.mark.parametrize(
+    ("text", "iso"),
+    [
+        ("11/15/36", "2036-11-15"),  # after the test: stays 20yy, for the reader to report
+        ("1/1/87", "1987-01-01"),  # an old reference strain's date
+    ],
+)
+def test_a_two_digit_year_after_the_test_is_not_moved_a_century(text, iso):
+    assert dates.parse(text, "MDY", not_after=dt.date(2035, 12, 3))[0] == iso

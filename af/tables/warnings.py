@@ -106,7 +106,29 @@ def report(tables: Iterable[Table]) -> list[str]:
     for cls in ("review", "tolerated"):
         lines.append(f"  {cls} ({len(listed[cls])}), each:")
         lines.extend(f"    {line}" for line in sorted(listed[cls]))
+    contradictions = date_contradictions(tables)
+    lines.append(
+        f"  review, harvest date before the collection date ({len(contradictions)}), each:"
+    )
+    lines.extend(f"    {line}" for line in contradictions)
     return lines
+
+
+def date_contradictions(tables: Iterable[Table]) -> list[str]:
+    """Antigens whose harvest date precedes their own collection date: a fact the table itself
+    contradicts (a CDC antigen harvested two years before it was collected). Found by a
+    consumer of the store on 1 Oct 2026; the check is the store's own now. Listed, not fixed:
+    which date is wrong is the lab's to say."""
+    out = []
+    for table in tables:
+        for antigen in table.antigens:
+            harvest, collected = antigen.passage_date, antigen.date
+            if harvest and collected and harvest < collected:
+                out.append(
+                    f"{table.table_id or table.source_key}: {antigen.name} {antigen.passage} "
+                    f"harvested {harvest}, collected {collected}"
+                )
+    return sorted(out)
 
 
 RULE_OUTPUT = re.compile(r"name '.*' (?:rewritten|renamed) '(.*)' by (\S+)")
