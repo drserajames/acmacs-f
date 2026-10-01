@@ -59,6 +59,11 @@ def make_project(root: Path) -> Path:
     stub = root / "cmaple-stub"
     stub.write_text(STUB)
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    (root / "placement.tsv").write_text(
+        "subtype\tmin_correlation\treason\ttrees\n"
+        "h3\t-1.0\tsynthetic tree, not calibrated: too few leaves to judge anyway\t1\n"
+        "h1\t-1.0\tsynthetic tree, not calibrated\t1\n"
+    )
     Work.create(root / "work")
     Store.create(root / "store")
     write_alignment(root / "alignment.fasta", {KEYS[n]: LEAF_SEQ[n] for n in "oabcd"})
@@ -82,6 +87,7 @@ asr_backend = "parsimony"
 [inputs.h3]
 alignment = "alignment.fasta"
 leaves = "leaves.parquet"
+placement_limits = "placement.tsv"
 """
     )
     return root / "trees.toml"
@@ -232,8 +238,17 @@ def test_a_leaf_without_a_sequence_is_an_error(tmp_path: Path) -> None:
 def test_incremental_needs_a_previous_tree(tmp_path: Path) -> None:
     with pytest.raises(stages.StageError, match="previous"):
         stages.SubtypeInputs(
-            alignment=tmp_path / "a.fasta", leaves=tmp_path / "l.parquet", incremental=True
+            alignment=tmp_path / "a.fasta",
+            leaves=tmp_path / "l.parquet",
+            placement_limits=tmp_path / "placement.tsv",
+            incremental=True,
         )
+
+
+def test_inputs_need_placement_limits(tmp_path: Path) -> None:
+    """Every tree is checked for placement, so the limits file is not optional (design rule 4)."""
+    with pytest.raises(stages.StageError, match="placement_limits is required"):
+        stages.SubtypeInputs(alignment=tmp_path / "a.fasta", leaves=tmp_path / "l.parquet")
 
 
 def test_a_clade_set_without_clones_fails(tmp_path: Path) -> None:
@@ -242,6 +257,7 @@ def test_a_clade_set_without_clones_fails(tmp_path: Path) -> None:
         leaves=tmp_path / "l.parquet",
         clade_set="A(H3N2)",
         clade_agreement=tmp_path / "agreement.tsv",
+        placement_limits=tmp_path / "placement.tsv",
     )
     with pytest.raises(stages.StageError, match=r"needs \[paths\] nomenclature"):
         stages.clade_source(inputs, None)
@@ -258,7 +274,7 @@ def test_a_clade_set_needs_agreement_limits(tmp_path: Path) -> None:
 def test_inputs_for_an_unconfigured_subtype_are_refused(tmp_path: Path) -> None:
     config = make_project(tmp_path / "p")
     text = config.read_text() + '\n[inputs.h1]\nalignment = "alignment.fasta"\n'
-    config.write_text(text + 'leaves = "leaves.parquet"\n')
+    config.write_text(text + 'leaves = "leaves.parquet"\nplacement_limits = "placement.tsv"\n')
     with pytest.raises(Exception, match="h1"):
         stages.load_run_config(config)
 

@@ -80,6 +80,7 @@ from af.tree.export import check_matches, read_export
 from af.tree.io import i6, newick
 from af.tree.io.fasta import read_alignment, write_alignment
 from af.tree.model import Tree
+from af.tree.placement import PlacementError, check_placement, limit_for, load_placement_limits
 from af.tree.populate import LeafRecord, af_clades_assigner, leaf_key, populate
 from af.tree.prebuild import ExclusionPlan, ExclusionRule
 from af.tree.prebuild import plan as prebuild_plan
@@ -153,6 +154,11 @@ class SubtypeInputs:
     clade_pin: str | None = None
     """The nomenclature commit to use. Checked against the clone, never assumed. Absent: the
     clone's current commit, read when the pipeline is set up."""
+    placement_limits: Path | None = None
+    """``trees/placement.tsv``: the minimum placement correlation per subtype, with its reason
+    (af.tree.placement). Required, because every tree is checked: a tree whose leaves sit where
+    their sequences do not say is the fault that produced trees/h3/weekly@79a55f78 (correlation
+    0.206), and the clock guard cannot see it."""
     clade_agreement: Path | None = None
     """The clades step's agreement limits (``subtype, max_disagreement, reason``; the data repo's
     ``clades/agreement.tsv``): a tree whose calls disagree with the fallback beyond its
@@ -170,6 +176,11 @@ class SubtypeInputs:
             raise StageError(
                 "clade_set needs clade_agreement: the agreement limits the clades step checks "
                 "the tree against (af.clades.agreement)"
+            )
+        if self.placement_limits is None:
+            raise StageError(
+                "placement_limits is required: the per-subtype minimum placement correlation "
+                "(af.tree.placement, trees/placement.tsv in the data repo)"
             )
         if self.incremental and self.previous is None:
             raise StageError("incremental = true needs a previous tree to start from")
@@ -672,6 +683,8 @@ def _populate_step(
     clades: CladeSource | None,
     layout: Layout,
 ) -> Step:
+    if inputs.placement_limits is None:  # SubtypeInputs requires it; never silently skip
+        raise StageError(f"{subtype}: no placement_limits, so placement cannot be checked")
     named = {
         "tree": layout.tree,
         "ancestral": layout.ancestral,
@@ -679,9 +692,11 @@ def _populate_step(
         "alignment": layout.alignment,
         "build_meta": layout.build_meta,
         "leaves": inputs.leaves,
+        "placement_limits": inputs.placement_limits,
     }
     if clades is not None:
         named["clades"] = clades.subclades
+    limits_path = inputs.placement_limits
     clock = sub.clock_settings()
     parameters = {
         "code_version": CODE_VERSION,
@@ -724,6 +739,12 @@ def _populate_step(
         except InvertedClockError as error:
             raise StageError(f"{subtype}: {error}") from error
         populated.counts["clock_direction"] = direction.to_json()
+        placement = limit_for(load_placement_limits(limits_path), subtype)
+        try:
+            measured = check_placement(populated, sub.outgroup, placement)
+        except PlacementError as error:
+            raise StageError(f"{subtype}: {error}") from error
+        populated.counts["placement"] = {**measured.to_json(), "limit": placement.to_json()}
         apply_flags(populated, find_outliers(populated, clock))
         i6.write(populated, out, inputs.purpose, build_source(layout))
 
