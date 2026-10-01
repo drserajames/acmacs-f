@@ -23,6 +23,13 @@ from af.chart.titre import Titre, TitreType
 # what a step records (lower than any sensible flag threshold)
 RECORD_MOVED = 0.5  # map units between consecutive steps
 RECORD_SLACK = 0.5  # column-basis slack
+# A point placed differently in maps of the same basin with near-equal stress (1 Oct 2026: at one
+# H1 step, one antigen with 7 titres sat 0.50 apart in two HPC builds of the same map, every other
+# point under 0.03; titre counts do not flag it). Recorded per step from the chosen kind's maps.
+RECORD_TWO_POSITION = 0.1  # map units
+NEAR_BEST = 0.001  # maps within this relative stress of the best are near-equal
+SAME_BASIN_RMSD = 0.1  # ...and in the same basin when their Procrustes RMSD to it is below this
+NEAR_BEST_LIMIT = 200  # maps compared at most (they are sorted by stress)
 
 
 @dataclass(frozen=True)
@@ -38,6 +45,7 @@ class Thresholds:
     near_tie_rmsd: float = 0.1  # below this the two maps are the same basin: the choice is moot
     basin_rmsd: float = 0.5  # reported with a scratch win: the maps are in different basins
     column_basis_slack: float = 1.0  # a forced base this far above the table-only base
+    two_position: float = 0.25  # map units between a point's places in near-equal maps of one basin
 
 
 THRESHOLDS = Thresholds()
@@ -70,6 +78,13 @@ def flags(d: dict[str, Any], t: Thresholds = THRESHOLDS) -> list[str]:
     slack = [s for s in d.get("column_basis_slack", []) if s["slack"] >= t.column_basis_slack]
     if slack:
         out.append(f"{len(slack)} sera with column-basis slack ≥ {t.column_basis_slack}")
+    two = [x for x in d.get("two_position_points", []) if x["max_distance"] > t.two_position]
+    if two:
+        top = max(two, key=lambda x: x["max_distance"])
+        out.append(
+            f"{len(two)} point(s) with two near-equal positions "
+            f"(largest {top['point']}: {top['max_distance']:.2f} apart)"
+        )
     if trapped := d.get("trapped"):  # after the core's trapped-point loop, any left is a problem
         out.append(f"{trapped} trapped")
     if new_control := d.get("control_flags"):  # already only the ones this step completes
@@ -213,6 +228,38 @@ def _names(chart: Chart, points: Any) -> list[str]:
         else:
             out.append("SR " + chart.sera[p - chart.n_antigens].designation())
     return out
+
+
+def two_position_points(chart: Chart, maps: list[dict]) -> dict[str, Any]:
+    """Points placed more than RECORD_TWO_POSITION apart between the best map and other maps of
+    the SAME basin with near-equal stress: their titres leave them two places, and another
+    compiler, BLAS or start can pick the other one. The best map has had the trapped-point pass
+    and the others have not, so a point that pass moved shows here too (it has another nearby
+    place, by definition)."""
+    ordered = sorted(maps, key=lambda m: m["stress"])
+    best = ordered[0]
+    window = NEAR_BEST * abs(best["stress"])
+    compared = 0
+    found: dict[int, tuple[int, float]] = {}
+    for m in ordered[1:NEAR_BEST_LIMIT]:
+        if m["stress"] - best["stress"] > window:
+            break
+        fit = procrustes(best["layout"], m["layout"])
+        if fit.rmsd > SAME_BASIN_RMSD:
+            continue
+        compared += 1
+        dist = np.nan_to_num(fit.distances)
+        for p in np.nonzero(dist > RECORD_TWO_POSITION)[0]:
+            n, far = found.get(int(p), (0, 0.0))
+            found[int(p)] = (n + 1, max(far, float(dist[p])))
+    order = sorted(found, key=lambda p: -found[p][1])
+    return {
+        "near_best_maps": compared,
+        "two_position_points": [
+            {"point": name, "max_distance": found[p][1], "maps": found[p][0]}
+            for name, p in zip(_names(chart, order), order, strict=True)
+        ],
+    }
 
 
 def previous_in_current(previous: Chart, current: Chart) -> np.ndarray:

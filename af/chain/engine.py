@@ -38,7 +38,7 @@ import numpy as np
 from af.chain import select
 from af.chain.backend import Optimiser, default_optimiser
 from af.chain.config import ChainConfig, TableRef, config_to_json, option_parameters
-from af.chain.diagnostics import group_moves, run_threads, step_diagnostics
+from af.chain.diagnostics import group_moves, run_threads, step_diagnostics, two_position_points
 from af.chain.starts import read_result, write_problem
 from af.chart.ace import read_chart, read_json, write_chart
 from af.chart.merge import ColumnBasisConvention, MergeOptions, MergeType, merge
@@ -560,6 +560,7 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
     }
     diagnostics = step_diagnostics(chart, None, None, None, arrays, mapper.optimiser, cfg)
     diagnostics.update(run_threads({"scratch": _threads(all_maps)}))
+    diagnostics.update(two_position_points(chart, all_maps))
     if o.move_groups:
         diagnostics["group_moves"] = group_moves(chart, _loop(all_maps).get("groups"))
     record["diagnostics"] = diagnostics
@@ -663,8 +664,9 @@ def _merge_step(
     diagnostics.update(
         run_threads({"incremental": _threads(all_incremental), "scratch": _threads(all_scratch)})
     )
+    chosen_maps = all_incremental if chosen_name == "incremental" else all_scratch
+    diagnostics.update(two_position_points(chosen, chosen_maps))
     if o.move_groups:
-        chosen_maps = all_incremental if chosen_name == "incremental" else all_scratch
         diagnostics["group_moves"] = group_moves(chosen, _loop(chosen_maps).get("groups"))
     record["diagnostics"] = diagnostics
     _write_step_record(directory, record)
