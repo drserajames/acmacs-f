@@ -9,6 +9,7 @@ Layout (the full description is in STORE-LAYOUT.md in the notes; this is the sum
         versions/<version id>/              immutable: MANIFEST.json, PROVENANCE.json, files
         cache/<entry key>/                  write-once entries, looked up by input key
         (versions/.tmp-*, cache/.tmp-*)     work in progress; never synced, never read
+    <root>/BUSY/<name>.json                 a batch of publishes in progress (af.store.busy)
 
 Publishing is atomic. A version is built in ``versions/.tmp-*``, hashed into its
 manifest and renamed into place, and only then do ``HISTORY.jsonl`` and ``CURRENT``
@@ -32,13 +33,14 @@ import socket
 import stat
 import tomllib
 import uuid
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import af
+from af.store import busy
 from af.store.manifest import (
     MANIFEST,
     PROVENANCE,
@@ -129,17 +131,57 @@ class Store:
     # ---- reading ----------------------------------------------------------------
 
     def current(self, kind: str, dataset: str) -> StoreRef:
-        """The version a dataset's CURRENT names. A dataset with no CURRENT is fatal."""
+        """The version a dataset's CURRENT names. A dataset with no CURRENT is fatal.
+
+        Inside :meth:`reading`, the read is recorded, so the guard can tell at the end
+        whether this CURRENT moved while the build was using it.
+        """
         path = self.dataset_dir(kind, dataset) / CURRENT
         if not path.is_file():
             raise StoreError(f"no such dataset (no {CURRENT}): {kind}/{dataset}")
         version = path.read_text().strip()
+        busy.record_current(self.root, kind, dataset, version)
         manifest_path = self.dataset_dir(kind, dataset) / VERSIONS / version / MANIFEST
         if not manifest_path.is_file():
             raise StoreError(f"{kind}/{dataset}: CURRENT names missing version {version}")
         return StoreRef(
             kind, dataset, version, Manifest.from_bytes(manifest_path.read_bytes()).sha256()
         )
+
+    def _current_id(self, kind: str, dataset: str) -> str | None:
+        """CURRENT's version id, unrecorded (for the read guard's own check)."""
+        path = self.dataset_dir(kind, dataset) / CURRENT
+        return path.read_text().strip() if path.is_file() else None
+
+    # ---- batches of publishes, and reads that must not see half of one ------------
+
+    def batch(
+        self,
+        name: str,
+        datasets: Iterable[str],
+        *,
+        max_age_hours: float = busy.DEFAULT_MAX_AGE_HOURS,
+    ) -> AbstractContextManager[busy.Marker]:
+        """Hold ``BUSY/<name>.json`` while publishing datasets meant to land together.
+
+        Readers in :meth:`reading` refuse to start while it is held. Use it for any batch
+        (a sweep, a rebuild of several datasets); a single publish is atomic already.
+        ``max_age_hours`` bounds how long a reader on another host waits on the marker if
+        this process dies without removing it. See :mod:`af.store.busy`.
+        """
+        return busy.batch(self.root, name, datasets, max_age_hours=max_age_hours)
+
+    def reading(
+        self, name: str, *, override: bool = False
+    ) -> AbstractContextManager[busy.ReadGuard]:
+        """Guard a build that reads the store (a map, a report).
+
+        It refuses to start while a batch holds the store. It fails at the end if a dataset
+        whose CURRENT it read (through any :class:`Store` on this root in this process) has
+        moved since. ``override`` reads anyway, for diagnosis: pass it only from an explicit
+        command-line flag, and put ``guard.to_json()`` in the build's provenance.
+        """
+        return busy.reading(self.root, name, override=override, current=self._current_id)
 
     def list_datasets(self, kind: str) -> list[StoreRef]:
         """Every dataset of ``kind`` with its CURRENT ref, sorted by dataset key."""
