@@ -230,3 +230,26 @@ def test_a_map_kept_as_built_reads_its_reference_record_beside_the_store(tmp_pat
     note = howmade.map_note("labx-hi", [fig], store, None, [], records)
     assert "the reference record for this version" in note.missing
     assert not any("Against the reference map" in line for line in note.lines)
+
+
+def test_a_fact_the_records_lack_is_counted_never_a_question_mark(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "store")
+    step = {"table_id": "labx-t1", "chosen": "scratch", "stress": {"scratch": 1.0},
+            "platform": {"release": "abcdef0123456789"},
+            "diagnostics": {"antigens": 3}}  # fmt: skip
+    chain = {"mode": "chain", "config": {}, "steps": [{"directory": "steps/0000",
+                                                       "table_id": "labx-t1"}]}  # fmt: skip
+    with store.build("chains", "labx/hi/main") as build:
+        (build.path / "steps/0000").mkdir(parents=True)
+        (build.path / "steps/0000/step.json").write_text(json.dumps(step))
+        (build.path / "chain.json").write_text(json.dumps(chain))
+        ref = build.publish(Provenance("af.chain", (), {"options": {}}, T0, T0))
+    fig = _figure(ref, full=True)
+    fig["provenance"]["inputs"]["colour_scheme"] = {}
+    note = howmade.map_note("labx-hi", [fig], store, None, [])
+    text = "\n".join(note.lines)
+    assert " ?" not in text and "(?" not in text
+    for what in ("seed", "optimiser", "dimensions", "the start counts",
+                 "the final map's sera count", "the final map's dropped cells count",
+                 "colour scheme", "colour source"):  # fmt: skip
+        assert what in note.missing, what
