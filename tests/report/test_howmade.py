@@ -131,7 +131,7 @@ def test_an_older_record_says_what_it_lacks(tmp_path: Path) -> None:
            "vaccine_choose": [{"name": "a vaccine"}]}  # fmt: skip
     note = howmade.map_note("labx-hi", [_figure(ref, full=False)], store, cfg, [])
     assert sorted(note.missing) == sorted([
-        "chain or merge_all", "named column-basis adjustments", "named removals",
+        "chain or merge_all",
         "non-ferret sera removed", "the map stage's non-ferret sera check",
         "what configured move m3 did", "the configured vaccine rules as applied",
         "decision dates of 1 move(s)", "decision dates of 1 rotation(s)",
