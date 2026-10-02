@@ -9,8 +9,11 @@ stat. af no longer reads locationdb here (Sarah: "af should not use locationdb")
 content hash of each location table is recorded in the report, so a map can be traced to the
 table version it was drawn from.
 
-Colours: ``colouring`` gives, per subtype, a colour scheme with its clade set and groups
-(:mod:`af.clades.colours`). Each antigen is matched to its sequence
+Colours: ``colouring`` gives, per subtype row of the subtype table (``af/subtypes.toml``:
+"h1", "h3", "bvic"), a colour scheme with its clade set and groups (:mod:`af.clades.colours`).
+A preparation's row is its table subtype and lineage; a B preparation whose tables leave the
+lineage unknown takes the lineage of the sequence it matched. A row without clade labels
+(B/Yam) is uncoloured with that reason. Each antigen is matched to its sequence
 (:mod:`af.serology.joins`, the sequence workstream's matcher, told by ``matching``: the rule
 tables :func:`af.seq.matching_rules.matching_rules` reads, the same ones the maps read, with
 their hashes in the report), the clade comes from the clade
@@ -38,7 +41,12 @@ from af.geo.render import render_geo
 from af.seq import locations
 from af.seq.matching_rules import MatchingRules
 from af.serology import query
-from af.serology.joins import LinkCounts, link_from_store, preparation_sequences
+from af.serology.joins import (
+    LinkCounts,
+    PreparationSequence,
+    link_from_store,
+    preparation_sequences,
+)
 from af.serology.query import Preparation
 from af.serology.rows import IdentityRules
 from af.serology.update import require_current
@@ -46,7 +54,7 @@ from af.stat.counts import stat_counts
 from af.stat.output import Previous, write_stat
 from af.store import ExternalInput, Store, StoreError, StoreRef
 from af.util.artefacts import sha256_path
-from af.util.subtypes import subtypes
+from af.util.subtypes import Subtype, SubtypeError, subtypes
 
 
 @dataclass(frozen=True)
@@ -73,8 +81,11 @@ class OutputsReport:
     matching_inputs: dict[str, str] = field(default_factory=dict)  # matcher's table -> sha256
     matching_rules: dict[str, int] = field(default_factory=dict)  # rows per matcher table
     links: LinkCounts | None = None  # antigen -> sequence matching, when colouring
-    colours: dict[str, ColourCounts] = field(default_factory=dict)  # subtype -> counts
-    uncoloured_subtypes: list[str] = field(default_factory=list)
+    colours: dict[str, ColourCounts] = field(default_factory=dict)  # subtype row -> counts
+    uncoloured_subtypes: list[str] = field(default_factory=list)  # rows given no colouring
+    # table subtype -> preparations left uncoloured because no row could be told: a B
+    # preparation of unknown lineage with no matched sequence to say which
+    unknown_lineage: dict[str, int] = field(default_factory=dict)
 
 
 def make_geo_and_stat(
@@ -164,20 +175,56 @@ def _styles(
     links = preparation_sequences(con, matching.passages)
     aligned = aligned_sequences(store, con, report.links)
     styles = {}
-    for subtype, setting in colouring.items():
-        styles[subtype], report.colours[subtype] = dot_styles(
+    for row, setting in colouring.items():
+        styles[row], report.colours[row] = dot_styles(
             links, aligned.get_pair, setting.scheme, setting.clade_set, setting.group_set
         )
-    report.uncoloured_subtypes = sorted({p.subtype for p in preps} - set(colouring))
+    rows = {p.key(): _row_of(p, links) for p in preps}
+    report.uncoloured_subtypes = sorted({r for r in rows.values() if r} - set(colouring))
     report.colour_inputs = {
         str(item.path): item.sha256 for setting in colouring.values() for item in setting.inputs
     }
+    seen: set[tuple[str, str, str, tuple[str, ...], str]] = set()
+
+    def uncoloured(row: str, reason: str, key: Any) -> DotStyle:
+        if key not in seen:  # counted once per preparation, as dot_styles counts
+            seen.add(key)
+            report.colours.setdefault(row, ColourCounts()).uncoloured[reason] += 1
+        return UNCOLOURED
 
     def style(prep: Preparation) -> DotStyle:
-        found = styles.get(prep.subtype)
-        return found(prep) if found is not None else UNCOLOURED
+        key = prep.key()
+        row = rows[key]
+        if row is None:
+            if key not in seen:
+                seen.add(key)
+                report.unknown_lineage[prep.subtype] = (
+                    report.unknown_lineage.get(prep.subtype, 0) + 1
+                )
+            return UNCOLOURED
+        found = styles.get(row)
+        if found is not None:
+            return found(prep)
+        if row not in labelled_rows():
+            return uncoloured(row, f"no clade labels for {subtypes().by_key(row).name}", key)
+        return uncoloured(row, "no colour scheme given", key)
 
     return style
+
+
+def _row_of(prep: Preparation, links: Mapping[Any, PreparationSequence]) -> str | None:
+    """The subtype row a preparation is: from its table subtype and lineage, or, for a B
+    preparation whose tables leave the lineage unknown, the sequence dataset it matched in.
+    None when neither tells (no such subtype, or no match to say which lineage)."""
+    try:
+        rows = subtypes().for_table(prep.subtype, prep.lineage)
+    except SubtypeError:
+        return None
+    if len(rows) == 1:
+        return rows[0].key
+    found = links.get(prep.key())
+    matched = [r.key for r in rows if found is not None and r.key in found.datasets]
+    return matched[0] if len(matched) == 1 else None
 
 
 class AlignedSequences(dict[tuple[str, str], AlignedSequence]):
@@ -217,9 +264,11 @@ def aligned_sequences(store: Store, con: Any, links: LinkCounts) -> AlignedSeque
     )
 
 
-#: The clade store's subtype for a table subtype: B tables are coloured by the B/Victoria
-#: clade set (there is no B/Yamagata clade table, by design; those dots stay uncoloured).
-CLADE_SUBTYPE = {"A(H1N1)": "A(H1N1)", "A(H3N2)": "A(H3N2)", "B": "B/Vic"}
+def labelled_rows() -> tuple[str, ...]:
+    """The subtype rows (``af/subtypes.toml`` keys) that have clade labels, in table order."""
+    from af.clades.subtypes import clade_facts
+
+    return tuple(row.key for row in subtypes() if clade_facts(row.name).labels)
 
 
 def clade_colouring(
@@ -228,27 +277,26 @@ def clade_colouring(
     acmacs_data: Path,
     schemes: Mapping[str, str],
 ) -> dict[str, SubtypeColouring]:
-    """Per table subtype, the clade colouring geo uses (Sarah, Q46: by clade for now).
+    """Per subtype row, the clade colouring geo uses (Sarah, Q46: by clade for now).
 
-    ``schemes`` names the scheme per table subtype (e.g. the maps' "clades-v10" for H3). The
-    user's schemes and groups are read once, from ``acmacs_data``, on this run
-    (:func:`af.clades.importer.read_user_clades`), the same path the antigenic maps use, so
-    geo and maps cannot colour a clade differently; see :func:`subtype_colouring`.
+    ``schemes`` names the scheme per subtype row (``af/subtypes.toml`` key: ``{"h3":
+    "clades-v10", "bvic": "clades-v2"}``). A row without clade labels (B/Yam) is an error
+    naming the reason, never an empty scheme. The user's schemes and groups are read once, from
+    ``acmacs_data``, on this run (:func:`af.clades.importer.read_user_clades`), the same path
+    the antigenic maps use, so geo and maps cannot colour a clade differently; see
+    :func:`subtype_colouring`.
 
     This is the seam for other colourings later (the antigenic maps' extra colouring):
     anything that yields a :class:`SubtypeColouring`.
     """
     user = read_clade_tables(store, clones, acmacs_data, list(schemes))
-    return {
-        subtype: subtype_colouring(store, clones, user, subtype, name)
-        for subtype, name in schemes.items()
-    }
+    return {row: subtype_colouring(store, clones, user, row, name) for row, name in schemes.items()}
 
 
 def read_clade_tables(
-    store: Store, clones: Path, acmacs_data: Path, subtypes: Sequence[str]
+    store: Store, clones: Path, acmacs_data: Path, rows: Sequence[str]
 ) -> UserClades:
-    """The user's schemes and groups, read once, for the clade sets of these table subtypes.
+    """The user's schemes and groups, read once, for the clade sets of these subtype rows.
 
     Read once per run and handed to :func:`subtype_colouring` for every figure (geo per
     subtype, maps per map), so every figure of a run is coloured from the same read.
@@ -256,37 +304,42 @@ def read_clade_tables(
     from af.clades.importer import read_user_clades
 
     return read_user_clades(
-        acmacs_data, {_clade_subtype(s): _clade_set(store, clones, s) for s in subtypes}
+        acmacs_data, {_labelled(row).name: clade_set_of(store, clones, row) for row in rows}
     )
 
 
 def subtype_colouring(
-    store: Store, clones: Path, user: UserClades, subtype: str, scheme_name: str
+    store: Store, clones: Path, user: UserClades, row: str, scheme_name: str
 ) -> SubtypeColouring:
-    """One subtype's colouring with one named scheme from ``user``.
+    """One subtype row's colouring with one named scheme from ``user``.
 
-    The clade set is the one the current ``clades/<subtype>`` table was labelled with
-    (:func:`af.clades.store.clade_set_for`), so "is this within that clade?" is answered by
-    the nomenclature revision that assigned the label. The user's tables' content hashes
-    travel with the result, into whatever report the figure goes to.
+    The clade set is the one the current ``clades/<row>`` table was labelled with
+    (:func:`clade_set_of`), so "is this within that clade?" is answered by the nomenclature
+    revision that assigned the label. The user's tables' content hashes travel with the
+    result, into whatever report the figure goes to.
     """
-    clade_subtype = _clade_subtype(subtype)
+    name = _labelled(row).name
     return SubtypeColouring(
-        user.scheme(clade_subtype, scheme_name),
-        _clade_set(store, clones, subtype),
-        user.group_set(clade_subtype),
+        user.scheme(name, scheme_name),
+        clade_set_of(store, clones, row),
+        user.group_set(name),
         inputs=user.inputs,
     )
 
 
-def _clade_subtype(subtype: str) -> str:
-    if subtype not in CLADE_SUBTYPE:
-        raise ValueError(f"no clade set for table subtype {subtype!r}")
-    return CLADE_SUBTYPE[subtype]
+def clade_set_of(store: Store, clones: Path, row: str) -> CladeSet:
+    """The clade set the current ``clades/<row>`` table was labelled with: the one set every
+    colouring path (named schemes and a caller's own) judges keys by."""
+    from af.clades.store import clade_set_for
+
+    dataset = _labelled(row).key  # refused before the store is read
+    return clade_set_for(store, store.current("clades", dataset), clones)
 
 
-def _clade_set(store: Store, clones: Path, subtype: str) -> CladeSet:
-    from af.clades.store import clade_set_for, dataset_for
+def _labelled(row: str) -> Subtype:
+    """The subtype row ``row``; an unknown row, or one without clade labels, is an error."""
+    from af.clades.subtypes import labelled
 
-    ref = store.current("clades", dataset_for(_clade_subtype(subtype)))
-    return clade_set_for(store, ref, clones)
+    found = subtypes().by_key(row)
+    labelled(found.name)  # B/Yam: "B/Yam has no clade labels: <the table's reason>"
+    return found

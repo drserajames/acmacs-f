@@ -61,7 +61,7 @@ from af.map.vaccines import (
 )
 from af.store.ref import StoreRef
 from af.store.store import Store
-from af.util.subtypes import Subtype, SubtypeError, subtypes
+from af.util.subtypes import Subtype
 
 FloatArray = NDArray[np.float64]
 
@@ -149,21 +149,13 @@ def _labels_by_designation(chart: Chart) -> dict[str, frozenset[str]]:
 
 
 def chart_subtype(chart: Chart) -> Subtype:
-    """The chart's row in af's subtype table, from its own data: the chart's virus type ("V")
-    and the lineage code ("L", e.g. "V"; none for A subtypes) most of its antigens carry.
+    """The chart's row in af's subtype table: :func:`af.map.colouring.chart_subtype`, the one
+    copy of the rule (majority lineage), with its error as a build error."""
+    from af.map.colouring import chart_subtype as from_chart
 
-    Never from the folder name (design rule 10), and never a "B means B/Vic" default: a B chart
-    whose antigens carry no lineage, or two lineages equally, is an error. A few antigens of
-    another lineage (a lab testing an old B/Yamagata strain against B/Victoria sera) do not
-    change the map's lineage; :func:`lineage_minority` reports them.
-    """
-    ranked = Counter(str(a.extra.get("L", "")) for a in chart.antigens).most_common()
-    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
-        counts = {c or "none": n for c, n in ranked}
-        raise BuildError(f"chart carries antigen lineages equally {counts}: which map is this?")
     try:
-        return subtypes().for_chart(str(chart.info.get("V", "")), ranked[0][0] if ranked else "")
-    except SubtypeError as exc:
+        return from_chart(chart)
+    except MapColouringError as exc:
         raise BuildError(str(exc)) from exc
 
 
