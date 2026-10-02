@@ -180,3 +180,10 @@ def test_draw_axes_says_which_points_the_frame_clips() -> None:
     clipped = draw_axes(ax, scene, Frame(-0.5, 2.0, 2.5), legend=False, title=False)
     plt.close(fig)
     assert clipped == ("sr0",)
+
+
+def test_a_marked_point_keeps_its_old_name_for_now() -> None:
+    """ScenePoint.mark is the renderer's word; .vaccine stays readable while callers move over."""
+    scene = chart_scene(chart(), XY, COLOURS, title="T", vaccines={"ag1": "V1"})
+    marked = next(p for p in scene.points if p.id == "ag1")
+    assert marked.mark == "V1" and marked.vaccine == "V1"

@@ -77,7 +77,7 @@ def i7_document(
             "clade": p.legend,
             "colour": drawn_fill(p),
             "greyed": p.greyed,
-            "vaccine": p.vaccine is not None,
+            "vaccine": p.mark is not None,  # af's marks are its vaccines
             "reference": p.reference,
             "sequenced": p.sequenced,
         }
