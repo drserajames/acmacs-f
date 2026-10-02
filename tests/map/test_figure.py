@@ -125,7 +125,7 @@ def _points_drawn(ax: Any) -> dict[tuple[float, float], Any]:
 
 def test_per_point_styles_are_opt_in() -> None:
     """R's figure style (pyacmapcheck): serum outline colours, faded points, a thick outline
-    on one antigen, a global opacity. Without them the drawing is the report's."""
+    on one antigen, a global opacity and grid colour. Without them the drawing is the report's."""
     import dataclasses
 
     import matplotlib.pyplot as plt
@@ -153,7 +153,7 @@ def test_per_point_styles_are_opt_in() -> None:
 
     plain = draw()
     styled = draw(
-        look=dataclasses.replace(DEFAULT_LOOK, alpha=0.8),
+        look=dataclasses.replace(DEFAULT_LOOK, alpha=0.8, grid_colour="#e5e5e5"),
         styles={
             "sr0": PointStyle(outline="#ff0000"),
             "ag0": PointStyle(alpha=0.2),
@@ -161,7 +161,8 @@ def test_per_point_styles_are_opt_in() -> None:
         },
     )
     assert plain["sr0"].get_edgecolor() == to_rgba("#9a9a9a")  # the report's serum outline
-    assert plain["ag0"].get_alpha() is None
+    assert plain["ag0"].get_alpha() is None and plain["grid"] == {"#dddddd"}
     assert styled["sr0"].get_edgecolor() == to_rgba("#ff0000", 0.8)  # own colour, global alpha
     assert styled["ag0"].get_alpha() == 0.2  # a point's own opacity beats the global one
     assert styled["ag1"].get_linewidth() == pytest.approx(3 * plain["ag1"].get_linewidth() / 0.8)
+    assert styled["grid"] == {"#e5e5e5"}

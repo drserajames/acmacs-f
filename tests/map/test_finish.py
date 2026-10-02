@@ -247,10 +247,10 @@ def test_a_figure_in_another_style_records_it_in_its_i7(tmp_path: Path) -> None:
     assert not any("style" in p for p in report["map"]["antigens"] + report["map"]["sera"])
     styled = finish(
         tmp_path / "styled" / "figure.pdf",
-        look=dataclasses.replace(DEFAULT_LOOK, alpha=0.8),
+        look=dataclasses.replace(DEFAULT_LOOK, alpha=0.8, grid_colour="#e5e5e5"),
         styles={"ag0": PointStyle(alpha=0.2), "sr0": PointStyle(outline="#ff0000")},
     )
-    assert styled["map"]["look"] == {"alpha": 0.8}
+    assert styled["map"]["look"] == {"alpha": 0.8, "grid_colour": "#e5e5e5"}
     by_id = {p["id"]: p for p in styled["map"]["antigens"] + styled["map"]["sera"]}
     assert by_id["ag0"]["style"] == {"alpha": 0.2}
     assert by_id["sr0"]["style"] == {"outline": "#ff0000"}

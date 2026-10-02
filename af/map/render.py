@@ -41,11 +41,12 @@ class Look:
     # Opt-in, for other figures than the report (pyacmapcheck draws in R's style); the defaults
     # are the report's look.
     alpha: float | None = None  # every point's fill and outline opacity; None: opaque
+    grid_colour: str = "#dddddd"
 
 
 DEFAULT_LOOK = Look()
 #: The Look fields a caller sets for another figure style; the I7 records those not at default.
-LOOK_OPT_INS = ("alpha",)
+LOOK_OPT_INS = ("alpha", "grid_colour")
 
 
 def look_opt_ins(look: Look) -> dict[str, Any]:
@@ -179,8 +180,8 @@ def draw_scene(
     ax.axis("off")
     for k in range(int(frame.size) + 1):
         g = k / frame.size
-        ax.plot([g, g], [0, 1], color="#dddddd", lw=0.8 * scale, zorder=0)
-        ax.plot([0, 1], [g, g], color="#dddddd", lw=0.8 * scale, zorder=0)
+        ax.plot([g, g], [0, 1], color=look.grid_colour, lw=0.8 * scale, zorder=0)
+        ax.plot([0, 1], [g, g], color=look.grid_colour, lw=0.8 * scale, zorder=0)
     page = frame.page(scene.xy())
     styles = styles or {}
 

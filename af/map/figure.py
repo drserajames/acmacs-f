@@ -225,9 +225,9 @@ def draw_axes(
     (``look.page_points``), so a panel is the report page shrunk. ``legend`` and ``title`` can be
     left off for small panels; nothing else differs from the PDF.
 
-    Opt-in, for figures in another style: ``look`` (:class:`Look`) sets every point's opacity;
-    ``styles`` overrides single points by id (:class:`PointStyle`: fill, outline colour and
-    width, opacity). Without them the drawing is the report's.
+    Opt-in, for figures in another style: ``look`` (:class:`Look`) sets every point's opacity
+    and the grid colour; ``styles`` overrides single points by id (:class:`PointStyle`: fill,
+    outline colour and width, opacity). Without them the drawing is the report's.
     """
     from af.map.render import draw_scene
 
