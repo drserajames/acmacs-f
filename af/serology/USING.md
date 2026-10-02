@@ -9,6 +9,7 @@ all go through this one path, so a virus has the same sequence, clade and colour
 ```python
 from pathlib import Path
 
+from af.clades.nomenclature import lineage
 from af.clades.store import clade_set_for, dataset_for
 from af.serology import query
 from af.serology.joins import (
@@ -33,19 +34,17 @@ key = ("A(H3N2)", "A(H3N2)/EXAMPLETOWN/1/2021", "", (), "SIAT1 (2021-02-01)")
 # ... or from a chart point: key = preparation_key(chart, "antigen", index)
 found = sequences.get(key)  # None: no row of this preparation found a usable sequence
 
-
 clade_set = clade_set_for(store, store.current("clades", dataset_for("A(H3N2)")), clones)
 clade = preparation_clade(found)  # None: unknown; "": no clade named; or a name
-if clade is None:
-    lineage = None  # unknown: no sequence, no clade row, or candidates that disagree
-elif clade == "":
-    lineage = ()  # the nomenclature names no clade here: nothing to know
-else:
-    lineage = (*reversed(clade_set.ancestors(clade)), clade)  # root -> leaf
+path = lineage(clade_set, clade)  # root -> leaf
+# path is None: unknown (no sequence, no clade row, or candidates that disagree)
+# path == (): the nomenclature names no clade here: nothing to know
 ```
 
 Keep the three outcomes apart: `None` is "unknown", `()` is "known to have no clade". A
 consumer that collapses them would read a missing sequence as a virus outside every clade.
+`preparation_clade` and `af.clades.nomenclature.lineage` both keep them apart; write neither
+by hand.
 
 ## What "the sequence of a preparation" means
 
