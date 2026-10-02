@@ -32,10 +32,17 @@ def _name(prefix: str, number: int) -> str:
     return "/".join([prefix, "EXAMPLETOWN", str(number), "2021"])
 
 
-def _sequences(store: Store, tmp_path: Path, extra: tuple[tuple[int, int], ...] = ()) -> None:
+def _sequences(
+    store: Store,
+    tmp_path: Path,
+    extra: tuple[tuple[int, int], ...] = (),
+    partial: frozenset[int] = frozenset(),
+) -> None:
     """Each sequences dataset gets its own two isolates in EXAMPLETOWN (EXAMPLELAND); only
     h3's are the ones the test's antigens match (an isolate is in one dataset only).
-    ``extra`` adds h3 isolates as (EPI number, name number): two under one name are a tie."""
+    ``extra`` adds h3 isolates as (EPI number, name number): two under one name are a tie.
+    With ``partial``, the sequences carry the aa_partial column, true for those EPI numbers;
+    without it they have no such column, as versions built before it existed."""
     for offset, dataset in enumerate(("h3", "h1", "bvic", "byam")):
         numbers = [(1 + 10 * offset,) * 2, (2 + 10 * offset,) * 2]
         if dataset == "h3":
@@ -52,9 +59,17 @@ def _sequences(store: Store, tmp_path: Path, extra: tuple[tuple[int, int], ...] 
             f"country, region, place, collection_date, problems)) "
             f"TO '{isolates.as_posix()}' (FORMAT parquet)"
         )
-        seqs = ", ".join(f"('EPI_ISL_{n}', 'ACC{n}', 'hash{n}', '{'K' * 40}')" for n, _ in numbers)
+        if partial:
+            seqs = ", ".join(f"('EPI_ISL_{n}', 'ACC{n}', 'hash{n}', '{'K' * 40}', {n in partial})"
+                             for n, _ in numbers)  # fmt: skip
+            columns = "epi_isl, accession, seq_hash, aa_aligned, aa_partial"
+        else:
+            seqs = ", ".join(
+                f"('EPI_ISL_{n}', 'ACC{n}', 'hash{n}', '{'K' * 40}')" for n, _ in numbers
+            )
+            columns = "epi_isl, accession, seq_hash, aa_aligned"
         duckdb.execute(
-            f"COPY (SELECT * FROM (VALUES {seqs}) AS v(epi_isl, accession, seq_hash, aa_aligned)) "
+            f"COPY (SELECT * FROM (VALUES {seqs}) AS v({columns})) "
             f"TO '{sequences.as_posix()}' (FORMAT parquet)"
         )
         with store.build("sequences", dataset) as builder:
@@ -160,6 +175,7 @@ def test_geo_colours_from_clade_store_and_scheme(tmp_path: Path, syn: Any) -> No
     assert report.matching_rules == rules.counts()
     assert report.colours["h3"].coloured == {"Clade P.1": 1}
     assert report.colours["h3"].uncoloured == {"no sequence": 1}
+    assert report.coloured_from_partial == {}  # a version built before aa_partial existed
     doc = json.loads((out / "geo" / "h3-records.json").read_text())
     points = doc["periods"][0]["locations"][0]["points"]
     assert points == [{"color": "#0000aa", "count": 1, "clade": "Clade P.1"}]
@@ -430,6 +446,45 @@ def test_each_dot_is_coloured_by_its_subtype_row(tmp_path: Path, syn: Any) -> No
     assert report.colours["bvic"].uncoloured == {"no colour scheme given": 1}
     assert report.unknown_lineage == {"B": 1}
     assert report.uncoloured_subtypes == ["bvic", "byam"]
+
+
+def test_dots_coloured_from_a_partial_protein_are_counted(tmp_path: Path, syn: Any) -> None:
+    """A sequence whose HA2 failed to translate keeps its HA1 protein (aa_partial); it colours
+    as any other, and the report says how many dots depend on one."""
+    store, tables, coastline = _roots(tmp_path, syn)
+    _sequences(store, tmp_path, partial=frozenset({1}))  # EXAMPLETOWN/1's sequence is partial
+    _clades(store, tmp_path)
+    rules = matching_rules(
+        write_af_data(tmp_path / "af-data", submitters="", number="", equivalents="")
+    )
+    scheme = ColourScheme(
+        subtype=H3, name="test",
+        entries=(ColourEntry(order=1, key="P.1", legend="Clade P.1", colour="#0000aa",
+                             is_group=False),),
+    )  # fmt: skip
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    report = make_geo_and_stat(
+        store, tables, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
+        colouring={"h3": SubtypeColouring(scheme, clade_set)}, matching=rules,
+        identity_rules=syn.rules,
+    )  # fmt: skip
+    assert report.colours["h3"].coloured == {"Clade P.1": 1}
+    assert report.coloured_from_partial == {"h3": 1}
+
+
+def test_a_tie_coloured_through_a_partial_candidate_counts_as_partial() -> None:
+    """With no sequence chosen, the dot's colour rests on its candidates; if one of them is a
+    partial protein, the dot depends on it too."""
+    from af.serology.joins import PreparationSequence, TiedSequence
+    from af.serology.outputs import _uses_partial
+
+    partial = frozenset({("EPI_ISL_2", "ACC2")})
+    one, two = TiedSequence("EPI_ISL_1", "ACC1", "P.1"), TiedSequence("EPI_ISL_2", "ACC2", "P.1")
+    tie = PreparationSequence(None, None, None, "", conflict=False, tied=(one, two))
+    assert _uses_partial(tie, partial)
+    assert not _uses_partial(PreparationSequence(None, None, None, "", False, tied=(one,)), partial)
+    assert _uses_partial(PreparationSequence("EPI_ISL_2", "ACC2", "P.1", "", False), partial)
+    assert not _uses_partial(None, partial)
 
 
 def test_map_store_refs_are_what_the_join_read_not_current_later(tmp_path: Path, syn: Any) -> None:
