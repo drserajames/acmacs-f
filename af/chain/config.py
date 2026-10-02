@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import datetime
 import re
+import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -179,11 +180,27 @@ class ChainConfig:
             raise ChainConfigError(f"{self.name}: tables are not in (date, suffix) order")
 
 
+# Options a chain file must state: their defaults are not neutral. Sarah, 2 Oct 2026: a map built
+# with the silent default minimum_column_basis "none" differed from the round's (1280) unnoticed.
+REQUIRED_OPTIONS = ("minimum_column_basis",)
+
+
+def _require_explicit(path: Path) -> None:
+    options = tomllib.loads(Path(path).read_text()).get("options", {})
+    missing = [k for k in REQUIRED_OPTIONS if k not in options]
+    if missing:
+        raise ChainConfigError(
+            f"{path}: [options] must state {', '.join(missing)} (e.g. minimum_column_basis ="
+            ' "none"): its default is not neutral, so a chain file says what it means'
+        )
+
+
 def load_chain_config(
     path: Path, inputs_dir: Path | None = None, tables_store: Path | None = None
 ) -> ChainConfig:
     """`inputs_dir` receives the chart files made from store tables (the chain's own area);
     `tables_store` is the machine's store root (the run config's `[paths] store`)."""
+    _require_explicit(path)
     s = load_config(path, ChainSettings)
     t = s.tables
     if t.store is not None:

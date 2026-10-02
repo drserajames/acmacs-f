@@ -108,8 +108,8 @@ def test_exclusion_matching_nothing_is_an_error(tables):
 def test_toml_config(tables, tmp_path):
     (tmp_path / "chain.toml").write_text(
         f'name = "{GROUP}"\nseed = 3\n[tables]\ndirectory = "tables"\ngroup = "{GROUP}"\n'
-        'date_from = "2021-02-01"\n[options]\nscratch_starts = 4\nincremental_starts = 3\n'
-        + select_block(tmp_path)
+        'date_from = "2021-02-01"\n[options]\nminimum_column_basis = "none"\n'
+        "scratch_starts = 4\nincremental_starts = 3\n" + select_block(tmp_path)
     )
     cfg = load_chain_config(tmp_path / "chain.toml")
     assert [t.table_id for t in cfg.tables][0] == f"{GROUP}-20210215" and len(cfg.tables) == 3
@@ -167,7 +167,8 @@ def chain_toml(tmp_path, dataset="testlab/h9/main", extra=""):
     path.write_text(
         f'name = "{GROUP}"\nseed = 3\n[tables]\ndirectory = "{tmp_path / "tables"}"\n'
         f'group = "{GROUP}"\n{extra}'
-        "[options]\nscratch_starts = 4\nincremental_starts = 3\ngrid_test = false\n"
+        '[options]\nminimum_column_basis = "none"\n'
+        "scratch_starts = 4\nincremental_starts = 3\ngrid_test = false\n"
     )
     return path
 
@@ -264,3 +265,15 @@ def test_run_toml_can_pin_the_interpreter(tables, tmp_path):
     with pytest.raises(WrongInterpreter):
         main([str(chain_toml(tmp_path)), str(tmp_path / "run.toml")])
     require_python(sys.executable)  # the interpreter running this test passes its own pin
+
+
+def test_a_chain_file_must_state_its_minimum_column_basis(tmp_path):
+    # Sarah, 2 Oct 2026: a map built with the silent default "none" differed from the round's (1280)
+    from af.chain.config import load_chain_config
+
+    path = tmp_path / "chain.toml"
+    path.write_text(
+        f'name = "{GROUP}"\nseed = 3\n[tables]\ndirectory = "tables"\ngroup = "{GROUP}"\n'
+    )
+    with pytest.raises(ChainConfigError, match="must state minimum_column_basis"):
+        load_chain_config(path)

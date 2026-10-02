@@ -141,6 +141,13 @@ class Mapper:
                     resources=Resources(threads=self.split.threads),
                 )
             )
+        log.info(
+            "%s: %d starts in %d jobs x %d thread(s) each",
+            label,
+            n_starts,
+            len(jobs),
+            self.split.threads,
+        )
         runner.run_many(jobs)
         chunks = [m for job in jobs for m in read_result(Path(job.outputs[0].path))]
         return self.optimiser.combine(
