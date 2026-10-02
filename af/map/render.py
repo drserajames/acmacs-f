@@ -65,13 +65,20 @@ class PointStyle:
 
     ``outline_width`` is in points on the report page, scaled like every other line width
     (the defaults are 0.8 for a point and 1.0 for a box). ``alpha`` is the opacity of the
-    point's fill and outline, over :attr:`Look.alpha`.
+    point's fill and outline, over :attr:`Look.alpha`. ``scale`` multiplies the point's size
+    (the Look's antigen radius or serum half-side, and a mark's enlargement on top), as R draws
+    removed points larger.
     """
 
     fill: str | None = None
     outline: str | None = None
     outline_width: float | None = None
     alpha: float | None = None
+    scale: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.scale is not None and self.scale <= 0:
+            raise ValueError(f"PointStyle scale must be positive, got {self.scale}")
 
     def recorded(self) -> dict[str, Any]:
         """The fields set, for the figure's I7 (an unset field is the scene's own drawing)."""
@@ -211,7 +218,7 @@ def draw_scene(
         z = order(p) + 1
         own = styles.get(p.id, PointStyle())
         if p.kind == "serum":
-            s = look.serum_half_side
+            s = look.serum_half_side * (own.scale if own.scale is not None else 1.0)
             style: dict[str, Any] = {
                 "fc": own.fill or "none",
                 "ec": own.outline or SERUM_OUTLINE,
@@ -222,6 +229,8 @@ def draw_scene(
             grey = p.greyed or p.colour is None
             edge = "black" if p.mark else (GREY if grey else "black")
             s = look.antigen_radius * (look.mark_scale if p.mark else 1.0)
+            if own.scale is not None:
+                s *= own.scale
             style = {
                 "fc": own.fill or (GREY if grey else p.colour),
                 "ec": own.outline or edge,

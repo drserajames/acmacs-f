@@ -268,3 +268,38 @@ def test_a_rectangular_pdf_has_its_frames_shape_and_its_i7_says_so(tmp_path: Any
         provenance={"inputs": {"x": {"sha256": "0" * 64}}},
     )  # fmt: skip
     assert doc["map"]["viewport"] == [-1.0, 4.0, 8.0, 4.0]
+
+
+def test_a_point_can_be_drawn_larger() -> None:
+    """R draws removed points larger (sera at 7 against 5): PointStyle.scale multiplies one
+    point's size and nothing else."""
+    import matplotlib.pyplot as plt
+
+    from af.map.figure import PointStyle
+
+    scene = chart_scene(chart(), XY, COLOURS, title="T")
+    frame = frame_around(scene)
+
+    def sizes(**kwargs: Any) -> dict[tuple[float, float], float]:
+        """Marker width by marker centre (a scale changes the size, never the centre)."""
+        fig = plt.figure(figsize=(4, 4), dpi=72)
+        ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+        draw_axes(ax, scene, frame, legend=False, title=False, **kwargs)
+        fig.canvas.draw()
+        out = {}
+        for patch in ax.patches:
+            e = patch.get_window_extent()
+            out[(round(float(e.x0 + e.x1) / 2, 2), round(float(e.y0 + e.y1) / 2, 2))] = float(
+                e.width
+            )
+        plt.close(fig)
+        return out
+
+    plain = sizes()
+    bigger = sizes(styles={"sr0": PointStyle(scale=1.4), "ag1": PointStyle(scale=2.0)})
+    assert plain.keys() == bigger.keys() and len(plain) == 3  # ag0, ag1, sr0 (ag2: no coordinates)
+    grown = sorted(round(bigger[c] / plain[c], 6) for c in plain)
+    assert grown == [1.0, 1.4, 2.0]  # ag0 as it was; sr0 and ag1 by their own scales
+    with pytest.raises(ValueError, match="positive"):
+        PointStyle(scale=0.0)
+    assert PointStyle(scale=1.4).recorded() == {"scale": 1.4}  # recorded in the I7 like the rest
