@@ -388,3 +388,30 @@ def test_build_record_uses_the_release_commit_when_not_a_checkout(
     record = build.af_source()
     assert record["commit"] == "a" * 40 and record["dirty"] is False
     assert record["release"]["rev"] == "HEAD"
+
+
+def test_a_store_being_published_refuses_the_build(tmp_path: Path) -> None:
+    from af.store.busy import StoreBusy
+
+    cfg, root, store, _, _ = _store_setup(tmp_path)
+    manifest = tmp_path / "manifest.json"
+    with store.batch("a-sweep", ["chains/labx/m"]), pytest.raises(StoreBusy, match="a-sweep"):
+        build.build(cfg, root, tmp_path / "out", store_root=store.root, manifest_path=manifest)
+    assert not (tmp_path / "out" / "test-report.pdf").exists()
+    assert not manifest.exists()
+
+
+@needs_latex
+def test_the_build_record_says_what_the_store_read_saw(tmp_path: Path) -> None:
+    cfg, root, store, tree, chain = _store_setup(tmp_path)
+    manifest = tmp_path / "manifest.json"
+    build.build(cfg, root, tmp_path / "out", store_root=store.root, manifest_path=manifest)
+    seen = json.loads((tmp_path / "out" / "test-report.build.json").read_text())["store_read"]
+    assert seen["read"] == "report-build" and seen["overrode_batches"] == []
+    assert seen["currents_read"]["chains/labx/m"] == [chain.version]
+    # --ignore-busy: builds anyway (diagnosis), and the record names the batch it overrode
+    with store.batch("a-sweep", ["chains/labx/m"]):
+        build.build(cfg, root, tmp_path / "out2", store_root=store.root, manifest_path=manifest,
+                    ignore_busy=True)  # fmt: skip
+    seen = json.loads((tmp_path / "out2" / "test-report.build.json").read_text())["store_read"]
+    assert [m["name"] for m in seen["overrode_batches"]] == ["a-sweep"]
