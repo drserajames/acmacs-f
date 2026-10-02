@@ -24,6 +24,7 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,7 +61,8 @@ from af.map.vaccines import (
     select_vaccines,
 )
 from af.map.viewport import from_y_down
-from af.store.ref import StoreRef
+from af.store.busy import ReadGuard
+from af.store.ref import StoreError, StoreRef
 from af.store.store import Store
 from af.util.subtypes import Subtype
 
@@ -431,6 +433,7 @@ def build_map(
     created: dt.datetime,
     colours: StoreColours | None = None,
     sera_markers: list[Marker] | None = None,
+    guard: ReadGuard | None = None,
 ) -> MapResult:
     """Build every window of one map. Raises :class:`BuildError` with the folder named.
 
@@ -646,6 +649,8 @@ def build_map(
         provenance["decisions"] = decisions
     if store_refs:
         provenance["store_refs"] = store_refs
+    if guard is not None:  # the guarded read this figure came from (af.store.busy)
+        provenance["store_read"] = guard.to_json()
     if stand_in:
         provenance["stand_in"] = stand_in
     figures = []
@@ -758,61 +763,78 @@ def build(
     only: Sequence[str] = (),
     created: dt.datetime | None = None,
     log: Any = print,
+    ignore_busy: bool = False,
 ) -> list[MapResult]:
-    """Build every configured map (or just ``only``). Raises on the first failure."""
+    """Build every configured map (or just ``only``). Raises on the first failure.
+
+    ``ignore_busy`` builds while a batch is writing the store, for diagnosis only (the command
+    line's explicit ``--ignore-busy``); every figure's provenance then says it did."""
     created = created or dt.datetime.now(dt.UTC)
     store = Store(store_root) if store_root is not None else None
     wanted = [m for m in config.maps if not only or m.folder in only]
     missing = sorted(set(only) - {m.folder for m in config.maps})
     if missing:
         raise BuildError(f"no such map(s) in the config: {', '.join(missing)}")
-    colours = None
-    if any(config.colour_source(m) == "store" for m in wanted):
-        if store is None:
-            raise BuildError("store colouring configured but no --store given")
-        started = time.monotonic()
-        from af.seq.matching_rules import matching_rules
-        from af.serology.update import require_current
-        from af.store import StoreError
-
-        # A serology store built before a lab's latest tables leaves that lab's newest antigens
-        # uncoloured, and nothing on the figure would say why. Refuse instead (10-serology's
-        # guard, the same one geo and stat use).
-        try:
-            require_current(store)
-        except StoreError as exc:
-            raise BuildError(str(exc)) from exc
-        if config.af_data is None:
-            raise BuildError("store colouring needs af_data (the acmacs-f-data checkout)")
-        colours = StoreColours(store, config.colouring, matching_rules(config.af_data))
-        log(f"{'colouring':24s} {time.monotonic() - started:5.1f}s  store join and user tables")
-    # Read once per run. Every map built from a round config reports its non-ferret sera; a
-    # config made in code without af_data reports none.
-    markers = read_markers(config.af_data / SERA_MARKERS) if config.af_data is not None else None
-    results = []
-    for cfg in wanted:
-        result = build_map(
-            cfg,
-            config,
-            store=store,
-            out_root=out_root,
-            vaccine_table=vaccine_list,
-            vaccine_defaults=vaccine_defaults,
-            created=created,
-            colours=colours if config.colour_source(cfg) == "store" else None,
-            sera_markers=markers,
+    with ExitStack() as stack:
+        # One guarded read of the store for the whole run: no build while a batch is writing
+        # it, and none whose inputs moved while it ran (af.store.busy). Each figure records it.
+        guard = (
+            stack.enter_context(store.reading("map-build", override=ignore_busy))
+            if store is not None
+            else None
         )
-        results.append(result)
-        flags = f" flags={len(result.flags)}" if result.flags else ""
-        other = sum(result.lineage_minority.values())
-        lineage = f" other-lineage antigens={other} {result.lineage_minority}" if other else ""
-        if result.non_ferret_sera:
-            lineage += f" NON-FERRET SERA={result.non_ferret_sera}"
-        n = len(result.figures)
-        log(f"{cfg.folder:24s} {result.seconds:5.1f}s  {n} figures{flags}{lineage}")
-        for f in result.flags:
-            log(f"    flag: {f}")
-    return results
+        colours = None
+        if any(config.colour_source(m) == "store" for m in wanted):
+            if store is None:
+                raise BuildError("store colouring configured but no --store given")
+            started = time.monotonic()
+            from af.seq.matching_rules import matching_rules
+            from af.serology.update import require_current
+            from af.store import StoreError
+
+            # A serology store built before a lab's latest tables leaves that lab's newest antigens
+            # uncoloured, and nothing on the figure would say why. Refuse instead (10-serology's
+            # guard, the same one geo and stat use).
+            try:
+                require_current(store)
+            except StoreError as exc:
+                raise BuildError(str(exc)) from exc
+            if config.af_data is None:
+                raise BuildError("store colouring needs af_data (the acmacs-f-data checkout)")
+            colours = StoreColours(
+                store, config.colouring, matching_rules(config.af_data), ignore_busy=ignore_busy
+            )
+            log(f"{'colouring':24s} {time.monotonic() - started:5.1f}s  store join and user tables")
+        # Read once per run. Every map built from a round config reports its non-ferret sera; a
+        # config made in code without af_data reports none.
+        markers = (
+            read_markers(config.af_data / SERA_MARKERS) if config.af_data is not None else None
+        )
+        results = []
+        for cfg in wanted:
+            result = build_map(
+                cfg,
+                config,
+                store=store,
+                out_root=out_root,
+                vaccine_table=vaccine_list,
+                vaccine_defaults=vaccine_defaults,
+                created=created,
+                colours=colours if config.colour_source(cfg) == "store" else None,
+                sera_markers=markers,
+                guard=guard,
+            )
+            results.append(result)
+            flags = f" flags={len(result.flags)}" if result.flags else ""
+            other = sum(result.lineage_minority.values())
+            lineage = f" other-lineage antigens={other} {result.lineage_minority}" if other else ""
+            if result.non_ferret_sera:
+                lineage += f" NON-FERRET SERA={result.non_ferret_sera}"
+            n = len(result.figures)
+            log(f"{cfg.folder:24s} {result.seconds:5.1f}s  {n} figures{flags}{lineage}")
+            for f in result.flags:
+                log(f"    flag: {f}")
+        return results
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -824,6 +846,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True, help="figure root to write under")
     parser.add_argument("--store", type=Path, help="store root (needed for maps built from chains)")
     parser.add_argument("--only", action="append", default=[], metavar="FOLDER")
+    parser.add_argument(
+        "--ignore-busy",
+        action="store_true",
+        help="build while a batch is writing the store (diagnosis only; recorded in provenance)",
+    )
     args = parser.parse_args(argv)
     try:
         from af.map.roundconfig import load_maps_config, load_vaccine_list
@@ -836,8 +863,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             vaccine_list=load_vaccine_list(vaccine_list_path),
             vaccine_defaults=load_vaccine_defaults(config.vaccine_defaults),
             only=args.only,
+            ignore_busy=args.ignore_busy,
         )
-    except (BuildError, ValueError, OSError) as exc:
+    except (BuildError, StoreError, ValueError, OSError) as exc:
         print(f"af.map.build: {exc}", file=sys.stderr)
         return 1
     print(f"{len(results)} map(s), {sum(len(r.figures) for r in results)} figures -> {args.out}")
