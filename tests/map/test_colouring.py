@@ -103,6 +103,7 @@ def test_chart_antigens_take_the_shared_choice(tmp_path: Path) -> None:
     assert "rows" in got.provenance
     assert len(got.provenance["matching_rules"]) == 6  # every rule table, with its hash
     assert "scheme_origin" not in got.provenance  # a named scheme: its tables are its origin
+    assert got.provenance["lineage_minority"] == {}  # every antigen is the map's lineage
 
 
 # ---------------------------------------------------------------- a scheme the caller built
@@ -184,8 +185,9 @@ def invented(prefix: str, n: int) -> str:
 
 
 def test_a_chart_is_coloured_by_its_subtype_row() -> None:
-    """The row comes from the chart's subtype and its antigens' lineage code; a chart mixing
-    lineages, or with a lineage the subtype table does not list, is an error."""
+    """The row comes from the chart's subtype and its antigens' majority lineage code (one
+    rule with af.map.build.chart_subtype); lineages carried equally, or a lineage the subtype
+    table does not list, are errors."""
     from af.map.colouring import chart_row
 
     def b_chart(*codes: str) -> Chart:
@@ -196,7 +198,9 @@ def test_a_chart_is_coloured_by_its_subtype_row() -> None:
     assert chart_row(h3) == "h3"
     assert chart_row(b_chart("V", "V")) == "bvic"
     assert chart_row(b_chart("Y")) == "byam"
-    with pytest.raises(MapColouringError, match="mix lineages"):
+    # the majority lineage, as the map build decides it: a few B/Yam antigens on a B/Vic map
+    assert chart_row(b_chart("V", "V", "Y")) == "bvic"
+    with pytest.raises(MapColouringError, match="lineages equally"):
         chart_row(b_chart("V", "Y"))
     with pytest.raises(MapColouringError, match="no .ace lineage code ''"):
         chart_row(b_chart(""))

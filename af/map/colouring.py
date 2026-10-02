@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -31,6 +32,7 @@ from af.map.style import ColourRow, ColourScheme
 from af.seq.matching_rules import MatchingRules
 from af.serology.joins import preparation_key
 from af.store.store import Store
+from af.util.subtypes import Subtype
 
 if TYPE_CHECKING:
     from af.clades.groups import GroupSet
@@ -189,11 +191,17 @@ class StoreColours:
         """
         from af.geo.colours import dot_styles
 
-        row = chart_row(chart)
+        row = chart_subtype(chart)
+        minority = Counter(
+            str(a.extra.get("L", "")) or "none"
+            for a in chart.antigens
+            if str(a.extra.get("L", "")) != row.ace_lineage
+        )
+        row_key = row.key
         if isinstance(scheme, str):
-            colouring = self._colouring(row, scheme)
+            colouring = self._colouring(row_key, scheme)
         else:
-            colouring = self._caller_colouring(row, scheme)
+            colouring = self._caller_colouring(row_key, scheme)
         style, counts = dot_styles(
             self._sequences,
             self._aligned.get_pair,
@@ -224,6 +232,8 @@ class StoreColours:
             "doubtful": dict(counts.doubtful),
             "rows": dict(counts.rows),
             "shadowed_rows": [str(s) for s in shadowed],
+            # antigens of another lineage than the map's (coloured by the map's row), by code
+            "lineage_minority": dict(sorted(minority.items())),
         }
         if not isinstance(scheme, str):
             provenance["scheme_origin"] = "caller-supplied"
@@ -241,19 +251,31 @@ class StoreColours:
         return refs
 
 
-def chart_row(chart: Chart) -> str:
-    """The subtype row (``af/subtypes.toml`` key) a chart is: its subtype ("V") and its
-    antigens' lineage code ("L", one for the whole chart). A chart whose antigens mix
-    lineages, or a subtype or lineage the table does not list, is an error."""
+def chart_subtype(chart: Chart) -> Subtype:
+    """The chart's row in af's subtype table, from its own data: the chart's virus type ("V")
+    and the lineage code ("L", e.g. "V"; none for A subtypes) most of its antigens carry.
+
+    The one copy of this rule: the map build (titles, vaccines, lineage-minority report) and
+    the store colouring both call it. Never from the folder name (design rule 10), and never a
+    "B means B/Vic" default: a B chart whose antigens carry no lineage, or two lineages
+    equally, is an error. A few antigens of another lineage (a lab testing an old B/Yamagata
+    strain against B/Victoria sera) do not change the map's lineage; the build reports them
+    (:func:`af.map.build.lineage_minority`), and the store colours them by the map's row.
+    """
     from af.util.subtypes import SubtypeError, subtypes
 
-    subtype = str(chart.info.get("V", ""))
-    codes = {str(a.extra.get("L", "")) for a in chart.antigens}
-    if len(codes) > 1:
+    ranked = Counter(str(a.extra.get("L", "")) for a in chart.antigens).most_common()
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        counts = {c or "none": n for c, n in ranked}
         raise MapColouringError(
-            f"chart antigens mix lineages {sorted(codes)}: colour one lineage per map"
+            f"chart carries antigen lineages equally {counts}: which map is this?"
         )
     try:
-        return subtypes().for_chart(subtype, codes.pop() if codes else "").key
+        return subtypes().for_chart(str(chart.info.get("V", "")), ranked[0][0] if ranked else "")
     except SubtypeError as exc:
         raise MapColouringError(str(exc)) from exc
+
+
+def chart_row(chart: Chart) -> str:
+    """The subtype row key (``af/subtypes.toml``) a chart is coloured by: :func:`chart_subtype`."""
+    return chart_subtype(chart).key
