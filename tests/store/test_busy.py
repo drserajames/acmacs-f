@@ -179,6 +179,10 @@ def test_marker_of_a_dead_process_is_stale_reported_and_replaced(
         assert "replacing stale batch marker" in caplog.text
 
 
+@pytest.mark.skipif(
+    busy.process_start(os.getpid()) == busy.UNKNOWN,
+    reason="processes cannot be inspected here (e.g. a sandbox that forbids ps)",
+)
 def test_a_reused_pid_is_not_the_holder(store: Store) -> None:
     write_marker(store, process_started="some other process")
     with store.reading("r"):
@@ -237,3 +241,17 @@ def test_cli_lists_and_clears_markers(store: Store, capsys: pytest.CaptureFixtur
     assert [m.name for m in busy.read_markers(store.root)] == ["old"]
     with pytest.raises(StoreError, match="no batch marker named 'nothing'"):
         store_main(["busy", str(store.root), "--clear", "nothing"])
+
+
+def test_where_processes_cannot_be_inspected_the_age_decides(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sandbox that forbids ps: a marker from this host falls back to the age limit."""
+    monkeypatch.setattr(busy, "process_start", lambda pid: busy.UNKNOWN)
+    write_marker(store, process_started=busy.UNKNOWN)
+    with pytest.raises(StoreBusy), store.reading("r"):
+        pass
+    old = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=13)).isoformat()
+    write_marker(store, process_started=busy.UNKNOWN, started=old)
+    with store.reading("r"):
+        pass

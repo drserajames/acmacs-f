@@ -76,24 +76,35 @@ class Marker:
 
 
 def stale_reason(marker: Marker) -> str | None:
-    """Why ``marker`` no longer holds the store, or None if it is live."""
+    """Why ``marker`` no longer holds the store, or None if it is live.
+
+    On the marker's own host the process decides. Elsewhere, or where processes cannot be
+    inspected (a sandbox that forbids ``ps``), only the marker's age can.
+    """
+    why_unchecked = f"held from another host, {marker.host}"
     if marker.host == socket.gethostname():
         started = process_start(marker.pid)
         if started is None:
             return f"its process {marker.pid} is gone"
-        if started != marker.process_started:
-            return f"pid {marker.pid} is now a different process"
-        return None
+        if started is not UNKNOWN and marker.process_started is not UNKNOWN:
+            if started != marker.process_started:
+                return f"pid {marker.pid} is now a different process"
+            return None
+        why_unchecked = "processes cannot be inspected here"
     if marker.age_hours() > marker.max_age_hours:
         return (
             f"it is {marker.age_hours():.1f} h old, past its {marker.max_age_hours:g} h limit "
-            f"(held from another host, {marker.host}, so its process cannot be checked)"
+            f"({why_unchecked}, so its process cannot be checked)"
         )
     return None
 
 
+UNKNOWN = ""  # a process start that could not be read (the marker's process_started too)
+
+
 def process_start(pid: int) -> str | None:
-    """A token for when process ``pid`` started, or None if there is no such process."""
+    """A token for when process ``pid`` started; None if there is no such process;
+    :data:`UNKNOWN` if processes cannot be inspected here."""
     proc = Path(f"/proc/{pid}/stat")
     if proc.exists():
         try:
@@ -107,10 +118,13 @@ def process_start(pid: int) -> str | None:
         return None
     except PermissionError:
         pass  # another user's process: it exists
-    result = subprocess.run(
-        ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, check=False
-    )
-    return result.stdout.strip() or None
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return UNKNOWN  # e.g. a sandbox that forbids ps; the pid exists (kill 0 above)
+    return result.stdout.strip() or (UNKNOWN if result.returncode == 0 else None)
 
 
 def busy_dir(root: Path) -> Path:
@@ -164,7 +178,7 @@ def batch(
         name=name,
         host=socket.gethostname(),
         pid=os.getpid(),
-        process_started=process_start(os.getpid()) or "",
+        process_started=process_start(os.getpid()) or UNKNOWN,
         started=datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
         datasets=tuple(datasets),
         max_age_hours=max_age_hours,
