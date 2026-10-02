@@ -338,16 +338,25 @@ def _step_row(s: dict, r: dict, thumb: Path) -> str:
     )
 
 
-def _reference_section(doc: dict) -> str:
-    """Sarah, 1 Oct 2026: differences from the reference map are declared on every page, and
-    the composition and basin figures appear together (a Jaccard alone reads as agreement)."""
-    ref = doc.get("reference")
-    if not ref:
-        return ""
+def _groups_details(title: str, moved: dict) -> str:
+    rows = [
+        f"group {g['group']}: {g['size']} points moved {g['mean_shift']:.2f} on average (spread"
+        f" {g['spread']:.2f}); years {_e(', '.join(f'{y} {n}' for y, n in g['years'].items()))};"
+        f" {_e('; '.join(g['points'][:6]))}" + (" …" if len(g["points"]) > 6 else "")
+        for g in moved["groups"]
+    ]
+    far = [f"{f['distance']:.2f} (group {f['group']}) {_e(f['point'])}" for f in moved["far"]]
+    return _details(title + ", groups", rows) + _details(
+        title + ", every point more than 5 apart", far
+    )
+
+
+def _reference_block(ref: dict) -> str:
     from af.chain.reference import sentences
 
     c, b = ref["composition"], ref["basin"]
-    parts = "".join(f"<p>{_e(x)}</p>" for x in sentences(ref, f"the reference map {ref['chart']}"))
+    label = ref["label"]
+    parts = "".join(f"<p>{_e(x)}</p>" for x in sentences(ref, label))
 
     def listed(side: dict) -> list[str]:
         more = side["count"] - len(side["listed"])
@@ -355,23 +364,20 @@ def _reference_section(doc: dict) -> str:
 
     details = "".join(
         [
+            _groups_details("As drawn (this map vs the reference's own layout)", ref["shipped"])
+            if "shipped" in ref
+            else "",
+            _groups_details("Basin (this map vs its chart relaxed from the reference)", b["moved"])
+            if "moved" in b
+            else "",
             _details(
                 "Placed most differently from the reference-seeded layout",
                 [f"{_e(m['point'])}: {m['distance']:.2f}" for m in b["movers"]],
             ),
-            _details(
-                "Antigens only here",
-                listed(c["map_only"]["antigens"]),
-            ),
-            _details(
-                "Antigens only in the reference",
-                listed(c["reference_only"]["antigens"]),
-            ),
+            _details("Antigens only here", listed(c["map_only"]["antigens"])),
+            _details("Antigens only in the reference", listed(c["reference_only"]["antigens"])),
             _details("Sera only here", listed(c["map_only"]["sera"])),
-            _details(
-                "Sera only in the reference",
-                listed(c["reference_only"]["sera"]),
-            ),
+            _details("Sera only in the reference", listed(c["reference_only"]["sera"])),
             _details(
                 "Matched by stage",
                 [
@@ -381,7 +387,18 @@ def _reference_section(doc: dict) -> str:
             ),
         ]
     )
-    return f'<h2>Against the reference map</h2><div class="reference">{parts}{details}</div>'
+    return f'<h3>{_e(label)}</h3><p class="meta">{_e(ref["chart"])}</p>{parts}{details}'
+
+
+def _reference_section(doc: dict) -> str:
+    """Sarah, 1-2 Oct 2026: differences from the reference maps (a round's unadjusted output
+    and its adjusted map) are declared on every page, and the composition, as-drawn and basin
+    figures appear together for each (a Jaccard alone reads as agreement)."""
+    refs = doc.get("references") or []
+    if not refs:
+        return ""
+    blocks = "".join(_reference_block(r) for r in refs)
+    return f'<h2>Against the reference maps</h2><div class="reference">{blocks}</div>'
 
 
 def _page(doc: dict, steps: list[Step]) -> str:

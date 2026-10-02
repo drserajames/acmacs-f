@@ -110,46 +110,46 @@ def check_tables_dataset(chain: Path, dataset: str) -> None:
         )
 
 
-def measure_reference(cfg: Any, run: RunSettings, root: Path) -> None:
-    """Measure the finished map against the chain's reference map (af.chain.reference) and add
-    the result to chain.json, which the review page shows and publishing keeps. Cached on the
-    chosen map's and the reference's sha256 and the start count: a rerun that changed nothing
-    measures nothing."""
+def measure_references(cfg: Any, run: RunSettings, root: Path) -> None:
+    """Measure the finished map against each of the chain's reference maps (af.chain.reference)
+    and record them in chain.json ("references", in the chain file's order), which the review
+    page shows and publishing keeps. Each is cached on the chosen map's and the reference's
+    sha256 and the start count: a rerun that changed nothing measures nothing."""
     from af.chain.reference import reference_check
 
-    ref = cfg.reference
     if run.references is None:
-        raise ChainConfigError(f"{cfg.name}: [reference] needs `references` in the run config")
-    ref_path = Path(run.references) / ref.chart
-    if not ref_path.is_file():
-        raise ChainConfigError(f"{cfg.name}: reference map missing: {ref_path}")
+        raise ChainConfigError(f"{cfg.name}: [[reference]] needs `references` in the run config")
+    paths = [Path(run.references) / ref.chart for ref in cfg.references]
+    for ref, path in zip(cfg.references, paths, strict=True):
+        if not path.is_file():  # all checked before any is measured
+            raise ChainConfigError(f"{cfg.name}: reference map {ref.label!r} missing: {path}")
     doc_path = root / "chain.json"
     doc = json.loads(doc_path.read_text())
     chosen = root / doc["steps"][-1]["directory"] / doc["steps"][-1]["chosen_file"]
-    key = {
-        "map_sha256": sha256_path(chosen),
-        "reference_sha256": sha256_path(ref_path),
-        "starts": ref.starts,
-    }
-    cache = root / "reference.json"
-    check = None
-    if cache.exists():
-        old = json.loads(cache.read_text())
-        if old.get("key") == key:
+    map_sha = sha256_path(chosen)
+    cache_path = root / "references.json"
+    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+    out = []
+    for ref, path in zip(cfg.references, paths, strict=True):
+        key = {"map_sha256": map_sha, "chart_sha256": sha256_path(path), "starts": ref.starts}
+        old = cache.get(ref.label)
+        if old is not None and old.get("key") == key:
             check = old["check"]
-    if check is None:
-        logging.info(
-            "%s: measuring against reference %s (%d seeded starts)", cfg.name, ref.chart, ref.starts
-        )
-        check = reference_check(
-            read_chart(chosen),
-            read_chart(ref_path),
-            starts=ref.starts,
-            seed=cfg.seed,
-            threads=run.threads,
-        )
-        cache.write_text(json.dumps({"key": key, "check": check}, indent=1))
-    doc["reference"] = {"chart": ref.chart, **key, **check}
+        else:
+            logging.info(
+                "%s: measuring against %s (%d seeded starts)", cfg.name, ref.label, ref.starts
+            )
+            check = reference_check(
+                read_chart(chosen),
+                read_chart(path),
+                starts=ref.starts,
+                seed=cfg.seed,
+                threads=run.threads,
+            )
+            cache[ref.label] = {"key": key, "check": check}
+            cache_path.write_text(json.dumps(cache, indent=1))
+        out.append({"label": ref.label, "chart": ref.chart, **key, **check})
+    doc["references"] = out
     tmp = doc_path.with_suffix(".json.tmp")  # as the engine writes it: never half a chain.json
     tmp.write_text(json.dumps(doc, indent=1))
     tmp.replace(doc_path)
@@ -196,8 +196,8 @@ def main(argv: list[str]) -> int:
             remade,
             len(results) - remade,
         )
-    if cfg.reference is not None and not args.review:
-        measure_reference(cfg, run, work.root)
+    if cfg.references and not args.review:
+        measure_references(cfg, run, work.root)
     page = build_review(work.root)
     logging.info("review page: %s", page)
     if run.publish and not args.review:
