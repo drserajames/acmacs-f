@@ -25,6 +25,12 @@ whose passage matches its own; when none or several match, by the records only i
 (Sarah, Q81, 30 Sep: "Passage-matched record"). Counted in ``ColourCounts.rows``. Passage stays
 part of antigen identity: egg and cell preparations are never merged; this chooses only among
 the records one preparation's rows already name.
+
+A sequence the nomenclature names no clade for can still be coloured by a GROUP that needs no
+clade (one with an empty anchor: substitutions alone), because the scheme's own rows may say so
+(Sarah, 2 Oct 2026: "af will need to fix this going forward"). No clade row and no anchored
+group can match such a virus, and the scheme's row order still decides (Q80). Each coloured dot
+records its ``basis``: by its clade, or by a group with no clade named.
 """
 
 from __future__ import annotations
@@ -41,13 +47,24 @@ from af.seq.matching import TIE_AGREES, TIE_RANKED
 from af.serology.joins import ROWS_PASSAGE_MATCHED, PreparationKey, PreparationSequence
 from af.serology.query import Preparation
 
+#: How a coloured dot got its colour: the virus's clade (any row matched with a clade named) ...
+BASIS_CLADE = "clade"
+#: ... or a group needing no clade, for a sequence the nomenclature names no clade for.
+BASIS_GROUP_NO_CLADE = "group, no clade named"
+
 
 @dataclass(frozen=True)
 class DotStyle:
-    """How a dot is drawn. ``label`` is the legend text; the uncoloured style has none."""
+    """How a dot is drawn. ``label`` is the legend text; the uncoloured style has none.
+
+    ``basis`` says how a coloured dot got its colour (:data:`BASIS_CLADE` or
+    :data:`BASIS_GROUP_NO_CLADE`); it is part of equality, so tied sequences reaching one colour
+    by different routes do not count as agreeing.
+    """
 
     label: str
     colour: str | None  # None: outline only
+    basis: str = ""
 
 
 UNCOLOURED = DotStyle(label="", colour=None)
@@ -60,6 +77,7 @@ class ColourCounts:
     ties: Counter[str] = field(default_factory=Counter)  # TIE_AGREES / TIE_RANKED -> preparations
     doubtful: Counter[str] = field(default_factory=Counter)  # doubt flag -> coloured preparations
     rows: Counter[str] = field(default_factory=Counter)  # ROWS_* resolution -> preparations
+    basis: Counter[str] = field(default_factory=Counter)  # BASIS_* -> coloured preparations
 
 
 def dot_styles(
@@ -90,6 +108,7 @@ def dot_styles(
                 counts.uncoloured[reason] += 1
             else:
                 counts.coloured[cache[key].label] += 1
+                counts.basis[cache[key].basis] += 1
                 linked = sequences_of.get(key)
                 counts.doubtful.update(linked.doubts if linked is not None else ())
         return cache[key]
@@ -135,13 +154,19 @@ def dot_styles(
         if clade is None:
             return UNCOLOURED, "no clade assignment"
         if clade == "":
-            return UNCOLOURED, "nomenclature names no clade"
+            # Known to have no clade: only a group needing none can colour it. The reason for
+            # one that stays uncoloured is unchanged, so earlier counts stay comparable.
+            no_clade = aligned(epi_isl, accession)
+            found = scheme.entry_for(None, no_clade, clade_set, group_set) if no_clade else None
+            if found is None:
+                return UNCOLOURED, "nomenclature names no clade"
+            return DotStyle(found.legend, found.colour, BASIS_GROUP_NO_CLADE), ""
         sequence = aligned(epi_isl, accession)
         if sequence is None:
             return UNCOLOURED, "no aligned sequence"
         entry = scheme.entry_for(clade, sequence, clade_set, group_set)
         if entry is None:
             return UNCOLOURED, "not in the colour scheme"
-        return DotStyle(label=entry.legend, colour=entry.colour), ""
+        return DotStyle(entry.legend, entry.colour, BASIS_CLADE), ""
 
     return style, counts
