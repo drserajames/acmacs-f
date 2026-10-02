@@ -5,6 +5,7 @@ datasets; each dataset holds immutable, content-addressed versions, a CURRENT po
 an append-only HISTORY and a write-once cache. See :mod:`af.store.store`.
 """
 
+from af.store.busy import ReadGuard, StoreBusy
 from af.store.manifest import Manifest
 from af.store.ref import KINDS, ExternalInput, StoreError, StoreRef
 from af.store.snapshot import (
@@ -20,6 +21,8 @@ from af.store.work import DatasetWork, PathsConfig, Work
 __all__ = [
     "DatasetWork",
     "PathsConfig",
+    "ReadGuard",
+    "StoreBusy",
     "Work",
     "KINDS",
     "ExternalInput",
