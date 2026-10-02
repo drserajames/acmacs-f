@@ -16,7 +16,7 @@ from af.map.colouring import (
     map_scheme,
 )
 from af.seq.matching_rules import matching_rules
-from af.serology.joins import PreparationSequence
+from af.serology.joins import LinkCounts, PreparationSequence
 from af.serology.outputs import AlignedSequences, SubtypeColouring
 from tests.clades.synthetic import build_clone, load_synthetic
 from tests.seq.test_matching_rules import write_af_data
@@ -91,6 +91,8 @@ def test_chart_antigens_take_the_shared_choice(tmp_path: Path) -> None:
     )
     colours._colourings = {("h3", "test"): SubtypeColouring(s, clade_set)}  # by row
     colours.rules = matching_rules(write_af_data(tmp_path / "af-data"))
+    colours.links = LinkCounts()  # no join: nothing read, nothing behind
+    colours._clade_refs = {}
 
     got = colours.for_chart(chart, "test")
     assert got.labels == (frozenset({"P.1"}), frozenset({"P"}), frozenset())
@@ -128,6 +130,8 @@ def caller_setup(tmp_path: Path) -> tuple[StoreColours, Chart, str]:
     clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
     colours._sets = {"h3": (clade_set, None)}  # keyed by subtype row
     colours.rules = matching_rules(write_af_data(tmp_path / "af-data"))
+    colours.links = LinkCounts()  # no join: nothing read, nothing behind
+    colours._clade_refs = {}
     return colours, chart, clade_set.subtype
 
 
@@ -287,3 +291,12 @@ def test_a_callers_groups_are_checked(tmp_path: Path) -> None:
         colours.for_chart(chart, own, groups=other)
     with pytest.raises(MapColouringError, match="groups= is for a caller's own scheme"):
         colours.for_chart(chart, "test", groups=other)
+
+
+def test_clade_tables_behind_the_sequences_are_always_in_the_provenance(tmp_path: Path) -> None:
+    colours, chart, clade_subtype = caller_setup(tmp_path)
+    own = CladeColourScheme(clade_subtype, "caller", (ColourEntry(1, "P", "P", "#aa0000", False),))
+    assert colours.for_chart(chart, own).provenance["clades_behind"] == {}
+    colours.links = LinkCounts(clades_behind={"h3": ("v-labelled", "v-read")})
+    got = colours.for_chart(chart, own).provenance["clades_behind"]
+    assert got == {"h3": ["v-labelled", "v-read"]}

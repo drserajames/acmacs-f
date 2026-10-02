@@ -294,22 +294,35 @@ def clade_colouring(
 
 
 def read_clade_tables(
-    store: Store, clones: Path, acmacs_data: Path, rows: Sequence[str]
+    store: Store,
+    clones: Path,
+    acmacs_data: Path,
+    rows: Sequence[str],
+    clade_refs: Mapping[str, StoreRef] | None = None,
 ) -> UserClades:
     """The user's schemes and groups, read once, for the clade sets of these subtype rows.
 
     Read once per run and handed to :func:`subtype_colouring` for every figure (geo per
     subtype, maps per map), so every figure of a run is coloured from the same read.
+    ``clade_refs`` (row -> clades version) are the versions to judge by, e.g. the ones a join
+    read; a row without one reads CURRENT.
     """
     from af.clades.importer import read_user_clades
 
+    refs = clade_refs or {}
     return read_user_clades(
-        acmacs_data, {_labelled(row).name: clade_set_of(store, clones, row) for row in rows}
+        acmacs_data,
+        {_labelled(row).name: clade_set_of(store, clones, row, refs.get(row)) for row in rows},
     )
 
 
 def subtype_colouring(
-    store: Store, clones: Path, user: UserClades, row: str, scheme_name: str
+    store: Store,
+    clones: Path,
+    user: UserClades,
+    row: str,
+    scheme_name: str,
+    clade_ref: StoreRef | None = None,
 ) -> SubtypeColouring:
     """One subtype row's colouring with one named scheme from ``user``.
 
@@ -321,19 +334,22 @@ def subtype_colouring(
     name = _labelled(row).name
     return SubtypeColouring(
         user.scheme(name, scheme_name),
-        clade_set_of(store, clones, row),
+        clade_set_of(store, clones, row, clade_ref),
         user.group_set(name),
         inputs=user.inputs,
     )
 
 
-def clade_set_of(store: Store, clones: Path, row: str) -> CladeSet:
-    """The clade set the current ``clades/<row>`` table was labelled with: the one set every
-    colouring path (named schemes and a caller's own) judges keys by."""
+def clade_set_of(store: Store, clones: Path, row: str, ref: StoreRef | None = None) -> CladeSet:
+    """The clade set the ``clades/<row>`` table was labelled with: the one set every colouring
+    path (named schemes and a caller's own) judges keys by. ``ref`` is the table version (the
+    one a join read, or a pinned one); without it, CURRENT."""
     from af.clades.store import clade_set_for
 
     dataset = _labelled(row).key  # refused before the store is read
-    return clade_set_for(store, store.current("clades", dataset), clones)
+    if ref is not None and ref.dataset != dataset:
+        raise ValueError(f"clade_set_of({row!r}): ref is for clades/{ref.dataset}")
+    return clade_set_for(store, ref or store.current("clades", dataset), clones)
 
 
 def _labelled(row: str) -> Subtype:
