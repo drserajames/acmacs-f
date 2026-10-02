@@ -107,3 +107,19 @@ def test_contents_lists_merged_pull_requests_newest_first(mr: ModuleType, tmp_pa
         ("#1", "first-thing", "Add a"),
     ]
     assert all(len(r[3]) == 10 and r[3][4] == "-" for r in rows), "dates as YYYY-MM-DD"
+
+
+def test_stage_times_are_logged_and_summarised(
+    mr: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Each timed stage reports its wall time, so a slow build says where the time went."""
+    clock = iter([0.0, 2.0, 2.0, 120.0, 120.0, 125.0, 125.0, 140.0])
+    monkeypatch.setattr(mr.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(mr, "_stages", [])
+    mr.step("exporting", "export")  # t=0
+    mr.step("creating the environment", "environment")  # export took 2 s
+    mr.step("verifying", "verify")  # environment took 118 s
+    mr.step("untimed note")  # verify took 5 s; no key: not timed
+    assert mr.stage_summary() == "export=2 environment=118 verify=5"
+    log = capsys.readouterr().out
+    assert "(export: 2 s)" in log and "(environment: 118 s)" in log and "(verify: 5 s)" in log
