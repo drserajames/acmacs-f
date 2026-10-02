@@ -284,9 +284,11 @@ def test_within_table_repeat_drops_are_counted_from_the_tables_record(tmp_path: 
     path.write_text(json.dumps({
         "map_sha256": sha, "reference": {"label": "the old map"}, "map_dropped": 2,
         "tables_with_map_drops": 1, "both": 1, "only_map": [{"cell": "x"}], "only_reference": [],
-        "measured": "2026-10-02", "measured_by": "a script"}))  # fmt: skip
+        "measured": "2026-10-02", "measured_by": "a script",
+        "matching": "name and passage"}))  # fmt: skip
     note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [], records)
     assert any("Of the 2 cells in this map set to * this way (1 tables), the reference the old "
                "map has no value for 1; it kept a value for 1; and it dropped 0" in line
                for line in note.lines)  # fmt: skip
     assert "the reference comparison of these repeat drops" not in note.missing
+    assert any("paired with the reference by name and passage" in line for line in note.lines)

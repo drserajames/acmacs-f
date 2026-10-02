@@ -228,8 +228,14 @@ def _repeat_drops_record(note: Note, files: ChainFiles, records: Path | None) ->
         f"Of the {rec.get('map_dropped')} cells in this map set to * this way "
         f"({rec.get('tables_with_map_drops')} tables), the reference {label} has no value for "
         f"{rec.get('both')}; it kept a value for {len(only_map)}; and it dropped "
-        f"{len(only_ref)} cells this map kept. (Measured {rec.get('measured')} by "
-        f"{rec.get('measured_by')}; cells listed in {path.name}.)"
+        f"{len(only_ref)} cells this map kept. (Cells paired with the reference by "
+        + (
+            str(rec["matching"])
+            if rec.get("matching")
+            else note.gap("how the repeat-drops record paired cells", f"{path.name} matching")
+        )  # fmt: skip
+        + f"; measured {rec.get('measured')} by {rec.get('measured_by')}; cells listed in "
+        f"{path.name}.)"
     )
 
 
