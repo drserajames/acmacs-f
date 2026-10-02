@@ -525,6 +525,8 @@ def _tied_preparations(
         doubts.setdefault(key, set()).update(dts)
     out: dict[PreparationKey, PreparationSequence] = {}
     for key, pairs in tied.items():
+        if not pairs:  # a refused tie must name its candidates; none to colour from otherwise
+            continue
         order = sorted(pairs, key=lambda ea: (epi_order(ea[0]), ea[1]))
         seqs = tuple(TiedSequence(epi, acc, clade_of.get((epi, acc))) for epi, acc in order)
         pick = min(ranked.get(key, ()), key=lambda ea: (epi_order(ea[0]), ea[1]), default=None)

@@ -285,7 +285,8 @@ class SequenceIndex:
             return result
         flags = [f for f in result.flags if f != NO_MATCH]
         loose = self._from_name(found, antigen_class, flags, own, passage)
-        return Match("location-forms", loose.chosen, loose.candidates, (*loose.flags, NAME_SPACING))
+        # replace, not a new Match: a refused tie keeps its candidates and ae's pick (Q81)
+        return replace(loose, method="location-forms", flags=(*loose.flags, NAME_SPACING))
 
     def _from_equivalent(
         self,
