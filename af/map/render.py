@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from af.map.labels import Placed
 from af.map.style import MARKERS, Scene, ScenePoint
 from af.map.viewport import Box, Frame
@@ -166,10 +168,11 @@ def draw_scene(
     legend: bool = True,
     title: bool = True,
     styles: Mapping[str, PointStyle] | None = None,
-) -> None:
+) -> tuple[str, ...]:
     """Draw a scene on an Axes whose data limits become the page (0..1, y down).
 
-    ``styles`` override single points' drawing, by point id.
+    ``styles`` override single points' drawing, by point id. Returns the ids of shown points
+    that lie outside the frame, which the Axes clips: a caller can mark where they went.
 
     ``scale`` multiplies every text size and line width: 1.0 on the report page; the Axes'
     side over ``look.page_points`` for a panel (:func:`af.map.figure.draw_axes`), so a panel is
@@ -243,6 +246,9 @@ def draw_scene(
         )
     if legend:
         _draw_legend(ax, scene, look, scale)
+    with np.errstate(invalid="ignore"):
+        outside = ~((page >= 0) & (page <= 1)).all(axis=1) & np.isfinite(page).all(axis=1)
+    return tuple(p.id for p, out in zip(scene.points, outside, strict=True) if p.shown and out)
 
 
 def _marker_patch(marker: str, x: float, y: float, size: float, style: dict[str, Any]) -> Any:

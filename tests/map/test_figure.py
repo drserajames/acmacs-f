@@ -166,3 +166,17 @@ def test_per_point_styles_are_opt_in() -> None:
     assert styled["ag0"].get_alpha() == 0.2  # a point's own opacity beats the global one
     assert styled["ag1"].get_linewidth() == pytest.approx(3 * plain["ag1"].get_linewidth() / 0.8)
     assert styled["grid"] == {"#e5e5e5"}
+
+
+def test_draw_axes_says_which_points_the_frame_clips() -> None:
+    import matplotlib.pyplot as plt
+
+    from af.map.viewport import Frame
+
+    scene = chart_scene(chart(), XY, COLOURS, title="T")
+    fig = plt.figure(figsize=(4, 4), dpi=72)
+    ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+    # a 2.5-unit frame from (-0.5, 2): ag0 (0,0) and ag1 (2,1) are inside, sr0 (1,3) is above it
+    clipped = draw_axes(ax, scene, Frame(-0.5, 2.0, 2.5), legend=False, title=False)
+    plt.close(fig)
+    assert clipped == ("sr0",)

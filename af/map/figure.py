@@ -216,7 +216,7 @@ def draw_axes(
     legend: bool = True,
     title: bool = True,
     styles: Mapping[str, PointStyle] | None = None,
-) -> None:
+) -> tuple[str, ...]:
     """Draw ``scene`` inside ``frame`` on a matplotlib Axes, exactly as the report PDF draws it.
 
     The Axes must be square on the figure: the map frame is square, and a stretched panel would
@@ -225,9 +225,12 @@ def draw_axes(
     (``look.page_points``), so a panel is the report page shrunk. ``legend`` and ``title`` can be
     left off for small panels; nothing else differs from the PDF.
 
-    Opt-in, for figures in another style: ``look`` (:class:`Look`) sets every point's opacity
-    and the grid colour; ``styles`` overrides single points by id (:class:`PointStyle`: fill,
-    outline colour and width, opacity). Without them the drawing is the report's.
+    Opt-in, for figures in another style: ``look`` (:class:`Look`) sets every point's opacity and
+    the grid colour; ``styles`` overrides single points by id (:class:`PointStyle`: fill, outline
+    colour and width, opacity). Without them the drawing is the report's.
+
+    Returns the ids of shown points outside the frame, which the Axes clips, so a caller can
+    mark where they went (an arrowhead at the edge, say).
     """
     from af.map.render import draw_scene
 
@@ -240,6 +243,6 @@ def draw_axes(
             f"the Axes is {w_in:.3f} x {h_in:.3f} in: a map panel must be square, as the frame is"
         )
     scale = w_in * 72.0 / look.page_points
-    draw_scene(
+    return draw_scene(
         ax, scene, frame, labels or {}, look, scale=scale, legend=legend, title=title, styles=styles
     )
