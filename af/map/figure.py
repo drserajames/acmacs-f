@@ -15,7 +15,13 @@ outside :mod:`af.map.build` (which adds a round's config, curation and orientati
    not a lookalike.
 
 Also public: :func:`marker_for_passage`, a point's marker shape from its passage, for a caller
-that builds points itself (:func:`chart_scene` already sets every point's ``marker``).
+that builds points itself (:func:`chart_scene` already sets every point's ``marker``); and the
+types those calls take, re-exported here so a caller pins to this module alone: ``Look`` and
+``DEFAULT_LOOK`` (page sizes, fonts, line widths), ``ColourScheme`` and ``ColourRow`` (the
+map's legend rows), ``ChartColours`` (what ``StoreColours.for_chart`` returns; imported only
+when asked for, so drawing with your own colours does not load the stores), ``Scene``, ``Window``
+and ``Frame``; and, for a legend drawn like the report's, the marker paths ``egg_path`` and
+``ugly_egg_path`` and the colours ``GREY`` (old antigens) and ``SERUM_OUTLINE``.
 
 Displayed coordinates grow upwards, as in R (Q105): pass a chart's layout as stored, and the map
 looks as R draws it.
@@ -33,14 +39,46 @@ import numpy as np
 from numpy.typing import NDArray
 
 from af.chart.model import Chart
-from af.map.style import Marker, PointIn, Scene, Window, style_points
+from af.map.render import DEFAULT_LOOK, GREY, SERUM_OUTLINE, Look, egg_path, ugly_egg_path
+from af.map.style import ColourRow, ColourScheme, Marker, PointIn, Scene, Window, style_points
 from af.map.vaccines import marker_for, passage_class
 from af.map.viewport import Frame
 
 if TYPE_CHECKING:
     from af.map.colouring import ChartColours
     from af.map.labels import Placed
-    from af.map.render import Look
+
+
+__all__ = [
+    "DEFAULT_LOOK",
+    "GREY",
+    "SERUM_OUTLINE",
+    "ChartColours",
+    "ColourRow",
+    "ColourScheme",
+    "FigureError",
+    "Frame",
+    "Look",
+    "Scene",
+    "Window",
+    "chart_points",
+    "chart_scene",
+    "draw_axes",
+    "frame_around",
+    "egg_path",
+    "marker_for_passage",
+    "ugly_egg_path",
+]
+
+
+def __getattr__(name: str) -> Any:
+    """``ChartColours`` on first use: af.map.colouring loads the stores, which a caller drawing
+    with its own colours never needs."""
+    if name == "ChartColours":
+        from af.map.colouring import ChartColours
+
+        return ChartColours
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class FigureError(ValueError):
@@ -176,7 +214,7 @@ def draw_axes(
     (``look.page_points``), so a panel is the report page shrunk. ``legend`` and ``title`` can be
     left off for small panels; nothing else differs from the PDF.
     """
-    from af.map.render import DEFAULT_LOOK, draw_scene
+    from af.map.render import draw_scene
 
     look = look or DEFAULT_LOOK
     fig = ax.get_figure()

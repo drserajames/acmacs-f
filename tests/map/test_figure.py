@@ -87,3 +87,26 @@ def test_marker_for_passage_is_the_scenes_rule() -> None:
     assert set(got) >= {"circle", "egg", "uglyegg"}  # the fixture has cell, egg and an egg serum
     with pytest.raises(FigureError, match="kind"):
         marker_for_passage("titre", "E3")
+
+
+def test_the_public_types_are_re_exported_from_figure() -> None:
+    """A caller pins to af.map.figure alone (pyacmapcheck, figure API §6)."""
+    import subprocess
+    import sys
+
+    import af.map.colouring as colouring
+    import af.map.figure as figure
+    import af.map.render as render
+    import af.map.style as style
+
+    assert figure.Look is render.Look and figure.DEFAULT_LOOK is render.DEFAULT_LOOK
+    assert figure.ColourScheme is style.ColourScheme and figure.ColourRow is style.ColourRow
+    assert figure.ChartColours is colouring.ChartColours
+    assert (figure.egg_path, figure.ugly_egg_path) == (render.egg_path, render.ugly_egg_path)
+    assert (figure.GREY, figure.SERUM_OUTLINE) == (render.GREY, render.SERUM_OUTLINE)
+    assert figure.Scene is style.Scene and figure.Window is style.Window
+    assert all(hasattr(figure, name) for name in figure.__all__)
+    # Drawing with your own colours does not load the stores: ChartColours is imported on use.
+    probe = "import sys, af.map.figure; print('af.map.colouring' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False"
