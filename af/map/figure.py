@@ -194,13 +194,21 @@ def chart_scene(
     )
 
 
-def frame_around(scene: Scene, *, margin: float = 1.0, size: float | None = None) -> Frame:
+def frame_around(
+    scene: Scene, *, margin: float = 1.0, size: float | None = None, square: bool = True
+) -> Frame:
     """A square frame over every shown point, ``margin`` map units beyond them; or of a fixed
-    ``size`` (the report maps' frame per subtype), centred on them."""
+    ``size`` (the report maps' frame per subtype), centred on them. ``square=False`` fits the
+    points' own extent instead, width and height separately (``size`` then does not apply)."""
     xy = np.array([p.xy for p in scene.points if p.shown and p.xy is not None], dtype=float)
     if len(xy) == 0:
         raise FigureError("no shown point has coordinates: nothing to frame")
     lo, hi = xy.min(axis=0), xy.max(axis=0)
+    if not square:
+        if size is not None:
+            raise FigureError("frame_around: size= is for a square frame")
+        w, h = (hi - lo) + 2 * margin
+        return Frame(float(lo[0] - margin), float(hi[1] + margin), float(w), float(h))
     side = float(size) if size is not None else float((hi - lo).max()) + 2 * margin
     centre = (lo + hi) / 2
     return Frame(float(centre[0] - side / 2), float(centre[1] + side / 2), side)  # top-left
@@ -219,11 +227,11 @@ def draw_axes(
 ) -> tuple[str, ...]:
     """Draw ``scene`` inside ``frame`` on a matplotlib Axes, exactly as the report PDF draws it.
 
-    The Axes must be square on the figure: the map frame is square, and a stretched panel would
-    misrepresent distances. Marker sizes, grid and legend box are fractions of the Axes; text
-    sizes and line widths are the report page's, scaled by the Axes' side over the page's
-    (``look.page_points``), so a panel is the report page shrunk. ``legend`` and ``title`` can be
-    left off for small panels; nothing else differs from the PDF.
+    The Axes must have the frame's shape on the figure (square for a square frame): a stretched
+    panel would misrepresent distances. Marker sizes, grid and legend box are fractions of the
+    Axes' width; text sizes and line widths are the report page's, scaled by the Axes' width
+    over the page's (``look.page_points``), so a panel is the report page shrunk. ``legend``
+    and ``title`` can be left off for small panels; nothing else differs from the PDF.
 
     Opt-in, for figures in another style: ``look`` (:class:`Look`) sets every point's opacity and
     the grid colour; ``styles`` overrides single points by id (:class:`PointStyle`: fill, outline
@@ -238,9 +246,11 @@ def draw_axes(
     fig = ax.get_figure()
     box = ax.get_position()
     w_in, h_in = box.width * fig.get_figwidth(), box.height * fig.get_figheight()
-    if abs(w_in - h_in) > 1e-3 * max(w_in, h_in):
+    if abs(h_in - w_in * frame.aspect) > 1e-3 * max(w_in, h_in):
+        shape = "square" if frame.height is None else f"{frame.size:g} x {frame.tall:g} map units"
         raise FigureError(
-            f"the Axes is {w_in:.3f} x {h_in:.3f} in: a map panel must be square, as the frame is"
+            f"the Axes is {w_in:.3f} x {h_in:.3f} in: a map panel must have its frame's shape "
+            f"({shape}), or distances would be stretched"
         )
     scale = w_in * 72.0 / look.page_points
     return draw_scene(

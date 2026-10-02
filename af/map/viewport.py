@@ -44,19 +44,39 @@ class FrameError(ValueError):
 
 @dataclass(frozen=True)
 class Frame:
-    """Square frame in displayed map coordinates (y up): its top-left corner as drawn, which is
-    (smallest x, LARGEST y), and its side."""
+    """A frame in displayed map coordinates (y up): its top-left corner as drawn, which is
+    (smallest x, LARGEST y), its width ``size`` and, for a rectangular frame, its ``height``.
+
+    The report's frames are square (``height`` None). A rectangular frame (Sarah, 2 Oct: her R
+    figures used data-derived limits) is opt-in, for callers that choose their own frames.
+    """
 
     x: float
     y: float
     size: float
+    height: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.size <= 0 or (self.height is not None and self.height <= 0):
+            raise ValueError(f"frame sides must be positive, got {self.size} x {self.height}")
+
+    @property
+    def tall(self) -> float:
+        """The frame's height in map units (its width for a square frame)."""
+        return self.size if self.height is None else self.height
+
+    @property
+    def aspect(self) -> float:
+        """Height over width: 1.0 for a square frame."""
+        return 1.0 if self.height is None else self.height / self.size
 
     def page(self, xy: Array) -> Array:
-        """Positions as fractions of the page, (0, 0) top-left, (1, 1) bottom-right.
+        """Positions as fractions of the page, (0, 0) top-left, (1, 1) bottom-right: x over
+        the width, y over the height.
 
         The one conversion from displayed map coordinates (y up) to the page (y down).
         """
-        return np.column_stack([xy[:, 0] - self.x, self.y - xy[:, 1]]) / self.size
+        return np.column_stack([(xy[:, 0] - self.x) / self.size, (self.y - xy[:, 1]) / self.tall])
 
 
 @dataclass(frozen=True)

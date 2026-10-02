@@ -148,7 +148,7 @@ def draw_pdf(
     import matplotlib.pyplot as plt
 
     side = look.page_points / 72.0
-    fig = plt.figure(figsize=(side, side), dpi=72)
+    fig = plt.figure(figsize=(side, side * frame.aspect), dpi=72)
     ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
     draw_scene(ax, scene, frame, labels, look, styles=styles)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
@@ -176,17 +176,24 @@ def draw_scene(
     that lie outside the frame, which the Axes clips: a caller can mark where they went.
 
     ``scale`` multiplies every text size and line width: 1.0 on the report page; the Axes'
-    side over ``look.page_points`` for a panel (:func:`af.map.figure.draw_axes`), so a panel is
-    the page shrunk. Everything else is in page fractions already.
+    width over ``look.page_points`` for a panel (:func:`af.map.figure.draw_axes`), so a panel is
+    the page shrunk. Everything else is in fractions of the page's WIDTH: a rectangular frame's
+    page runs 0..1 across and 0..aspect down, so a circle stays round and a map unit is the same
+    length both ways. A square frame's aspect is exactly 1, and its page exactly the square one.
     """
+    a = frame.aspect
     ax.set_xlim(0, 1)
-    ax.set_ylim(1, 0)  # the PAGE grows downward; map y (up) became page y in Frame.page
+    ax.set_ylim(a, 0)  # the PAGE grows downward; map y (up) became page y in Frame.page
     ax.axis("off")
-    for k in range(int(frame.size) + 1):
+    across, down = int(frame.size), int(frame.tall)
+    for k in range(max(across, down) + 1):
         g = k / frame.size
-        ax.plot([g, g], [0, 1], color=look.grid_colour, lw=0.8 * scale, zorder=0)
-        ax.plot([0, 1], [g, g], color=look.grid_colour, lw=0.8 * scale, zorder=0)
+        if k <= across:
+            ax.plot([g, g], [0, a], color=look.grid_colour, lw=0.8 * scale, zorder=0)
+        if k <= down:
+            ax.plot([0, 1], [g, g], color=look.grid_colour, lw=0.8 * scale, zorder=0)
     page = frame.page(scene.xy())
+    drawn = page * [1.0, a]  # in width units: what the Axes draws
     styles = styles or {}
 
     def order(p: ScenePoint) -> int:
@@ -200,7 +207,7 @@ def draw_scene(
         p = scene.points[i]
         if not p.shown:
             continue
-        x, y = page[i]
+        x, y = drawn[i]
         z = order(p) + 1
         own = styles.get(p.id, PointStyle())
         if p.kind == "serum":
@@ -228,7 +235,7 @@ def draw_scene(
     for lab in labels.values():
         ax.text(
             lab.box[0],
-            lab.box[3],
+            lab.box[3] * a,
             lab.text,
             fontsize=look.label_size * scale,
             va="bottom",
@@ -246,7 +253,7 @@ def draw_scene(
             zorder=9,
         )
     if legend:
-        _draw_legend(ax, scene, look, scale)
+        _draw_legend(ax, scene, look, scale, drop=a - 1.0)
     # Spelled out with np.asarray (as rows_with_coordinates is): older numpy stubs type a reduced
     # comparison as possibly a scalar, which fails type checking on Python 3.11 (CI).
     with np.errstate(invalid="ignore"):
@@ -272,10 +279,14 @@ def _marker_patch(marker: str, x: float, y: float, size: float, style: dict[str,
     raise ValueError(f"unknown marker shape {marker!r} (known: {', '.join(MARKERS)})")
 
 
-def _draw_legend(ax: Any, scene: Scene, look: Look, scale: float = 1.0) -> None:
+def _draw_legend(
+    ax: Any, scene: Scene, look: Look, scale: float = 1.0, *, drop: float = 0.0
+) -> None:
+    """The legend, bottom-left; ``drop`` moves it down to the bottom of a taller page."""
     from matplotlib.patches import Circle, Rectangle
 
     box = legend_box(scene, look)
+    box = Box(box.name, box.left, box.top + drop, box.right, box.bottom + drop)
     ax.add_patch(
         Rectangle(
             (box.left, box.top),

@@ -58,7 +58,7 @@ def test_draw_axes_refuses_a_stretched_panel() -> None:
 
     fig, ax = plt.subplots(figsize=(4, 2))
     scene = chart_scene(chart(), XY, COLOURS, title="T")
-    with pytest.raises(FigureError, match="must be square"):
+    with pytest.raises(FigureError, match="must have its frame.s shape"):
         draw_axes(ax, scene, frame_around(scene))
     plt.close(fig)
 
@@ -187,3 +187,84 @@ def test_a_marked_point_keeps_its_old_name_for_now() -> None:
     scene = chart_scene(chart(), XY, COLOURS, title="T", vaccines={"ag1": "V1"})
     marked = next(p for p in scene.points if p.id == "ag1")
     assert marked.mark == "V1" and marked.vaccine == "V1"
+
+
+# ---------------------------------------------------------------- rectangular frames (Sarah, 2 Oct)
+
+
+def test_a_rectangular_frame_divides_each_axis_by_its_own_side() -> None:
+    from af.map.viewport import Frame
+
+    frame = Frame(0.0, 5.0, 10.0, height=5.0)
+    assert frame.aspect == 0.5 and frame.tall == 5.0
+    assert frame.page(np.array([[10.0, 0.0], [5.0, 2.5]])).tolist() == [[1.0, 1.0], [0.5, 0.5]]
+    assert Frame(0.0, 0.0, 4.0).aspect == 1.0  # square: as before
+    with pytest.raises(ValueError, match="positive"):
+        Frame(0.0, 0.0, 4.0, height=0.0)
+
+
+def test_frame_around_can_fit_the_points_extent() -> None:
+    scene = chart_scene(chart(), XY, COLOURS, title="T")  # shown x 0..2, y 0..3
+    f = frame_around(scene, margin=1.0, square=False)
+    assert (f.x, f.y, f.size, f.tall) == pytest.approx((-1.0, 4.0, 4.0, 5.0))
+    with pytest.raises(FigureError, match="square"):
+        frame_around(scene, size=10, square=False)
+
+
+def test_a_rectangular_panel_keeps_map_units_and_circles_round() -> None:
+    import matplotlib.pyplot as plt
+
+    from af.map.viewport import Frame
+
+    scene = chart_scene(chart(), XY, COLOURS, title="T")
+    frame = Frame(-1.0, 4.0, 8.0, height=4.0)  # twice as wide as tall
+    fig = plt.figure(figsize=(4, 2), dpi=72)
+    ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+    draw_axes(ax, scene, frame, legend=False, title=False)
+    fig.canvas.draw()
+    from matplotlib.patches import Circle, Rectangle
+
+    shapes = set()
+    for patch in ax.patches:  # each marker keeps its own proportions, not the panel's
+        ext = patch.get_window_extent()
+        if isinstance(patch, (Circle, Rectangle)):
+            assert ext.width == pytest.approx(ext.height, rel=1e-6)
+            shapes.add(type(patch).__name__)
+        else:  # an egg is 1.191 times as tall as wide (kateri's); an ugly egg as tall as wide
+            ratio = ext.height / ext.width
+            shape = "egg" if ratio == pytest.approx(1.191, abs=0.01) else "uglyegg"
+            assert shape == "egg" or ratio == pytest.approx(1.0, rel=1e-6)
+            shapes.add(shape)
+    assert shapes == {"Circle", "egg", "uglyegg"}  # the fixture: cell, egg and an egg serum
+    # ag0 (0,0) and ag1 (2,1): 2 units across and 1 up are 2:1 on the page too
+    page = ax.transData.transform(frame.page(np.array([[0.0, 0.0], [2.0, 1.0]])) * [1, 0.5])
+    dx, dy = page[1] - page[0]
+    assert dx == pytest.approx(2 * dy)  # display y grows upwards: map up is display up
+    assert dx == pytest.approx(2 * 4 * 72 / 8)  # 2 units of an 8-unit frame on a 4 in panel
+    plt.close(fig)
+    square = plt.figure(figsize=(3, 3), dpi=72)
+    with pytest.raises(FigureError, match="8 x 4 map units"):
+        draw_axes(square.add_axes((0.0, 0.0, 1.0, 1.0)), scene, frame)
+    plt.close(square)
+
+
+def test_a_rectangular_pdf_has_its_frames_shape_and_its_i7_says_so(tmp_path: Any) -> None:
+    import datetime as dt
+
+    from af.map.i7 import i7_document
+    from af.map.render import draw_pdf
+    from af.map.viewport import Frame
+
+    scene = chart_scene(chart(), XY, COLOURS, title="T")
+    frame = Frame(-1.0, 4.0, 8.0, height=4.0)
+    pdf = tmp_path / "rect.pdf"
+    draw_pdf(scene, frame, {}, pdf)
+    box = pdf.read_bytes().split(b"/MediaBox")[1].split(b"]")[0]
+    width, height = (float(v) for v in box.strip(b" [").split()[2:4])
+    assert height == pytest.approx(width / 2)
+    doc = i7_document(
+        scene, frame, {}, chart="c", pdf=pdf,
+        created=dt.datetime(2026, 10, 2, tzinfo=dt.UTC),
+        provenance={"inputs": {"x": {"sha256": "0" * 64}}},
+    )  # fmt: skip
+    assert doc["map"]["viewport"] == [-1.0, 4.0, 8.0, 4.0]

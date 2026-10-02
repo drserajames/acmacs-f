@@ -100,7 +100,7 @@ def i7_document(
         # Displayed coordinates grow upwards (Q105); the viewport is [x, y, w, h] with (x, y) the
         # frame's top-left corner as drawn, i.e. its largest y.
         "y_axis": "up",
-        "viewport": [frame.x, frame.y, frame.size, frame.size],
+        "viewport": [frame.x, frame.y, frame.size, frame.tall],
         "clade_scheme": scene.scheme,
         "legend": [{"clade": t, "count": n} for t, _, n in scene.legend],
         "antigens": [point(i, p) for i, p in enumerate(scene.points) if p.kind == "antigen"],
