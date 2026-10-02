@@ -224,7 +224,9 @@ def _filtered(rule: Rule, record: _Record, cut: Cut | None, known: frozenset[Key
 def _keys(store: Store, ref: StoreRef) -> frozenset[Key]:
     """Every key of one store version: what was known when a cut was chosen from it."""
     path = str(store.resolve(ref) / "isolates" / "*" / "*.parquet")
-    rows = duckdb.execute("select epi_isl, accession from read_parquet(?)", [path]).fetchall()
+    rows = duckdb.execute(
+        "select epi_isl, accession from read_parquet(?, union_by_name=true)", [path]
+    ).fetchall()
     return frozenset((e, a) for e, a in rows)
 
 
@@ -268,15 +270,24 @@ def _count(rule: Rule, removed: int, added: int, remaining: int) -> RuleCount:
 
 
 def _load(store: Store, ref: StoreRef) -> dict[Key, _Record]:
+    """Every record of one store version, with what the rules need.
+
+    ``union_by_name`` because a version's partitions need not share a schema: publish_pull
+    rewrites only the pulls it re-stores and hard-links the rest, so a column added to the
+    sequences table (aa_partial) exists in some partitions and not others until every pull has
+    been re-stored. Without it duckdb refuses the whole glob ("schema mismatch in glob") and
+    selection fails for that subtype rather than degrading.
+    """
     version = store.resolve(ref)
+    sequences = str(version / "sequences" / "*" / "*.parquet")
     rows = duckdb.execute(
         "select i.epi_isl, i.accession, i.host, i.collection_date_first, s.align_error,"
         " s.alignment_start, s.alignment_end, s.covers_mature, s.nuc_aligned, s.aa_aligned,"
         " s.failed_cds, s.frameshifts, s.deleted_aa, s.inserted_aa, s.unknown_aa,"
-        " s.premature_stop, s.nextclade_qc_status, s.aa_partial"
-        " from read_parquet(?) i join read_parquet(?) s using (epi_isl, accession)",
-        [str(version / "isolates" / "*" / "*.parquet"),
-         str(version / "sequences" / "*" / "*.parquet")],
+        " s.premature_stop, s.nextclade_qc_status, " + _partial(sequences) +
+        " from read_parquet(?, union_by_name=true) i"
+        " join read_parquet(?, union_by_name=true) s using (epi_isl, accession)",
+        [str(version / "isolates" / "*" / "*.parquet"), sequences],
     ).fetchall()  # fmt: skip
     out = {}
     for row in rows:
@@ -287,6 +298,20 @@ def _load(store: Store, ref: StoreRef) -> dict[Key, _Record]:
                           unknown or 0, bool(stop), status or "", bool(partial))  # fmt: skip
         out[(epi, acc)] = _Record((epi, acc), host, first, aa, aligned)
     return out
+
+
+def _partial(sequences: str) -> str:
+    """The aa_partial column, or false where a version's pulls were all built before it existed.
+
+    Builds before the column could not store a partial protein (a failed CDS discarded the whole
+    translation), so false is what those rows mean, not a guess. Where only some partitions have
+    the column, union_by_name gives the others NULL, which reads as false for the same reason.
+    """
+    described = duckdb.execute(
+        "describe select * from read_parquet(?, union_by_name=true)", [sequences]
+    ).fetchall()
+    columns = {c for (c, *_) in described}
+    return "s.aa_partial" if "aa_partial" in columns else "false as aa_partial"
 
 
 def parse_rules(data: dict[str, Any], base_dir: Path) -> SubtypeRules:
