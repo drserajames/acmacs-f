@@ -174,6 +174,17 @@ class SheetReader:
         last_letter = max(columns.values())
         columns = {letter: columns[letter] for letter, _ in sera}  # control sera removed
         antigens, titres = self._antigens(label_row, columns, last_letter, subtype, test_date)
+        if lineage:
+            # The sheet states the lineage once, in its title ("TYPE B VICTORIA LINEAGE"), and
+            # every point on it carries that lineage, as in the other labs' readers. Counted
+            # in the run report; a point of another lineage is a control, removed by rule.
+            points = [*antigens, *(sr for _, sr in sera)]
+            for point in points:
+                point.lineage = lineage
+            self.warnings.append(
+                f"{self.s.where(0)}: lineage {lineage} from the sheet title for "
+                f"{len(antigens)} antigens and {len(sera)} sera"
+            )
         return Table(
             table_id="",
             group=group,

@@ -171,3 +171,14 @@ def test_a_harvest_after_the_test_is_left_out_not_moved_a_century(tmp_path: Path
     (t,) = res.tables
     assert t.antigens[2].passage == "MDCK1" and t.antigens[2].passage_date is None
     assert any("is after the test; left out" in w for w in t.warnings)
+
+
+def test_every_point_carries_the_sheets_lineage(tmp_path: Path, rules: Rules):
+    # the title says TYPE B VICTORIA LINEAGE; a map colours points by their own lineage
+    res = cdc_xlsx.read([workbook(tmp_path / "old.xlsx")], rules)
+    (t,) = res.tables
+    assert t.lineage == "VICTORIA"
+    assert {p.lineage for p in (*t.antigens, *t.sera)} == {"VICTORIA"}
+    assert any(
+        "lineage VICTORIA from the sheet title for 3 antigens and 3 sera" in w for w in t.warnings
+    )
