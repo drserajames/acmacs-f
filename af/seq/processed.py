@@ -83,7 +83,10 @@ SEQUENCES = pa.schema(
         # reason to drop a row: identical sequences from two isolates are two records.
         ("seq_hash", pa.string()),
         ("nuc_aligned", pa.string()),  # mature HA, reference numbering; null if not aligned
-        ("aa_aligned", pa.string()),  # mature HA protein; null if a mature CDS failed
+        # mature HA protein; null only when no mature CDS translated. A CDS that did not
+        # translate is filled with "X" (unobservable) and aa_partial says so.
+        ("aa_aligned", pa.string()),
+        ("aa_partial", pa.bool_()),
         ("align_error", pa.string()),
         ("alignment_start", pa.int32()),
         ("alignment_end", pa.int32()),
@@ -296,6 +299,7 @@ def _sequence_row(record: SequenceRecord, result: Aligned, pull_id: str) -> dict
         "seq_hash": hashlib.sha256(record.nucleotides.encode()).hexdigest()[:16],
         "nuc_aligned": result.nucleotides,
         "aa_aligned": result.amino_acids,
+        "aa_partial": result.aa_partial,
         "align_error": result.error,
         "alignment_start": result.alignment_start,
         "alignment_end": result.alignment_end,

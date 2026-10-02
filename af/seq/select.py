@@ -273,7 +273,7 @@ def _load(store: Store, ref: StoreRef) -> dict[Key, _Record]:
         "select i.epi_isl, i.accession, i.host, i.collection_date_first, s.align_error,"
         " s.alignment_start, s.alignment_end, s.covers_mature, s.nuc_aligned, s.aa_aligned,"
         " s.failed_cds, s.frameshifts, s.deleted_aa, s.inserted_aa, s.unknown_aa,"
-        " s.premature_stop, s.nextclade_qc_status"
+        " s.premature_stop, s.nextclade_qc_status, s.aa_partial"
         " from read_parquet(?) i join read_parquet(?) s using (epi_isl, accession)",
         [str(version / "isolates" / "*" / "*.parquet"),
          str(version / "sequences" / "*" / "*.parquet")],
@@ -281,10 +281,10 @@ def _load(store: Store, ref: StoreRef) -> dict[Key, _Record]:
     out = {}
     for row in rows:
         epi, acc, host, first, error, start, end, covers, nuc, aa, failed, *rest = row
-        frameshifts, deleted, inserted, unknown, stop, status = rest
+        frameshifts, deleted, inserted, unknown, stop, status, partial = rest
         aligned = Aligned(f"{epi}.{acc}", error, start, end, bool(covers), nuc, aa,
                           tuple(failed or ()), frameshifts or 0, deleted or 0, inserted or 0,
-                          unknown or 0, bool(stop), status or "")  # fmt: skip
+                          unknown or 0, bool(stop), status or "", bool(partial))  # fmt: skip
         out[(epi, acc)] = _Record((epi, acc), host, first, aa, aligned)
     return out
 
