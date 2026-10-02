@@ -236,6 +236,14 @@ class Rules:
             if tags.exists()
             else RuleTable.empty(tags, tag_scope)
         )
+        # Workbooks not read, each with its decision (af.tables.update): a held exclusion is
+        # listed with its evidence in every run, never silent. Absent: none are.
+        held = directory / "excluded_tables.tsv"
+        self.excluded_tables = (
+            RuleTable(held, scope=("lab",), required=("kind", "pattern"))
+            if held.exists()
+            else RuleTable.empty(held, ("lab",))
+        )
         self._check_alias_canonicals()
 
     def _check_alias_canonicals(self) -> None:
@@ -262,6 +270,7 @@ class Rules:
             self.cell_fixes,
             self.id_shapes,
             self.identity_tags,
+            self.excluded_tables,
             self.titre_tokens,
             self.control_sera,
             self.table_defaults,

@@ -164,6 +164,9 @@ def update(
     merged = [w for t in tables for w in t.warnings if w.startswith(cdc.MERGED_ISOLATES)]
     report.append(f"flagged ({cdc.MERGED_ISOLATES}; kept merged, Q13): {len(merged)}")
     report.extend(f"  {w}" for w in merged)
+    held = [r for r in rules.excluded_tables.rules if r.hits]
+    report.append(f"held exclusions (excluded_tables.tsv): {len(held)}")
+    report.extend(f"  {r.where}: {r['pattern']}: {r['evidence']}" for r in held)
     report.extend(warnings.report(tables))
     errors.extend(warnings.curated_errors(tables))
     errors.extend(f"rule never matched: {r.where}" for t in rules.tables() for r in t.unmatched())
@@ -204,20 +207,20 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
             settings.locations.locdb, settings.locations.chinese_aliases
         )
         for inputs in settings.ac21:
-            files = _dated_files(inputs)
+            files = _held_out(_dated_files(inputs), inputs, rules, report)
             result = ac21.read(files, rules, locations, lab=inputs.lab)
             _add_workbooks(inputs, files, result, tables, report, errors)
     for inputs in settings.niid:
         from . import niid
 
-        files = _dated_files(inputs)
+        files = _held_out(_dated_files(inputs), inputs, rules, report)
         _add_workbooks(
             inputs, files, niid.read(files, rules, lab=inputs.lab), tables, report, errors
         )
     for vinputs in settings.vidrl:
         from . import vidrl
 
-        files = _dated_files(vinputs)
+        files = _held_out(_dated_files(vinputs), vinputs, rules, report)
         result = vidrl.read(
             files, rules, lab=vinputs.lab, subtype=vinputs.subtype, lineage=vinputs.lineage
         )
@@ -225,7 +228,7 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
     for cinputs in settings.crick:
         from . import crick
 
-        files = _dated_files(cinputs)
+        files = _held_out(_dated_files(cinputs), cinputs, rules, report)
         result = crick.read(
             files, rules, lab=cinputs.lab, subtype=cinputs.subtype, lineage=cinputs.lineage
         )
@@ -303,6 +306,22 @@ def _add_workbooks(
                 f"{table.meta['file']}: test date {table.date} != file-name date {stem_date}"
             )
     tables.extend(result.tables)
+
+
+def _held_out(
+    files: list[Path], inputs: AC21Inputs | VIDRLInputs, rules: Rules, report: list[str]
+) -> list[Path]:
+    """Workbooks an excluded_tables rule holds out are not read. Each is reported with the
+    rule and its evidence in every run (a decision such as "exclude now but revisit later"
+    must stay visible), and counted in the summary."""
+    kept = []
+    for path in files:
+        rule = rules.excluded_tables.find(path.name, lab=inputs.lab)
+        if rule is None:
+            kept.append(path)
+            continue
+        report.append(f"  HELD EXCLUSION {path.name} by {rule.where}: {rule['evidence']}")
+    return kept
 
 
 def _file_date(path: Path) -> str | None:
