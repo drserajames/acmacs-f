@@ -106,6 +106,7 @@ def test_toml_rules(tables, tmp_path):  # noqa: F811
     path.write_text(
         head
         + 'group = "h9-hi-test-lab"\n'
+        + '[options]\nminimum_column_basis = "none"\n'
         + f'[select]\nnon_ferret_markers = "{write_markers(tmp_path / "markers.tsv")}"\n'
         + '[[select.remove]]\nwhat = "sera"\npassage = "egg"\nreason = "egg-free map"\n'
         + '[[select.remove]]\nwhat = "antigens"\ndesignation = "TEST-201 MDCK1"\n'
