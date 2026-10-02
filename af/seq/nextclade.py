@@ -49,6 +49,7 @@ DATASET_ZIP = "dataset.zip"
 DATASET_DIR = "dataset"
 #: The CDSs that make up mature HA. SigPep is outside it and is ignored everywhere.
 MATURE_CDS = ("HA1", "HA2")
+UNKNOWN_AA = "X"  # af.clades.sequence reads this as unobservable
 STOP_CODONS = frozenset({"TAA", "TAG", "TGA"})
 
 TSV = "nextclade.tsv"
@@ -179,6 +180,11 @@ class Reference:
     @property
     def mature_aa(self) -> int:
         return self.mature_nt // 3
+
+    def cds_aa(self, name: str) -> int:
+        """Residues the annotation gives this mature CDS, for padding one that did not translate."""
+        start, end = self.cds[name]
+        return (end - start + 1) // 3
 
 
 def read_reference(dataset_dir: Path, expected_mature_nt: int) -> Reference:
@@ -341,7 +347,9 @@ class Aligned:
     """One sequence's alignment, reduced to mature HA, with the facts R3 needs.
 
     ``nucleotides`` and ``amino_acids`` are None when Nextclade could not align the
-    sequence (``error`` says why) or could not translate a mature CDS (``failed_cds``).
+    sequence (``error`` says why). A mature CDS that did not translate (``failed_cds``) is
+    filled with "X" and ``aa_partial`` is set, so the CDS that did translate is still
+    readable (Sarah, 2 Oct); only a sequence with no translated CDS at all has no protein.
     """
 
     seq_id: str
@@ -358,6 +366,10 @@ class Aligned:
     unknown_aa: int
     premature_stop: bool
     qc_status: str
+    #: True when ``amino_acids`` holds some CDS as "X" because it did not translate: the
+    #: protein is readable where it was read and unobservable elsewhere, never a wrong
+    #: residue. Defaulted so a caller that predates partial proteins stays correct.
+    aa_partial: bool = False
     #: Nextclade's calls, kept for the clades workstream's fallback (sequences not on a
     #: tree); they depend on the dataset release, which provenance names.
     clade: str | None = None
@@ -401,12 +413,34 @@ def _reduce(
     failed = tuple(
         sorted(cds for cds in _cds_list(row.get("failedCdses", "")) if cds in MATURE_CDS)
     )
+    observed = ""
+    partial = False
     if error is None:
         full = aligned[seq_id]
         nucleotides = full[reference.mature_start - 1 : reference.mature_end]
-        pieces = [translations.get(cds, {}).get(seq_id) for cds in MATURE_CDS]
-        if all(piece is not None for piece in pieces) and not failed:
-            amino_acids = "".join(piece for piece in pieces if piece)[: reference.mature_aa]
+        pieces, read = [], []
+        for cds in MATURE_CDS:
+            piece = translations.get(cds, {}).get(seq_id)
+            if piece is None or cds in failed:
+                # Unobservable, not absent: pad to this CDS's own length so every protein
+                # keeps the same length and a position still means what it says.
+                pieces.append(UNKNOWN_AA * reference.cds_aa(cds))
+                read.append(False)
+                partial = True
+            else:
+                pieces.append(piece)
+                read.append(True)
+        if any(read):
+            amino_acids = "".join(pieces)[: reference.mature_aa]
+            # The residues actually translated, within the protein as stored: the counts below
+            # must not see padding, nor a trailing stop the truncation removed.
+            kept = "".join(
+                piece if was_read else "\0" * len(piece)
+                for piece, was_read in zip(pieces, read, strict=True)
+            )[: reference.mature_aa]
+            observed = kept.replace("\0", "")
+        else:
+            partial = False  # nothing translated at all: no protein, as before
     return Aligned(
         seq_id=seq_id,
         error=error,
@@ -419,8 +453,11 @@ def _reduce(
         frameshifts=_count_in_mature(row.get("frameShifts", "")),
         deleted_aa=_count_in_mature(row.get("aaDeletions", "")),
         inserted_aa=_inserted_aa_in_mature(row.get("aaInsertions", "")),
-        unknown_aa=amino_acids.count("X") if amino_acids else 0,
-        premature_stop="*" in amino_acids if amino_acids else False,
+        aa_partial=partial,
+        # Over the translated part only: padding is not an ambiguous residue that was read,
+        # and counting it would trip R3's unknown-aa limit for a reason that is not quality.
+        unknown_aa=observed.count("X"),
+        premature_stop="*" in observed,
         qc_status=row.get("qc.overallStatus", ""),
         clade=row.get("clade") or None,
         subclade=row.get("subclade") or None,
@@ -513,8 +550,10 @@ def align_step(name: str, parameters: Mapping[str, Any]) -> Step:
             for record in read_alignment(out_dir, reference)
             for reason in qc_failures(record, limits) or ["pass"]
         )
+        partial = sum(1 for record in read_alignment(out_dir, reference) if record.aa_partial)
         summary = {
             "nextclade_version": version,
+            "partial_aa": partial,
             "reference": _reference_json(reference),
             "counts": counts.to_json(),
             "r3": dict(sorted(qc.items())),

@@ -116,12 +116,45 @@ class TestReduce:
         assert (record.unknown_aa, record.premature_stop) == (2, True)
         assert nc.qc_failures(record, LIMITS) == ["unknown-aa", "premature-stop"]
 
-    def test_failed_cds_has_no_protein(self, tmp_path: Path) -> None:
+    def test_a_failed_cds_keeps_the_one_that_translated(self, tmp_path: Path) -> None:
+        """Sarah, 2 Oct: keep HA1 when only HA2 fails. HA2 reads unobservable, never wrong."""
         write_output(tmp_path, [tsv_row("s1", failedCdses="HA2")], {"s1": "A" * 30},
                      {"HA1": {"s1": "TYVR"}})  # fmt: skip
         record = next(nc.read_alignment(tmp_path, REFERENCE))
-        assert record.amino_acids is None
+        # HA1 is 4 residues here (nt 7-18) and the mature protein 7 (nt 7-27)
+        assert record.amino_acids == "TYVRXXX"
+        assert len(record.amino_acids) == REFERENCE.mature_aa  # the length invariant holds
+        assert record.aa_partial is True
+        # still cds-failed, so R3 excludes it from a tree exactly as before
         assert "cds-failed" in nc.qc_failures(record, LIMITS)
+
+    def test_padding_is_not_counted_as_read(self, tmp_path: Path) -> None:
+        """Padding is not an ambiguous residue someone read, nor a stop."""
+        write_output(tmp_path, [tsv_row("s1", failedCdses="HA2")], {"s1": "A" * 30},
+                     {"HA1": {"s1": "TYVR"}})  # fmt: skip
+        record = next(nc.read_alignment(tmp_path, REFERENCE))
+        assert (record.unknown_aa, record.premature_stop) == (0, False)
+
+    def test_an_unknown_residue_that_was_read_is_still_counted(self, tmp_path: Path) -> None:
+        write_output(tmp_path, [tsv_row("s1", failedCdses="HA2")], {"s1": "A" * 30},
+                     {"HA1": {"s1": "TXVR"}})  # fmt: skip
+        assert next(nc.read_alignment(tmp_path, REFERENCE)).unknown_aa == 1
+
+    def test_a_failed_first_cds_pads_the_front(self, tmp_path: Path) -> None:
+        write_output(tmp_path, [tsv_row("s1", failedCdses="HA1")], {"s1": "A" * 30},
+                     {"HA2": {"s1": "TYV*"}})  # fmt: skip
+        record = next(nc.read_alignment(tmp_path, REFERENCE))
+        assert record.amino_acids == "XXXXTYV"  # HA1's 4 padded, then HA2, truncated
+        assert record.aa_partial is True
+
+    def test_nothing_translated_is_still_no_protein(self, tmp_path: Path) -> None:
+        write_output(tmp_path, [tsv_row("s1", failedCdses="HA1,HA2")], {"s1": "A" * 30}, {})
+        record = next(nc.read_alignment(tmp_path, REFERENCE))
+        assert (record.amino_acids, record.aa_partial) == (None, False)
+
+    def test_a_complete_protein_is_unchanged_and_not_partial(self, tmp_path: Path) -> None:
+        record = one(tmp_path)
+        assert record.amino_acids == "TYVRTYV" and record.aa_partial is False
 
     def test_alignment_error_is_kept_and_flagged(self, tmp_path: Path) -> None:
         write_output(tmp_path, [tsv_row("s1", errors="Unable to align: seed", alignmentStart="",
@@ -361,3 +394,24 @@ def test_errors_are_grouped_by_kind_not_by_sequence(tmp_path: Path) -> None:
     )
     counts = nc.check_complete(["s1", "s2", "s3"], tmp_path)
     assert counts.errors == {"Unknown nucleotide: L": 2, "Unable to align: seed": 1}
+
+
+def test_a_padded_protein_reads_unobservable_where_it_was_not_read(tmp_path: Path) -> None:
+    """The contract Sarah set: an HA2 position must never read as a residue (2 Oct).
+
+    Asserted against af.clades' own engine rather than restated here, because that engine is
+    what decides a clade or a colouring group (agreed with 04-clades, 2 Oct).
+    """
+    from af.clades.sequence import AlignedSequence, Evidence
+
+    write_output(tmp_path, [tsv_row("s1", failedCdses="HA2")], {"s1": "A" * 30},
+                 {"HA1": {"s1": "TYVR"}})  # fmt: skip
+    record = next(nc.read_alignment(tmp_path, REFERENCE))
+    assert record.amino_acids is not None
+    sequence = AlignedSequence(record.amino_acids)
+    # position 1 is in HA1 and was read: it answers
+    assert sequence.evidence("aa", 1, "T") is Evidence.MATCHES
+    assert sequence.evidence("aa", 1, "Y") is Evidence.CONTRADICTS
+    # position 5 is in HA2 and was not read: it never answers, whatever is asked
+    assert sequence.evidence("aa", 5, "T") is Evidence.UNOBSERVABLE
+    assert sequence.evidence("aa", 5, "Y") is Evidence.UNOBSERVABLE
