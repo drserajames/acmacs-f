@@ -527,7 +527,9 @@ def stress_table(problem: MapProblem, layout: FloatArray) -> FloatArray:
     ``d`` its table distance (column basis minus log2(titre/10) minus the avidity
     adjustments, clipped at 0) and ``D`` the map distance. Cells are
     NaN where a titre is not fitted: missing, ``>``, dodgy unless ``dodgy_is_regular``, or
-    touching a disconnected point. ``np.nansum(stress_table(...)) == stress(...)``.
+    touching a disconnected point. ``np.nansum(stress_table(...))`` equals ``stress(...)`` to
+    rounding: the sums run in a different order, so compare with a relative tolerance (about
+    1e-12), not ``==``.
     """
     return np.asarray(problem._core_problem.stress_table(_layout(problem, layout)))
 
@@ -538,7 +540,8 @@ def point_stress(problem: MapProblem, layout: FloatArray) -> FloatArray:
     column sums for sera; 0 for a point with no fitted titre).
 
     Every titre joins one antigen and one serum, so it counts at both ends:
-    ``point_stress(...).sum() == 2 * stress(...)``. This is the quantity the grid test minimises
+    ``point_stress(...).sum()`` equals ``2 * stress(...)`` to rounding (compare with a relative
+    tolerance, not ``==``). This is the quantity the grid test minimises
     for one point at a time.
     """
     table = stress_table(problem, layout)
