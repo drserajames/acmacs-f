@@ -169,8 +169,8 @@ def _column_bases(note: Note, files: ChainFiles) -> None:
     note.item(f"Minimum column basis: {mcb}{mode}")
     config = files.chain.get("config", {})
     if "column_basis_adjustments" not in config:
-        where = "chain.json config.column_basis_adjustments"
-        note.item("Named adjustments: " + note.gap("named column-basis adjustments", where))
+        # af.chain writes the key only when the chain has adjustments: absent = none.
+        note.item("Named adjustments: none (af.chain records them only when a chain has any)")
         return
     measured = {m.get("rule"): m for m in files.last_step.get("column_basis_adjustments", [])}
     rows = config["column_basis_adjustments"]
@@ -191,8 +191,8 @@ def _column_bases(note: Note, files: ChainFiles) -> None:
 def _selection(note: Note, files: ChainFiles) -> None:
     config = files.chain.get("config", {})
     if "select_remove" not in config:
-        where = "chain.json config.select_remove"
-        note.item("Named removals: " + note.gap("named removals", where))
+        # af.chain writes the key only when the chain has removal rules: absent = none.
+        note.item("Named removals: none (af.chain records them only when a chain has any)")
     else:
         removed = files.last_step.get("removed", {})
         rules = config["select_remove"] or []
@@ -204,6 +204,9 @@ def _selection(note: Note, files: ChainFiles) -> None:
             count = removed.get(what) if isinstance(removed, dict) else None
             n = f"{_count(count)} point(s)" if count is not None else "count not in step.json"
             note.item(f"Removed by rule {what} {name}: {n} ({rule.get('reason', '')})")
+    window = config.get("selection")
+    if window:
+        note.item(f"Tables selected: {json.dumps(window)}")
     nf = files.chain.get("non_ferret_sera")
     if nf:
         note.item(f"Ferret-only sera: {nf.get('verification')}")
