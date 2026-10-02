@@ -253,3 +253,21 @@ def test_a_fact_the_records_lack_is_counted_never_a_question_mark(tmp_path: Path
                  "the final map's sera count", "the final map's dropped cells count",
                  "colour scheme", "colour source"):  # fmt: skip
         assert what in note.missing, what
+
+
+def test_within_table_repeat_drops_are_counted_from_the_tables_record(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "store")
+    step = {"table_id": "t3", "chosen": "scratch", "stress": {"scratch": 1.0},
+            "platform": {"release": "abcdef0123456789"}, "diagnostics": {}}  # fmt: skip
+    tables = [{"table_id": "t1", "repeat_drops": ["cell a", "cell b"]}, {"table_id": "t2"},
+              {"table_id": "t3", "repeat_drops": ["cell c"]}]  # fmt: skip
+    chain = {"mode": "merge_all", "config": {"tables": tables},
+             "steps": [{"directory": "steps/0000", "table_id": "t3"}]}  # fmt: skip
+    with store.build("chains", "labx/hi/merged") as build:
+        (build.path / "steps/0000").mkdir(parents=True)
+        (build.path / "steps/0000/step.json").write_text(json.dumps(step))
+        (build.path / "chain.json").write_text(json.dumps(chain))
+        options = {**OPTIONS, "sd_limit": 1.0}
+        ref = build.publish(Provenance("af.chain", (), {"options": options}, T0, T0))
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [])
+    assert any("(sd_limit 1.0): 3 cell(s) in 2 of 3 tables" in line for line in note.lines)
