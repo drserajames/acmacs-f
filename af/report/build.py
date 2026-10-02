@@ -26,6 +26,7 @@ import json
 import re
 import shutil
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -392,19 +393,33 @@ def check_provenance(
 def build(
     config_path: Path, figures_root: Path, out_dir: Path, *,
     store_root: Path | None = None, manifest_path: Path | None = None, deep: bool = False,
+    ignore_busy: bool = False,
 ) -> Path:  # fmt: skip
-    """Build the report; return the PDF path. Raises on any problem, leaving no final PDF."""
+    """Build the report; return the PDF path. Raises on any problem, leaving no final PDF.
+
+    With a store, everything that reads it runs under ``Store.reading``: the build refuses to
+    start while a batch is publishing, and fails if a dataset it read moved before it finished
+    (its output would mix versions). Only then are the PDF, manifest and build record written,
+    and the record carries what the guard saw. ``ignore_busy`` reads anyway (diagnosis only);
+    the record says so.
+    """
     cfg = load(config_path)
     built_at = dt.datetime.now(dt.UTC)  # shown on the cover and recorded; decides nothing
     figs = resolve_all(cfg, figures_root)
-    use = check_provenance(cfg, figs, store_root, manifest_path, deep=deep)
-    build_dir = out_dir / "build"
-    if build_dir.exists():
-        shutil.rmtree(build_dir)  # never reuse a stale .aux/.toc or an old figure
-    build_dir.mkdir(parents=True)
-    tex = write_tex(cfg, figs, build_dir, built_at, len(use.not_from_store))
-    passes = run_latex(tex, LocalRunner())
-    pages = check_output(tex, cfg.all_slots())
+    guarded = (
+        Store.open(store_root).reading("report-build", override=ignore_busy)
+        if store_root is not None
+        else nullcontext(None)
+    )
+    with guarded as guard:
+        use = check_provenance(cfg, figs, store_root, manifest_path, deep=deep)
+        build_dir = out_dir / "build"
+        if build_dir.exists():
+            shutil.rmtree(build_dir)  # never reuse a stale .aux/.toc or an old figure
+        build_dir.mkdir(parents=True)
+        tex = write_tex(cfg, figs, build_dir, built_at, len(use.not_from_store))
+        passes = run_latex(tex, LocalRunner())
+        pages = check_output(tex, cfg.all_slots())
     final = out_dir / f"{cfg.report.id}.pdf"
     shutil.copyfile(tex.with_suffix(".pdf"), final)
     if manifest_path is not None:
@@ -413,6 +428,7 @@ def build(
     record = build_record(
         cfg, config_path, figs, use, final, pages, passes, built_at, manifest_path
     )
+    record["store_read"] = guard.to_json() if guard is not None else None
     (out_dir / f"{cfg.report.id}.build.json").write_text(json.dumps(record, indent=1))
     return final
 
@@ -425,11 +441,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--store", type=Path, help="store root; required when figures name refs")
     parser.add_argument("--manifest", type=Path, help="where to write the report manifest")
     parser.add_argument("--deep", action="store_true", help="re-hash every store file")
+    parser.add_argument(
+        "--ignore-busy", action="store_true",
+        help="read the store even while a batch is publishing (diagnosis only; recorded)",
+    )  # fmt: skip
     args = parser.parse_args(argv)
     try:
         pdf = build(
             args.config, args.figures, args.out,
             store_root=args.store, manifest_path=args.manifest, deep=args.deep,
+            ignore_busy=args.ignore_busy,
         )  # fmt: skip
     except (BuildError, ConfigError, FigureError, ProvenanceError, StoreError) as err:
         print(f"report build FAILED: {err}", file=sys.stderr)
