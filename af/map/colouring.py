@@ -118,9 +118,27 @@ class StoreColours:
     figure of the run is coloured from the same read of the user's tables and the same join.
     """
 
-    def __init__(self, store: Store, cfg: ColouringConfig, rules: MatchingRules) -> None:
+    store_read: dict[str, Any] | None = None  # the guarded read, set by the constructor
+
+    def __init__(
+        self,
+        store: Store,
+        cfg: ColouringConfig,
+        rules: MatchingRules,
+        *,
+        ignore_busy: bool = False,
+    ) -> None:
         """``rules`` are the matcher's tables, loaded once by the caller
-        (:func:`af.seq.matching_rules.matching_rules`), the same loader geo uses."""
+        (:func:`af.seq.matching_rules.matching_rules`), the same loader geo uses.
+
+        Every read happens under one guard (:meth:`af.store.Store.reading`): no colouring while
+        a batch is writing the store, and none whose inputs moved while it read. ``ignore_busy``
+        reads anyway, for diagnosis; ``store_read`` records the guarded read for provenance."""
+        with store.reading("map-colours", override=ignore_busy) as guard:
+            self._read(store, cfg, rules)
+        self.store_read = guard.to_json()
+
+    def _read(self, store: Store, cfg: ColouringConfig, rules: MatchingRules) -> None:
         from af.serology import query
         from af.serology.joins import link_from_store, preparation_sequences
         from af.serology.outputs import aligned_sequences, labelled_rows, read_clade_tables
@@ -278,6 +296,7 @@ class StoreColours:
             "scheme": rows.name,
             "user_tables": {str(i.path): i.sha256 for i in colouring.inputs},
             "matching_rules": self.rules.provenance(),
+            "store_read": self.store_read,
             "coloured": dict(counts.coloured),
             "uncoloured": dict(counts.uncoloured),
             # How the join reached some of those colours, as geo reports them: refused name ties
