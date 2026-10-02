@@ -83,6 +83,8 @@ class OutputsReport:
     links: LinkCounts | None = None  # antigen -> sequence matching, when colouring
     colours: dict[str, ColourCounts] = field(default_factory=dict)  # subtype row -> counts
     uncoloured_subtypes: list[str] = field(default_factory=list)  # rows given no colouring
+    # subtype row -> dots coloured from a partially translated protein (aa_partial)
+    coloured_from_partial: dict[str, int] = field(default_factory=dict)
     # table subtype -> preparations left uncoloured because no row could be told: a B
     # preparation of unknown lineage with no matched sequence to say which
     unknown_lineage: dict[str, int] = field(default_factory=dict)
@@ -185,6 +187,7 @@ def _styles(
         str(item.path): item.sha256 for setting in colouring.values() for item in setting.inputs
     }
     seen: set[tuple[str, str, str, tuple[str, ...], str]] = set()
+    partial_seen: set[tuple[str, str, str, tuple[str, ...], str]] = set()
 
     def uncoloured(row: str, reason: str, key: Any) -> DotStyle:
         if key not in seen:  # counted once per preparation, as dot_styles counts
@@ -204,7 +207,17 @@ def _styles(
             return UNCOLOURED
         found = styles.get(row)
         if found is not None:
-            return found(prep)
+            dot = found(prep)
+            linked = links.get(key)
+            if (
+                dot.label
+                and key not in partial_seen
+                and linked is not None
+                and (linked.epi_isl, linked.accession) in aligned.partial
+            ):
+                partial_seen.add(key)
+                report.coloured_from_partial[row] = report.coloured_from_partial.get(row, 0) + 1
+            return dot
         if row not in labelled_rows():
             return uncoloured(row, f"no clade labels for {subtypes().by_key(row).name}", key)
         return uncoloured(row, "no colour scheme given", key)
@@ -228,7 +241,20 @@ def _row_of(prep: Preparation, links: Mapping[Any, PreparationSequence]) -> str 
 
 
 class AlignedSequences(dict[tuple[str, str], AlignedSequence]):
-    """(epi_isl, accession) -> aligned sequence, with the two-argument lookup dot_styles takes."""
+    """(epi_isl, accession) -> aligned sequence, with the two-argument lookup dot_styles takes.
+
+    ``partial`` names the sequences whose protein is only part translated (the sequence
+    store's ``aa_partial``: a CDS that failed is all "X", unobservable), so a report can say
+    how many dots were coloured from one.
+    """
+
+    def __init__(
+        self,
+        items: Mapping[tuple[str, str], AlignedSequence] = {},  # noqa: B006 (read only)
+        partial: frozenset[tuple[str, str]] = frozenset(),
+    ) -> None:
+        super().__init__(items)
+        self.partial = partial
 
     def get_pair(self, epi_isl: str, accession: str) -> AlignedSequence | None:
         return self.get((epi_isl, accession))
@@ -251,8 +277,15 @@ def aligned_sequences(store: Store, con: Any, links: LinkCounts) -> AlignedSeque
         for ref in (StoreRef.from_json(r) for r in links.refs["sequences"].values())
         for path in sorted((store.resolve(ref) / "sequences").glob("*/*.parquet"))
     ]
+    described = con.execute(
+        "DESCRIBE SELECT * FROM read_parquet(?, union_by_name = true)", [paths]
+    ).fetchall()
+    columns = {row[0] for row in described}
+    # versions built before aa_partial existed have no partial proteins: none was stored
+    partial = "coalesce(s.aa_partial, false)" if "aa_partial" in columns else "false"
     rows = con.execute(
-        "SELECT s.epi_isl, s.accession, s.aa_aligned FROM read_parquet(?) s "
+        f"SELECT s.epi_isl, s.accession, s.aa_aligned, {partial} "
+        "FROM read_parquet(?, union_by_name = true) s "
         "JOIN (SELECT epi_isl, accession FROM antigen_sequences "
         "      WHERE status IN ('matched', 'doubtful') "
         "      UNION SELECT unnest(tied, recursive := true) FROM antigen_sequences) m "
@@ -260,7 +293,8 @@ def aligned_sequences(store: Store, con: Any, links: LinkCounts) -> AlignedSeque
         [paths],
     ).fetchall()
     return AlignedSequences(
-        {(e, a): AlignedSequence(aa, gaps=GapSupport.OBSERVED) for e, a, aa in rows}
+        {(e, a): AlignedSequence(aa, gaps=GapSupport.OBSERVED) for e, a, aa, _ in rows},
+        partial=frozenset((e, a) for e, a, _, part in rows if part),
     )
 
 
