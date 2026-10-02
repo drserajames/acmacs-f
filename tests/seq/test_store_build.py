@@ -9,16 +9,18 @@ import datetime
 import json
 import random
 from pathlib import Path
+from types import SimpleNamespace
 
 import brotli
 import pytest
 
 from af.pipeline.config import RunnerSettings
+from af.run import Runner
 from af.seq import build, processed, pulls
 from af.seq.dates import parse as parse_date
 from af.seq.gisaid import SequenceRecord, Workbook
 from af.seq.nextclade import Aligned
-from af.store import PathsConfig, Store, Work
+from af.store import PathsConfig, Store, Work, busy
 from af.store.ref import StoreError, StoreRef
 from af.store.store import Provenance
 
@@ -538,3 +540,122 @@ def test_a_placement_row_outside_the_candidates_is_refused(
     build.import_source(config, "definitive")
     with pytest.raises(build.ConfigError, match="not a lineage_check candidate"):
         build.store_pull(config, "definitive-2021-0312-b", build.make_runner(config.runner))
+
+
+# ---- store runs hold one batch marker (af.store.busy) ------------------------------------
+
+B_PULL = "definitive-2021-0312-b"
+
+
+def test_a_b_pull_names_both_lineage_datasets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = b_config(tmp_path, b_set(tmp_path, monkeypatch))
+    assert build.pull_datasets(config, B_PULL) == ["bvic", "byam"]
+    with pytest.raises(build.ConfigError, match="no entry for pull label 'h9n2'"):
+        build.pull_datasets(config, "definitive-2021-0312-h9n2")
+
+
+def test_the_marker_is_held_for_the_whole_run_and_refuses_readers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One marker across every pull, so a reader between two publishes is refused."""
+    config = b_config(tmp_path, b_set(tmp_path, monkeypatch))
+    root = tmp_path / "store"
+    seen: list[tuple[str, list[busy.Marker]]] = []
+
+    def fake_store_pull(config: build.SequencesConfig, pull_id: str, runner: object) -> dict:
+        seen.append((pull_id, busy.live_markers(root)))
+        with pytest.raises(busy.StoreBusy), Store.open(root).reading("example-map"):
+            pass
+        return {}
+
+    monkeypatch.setattr(build, "store_pull", fake_store_pull)
+    pull_ids = [B_PULL, "definitive-2021-0612-b"]
+    assert build.store_pulls(
+        config, pull_ids, build.make_runner(config.runner), batch="seq-sweep"
+    ) == {p: {} for p in pull_ids}
+    assert [pull for pull, _ in seen] == pull_ids
+    (first,), (second,) = (markers for _, markers in seen)
+    assert first == second  # the same marker, not one taken per pull
+    assert first.name == "seq-sweep"
+    assert first.datasets == ("sequences/bvic", "sequences/byam")
+    assert busy.read_markers(root) == []  # released at the end
+
+
+def test_a_failed_pull_stops_the_run_and_releases_the_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = b_config(tmp_path, b_set(tmp_path, monkeypatch))
+    called: list[str] = []
+
+    def failing(config: build.SequencesConfig, pull_id: str, runner: object) -> dict:
+        called.append(pull_id)
+        raise StoreError("example failure")
+
+    monkeypatch.setattr(build, "store_pull", failing)
+    with pytest.raises(StoreError, match="example failure"):
+        build.store_pulls(
+            config, [B_PULL, "definitive-2021-0612-b"], build.make_runner(config.runner)
+        )
+    assert called == [B_PULL]
+    assert busy.read_markers(tmp_path / "store") == []
+
+
+def test_bad_pull_lists_are_refused_before_the_marker_is_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = b_config(tmp_path, b_set(tmp_path, monkeypatch))
+    runner = build.make_runner(config.runner)
+    for pull_ids, message in (
+        ([], "no pull named"),
+        ([B_PULL, B_PULL], "pull named twice"),
+        ([B_PULL, "definitive-2021-0312-h9n2"], "no entry for pull label"),
+    ):
+        with pytest.raises(build.ConfigError, match=message):
+            build.store_pulls(config, pull_ids, runner)
+        assert busy.read_markers(tmp_path / "store") == []
+
+
+def test_a_real_pull_publishes_while_its_own_marker_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard must not block the writer that holds it."""
+    config = b_config(tmp_path, b_set(tmp_path, monkeypatch))
+    build.import_source(config, "definitive")
+    real = build.store_pull
+    held: list[int] = []
+
+    def spy(config: build.SequencesConfig, pull_id: str, runner: Runner) -> dict[str, StoreRef]:
+        held.append(len(busy.live_markers(tmp_path / "store")))
+        return real(config, pull_id, runner)
+
+    monkeypatch.setattr(build, "store_pull", spy)
+    refs = build.store_pulls(config, [B_PULL], build.make_runner(config.runner))
+    assert held == [1]
+    assert sorted(refs[B_PULL]) == ["bvic", "byam"]
+    assert busy.read_markers(tmp_path / "store") == []
+
+
+def test_the_command_line_joins_repeated_pulls_and_a_pulls_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = tmp_path / "pulls.txt"
+    listing.write_text("# example sweep\nexample-2021-0612-b\n\nexample-2021-0912-b  # last\n")
+    got: dict[str, object] = {}
+
+    def fake(config: object, pull_ids: list[str], runner: object, *, batch: str) -> dict:
+        got.update(pulls=pull_ids, batch=batch)
+        return {}
+
+    monkeypatch.setattr(build, "load_config", lambda path, kind: SimpleNamespace(runner=None))
+    monkeypatch.setattr(build, "make_runner", lambda settings, path: None)
+    monkeypatch.setattr(build, "store_pulls", fake)
+    argv = ["cfg.toml", "store", "--pull", "example-2021-0312-b", "--pulls-file", str(listing)]
+    assert build.main([*argv, "--batch", "seq-sweep"]) == 0
+    assert got == {
+        "pulls": ["example-2021-0312-b", "example-2021-0612-b", "example-2021-0912-b"],
+        "batch": "seq-sweep",
+    }
+    build.main(argv[:4])
+    assert got["batch"] == build.DEFAULT_BATCH

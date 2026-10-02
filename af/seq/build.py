@@ -4,13 +4,18 @@ Two commands, both driven by one TOML config (see :class:`SequencesConfig`)::
 
     python -m af.seq.build CONFIG import --source definitive    # extractor → raw/gisaid
     python -m af.seq.build CONFIG store --pull definitive-2024-0312-h3n2
+    python -m af.seq.build CONFIG store --pulls-file sweep.txt --batch seq-sweep
 
 ``import`` copies every pull of an extractor set into ``raw/gisaid/<pull-id>``; a pull
-already there publishes nothing new. ``store`` reads one raw pull, places each record in
-its subtype dataset by the configured rules, aligns each group with Nextclade, and
+already there publishes nothing new. ``store`` reads each raw pull named, places each record
+in its subtype dataset by the configured rules, aligns each group with Nextclade, and
 publishes that pull's partitions of ``sequences/<subtype>`` (:mod:`af.seq.processed`).
 Alignments are pipeline steps in the work area, so re-running an unchanged pull does not
 re-run Nextclade.
+
+``store`` holds one batch marker (:meth:`af.store.Store.batch`) for the whole run, naming
+every dataset its pulls can write, so a map or report never starts against a half re-stored
+store. Pulls run in the order given, and the first failure stops the run.
 
 With a ``[locations]`` section, every ``store`` also checks the pull's name-locations against
 af's places table (:mod:`af.seq.newplaces`, LOCATIONS-PROPOSAL §6c): the counts go in each
@@ -47,6 +52,8 @@ from af.util.config import ConfigError, load_config
 
 WORK_DATASET = "gisaid"
 NEW_LOCATIONS = "new-locations"  # under a pull's work area: one directory per dataset
+#: The batch marker a ``store`` run holds unless given another name (af.store.busy).
+DEFAULT_BATCH = "seq-store"
 
 
 @dataclass(frozen=True)
@@ -117,6 +124,53 @@ def import_source(config: SequencesConfig, source: str) -> list[StoreRef]:
         raise ConfigError("<config>", [f"sources: no source {source!r}"])
     store = Store.open(config.paths.store)
     return [import_pull(store, pull) for pull in find_pulls(config.sources[source], source)]
+
+
+def pull_datasets(config: SequencesConfig, pull_id: str) -> list[str]:
+    """Every sequences dataset this pull can publish to, for the batch marker.
+
+    Read from the config, not from a run: a B pull writes both lineages' datasets, and the
+    marker must name them before the first record is placed.
+    """
+    label = pull_id.rsplit("-", 1)[-1]
+    if label not in config.source_subtypes:
+        raise ConfigError("<config>", [f"source_subtypes: no entry for pull label {label!r}"])
+    subtype = config.source_subtypes[label]
+    names = {rule.dataset for rule in config.placement if rule.gisaid_subtype == subtype}
+    for check in config.lineage_check:
+        if check.gisaid_subtype == subtype:
+            names.update(check.candidates.values())
+    if not names:
+        raise ConfigError("<config>", [f"placement: no dataset receives {subtype!r} records"])
+    return sorted(names)
+
+
+def store_pulls(
+    config: SequencesConfig,
+    pull_ids: Sequence[str],
+    runner: Runner,
+    *,
+    batch: str = DEFAULT_BATCH,
+) -> dict[str, dict[str, StoreRef]]:
+    """Store several pulls under one batch marker; returns each pull's refs, in order.
+
+    One marker for the whole run, not one per pull: a sweep publishes each dataset once per
+    pull, and a reader between two of those publishes would see a dataset half re-stored.
+    """
+    if not pull_ids:
+        raise ConfigError("<command line>", ["store: no pull named"])
+    if repeated := sorted({p for p in pull_ids if list(pull_ids).count(p) > 1}):
+        raise ConfigError("<command line>", [f"store: pull named twice: {', '.join(repeated)}"])
+    datasets = sorted({f"{processed.KIND}/{d}" for p in pull_ids for d in pull_datasets(config, p)})
+    store = Store.open(config.paths.store)
+    with store.batch(batch, datasets):
+        return {pull_id: store_pull(config, pull_id, runner) for pull_id in pull_ids}
+
+
+def read_pulls_file(path: Path) -> list[str]:
+    """One pull id per line; blank lines and ``#`` comments are skipped."""
+    lines = (line.split("#", 1)[0].strip() for line in path.read_text().splitlines())
+    return [line for line in lines if line]
 
 
 def store_pull(config: SequencesConfig, pull_id: str, runner: Runner) -> dict[str, StoreRef]:
@@ -360,16 +414,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("config", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("import").add_argument("--source", required=True)
-    commands.add_parser("store").add_argument("--pull", required=True)
+    store = commands.add_parser("store")
+    store.add_argument("--pull", action="append", default=[], help="a raw pull id; repeatable")
+    store.add_argument("--pulls-file", type=Path, help="pull ids, one per line")
+    store.add_argument("--batch", default=DEFAULT_BATCH, help="the batch marker's name")
     args = parser.parse_args(argv)
     config = load_config(args.config, SequencesConfig)
     if args.command == "import":
         refs = import_source(config, args.source)
         _print({ref.dataset: ref.version for ref in refs})
     else:
+        pull_ids = args.pull + (read_pulls_file(args.pulls_file) if args.pulls_file else [])
         runner = make_runner(config.runner, args.config)
-        refs_by = store_pull(config, args.pull, runner)
-        _print({ref.dataset: ref.version for ref in refs_by.values()})
+        for refs_by in store_pulls(config, pull_ids, runner, batch=args.batch).values():
+            _print({ref.dataset: ref.version for ref in refs_by.values()})
     return 0
 
 
