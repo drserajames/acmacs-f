@@ -151,15 +151,15 @@ def test_geo_colours_from_clade_store_and_scheme(tmp_path: Path, syn: Any) -> No
     out = tmp_path / "out"
     report = make_geo_and_stat(
         store, tables, coastline, Month(2021, 1), Month(2021, 1), out,
-        colouring={H3: SubtypeColouring(scheme, clade_set)}, matching=rules,
+        colouring={"h3": SubtypeColouring(scheme, clade_set)}, matching=rules,
         identity_rules=syn.rules,
     )  # fmt: skip
     assert report.links is not None and report.links.by_status["matched"] == 1
     # the matcher's tables are in the report by content hash, as the colour tables are
     assert report.matching_inputs == rules.provenance() and len(report.matching_inputs) == 6
     assert report.matching_rules == rules.counts()
-    assert report.colours[H3].coloured == {"Clade P.1": 1}
-    assert report.colours[H3].uncoloured == {"no sequence": 1}
+    assert report.colours["h3"].coloured == {"Clade P.1": 1}
+    assert report.colours["h3"].uncoloured == {"no sequence": 1}
     doc = json.loads((out / "geo" / "h3-records.json").read_text())
     points = doc["periods"][0]["locations"][0]["points"]
     assert points == [{"color": "#0000aa", "count": 1, "clade": "Clade P.1"}]
@@ -233,7 +233,7 @@ def test_rule_tables_reach_the_matcher(tmp_path: Path, syn: Any) -> None:
     with pytest.raises(ValueError, match="no stored sequence has"):
         make_geo_and_stat(
             store, tables, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
-            colouring={H3: SubtypeColouring(scheme, clade_set)}, matching=rules,
+            colouring={"h3": SubtypeColouring(scheme, clade_set)}, matching=rules,
             identity_rules=syn.rules,
         )  # fmt: skip
 
@@ -247,7 +247,7 @@ def test_colouring_without_matching_rules_is_refused(tmp_path: Path, syn: Any) -
     with pytest.raises(ValueError, match="colouring needs matching rules"):
         make_geo_and_stat(
             store, tables, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
-            colouring={H3: SubtypeColouring(scheme, clade_set)}, identity_rules=syn.rules,
+            colouring={"h3": SubtypeColouring(scheme, clade_set)}, identity_rules=syn.rules,
         )  # fmt: skip
 
 
@@ -296,12 +296,12 @@ def test_a_refused_tie_is_coloured_from_its_candidates_own_sequences(
     )
     report = make_geo_and_stat(
         store, locations, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
-        colouring={H3: SubtypeColouring(scheme, clade_set)}, matching=rules,
+        colouring={"h3": SubtypeColouring(scheme, clade_set)}, matching=rules,
         identity_rules=syn.rules,
     )  # fmt: skip
     assert report.links is not None and report.links.by_flag["match.ambiguous"] == 1
-    assert report.colours[H3].coloured == {"Clade P.1": 1}
-    assert report.colours[H3].ties == {"match.tie-agrees": 1}
+    assert report.colours["h3"].coloured == {"Clade P.1": 1}
+    assert report.colours["h3"].ties == {"match.tie-agrees": 1}
 
 
 def test_a_doubtful_match_ae_uses_is_coloured_and_counted(tmp_path: Path, syn: Any) -> None:
@@ -328,12 +328,12 @@ def test_a_doubtful_match_ae_uses_is_coloured_and_counted(tmp_path: Path, syn: A
     )
     report = make_geo_and_stat(
         store, locations, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
-        colouring={H3: SubtypeColouring(scheme, clade_set)}, matching=rules,
+        colouring={"h3": SubtypeColouring(scheme, clade_set)}, matching=rules,
         identity_rules=syn.rules,
     )  # fmt: skip
     assert report.links is not None and report.links.by_status["doubtful"] == 1
-    assert report.colours[H3].coloured == {"Clade P.1": 1}
-    assert report.colours[H3].doubtful == {"match.egg-antigen-non-egg-sequence": 1}
+    assert report.colours["h3"].coloured == {"Clade P.1": 1}
+    assert report.colours["h3"].doubtful == {"match.egg-antigen-non-egg-sequence": 1}
 
 
 def test_pinned_sequences_and_clades_reproduce_a_join_after_current_moves(
@@ -400,3 +400,33 @@ def test_pinned_sequences_and_clades_reproduce_a_join_after_current_moves(
         link_from_store(con, store, rules, with_clades=True, sequences={"h3": pinned_h3})
     with pytest.raises(StoreError, match="sequences-only join"):
         link_from_store(con, store, rules, with_clades=False, sequences=pins, clades=clade_pins)
+
+
+def test_each_dot_is_coloured_by_its_subtype_row(tmp_path: Path, syn: Any) -> None:
+    """Colouring is keyed by the subtype table's rows: a B/Yam dot is uncoloured because B/Yam
+    has no clade labels (said so), a B/Vic dot with no scheme given is counted as such, and a B
+    dot of unknown lineage with no sequence to tell is counted apart."""
+    store, tables, coastline = _roots(tmp_path, syn)
+    _clades(store, tmp_path)
+    serum = {"name": syn.virus("Elsewhere", 8, prefix="B"), "serum_id": "S-B"}
+    b = [{"name": syn.virus("EXAMPLETOWN", n, prefix="B"), "passage": "MDCK1",
+          "date": "2021-01-07", "lineage": lineage}
+         for n, lineage in ((5, "YAMAGATA"), (6, "VICTORIA"), (7, ""))]  # fmt: skip
+    later = [syn.table("b-hi-labx-20210305", b, [serum], [[["40"]] for _ in b], subtype="B",
+                       group="b-hi-labx")]  # fmt: skip
+    publish(store, later, Manifest.from_tables(later, inputs=[]), _provenance("tables-test"))
+    update(store, syn.rules)
+    scheme = ColourScheme(subtype=H3, name="test", entries=())
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    rules = matching_rules(
+        write_af_data(tmp_path / "af-data", submitters="", number="", equivalents="")
+    )
+    report = make_geo_and_stat(
+        store, tables, coastline, Month(2021, 1), Month(2021, 1), tmp_path / "out",
+        colouring={"h3": SubtypeColouring(scheme, clade_set)}, matching=rules,
+        identity_rules=syn.rules,
+    )  # fmt: skip
+    assert report.colours["byam"].uncoloured == {"no clade labels for B/Yam": 1}
+    assert report.colours["bvic"].uncoloured == {"no colour scheme given": 1}
+    assert report.unknown_lineage == {"B": 1}
+    assert report.uncoloured_subtypes == ["bvic", "byam"]

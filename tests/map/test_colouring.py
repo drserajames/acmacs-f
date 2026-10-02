@@ -89,7 +89,7 @@ def test_chart_antigens_take_the_shared_choice(tmp_path: Path) -> None:
     colours._aligned = AlignedSequences(
         {("EPI_1", "A1"): AlignedSequence("M"), ("EPI_2", "A2"): AlignedSequence("M")}
     )
-    colours._colourings = {(sub, "test"): SubtypeColouring(s, clade_set)}
+    colours._colourings = {("h3", "test"): SubtypeColouring(s, clade_set)}  # by row
     colours.rules = matching_rules(write_af_data(tmp_path / "af-data"))
 
     got = colours.for_chart(chart, "test")
@@ -125,7 +125,7 @@ def caller_setup(tmp_path: Path) -> tuple[StoreColours, Chart, str]:
     )
     colours._colourings = {}
     clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
-    colours._sets = {clade_set.subtype: (clade_set, None)}
+    colours._sets = {"h3": (clade_set, None)}  # keyed by subtype row
     colours.rules = matching_rules(write_af_data(tmp_path / "af-data"))
     return colours, chart, clade_set.subtype
 
@@ -175,4 +175,40 @@ def test_a_callers_scheme_for_another_subtype_is_an_error(tmp_path: Path) -> Non
     colours, chart, _ = caller_setup(tmp_path)
     own = CladeColourScheme("B/Vic", "caller", (ColourEntry(1, "P", "P", "#aa0000", False),))
     with pytest.raises(MapColouringError, match="is for B/Vic"):
+        colours.for_chart(chart, own)
+
+
+def invented(prefix: str, n: int) -> str:
+    """An invented virus name, assembled so no strain-shaped text is committed."""
+    return "/".join((prefix, "PLACE", str(n), "2021"))
+
+
+def test_a_chart_is_coloured_by_its_subtype_row() -> None:
+    """The row comes from the chart's subtype and its antigens' lineage code; a chart mixing
+    lineages, or with a lineage the subtype table does not list, is an error."""
+    from af.map.colouring import chart_row
+
+    def b_chart(*codes: str) -> Chart:
+        antigens = [Antigen(invented("B", n), extra={"L": c}) for n, c in enumerate(codes)]
+        return Chart({"V": "B"}, antigens, [], Titres([[] for _ in antigens]))
+
+    h3 = Chart({"V": "A(H3N2)"}, [Antigen(invented("A", 1))], [], Titres([[]]))
+    assert chart_row(h3) == "h3"
+    assert chart_row(b_chart("V", "V")) == "bvic"
+    assert chart_row(b_chart("Y")) == "byam"
+    with pytest.raises(MapColouringError, match="mix lineages"):
+        chart_row(b_chart("V", "Y"))
+    with pytest.raises(MapColouringError, match="no .ace lineage code ''"):
+        chart_row(b_chart(""))
+
+
+def test_a_callers_scheme_for_a_lineage_without_clade_labels_is_an_error(tmp_path: Path) -> None:
+    """B/Yam has no clade labels (the subtype table says why): never an empty colouring."""
+    from af.clades.subtypes import CladeSubtypeError
+
+    colours, _, _ = caller_setup(tmp_path)
+    colours._store, colours._clones = None, None  # type: ignore[assignment]  # refused first
+    chart = Chart({"V": "B"}, [Antigen(invented("B", 1), extra={"L": "Y"})], [], Titres([[]]))
+    own = CladeColourScheme("B/Yam", "caller", (ColourEntry(1, "P", "P", "#aa0000", False),))
+    with pytest.raises(CladeSubtypeError, match="B/Yam has no clade labels"):
         colours.for_chart(chart, own)

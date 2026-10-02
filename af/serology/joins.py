@@ -300,6 +300,9 @@ class PreparationSequence:
     # ROWS_SEVERAL_MATCH (none chosen; colouring uses them only when they agree).
     alternatives: tuple[TiedSequence, ...] = ()
     resolution: str = ""
+    # the sequence datasets (subtype rows: "bvic", ...) its matched rows found sequences in;
+    # tells a B preparation of unknown lineage which lineage it is. Empty for ties.
+    datasets: frozenset[str] = frozenset()
 
 
 #: How a preparation whose rows name different records was resolved (Sarah, Q81, 30 Sep:
@@ -432,21 +435,24 @@ def _single_sequences(
                list(DISTINCT struct_pack(epi := s.epi_isl, acc := s.accession, clade := s.clade,
                                          passage := coalesce(s.sequence_passage, ''))) AS sequences,
                any_value(s.epi_isl), any_value(s.accession), any_value(s.clade),
-               bool_or(s.pairing = 'exact'), bool_or(s.pairing = 'proxy'), {doubts}
+               bool_or(s.pairing = 'exact'), bool_or(s.pairing = 'proxy'), {doubts},
+               list(DISTINCT s.dataset) FILTER (WHERE s.dataset IS NOT NULL)
         {_ROWS}
         WHERE {where}
         GROUP BY {_PREP}
         """
     ).fetchall()
     out: dict[PreparationKey, PreparationSequence] = {}
-    for subtype, name, reassortant, annots, passage, seqs, epi, acc, clade, ex, px, dts in rows:
+    for subtype, name, reassortant, annots, passage, seqs, epi, acc, clade, ex, px, dts, ds in rows:
         key = (subtype, name, reassortant, tuple(annots), passage)
         pairing = "exact" if ex else "proxy" if px else ""
+        datasets = frozenset(ds or ())
         if len({(r["epi"], r["acc"]) for r in seqs}) > 1:
-            out[key] = _resolve(key[4], seqs, passages, pairing, tuple(dts))
+            found = _resolve(key[4], seqs, passages, pairing, tuple(dts))
+            out[key] = replace(found, datasets=datasets)
         else:
             out[key] = PreparationSequence(
-                epi, acc, clade, pairing, conflict=False, doubts=tuple(dts)
+                epi, acc, clade, pairing, conflict=False, doubts=tuple(dts), datasets=datasets
             )
     return out
 

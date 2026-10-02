@@ -110,7 +110,7 @@ class StoreColours:
         (:func:`af.seq.matching_rules.matching_rules`), the same loader geo uses."""
         from af.serology import query
         from af.serology.joins import link_from_store, preparation_sequences
-        from af.serology.outputs import CLADE_SUBTYPE, aligned_sequences, read_clade_tables
+        from af.serology.outputs import aligned_sequences, labelled_rows, read_clade_tables
 
         assert cfg.nomenclature and cfg.acmacs_data  # checked by the config
         self._store = store
@@ -121,23 +121,21 @@ class StoreColours:
         self.links = link_from_store(con, store, rules, with_clades=True)
         self._sequences = preparation_sequences(con, rules.passages)
         self._aligned = aligned_sequences(store, con, self.links)
-        self._user = read_clade_tables(
-            store, cfg.nomenclature, cfg.acmacs_data, list(CLADE_SUBTYPE)
-        )
+        self._user = read_clade_tables(store, cfg.nomenclature, cfg.acmacs_data, labelled_rows())
         self._colourings: dict[tuple[str, str], SubtypeColouring] = {}
         self._sets: dict[str, tuple[CladeSet, GroupSet | None]] = {}
 
-    def _colouring(self, subtype: str, scheme_name: str) -> SubtypeColouring:
+    def _colouring(self, row: str, scheme_name: str) -> SubtypeColouring:
         from af.serology.outputs import subtype_colouring
 
-        key = (subtype, scheme_name)
+        key = (row, scheme_name)
         if key not in self._colourings:
             self._colourings[key] = subtype_colouring(
-                self._store, self._clones, self._user, subtype, scheme_name
+                self._store, self._clones, self._user, row, scheme_name
             )
         return self._colourings[key]
 
-    def _caller_colouring(self, subtype: str, scheme: CladeColourScheme) -> SubtypeColouring:
+    def _caller_colouring(self, row: str, scheme: CladeColourScheme) -> SubtypeColouring:
         """A scheme the caller built, checked exactly as a scheme from the user's tables is.
 
         Its keys are judged against the same clade set a named scheme is (the one the current
@@ -145,24 +143,21 @@ class StoreColours:
         naming no known clade or group is an error here too, never a row that silently colours
         nothing (design rule 1). Keys are taken as given: no legacy-name resolution.
         """
-        from af.clades.store import clade_set_for, dataset_for
-        from af.serology.outputs import CLADE_SUBTYPE, SubtypeColouring
+        from af.serology.outputs import SubtypeColouring, clade_set_of
+        from af.util.subtypes import subtypes
 
-        clade_subtype = CLADE_SUBTYPE.get(subtype)
-        if clade_subtype is None:
-            raise MapColouringError(f"no clade set for table subtype {subtype!r}")
+        clade_subtype = subtypes().by_key(row).name  # the scheme names it: "B/Vic"
         if scheme.subtype != clade_subtype:
             raise MapColouringError(
-                f"colour scheme {scheme.name!r} is for {scheme.subtype}, the chart is {subtype} "
-                f"(clades of {clade_subtype})"
+                f"colour scheme {scheme.name!r} is for {scheme.subtype}, the chart is "
+                f"{clade_subtype}"
             )
-        if clade_subtype not in self._sets:
-            ref = self._store.current("clades", dataset_for(clade_subtype))
-            self._sets[clade_subtype] = (
-                clade_set_for(self._store, ref, self._clones),
+        if row not in self._sets:  # clade_set_of refuses a row without clade labels (B/Yam)
+            self._sets[row] = (
+                clade_set_of(self._store, self._clones, row),
                 self._user.group_set(clade_subtype),
             )
-        clade_set, group_set = self._sets[clade_subtype]
+        clade_set, group_set = self._sets[row]
         rows = [
             (
                 f"entry {n} ({entry.key!r})",
@@ -194,11 +189,11 @@ class StoreColours:
         """
         from af.geo.colours import dot_styles
 
-        subtype = str(chart.info.get("V", ""))
+        row = chart_row(chart)
         if isinstance(scheme, str):
-            colouring = self._colouring(subtype, scheme)
+            colouring = self._colouring(row, scheme)
         else:
-            colouring = self._caller_colouring(subtype, scheme)
+            colouring = self._caller_colouring(row, scheme)
         style, counts = dot_styles(
             self._sequences,
             self._aligned.get_pair,
@@ -238,10 +233,27 @@ class StoreColours:
 
     def store_refs(self) -> list[dict[str, str]]:
         """The store versions every store-coloured figure of this run was drawn from."""
-        from af.clades.store import dataset_for
-        from af.serology.outputs import CLADE_SUBTYPE
+        from af.serology.outputs import labelled_rows
 
         refs = [self.serology.to_json()]
-        for clade_subtype in sorted(set(CLADE_SUBTYPE.values())):
-            refs.append(self._store.current("clades", dataset_for(clade_subtype)).to_json())
+        for row in labelled_rows():
+            refs.append(self._store.current("clades", row).to_json())
         return refs
+
+
+def chart_row(chart: Chart) -> str:
+    """The subtype row (``af/subtypes.toml`` key) a chart is: its subtype ("V") and its
+    antigens' lineage code ("L", one for the whole chart). A chart whose antigens mix
+    lineages, or a subtype or lineage the table does not list, is an error."""
+    from af.util.subtypes import SubtypeError, subtypes
+
+    subtype = str(chart.info.get("V", ""))
+    codes = {str(a.extra.get("L", "")) for a in chart.antigens}
+    if len(codes) > 1:
+        raise MapColouringError(
+            f"chart antigens mix lineages {sorted(codes)}: colour one lineage per map"
+        )
+    try:
+        return subtypes().for_chart(subtype, codes.pop() if codes else "").key
+    except SubtypeError as exc:
+        raise MapColouringError(str(exc)) from exc
