@@ -119,6 +119,19 @@ def transform(layout: list[list[float]], t: list[float] | None) -> list[list[flo
     return out
 
 
+def to_y_up(
+    xy: list[list[float] | None], viewport: list[float]
+) -> tuple[list[list[float] | None], list[float]]:
+    """ae coordinates as kateri draws them (y down) -> af's (y up, as in R; Sarah, Q105).
+
+    Points mirror in y. The viewport stays [x, y, w, h] with (x, y) the frame's top-left corner
+    as drawn: drawn at the top in y-down is the smallest y, which in y-up is the largest, -y.
+    """
+    up = [None if p is None else [p[0], -p[1]] for p in xy]
+    x, y, w, h = viewport
+    return up, [x, -y, w, h]
+
+
 def absolute_viewport(xy: list[list[float] | None], v: list[float] | None) -> list[float]:
     pts = [p for p in xy if p is not None]
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
@@ -182,7 +195,7 @@ def map_i7(
         attrs = entry.get("T", {})
         rec: dict[str, Any] = {
             "id": designation(entry), "name": entry["N"], "passage_class": passage_class(entry),
-            "date": entry.get("D"), "xy": p,
+            "date": entry.get("D"), "xy": None if p is None else [p[0], -p[1]],  # y up (Q105)
             "shown": plot.get("+", True) is not False and p is not None,
             "in_viewport": inside, "colour": colour, "clade": labels.get(colour),
             "greyed": any(attrs.get(key) and colour == fill for key, fill in grey_rules.items()),
@@ -222,7 +235,8 @@ def map_i7(
         "map": {
             "chart": chart_label,
             "window": {"name": window},
-            "viewport": viewport,
+            "viewport": to_y_up([], viewport)[1],
+            "y_axis": "up",
             "clade_scheme": style,
             "antigens": antigens,
             "sera": sera,

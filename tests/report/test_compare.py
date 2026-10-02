@@ -915,3 +915,23 @@ def test_geo_largest_changes_are_deterministic_and_only_changes() -> None:
     b = Counter({"PLACEB": 3, "PLACEA": 3, "PLACEC": 1, "PLACED": 5})
     assert _diff(a, b)["largest"] == ["PLACEA: 2 -> 3", "PLACEB: 2 -> 3"]  # ties by name
     assert _diff(a, a)["largest"] == []  # nothing differs, nothing listed
+
+
+def test_reference_coordinates_turn_y_up_and_the_frame_keeps_its_top_left() -> None:
+    from af.report.compare.reference_ae import to_y_up
+
+    xy, viewport = to_y_up([[1.0, 2.0], None, [3.0, -4.0]], [-5.0, -6.0, 10.0, 12.0])
+    assert xy == [[1.0, -2.0], None, [3.0, 4.0]]
+    # y-down frame spans y -6..6 with its drawn top at -6; y-up its top is the largest y, 6
+    assert viewport == [-5.0, 6.0, 10.0, 12.0]
+
+
+def test_maps_with_different_y_axes_are_refused() -> None:
+    pts = [(float(i), float(i % 3)) for i in range(5)]
+    up, unstated = _map(pts, ["X"] * 5), _map(pts, ["X"] * 5)
+    up["map"]["y_axis"] = "up"
+    with pytest.raises(ValueError, match="y axes differ"):
+        maps.compare(unstated, up)
+    both = _map(pts, ["X"] * 5)
+    both["map"]["y_axis"] = "up"
+    assert maps.compare(both, up)["antigens"]["jaccard"] == 1.0
