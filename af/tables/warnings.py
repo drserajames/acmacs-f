@@ -48,6 +48,7 @@ APPLIED = {
     "antigen merges two CDC isolate ids": r"antigen merges two CDC isolate ids",
     "note on a section row": r"note on the section row",
     "QC block under the table not read": r"block not read",
+    "point lineage from the sheet title": r"lineage \w+ from the sheet title for",
     "table read from ae's .ace (no workbook)": r"ae \.ace, no workbook, read by ace_imports",
 }
 TOLERATED = {
