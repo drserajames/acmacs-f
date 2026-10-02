@@ -192,3 +192,41 @@ def test_notes_are_not_written_while_the_store_is_being_published(tmp_path: Path
     assert "READ DESPITE batch(es) publishing: a-sweep" in index
     howmade.write_notes(record, store, None, [], tmp_path / "out2")
     assert "CURRENT(s) read." in (tmp_path / "out2/README.md").read_text()
+
+
+def test_a_map_kept_as_built_reads_its_reference_record_beside_the_store(tmp_path: Path) -> None:
+    import hashlib
+
+    store = Store.create(tmp_path / "store")
+    step = {"table_id": "labx-t1", "chosen": "scratch", "stress": {"scratch": 1.0},
+            "platform": {"release": "abcdef0123456789"}, "diagnostics": {}}  # fmt: skip
+    chain = {"mode": "merge_all", "config": {},
+             "steps": [{"directory": "steps/0000", "table_id": "labx-t1",
+                        "chosen_file": "chosen.ace"}]}  # fmt: skip
+    with store.build("chains", "labx/hi/merged") as build:
+        (build.path / "steps/0000").mkdir(parents=True)
+        (build.path / "steps/0000/step.json").write_text(json.dumps(step))
+        (build.path / "steps/0000/chosen.ace").write_text("a map")
+        (build.path / "chain.json").write_text(json.dumps(chain))
+        ref = build.publish(Provenance("af.chain", (), {"options": OPTIONS}, T0, T0))
+    records = tmp_path / "reference-records"
+    path = records / "labx/hi/merged" / f"{ref.version}.json"
+    path.parent.mkdir(parents=True)
+    record = {"dataset": "labx/hi/merged", "version": ref.version,
+              "map_sha256": hashlib.sha256(b"a map").hexdigest(), "measured": "2026-10-02",
+              "measured_by": {"release": "fedcba9876543210", "script": "a script"},
+              "method_note": "published map kept as built.",
+              "references": [_reference()]}  # fmt: skip
+    path.write_text(json.dumps(record))
+    fig = _figure(ref, full=True)
+    note = howmade.map_note("labx-hi", [fig], store, None, [], records)
+    text = "\n".join(note.lines)
+    assert "published map kept as built. Measured 2026-10-02 by a script" in text
+    assert "Against the reference map: antigens 10 here" in text
+    assert "the chain's checks against the ae round's maps" not in note.missing
+    assert "scratch precision fine" in text
+    record["map_sha256"] = "0" * 64  # a record of another map is refused, not quoted
+    path.write_text(json.dumps(record))
+    note = howmade.map_note("labx-hi", [fig], store, None, [], records)
+    assert "the reference record for this version" in note.missing
+    assert not any("Against the reference map" in line for line in note.lines)

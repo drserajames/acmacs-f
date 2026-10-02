@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from af.store import Store, StoreError, StoreRef
+from af.util.artefacts import sha256_path
 
 MAP_PREFIX = "map/"
 
@@ -88,6 +89,7 @@ class ChainFiles:
     provenance: dict[str, Any]
     last_step: dict[str, Any]
     current: str | None
+    chosen_sha256: str | None = None  # the final map's file, to check records made beside the store
 
 
 def open_chain(store: Store, ref: StoreRef) -> ChainFiles:
@@ -101,7 +103,9 @@ def open_chain(store: Store, ref: StoreRef) -> ChainFiles:
         current: str | None = store.current(ref.kind, ref.dataset).version
     except StoreError:
         current = None
-    return ChainFiles(ref, chain, provenance, step, current)
+    chosen = directory / last["directory"] / last.get("chosen_file", "chosen.ace")
+    chosen_sha = sha256_path(chosen) if chosen.is_file() else None
+    return ChainFiles(ref, chain, provenance, step, current, chosen_sha)
 
 
 def _source(note: Note, files: ChainFiles) -> None:
@@ -136,7 +140,8 @@ def _source(note: Note, files: ChainFiles) -> None:
             else note.gap("af release", "last step.json platform.release")
         )  # fmt: skip
         + f"; seed {params.get('seed', '?')}; {params.get('optimiser', '?')}; "
-        f"{opts.get('dimensions', '?')} dimensions; starts: {starts or '?'}"
+        f"{opts.get('dimensions', '?')} dimensions; starts: {starts or '?'}; scratch precision "
+        + str(opts.get("scratch_precision", "fine (af.chain records the key only when not fine)"))
     )
     stress, chosen = step.get("stress", {}), step.get("chosen")
     diag = step.get("diagnostics", {})
@@ -329,7 +334,10 @@ def _map_stage(note: Note, fig: dict[str, Any], cfg: dict[str, Any] | None) -> N
 # ---------------------------------------------------------------- against the reference
 
 
-def _references(note: Note, files: ChainFiles | None) -> None:
+def _references(note: Note, files: ChainFiles | None, records: Path | None) -> None:
+    """The chain's own checks against the reference maps: in chain.json for maps built from
+    a release that records them; for a published map kept as built (Q110), in a record file
+    written beside the store, ``<records>/<dataset>/<version>.json``, checked against the map."""
     from af.chain.reference import sentences
 
     if files is None:
@@ -338,11 +346,24 @@ def _references(note: Note, files: ChainFiles | None) -> None:
     if refs is None and "reference" in files.chain:  # the single-reference form of 1 Oct
         refs = [{"label": files.chain["reference"].get("chart", "reference"),
                  **files.chain["reference"]}]  # fmt: skip
+    if refs is None and records is not None:
+        path = records / files.ref.dataset / f"{files.ref.version}.json"
+        if path.is_file():
+            record = json.loads(path.read_text())
+            if record.get("map_sha256") != files.chosen_sha256:
+                what = "the reference record for this version"
+                note.item(note.gap(what, f"{path} (its map_sha256 is not this version's map)"))
+                return
+            by = record.get("measured_by", {})
+            note.item(
+                f"{record.get('method_note', '')} Measured {record.get('measured', '?')} by "
+                f"{by.get('script', '?')} on af {str(by.get('release', '?'))[:12]} ({path.name})"
+            )
+            refs = record.get("references")
     if refs is None:
-        note.item(
-            "Chain reference checks: "
-            + note.gap("the chain's checks against the ae round's maps", "chain.json references")
-        )
+        where = "chain.json references, or a reference record beside the store"
+        note.item("Chain reference checks: " + note.gap(
+            "the chain's checks against the ae round's maps", where))  # fmt: skip
         return
     for entry in refs:
         for sentence in sentences(entry, entry.get("label", "reference")):
@@ -384,6 +405,7 @@ def _comparison(note: Note, rows: list[dict[str, Any]]) -> None:
 def map_note(
     folder: str, figures: list[dict[str, Any]], store: Store | None,
     cfg: dict[str, Any] | None, rows: list[dict[str, Any]],
+    reference_records: Path | None = None,
 ) -> Note:  # fmt: skip
     """The note for one map: ``figures`` are its window figures' I7 documents."""
     note = Note(folder)
@@ -441,7 +463,7 @@ def map_note(
     note.section("Changes at the map stage (af.map.build)")
     _map_stage(note, fig, cfg)
     note.section("Against the ae round")
-    _references(note, files)
+    _references(note, files, reference_records)
     _comparison(note, rows)
     note.lines += ["", f"_{len(note.missing)} fact(s) MISSING"
                    + (f": {'; '.join(note.missing)}._" if note.missing else "._")]  # fmt: skip
@@ -451,6 +473,7 @@ def map_note(
 def write_notes(
     record: dict[str, Any], store: Store | None, maps_config: dict[str, Any] | None,
     comparison: list[dict[str, Any]], out: Path, *, ignore_busy: bool = False,
+    reference_records: Path | None = None,
 ) -> list[Note]:  # fmt: skip
     """One note per map folder in the build record, and an index; returns the notes.
 
@@ -473,7 +496,14 @@ def write_notes(
     )
     with guarded as guard:
         notes = [
-            map_note(folder, by_folder[folder], store, configs.get(folder), rows.get(folder, []))
+            map_note(
+                folder,
+                by_folder[folder],
+                store,
+                configs.get(folder),
+                rows.get(folder, []),
+                reference_records,
+            )  # fmt: skip
             for folder in sorted(by_folder)
         ]
     out.mkdir(parents=True, exist_ok=True)
@@ -503,6 +533,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--comparison", type=Path, help="the report comparison's COMPARISON.json")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument(
+        "--reference-records", type=Path,
+        help="where reference checks of maps kept as built are recorded, beside the store "
+        "(<dir>/<dataset>/<version>.json)",
+    )  # fmt: skip
+    parser.add_argument(
         "--ignore-busy", action="store_true",
         help="read the store even while a batch is publishing (diagnosis only; the index says so)",
     )  # fmt: skip
@@ -512,8 +547,9 @@ def main(argv: list[str] | None = None) -> int:
     maps_config = tomllib.loads(args.maps_config.read_text()) if args.maps_config else None
     comparison = json.loads(args.comparison.read_text()) if args.comparison else []
     notes = write_notes(
-        record, store, maps_config, comparison, args.out, ignore_busy=args.ignore_busy
-    )
+        record, store, maps_config, comparison, args.out, ignore_busy=args.ignore_busy,
+        reference_records=args.reference_records,
+    )  # fmt: skip
     print(f"{len(notes)} notes, {sum(len(n.missing) for n in notes)} fact(s) MISSING -> "
           f"{args.out}", file=sys.stderr)  # fmt: skip
     return 0
