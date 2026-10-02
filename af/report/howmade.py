@@ -224,6 +224,23 @@ def _selection(note: Note, files: ChainFiles) -> None:
             count = removed.get(what) if isinstance(removed, dict) else None
             n = f"{_count(count)} point(s)" if count is not None else "count not in step.json"
             note.item(f"Removed by rule {what} {name}: {n} ({rule.get('reason', '')})")
+    tables = [t for t in config.get("tables", []) if isinstance(t, dict)]
+    dropped = [t for t in tables if t.get("repeat_drops")]
+    sd_limit = files.provenance.get("parameters", {}).get("options", {}).get("sd_limit")
+    rule = f" (sd_limit {sd_limit})" if sd_limit is not None else ""
+    if dropped:
+        cells = sum(len(t["repeat_drops"]) for t in dropped)
+        note.item(
+            f"Within-table repeats: readings of one antigen against one serum in one table are "
+            f"merged, and set to * when their spread is too large{rule}: {cells} cell(s) in "
+            f"{len(dropped)} of {len(tables)} tables (listed in chain.json "
+            "config.tables[].repeat_drops)"
+        )
+    elif tables:
+        note.item(
+            f"Within-table repeats: no table records a dropped cell{rule} (af.chain lists "
+            "repeat_drops per table, when non-zero, since 26 Sep 2026)"
+        )
     window = config.get("selection")
     if window:
         note.item(f"Tables selected: {json.dumps(window)}")
