@@ -71,6 +71,15 @@ def _count(value: Any) -> Any:
     return len(value) if isinstance(value, (list, dict)) else value
 
 
+def _recorded(
+    note: Note, record: dict[str, Any], key: str, where: str, what: str | None = None
+) -> str:
+    """A recorded value, or a counted MISSING naming where it would be recorded."""
+    if record.get(key) is not None:
+        return str(record[key])
+    return note.gap(what or key, where)
+
+
 def _when(note: Note, item: dict[str, Any], category: str) -> str:
     """An entry's decision date; an undated one is counted, and said once per kind of entry."""
     if item.get("decided"):
@@ -139,21 +148,32 @@ def _source(note: Note, files: ChainFiles) -> None:
             if release
             else note.gap("af release", "last step.json platform.release")
         )  # fmt: skip
-        + f"; seed {params.get('seed', '?')}; {params.get('optimiser', '?')}; "
-        f"{opts.get('dimensions', '?')} dimensions; starts: {starts or '?'}; scratch precision "
+        + f"; seed {_recorded(note, params, 'seed', 'PROVENANCE.json parameters')}; "
+        f"{_recorded(note, params, 'optimiser', 'PROVENANCE.json parameters')}; "
+        f"{_recorded(note, opts, 'dimensions', 'PROVENANCE.json parameters.options')} dimensions; "
+        "starts: "
+        + (starts or note.gap("the start counts", "PROVENANCE.json parameters.options"))
+        + "; scratch precision "
         + str(opts.get("scratch_precision", "fine (af.chain records the key only when not fine)"))
     )
     stress, chosen = step.get("stress", {}), step.get("chosen")
     diag = step.get("diagnostics", {})
     if chosen in stress:
         others = ", ".join(f"{k} {_num(v)}" for k, v in stress.items() if k != chosen)
+
+        def diag_value(key: str) -> str:
+            if key in diag:
+                return str(_count(diag[key]))
+            return note.gap(f"the final map's {key.replace('_', ' ')} count", "last step.json "
+                            "diagnostics")  # fmt: skip
+
         note.item(
             f"Final map: stress {_num(stress[chosen])} ({chosen} chosen"
-            + (f"; {others}" if others else "") + f"); {diag.get('antigens', '?')} antigens, "
-            f"{diag.get('sera', '?')} sera; disconnected {_count(diag.get('disconnected', '?'))}, "
-            f"trapped {_count(diag.get('trapped', '?'))}, cells dropped by the SD limit "
-            f"{_count(diag.get('dropped_cells', '?'))} (listed in step.json)"
-        )  # fmt: skip
+            + (f"; {others}" if others else "")
+            + f"); {diag_value('antigens')} antigens, {diag_value('sera')} sera; disconnected "
+            f"{diag_value('disconnected')}, trapped {diag_value('trapped')}, cells dropped by the "
+            f"SD limit {diag_value('dropped_cells')}"
+        )
     else:
         note.item(note.gap("final stress", "last step.json stress / chosen"))
 
@@ -326,7 +346,9 @@ def _map_stage(note: Note, fig: dict[str, Any], cfg: dict[str, Any] | None) -> N
     for name, item in (prov.get("stand_in") or {}).items():
         note.item(f"Stand-in {name}: {item}")
     scheme = prov.get("inputs", {}).get("colour_scheme", {})
-    note.item(f"Colours: {scheme.get('name', '?')} (source: {scheme.get('source', '?')})")
+    where = "figure provenance.inputs.colour_scheme"
+    note.item(f"Colours: {_recorded(note, scheme, 'name', where, 'colour scheme')} "
+              f"(source: {_recorded(note, scheme, 'source', where, 'colour source')})")  # fmt: skip
     flags = fig.get("map", {}).get("flags") or []
     note.item("Flags: " + ("; ".join(flags) if flags else "none"))
     for category, n in note.undated.items():
@@ -359,7 +381,8 @@ def _references(note: Note, files: ChainFiles | None, records: Path | None) -> N
                 return
             by = record.get("measured_by", {})
             note.item(
-                f"{record.get('method_note', '')} Measured {record.get('measured', '?')} by "
+                f"{str(record.get('method_note', '')).rstrip('.')}. Measured "
+                f"{record.get('measured', '?')} by "
                 f"{by.get('script', '?')} on af {str(by.get('release', '?'))[:12]} ({path.name})"
             )
             refs = record.get("references")
