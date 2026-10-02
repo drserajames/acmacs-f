@@ -29,6 +29,7 @@ import json
 import math
 import sys
 import tomllib
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -449,9 +450,14 @@ def map_note(
 
 def write_notes(
     record: dict[str, Any], store: Store | None, maps_config: dict[str, Any] | None,
-    comparison: list[dict[str, Any]], out: Path,
+    comparison: list[dict[str, Any]], out: Path, *, ignore_busy: bool = False,
 ) -> list[Note]:  # fmt: skip
-    """One note per map folder in the build record, and an index; returns the notes."""
+    """One note per map folder in the build record, and an index; returns the notes.
+
+    Every note is composed under ``Store.reading`` (refused while a batch publishes, failed if a
+    chain's CURRENT moves mid-read), and only then written, so a refused read writes nothing.
+    ``ignore_busy`` reads anyway (diagnosis); the index says so.
+    """
     by_folder: dict[str, list[dict[str, Any]]] = {}
     for fig in record["figures"]:
         if fig["slot"].startswith(MAP_PREFIX):
@@ -462,16 +468,27 @@ def write_notes(
     for row in comparison:
         if row["slot"].startswith(MAP_PREFIX):
             rows.setdefault(row["slot"][len(MAP_PREFIX) :].split("/")[0], []).append(row)
+    guarded = (
+        store.reading("howmade", override=ignore_busy) if store is not None else nullcontext(None)
+    )
+    with guarded as guard:
+        notes = [
+            map_note(folder, by_folder[folder], store, configs.get(folder), rows.get(folder, []))
+            for folder in sorted(by_folder)
+        ]
     out.mkdir(parents=True, exist_ok=True)
-    notes = []
-    for folder in sorted(by_folder):
-        note = map_note(folder, by_folder[folder], store, configs.get(folder), rows.get(folder, []))
-        (out / f"{folder}.md").write_text("\n".join(note.lines) + "\n")
-        notes.append(note)
+    for note in notes:
+        (out / f"{note.folder}.md").write_text("\n".join(note.lines) + "\n")
     index = [f"# How each map was made: {record.get('report', '')}", "",
              f"{len(notes)} maps; {sum(len(n.missing) for n in notes)} fact(s) MISSING in all. "
-             "Each note says which artefact a MISSING fact would come from.", "",
-             "| Map | Source | Mode | MISSING |", "|---|---|---|---|"]  # fmt: skip
+             "Each note says which artefact a MISSING fact would come from.", ""]  # fmt: skip
+    if guard is not None:
+        seen = guard.to_json()
+        overrode = [m["name"] for m in seen["overrode_batches"]]
+        index += [f"Store read {seen['started']}: {len(seen['currents_read'])} CURRENT(s) read"
+                  + (f"; READ DESPITE batch(es) publishing: {', '.join(overrode)}"
+                     if overrode else "") + ".", ""]  # fmt: skip
+    index += ["| Map | Source | Mode | MISSING |", "|---|---|---|---|"]
     index += [f"| [{n.folder}]({n.folder}.md) | {n.source} | {n.mode or '?'} | {len(n.missing)} |"
               for n in notes]  # fmt: skip
     (out / "README.md").write_text("\n".join(index) + "\n")
@@ -485,12 +502,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--maps-config", type=Path, help="the round's map config (maps.toml)")
     parser.add_argument("--comparison", type=Path, help="the report comparison's COMPARISON.json")
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--ignore-busy", action="store_true",
+        help="read the store even while a batch is publishing (diagnosis only; the index says so)",
+    )  # fmt: skip
     args = parser.parse_args(argv)
     record = json.loads(args.record.read_text())
     store = Store.open(args.store) if args.store else None
     maps_config = tomllib.loads(args.maps_config.read_text()) if args.maps_config else None
     comparison = json.loads(args.comparison.read_text()) if args.comparison else []
-    notes = write_notes(record, store, maps_config, comparison, args.out)
+    notes = write_notes(
+        record, store, maps_config, comparison, args.out, ignore_busy=args.ignore_busy
+    )
     print(f"{len(notes)} notes, {sum(len(n.missing) for n in notes)} fact(s) MISSING -> "
           f"{args.out}", file=sys.stderr)  # fmt: skip
     return 0

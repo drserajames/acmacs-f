@@ -171,3 +171,24 @@ def test_write_notes_writes_one_note_per_map_and_an_index(tmp_path: Path) -> Non
     assert (tmp_path / "out/labx-hi.md").read_text().startswith("# labx-hi: how this map was made")
     index = (tmp_path / "out/README.md").read_text()
     assert "| [labx-hi](labx-hi.md) | labx/hi/merged@" in index and "| merge_all | 0 |" in index
+
+
+def test_notes_are_not_written_while_the_store_is_being_published(tmp_path: Path) -> None:
+    import pytest
+
+    from af.store.busy import StoreBusy
+
+    store = Store.create(tmp_path / "store")
+    ref = _chain(store, full=True)
+    path = tmp_path / "all.i7.json"
+    path.write_text(json.dumps(_figure(ref, full=True)))
+    record = {"report": "rep-1", "figures": [{"slot": "map/labx-hi/all", "i7": str(path)}]}
+    with store.batch("a-sweep", ["chains/labx/hi/merged"]):
+        with pytest.raises(StoreBusy, match="a-sweep"):
+            howmade.write_notes(record, store, None, [], tmp_path / "out")
+        assert not (tmp_path / "out").exists()
+        howmade.write_notes(record, store, None, [], tmp_path / "out", ignore_busy=True)
+    index = (tmp_path / "out/README.md").read_text()
+    assert "READ DESPITE batch(es) publishing: a-sweep" in index
+    howmade.write_notes(record, store, None, [], tmp_path / "out2")
+    assert "CURRENT(s) read." in (tmp_path / "out2/README.md").read_text()
