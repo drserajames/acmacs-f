@@ -34,6 +34,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from af.chain.adjust import ColumnBasisAdjustment
 from af.chain.select import RemoveRule, Selection, SeraPolicy
 from af.chart.merge import ColumnBasisConvention
 from af.chart.sera import read_markers
@@ -130,6 +131,8 @@ class ChainSettings:
     options: MapOptions = field(default_factory=MapOptions)
     select: Selection = field(default_factory=Selection)
     reference: list[Reference] = field(default_factory=list)
+    # named changes to the merged chart's column bases before optimising (af.chain.adjust)
+    adjust_column_bases: list[ColumnBasisAdjustment] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -164,8 +167,14 @@ class ChainConfig:
     sera_policy: SeraPolicy = field(default_factory=SeraPolicy)
     # measured against after the run; not a step parameter
     references: list[Reference] = field(default_factory=list)
+    column_basis_adjustments: list[ColumnBasisAdjustment] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        if self.column_basis_adjustments and not self.options.merge_all:
+            raise ChainConfigError(
+                f"{self.name}: column-basis adjustments apply to a merge_all map only (in a chain"
+                " each step's merge would meet them again)"
+            )
         if self.options.merge_all and self.first_map is not None:
             raise ChainConfigError(
                 f"{self.name}: merge_all maps the tables from scratch; no first_map"
@@ -238,6 +247,7 @@ def load_chain_config(
             _selection(t),
             _sera_policy(path, s.select),
             s.reference,
+            s.adjust_column_bases,
         )
     if t.directory is not None and t.group is not None and t.dataset is None:
         tables = tables_from_directory(t.directory, t.group, start, end, set(t.exclude))
@@ -252,6 +262,7 @@ def load_chain_config(
             _selection(t),
             _sera_policy(path, s.select),
             s.reference,
+            s.adjust_column_bases,
         )
     raise ChainConfigError(f"{path}: [tables] needs either dataset or directory + group")
 
@@ -335,6 +346,11 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
         **({"select_remove": [r.to_json() for r in cfg.remove]} if cfg.remove else {}),
         **({"selection": cfg.selection} if cfg.selection else {}),
         "non_ferret_sera": cfg.sera_policy.to_json(),
+        **(
+            {"column_basis_adjustments": [a.to_json() for a in cfg.column_basis_adjustments]}
+            if cfg.column_basis_adjustments
+            else {}
+        ),
         **(
             {
                 "references": [

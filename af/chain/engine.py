@@ -35,7 +35,7 @@ from typing import Any
 
 import numpy as np
 
-from af.chain import select
+from af.chain import adjust, select
 from af.chain.backend import Optimiser, default_optimiser
 from af.chain.config import ChainConfig, TableRef, config_to_json, option_parameters
 from af.chain.diagnostics import group_moves, run_threads, step_diagnostics, two_position_points
@@ -196,6 +196,8 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
         common["select_remove"] = [r.to_json() for r in cfg.remove]
     if _removes_sera(cfg):  # likewise: only a chain whose tables HAVE non-ferret sera changes
         common["non_ferret_sera"] = cfg.sera_policy.to_json()
+    if cfg.column_basis_adjustments:  # they change the map; a map without them keeps its steps
+        common["column_basis_adjustments"] = [a.to_json() for a in cfg.column_basis_adjustments]
     if cfg.options.merge_all:
         return [_merge_all_step_def(cfg, root, mapper, common)]
     steps = []
@@ -522,7 +524,8 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
         merged, report = merge(merged, table, options)
         outcomes.update({str(k): v for k, v in report.outcomes.items()})
     assert merged is not None  # ChainConfig refuses a chain without tables
-    write_chart(merged, directory / "merge.ace")
+    write_chart(merged, directory / "merge.ace")  # as merged; the adjustments follow
+    merged, adjustments = adjust.apply(cfg.column_basis_adjustments, merged)
     arrays = merged.optimiser_arrays(
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
     )
@@ -563,6 +566,7 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
             "outcomes": dict(outcomes),
         },
         **({"removed": removed} if cfg.remove else {}),
+        **({"column_basis_adjustments": adjustments} if adjustments else {}),
         "non_ferret_sera": sera,
     }
     diagnostics = step_diagnostics(chart, None, None, None, arrays, mapper.optimiser, cfg)
