@@ -66,8 +66,8 @@ MIXED: dict[str, tuple[set[str], set[str], str]] = {
         "species/marker detection is core; FERRET_ONLY, Sarah's policy sentence, goes af-side",
     ),
     "af/map/render.py": (
-        set(), {"egg", "vaccine"},
-        "'egg'/'uglyegg' are marker SHAPE names (fine); ScenePoint.vaccine is to be renamed 'mark'",
+        set(), {"egg"},
+        "'egg'/'uglyegg' are marker SHAPE names, not passages (fine)",
     ),
     "af/map/finish.py": (
         {"af.map.i7"}, {"vaccine"},

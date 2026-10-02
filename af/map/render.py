@@ -34,7 +34,7 @@ class Look:
 
     page_points: float = 800.0
     antigen_radius: float = 0.0125
-    vaccine_scale: float = 2.0
+    mark_scale: float = 2.0  # a marked point's size over a plain one's
     serum_half_side: float = 0.0125
     title_size: float = 25.0
     label_size: float = 22.0
@@ -192,7 +192,7 @@ def draw_scene(
     def order(p: ScenePoint) -> int:
         if p.kind == "serum":
             return 0
-        if p.vaccine:
+        if p.mark:
             return 4
         return 1 if (p.greyed or p.colour is None) else (2 if p.reference else 3)
 
@@ -213,8 +213,8 @@ def draw_scene(
             }
         else:
             grey = p.greyed or p.colour is None
-            edge = "black" if p.vaccine else (GREY if grey else "black")
-            s = look.antigen_radius * (look.vaccine_scale if p.vaccine else 1.0)
+            edge = "black" if p.mark else (GREY if grey else "black")
+            s = look.antigen_radius * (look.mark_scale if p.mark else 1.0)
             style = {
                 "fc": own.fill or (GREY if grey else p.colour),
                 "ec": own.outline or edge,

@@ -80,7 +80,7 @@ def finish_map(
         & antigen
         & np.array([p.date is not None and p.date >= must_show_since for p in scene.points])
     )
-    vaccine = np.array([p.vaccine is not None for p in scene.points])
+    vaccine = np.array([p.mark is not None for p in scene.points])
     in_window = shown & antigen & ~np.array([p.greyed for p in scene.points])
     priorities = (
         Priority("recent antigens", recent),
@@ -94,11 +94,11 @@ def finish_map(
     )
     frame: Frame = choice.frame
     page = frame.page(xy)
-    ids = [p.id for p in scene.points if p.vaccine is not None and p.shown]
-    rows = [i for i, p in enumerate(scene.points) if p.vaccine is not None and p.shown]
+    ids = [p.id for p in scene.points if p.mark is not None and p.shown]
+    rows = [i for i, p in enumerate(scene.points) if p.mark is not None and p.shown]
     placed = place_labels(
         page[rows],
-        [scene.points[i].vaccine or "" for i in rows],
+        [scene.points[i].mark or "" for i in rows],
         page[shown],
         furniture,
     )
