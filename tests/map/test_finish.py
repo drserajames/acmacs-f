@@ -4,6 +4,7 @@ import datetime as dt
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -216,3 +217,41 @@ def test_vaccine_takes_its_cell_preparations_colour() -> None:
     # the legend counts each shown antigen under the colour it is DRAWN in
     counts = {t: n for t, _, n in scene.legend}
     assert counts["group A"] == 3 and counts["group B"] == 2
+
+
+def test_a_figure_in_another_style_records_it_in_its_i7(tmp_path: Path) -> None:
+    """Every opt-in that changes the drawing is in the I7; a report map writes none of them."""
+    import dataclasses
+
+    from af.map.render import DEFAULT_LOOK, PointStyle
+
+    def finish(out: Path, **style: Any) -> dict[str, Any]:
+        result = finish_map(
+            synthetic_points(),
+            chart="synthetic",
+            scheme=SCHEME,
+            window=Window("12m", SINCE),
+            title="Synthetic by group",
+            frame_size=14.0,
+            must_show_since=SINCE,
+            vaccine_labels={},
+            out_pdf=out,
+            created=dt.datetime(2026, 9, 25, 12, 0, tzinfo=dt.UTC),
+            provenance={"inputs": {"chain": {"name": "synthetic", "sha256": "0" * 64}}},
+            **style,
+        )
+        return json.loads(result.i7.read_text())
+
+    report = finish(tmp_path / "report" / "figure.pdf")
+    assert "look" not in report["map"]
+    assert not any("style" in p for p in report["map"]["antigens"] + report["map"]["sera"])
+    styled = finish(
+        tmp_path / "styled" / "figure.pdf",
+        look=dataclasses.replace(DEFAULT_LOOK, alpha=0.8, grid_colour="#e5e5e5"),
+        styles={"ag0": PointStyle(alpha=0.2), "sr0": PointStyle(outline="#ff0000")},
+    )
+    assert styled["map"]["look"] == {"alpha": 0.8, "grid_colour": "#e5e5e5"}
+    by_id = {p["id"]: p for p in styled["map"]["antigens"] + styled["map"]["sera"]}
+    assert by_id["ag0"]["style"] == {"alpha": 0.2}
+    assert by_id["sr0"]["style"] == {"outline": "#ff0000"}
+    assert "style" not in by_id["ag1"]

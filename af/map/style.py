@@ -100,9 +100,16 @@ class ScenePoint:
     passage_class: str | None
     reference: bool
     serum_id: str | None
-    vaccine: str | None = None  # label text if marked as a vaccine
+    # A marked point is drawn enlarged with a black outline and labelled with this text. The
+    # renderer knows marks, not what they mean; af marks its vaccines (af.map.vaccines).
+    mark: str | None = None
     sequenced: bool = False
     marker: Marker = "circle"
+
+    @property
+    def vaccine(self) -> str | None:
+        """Deprecated name of :attr:`mark` (af marks vaccines), kept while callers move over."""
+        return self.mark
 
 
 @dataclass
@@ -236,7 +243,7 @@ def style_points(
                 reference=p.reference,
                 sequenced=p.sequenced,
                 serum_id=p.serum_id,
-                vaccine=vaccines.get(p.id),
+                mark=vaccines.get(p.id),
                 marker=p.marker or PLAIN_MARKER[p.kind],
             )
         )

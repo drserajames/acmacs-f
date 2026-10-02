@@ -14,6 +14,7 @@ import pytest
 from af.store import Provenance, Store
 from af.tree.asr.base import GapCapabilityError
 from af.tree.io import i6, newick
+from af.tree.model import leaf_id
 from af.tree.populate import (
     CladeAssigner,
     CladeCall,
@@ -76,6 +77,21 @@ def test_mutation_scale_needs_states() -> None:
     tree, _ = built()
     with pytest.raises(PopulateError, match="need ancestral states"):
         populate(tree, "h3", records(), None, branch_scale="mutations")
+
+
+def test_the_ml_scale_runs_with_no_ancestral_states_at_all() -> None:
+    """The documented states=None path, which a question about topology and dates needs.
+
+    Internal nodes then have no sequence, so no protein, no substitutions and no collapsing; the
+    leaves keep theirs. af.tree.cut takes it; before this was tested it crashed on an assertion.
+    """
+    tree, ids = built()
+    result = populate(tree, "h3", records(), None, branch_scale="ml")
+    assert result.states is None
+    assert result.aa[leaf_id(KEYS["a"])]  # a leaf still translates
+    assert ids["x"] not in result.aa and ids["x"] not in result.nuc_subs
+    assert result.counts["unchanged_branches_collapsed"] == 0
+    assert result.tree.by_id(ids["z"]).branch_length == pytest.approx(0.01)
 
 
 def test_clades_come_from_the_injected_engine_with_gap_capability_marked() -> None:

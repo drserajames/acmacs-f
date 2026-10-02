@@ -1,5 +1,7 @@
 """af.map.figure: a chart drawn the report way on any matplotlib Axes."""
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -110,3 +112,78 @@ def test_the_public_types_are_re_exported_from_figure() -> None:
     probe = "import sys, af.map.figure; print('af.map.colouring' in sys.modules)"
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "False"
+
+
+def _points_drawn(ax: Any) -> dict[tuple[float, float], Any]:
+    """The point patches by page position (legend patches sit in the legend box, ignored)."""
+    out = {}
+    for patch in ax.patches:
+        ext = patch.get_path().transformed(patch.get_patch_transform()).get_extents()
+        out[(round(float(ext.x0 + ext.x1) / 2, 4), round(float(ext.y0 + ext.y1) / 2, 4))] = patch
+    return out
+
+
+def test_per_point_styles_are_opt_in() -> None:
+    """R's figure style (pyacmapcheck): serum outline colours, faded points, a thick outline
+    on one antigen, a global opacity and grid colour. Without them the drawing is the report's."""
+    import dataclasses
+
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgba
+
+    from af.map.figure import PointStyle
+
+    scene = chart_scene(chart(), XY, COLOURS, title="T")
+    frame = frame_around(scene)
+    page = frame.page(scene.xy())
+
+    def draw(**kwargs: Any) -> dict[str, Any]:
+        fig = plt.figure(figsize=(4, 4), dpi=72)
+        ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+        draw_axes(ax, scene, frame, legend=False, title=False, **kwargs)
+        drawn = _points_drawn(ax)
+        lines = {line.get_color() for line in ax.lines}
+        plt.close(fig)
+        by_id: dict[str, Any] = {}
+        for i, p in enumerate(scene.points):
+            if p.xy is not None:
+                by_id[p.id] = drawn[(round(float(page[i, 0]), 4), round(float(page[i, 1]), 4))]
+        by_id["grid"] = lines
+        return by_id
+
+    plain = draw()
+    styled = draw(
+        look=dataclasses.replace(DEFAULT_LOOK, alpha=0.8, grid_colour="#e5e5e5"),
+        styles={
+            "sr0": PointStyle(outline="#ff0000"),
+            "ag0": PointStyle(alpha=0.2),
+            "ag1": PointStyle(outline="#000000", outline_width=3.0),
+        },
+    )
+    assert plain["sr0"].get_edgecolor() == to_rgba("#9a9a9a")  # the report's serum outline
+    assert plain["ag0"].get_alpha() is None and plain["grid"] == {"#dddddd"}
+    assert styled["sr0"].get_edgecolor() == to_rgba("#ff0000", 0.8)  # own colour, global alpha
+    assert styled["ag0"].get_alpha() == 0.2  # a point's own opacity beats the global one
+    assert styled["ag1"].get_linewidth() == pytest.approx(3 * plain["ag1"].get_linewidth() / 0.8)
+    assert styled["grid"] == {"#e5e5e5"}
+
+
+def test_draw_axes_says_which_points_the_frame_clips() -> None:
+    import matplotlib.pyplot as plt
+
+    from af.map.viewport import Frame
+
+    scene = chart_scene(chart(), XY, COLOURS, title="T")
+    fig = plt.figure(figsize=(4, 4), dpi=72)
+    ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+    # a 2.5-unit frame from (-0.5, 2): ag0 (0,0) and ag1 (2,1) are inside, sr0 (1,3) is above it
+    clipped = draw_axes(ax, scene, Frame(-0.5, 2.0, 2.5), legend=False, title=False)
+    plt.close(fig)
+    assert clipped == ("sr0",)
+
+
+def test_a_marked_point_keeps_its_old_name_for_now() -> None:
+    """ScenePoint.mark is the renderer's word; .vaccine stays readable while callers move over."""
+    scene = chart_scene(chart(), XY, COLOURS, title="T", vaccines={"ag1": "V1"})
+    marked = next(p for p in scene.points if p.id == "ag1")
+    assert marked.mark == "V1" and marked.vaccine == "V1"

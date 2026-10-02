@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 
 from af.map.labels import Placed
-from af.map.render import GREY
+from af.map.render import DEFAULT_LOOK, GREY, Look, PointStyle, look_opt_ins
 from af.map.style import Scene, ScenePoint
 from af.map.viewport import Frame
 
@@ -50,8 +50,14 @@ def i7_document(
     provenance: dict[str, Any],
     orientation: dict[str, object] | None = None,
     flags: Sequence[str] = (),
+    look: Look = DEFAULT_LOOK,
+    styles: Mapping[str, PointStyle] | None = None,
 ) -> dict[str, Any]:
-    """The I7 JSON for a rendered map (eu-23's I7 draft v1). ``created`` must carry a time zone."""
+    """The I7 JSON for a rendered map (eu-23's I7 draft v1). ``created`` must carry a time zone.
+
+    A figure drawn in another style records it: ``map.look`` holds the opt-in Look settings that
+    differ from the report's, and a point drawn with its own :class:`PointStyle` carries
+    ``style``. Neither key is written for a report map."""
     if created.tzinfo is None:
         raise ValueError("I7 'created' needs a time zone")
     check_provenance_inputs(provenance.get("inputs"))
@@ -71,7 +77,7 @@ def i7_document(
             "clade": p.legend,
             "colour": drawn_fill(p),
             "greyed": p.greyed,
-            "vaccine": p.vaccine is not None,
+            "vaccine": p.mark is not None,  # af's marks are its vaccines
             "reference": p.reference,
             "sequenced": p.sequenced,
         }
@@ -81,6 +87,8 @@ def i7_document(
             d["serum_id"] = p.serum_id
         if p.id in labels:
             d["label"] = labels[p.id].text
+        if styles and p.id in styles and styles[p.id].recorded():
+            d["style"] = styles[p.id].recorded()
         return d
 
     map_block: dict[str, Any] = {
@@ -98,6 +106,8 @@ def i7_document(
         "antigens": [point(i, p) for i, p in enumerate(scene.points) if p.kind == "antigen"],
         "sera": [point(i, p) for i, p in enumerate(scene.points) if p.kind == "serum"],
     }
+    if opt_ins := look_opt_ins(look):
+        map_block["look"] = opt_ins
     shown_ag = [p for p in scene.points if p.kind == "antigen" and p.shown]
     map_block["colour_coverage"] = {
         "shown_antigens": len(shown_ag),

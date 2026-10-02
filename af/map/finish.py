@@ -8,7 +8,7 @@ page. The PDF comes before the I7, because the I7 carries the PDF's hash.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +20,7 @@ from af.map.labels import Placed, place_labels
 from af.map.render import (
     DEFAULT_LOOK,
     Look,
+    PointStyle,
     draw_pdf,
     legend_box,
     recent_hidden,
@@ -55,6 +56,7 @@ def finish_map(
     orientation: dict[str, object] | None = None,
     flags: Sequence[str] = (),
     look: Look = DEFAULT_LOOK,
+    styles: Mapping[str, PointStyle] | None = None,
 ) -> FinishedMap:
     """Produce ``out_pdf`` and its I7 for one chart and window.
 
@@ -78,7 +80,7 @@ def finish_map(
         & antigen
         & np.array([p.date is not None and p.date >= must_show_since for p in scene.points])
     )
-    vaccine = np.array([p.vaccine is not None for p in scene.points])
+    vaccine = np.array([p.mark is not None for p in scene.points])
     in_window = shown & antigen & ~np.array([p.greyed for p in scene.points])
     priorities = (
         Priority("recent antigens", recent),
@@ -92,16 +94,16 @@ def finish_map(
     )
     frame: Frame = choice.frame
     page = frame.page(xy)
-    ids = [p.id for p in scene.points if p.vaccine is not None and p.shown]
-    rows = [i for i, p in enumerate(scene.points) if p.vaccine is not None and p.shown]
+    ids = [p.id for p in scene.points if p.mark is not None and p.shown]
+    rows = [i for i, p in enumerate(scene.points) if p.mark is not None and p.shown]
     placed = place_labels(
         page[rows],
-        [scene.points[i].vaccine or "" for i in rows],
+        [scene.points[i].mark or "" for i in rows],
         page[shown],
         furniture,
     )
     labels = dict(zip(ids, placed, strict=True))
-    draw_pdf(scene, frame, labels, out_pdf, look)
+    draw_pdf(scene, frame, labels, out_pdf, look, styles)
     doc = i7_document(
         scene,
         frame,
@@ -112,6 +114,8 @@ def finish_map(
         provenance=provenance,
         orientation=orientation,
         flags=flags,
+        look=look,
+        styles=styles,
     )
     i7 = write_i7(doc, out_pdf)
     return FinishedMap(

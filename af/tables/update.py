@@ -69,6 +69,14 @@ class LocationSources:
 
 
 @dataclass(frozen=True)
+class AceInputs:
+    """A folder of ae's committed .ace charts; only those an ace_imports rule names are read."""
+
+    lab: str
+    dir: Path
+
+
+@dataclass(frozen=True)
 class AC21Inputs:
     """One folder of a lab's dated workbooks (AC Excel 2.1, or NIID's layout). ``start``
     bounds what is read: a workbook is read when the YYYYMMDD in its file name is on or after
@@ -124,6 +132,7 @@ class TablesSettings:
     vidrl: list[VIDRLInputs] = field(default_factory=list)  # VIDRL's layout (af.tables.vidrl)
     crick: list[VIDRLInputs] = field(default_factory=list)  # Crick's layout (af.tables.crick)
     crick_sheets: list[CrickSheetsInputs] = field(default_factory=list)  # named sheets, one file
+    ace: list[AceInputs] = field(default_factory=list)  # ae .ace where no workbook exists
     locations: LocationSources | None = None
 
 
@@ -164,6 +173,12 @@ def update(
     merged = [w for t in tables for w in t.warnings if w.startswith(cdc.MERGED_ISOLATES)]
     report.append(f"flagged ({cdc.MERGED_ISOLATES}; kept merged, Q13): {len(merged)}")
     report.extend(f"  {w}" for w in merged)
+    imported = [r for r in rules.ace_imports.rules if r.hits]
+    report.append(f"ae .ace imports, no workbook (ace_imports.tsv): {len(imported)}")
+    report.extend(f"  {r.where}: {r['pattern']}: {r['evidence']}" for r in imported)
+    held = [r for r in rules.excluded_tables.rules if r.hits]
+    report.append(f"held exclusions (excluded_tables.tsv): {len(held)}")
+    report.extend(f"  {r.where}: {r['pattern']}: {r['evidence']}" for r in held)
     report.extend(warnings.report(tables))
     errors.extend(warnings.curated_errors(tables))
     errors.extend(f"rule never matched: {r.where}" for t in rules.tables() for r in t.unmatched())
@@ -204,20 +219,20 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
             settings.locations.locdb, settings.locations.chinese_aliases
         )
         for inputs in settings.ac21:
-            files = _dated_files(inputs)
+            files = _held_out(_dated_files(inputs), inputs, rules, report)
             result = ac21.read(files, rules, locations, lab=inputs.lab)
             _add_workbooks(inputs, files, result, tables, report, errors)
     for inputs in settings.niid:
         from . import niid
 
-        files = _dated_files(inputs)
+        files = _held_out(_dated_files(inputs), inputs, rules, report)
         _add_workbooks(
             inputs, files, niid.read(files, rules, lab=inputs.lab), tables, report, errors
         )
     for vinputs in settings.vidrl:
         from . import vidrl
 
-        files = _dated_files(vinputs)
+        files = _held_out(_dated_files(vinputs), vinputs, rules, report)
         result = vidrl.read(
             files, rules, lab=vinputs.lab, subtype=vinputs.subtype, lineage=vinputs.lineage
         )
@@ -225,14 +240,45 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
     for cinputs in settings.crick:
         from . import crick
 
-        files = _dated_files(cinputs)
+        files = _held_out(_dated_files(cinputs), cinputs, rules, report)
         result = crick.read(
             files, rules, lab=cinputs.lab, subtype=cinputs.subtype, lineage=cinputs.lineage
         )
         _add_workbooks(cinputs, files, result, tables, report, errors)
     for sinputs in settings.crick_sheets:
         _add_sheets(settings, sinputs, rules, tables, report, errors)
+    for ainputs in settings.ace:
+        _add_ace(ainputs, rules, tables, report, errors)
     return tables, report, errors
+
+
+def _add_ace(
+    inputs: AceInputs, rules: Rules, tables: list[Table], report: list[str], errors: list[str]
+) -> None:
+    """The .ace files an ace_imports rule names, each reported as such in every run. A
+    workbook table with the same group and date means the workbook has arrived: the import
+    must then be retired, so that is an error."""
+    from . import ace_import
+
+    if not inputs.dir.is_dir():
+        raise FileNotFoundError(f"ace folder missing: {inputs.dir}")
+    read_from_workbooks = {(t.group, t.date): t.source_key for t in tables}
+    for path in sorted(inputs.dir.glob("*.ace")):
+        rule = rules.ace_imports.find(path.name, lab=inputs.lab)
+        if rule is None:
+            continue
+        result = ace_import.read(path, rule, rules, lab=inputs.lab)
+        errors.extend(result.errors)
+        for table in result.tables:
+            report.append(
+                f"  ACE IMPORT {path.name} ({ace_import.SOURCE}) by {rule.where}: "
+                f"{rule['evidence']}"
+            )
+            if (other := read_from_workbooks.get((table.group, table.date))) is not None:
+                errors.append(
+                    f"{path.name}: {other} now reads this test from a workbook; retire {rule.where}"
+                )
+        tables.extend(result.tables)
 
 
 def _add_sheets(
@@ -303,6 +349,22 @@ def _add_workbooks(
                 f"{table.meta['file']}: test date {table.date} != file-name date {stem_date}"
             )
     tables.extend(result.tables)
+
+
+def _held_out(
+    files: list[Path], inputs: AC21Inputs | VIDRLInputs, rules: Rules, report: list[str]
+) -> list[Path]:
+    """Workbooks an excluded_tables rule holds out are not read. Each is reported with the
+    rule and its evidence in every run (a decision such as "exclude now but revisit later"
+    must stay visible), and counted in the summary."""
+    kept = []
+    for path in files:
+        rule = rules.excluded_tables.find(path.name, lab=inputs.lab)
+        if rule is None:
+            kept.append(path)
+            continue
+        report.append(f"  HELD EXCLUSION {path.name} by {rule.where}: {rule['evidence']}")
+    return kept
 
 
 def _file_date(path: Path) -> str | None:
