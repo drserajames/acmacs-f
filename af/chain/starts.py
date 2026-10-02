@@ -23,6 +23,8 @@ from af.chain.backend import MapResult, optimiser_by_key
 
 _ARRAYS = ("titre_value", "titre_type", "column_bases", "disconnected")
 _OPTIONAL = ("weights", "avidity_adjust", "unmovable")
+# how a map from scratch is relaxed (MapOptions.scratch_precision), carried to every chunk
+_SETTINGS = ("scratch_precision",)
 
 
 def write_problem(
@@ -37,6 +39,7 @@ def write_problem(
     data: dict[str, Any] = {k: arrays[k] for k in _ARRAYS}
     data.update({k: arrays[k] for k in _OPTIONAL if arrays.get(k) is not None})
     data["dodgy_is_regular"] = np.bool_(arrays.get("dodgy_is_regular", False))
+    data.update({k: np.str_(arrays[k]) for k in _SETTINGS if arrays.get(k) is not None})
     data["seed"] = np.uint64(seed & (2**64 - 1))
     data["dimensions"] = np.int64(dimensions)
     data["optimiser"] = np.str_(optimiser)
@@ -52,6 +55,7 @@ def read_problem(path: Path) -> tuple[dict, int, int, str, np.ndarray | None]:
     with np.load(path, allow_pickle=False) as f:
         arrays = {k: f[k] for k in (*_ARRAYS, *_OPTIONAL) if k in f}
         arrays["dodgy_is_regular"] = bool(f["dodgy_is_regular"])
+        arrays.update({k: str(f[k]) for k in _SETTINGS if k in f})
         start = f.get("start_layout", None)
         return arrays, int(f["seed"]), int(f["dimensions"]), str(f["optimiser"]), start
 

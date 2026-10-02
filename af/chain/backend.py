@@ -109,24 +109,30 @@ class CoreOptimiser:
         )
 
     def optimise(self, arrays, n_starts, dim, seed, start_layout, move_groups=False):
-        from af.map.optimise import relax
+        from af.map.optimise import refine, relax
 
         problem = self._problem(arrays)
+        rough = start_layout is None and _scratch_rough(arrays)
         result = relax(
             problem,
             n_starts=n_starts,
             seed=seed & (2**64 - 1),
             dimensions=dim,
             start_layout=start_layout,
+            precision="rough" if rough else "fine",
             keep=None,
             threads=self.threads,
         )
-        maps = [self._as_dict(p, result.threads) for p in result.projections]
+        projections = result.projections
+        if rough:  # as AD chart-relax-grid: every start rough, then the best 5 fine
+            projections = refine(problem, projections, n_best=5, threads=self.threads)
+        maps = [self._as_dict(p, result.threads) for p in projections]
         return self._resolve(problem, maps, move_groups)
 
     def relax_chunk(self, arrays, first_start, n_starts, dim, seed, start_layout):
-        """One job's share of a map's starts. Incremental chunks stay rough: the fine stage
-        must see the best starts of all chunks (see `combine`)."""
+        """One job's share of a map's starts. Incremental chunks, and scratch chunks relaxed
+        rough (MapOptions.scratch_precision), stay rough: the fine stage must see the best
+        starts of all chunks (see `combine`)."""
         from af.map.optimise import relax
 
         result = relax(
@@ -136,7 +142,7 @@ class CoreOptimiser:
             seed=seed & (2**64 - 1),
             dimensions=dim,
             start_layout=start_layout,
-            precision="rough" if start_layout is not None else "fine",
+            precision="rough" if start_layout is not None or _scratch_rough(arrays) else "fine",
             keep=None,
             threads=self.threads,
         )
@@ -147,7 +153,7 @@ class CoreOptimiser:
 
         problem = self._problem(arrays)
         projections = sort_projections([self._as_projection(r) for r in chunks])
-        if incremental:
+        if incremental or _scratch_rough(arrays):
             projections = refine(problem, projections, n_best=5, threads=self.threads)
         # the relax threads of the chunks, whatever order the maps are in now
         relax = [{"threads": r["threads"], "cpus": r["cpus"]} for r in chunks if "threads" in r]
@@ -216,6 +222,12 @@ class CoreOptimiser:
             for g in results
             if g.diagnosis in ("trapped", "hemisphering")
         ]
+
+
+def _scratch_rough(arrays: dict) -> bool:
+    """A map from scratch relaxed rough, then its best 5 fine (MapOptions.scratch_precision).
+    Absent means af's original method, every start fine."""
+    return arrays.get("scratch_precision", "fine") == "rough"
 
 
 def _count_runs(runs: list[dict]) -> list[dict]:
