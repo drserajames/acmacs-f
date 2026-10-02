@@ -32,6 +32,7 @@ from af.map.config import ColouringConfig
 from af.map.style import ColourRow, ColourScheme
 from af.seq.matching_rules import MatchingRules
 from af.serology.joins import preparation_key
+from af.store.ref import StoreRef
 from af.store.store import Store
 from af.util.subtypes import Subtype
 
@@ -131,9 +132,16 @@ class StoreColours:
         self.serology = store.current("serology", "all")
         con = query.connect(store.resolve(self.serology))
         self.links = link_from_store(con, store, rules, with_clades=True)
+        # The clade tables the join read: clade sets are judged by these same versions, never by
+        # a CURRENT re-read a moment later (it may have moved).
+        self._clade_refs = {
+            ref.dataset: ref for ref in (StoreRef.from_json(r) for r in self.links.refs["clades"])
+        }
         self._sequences = preparation_sequences(con, rules.passages)
         self._aligned = aligned_sequences(store, con, self.links)
-        self._user = read_clade_tables(store, cfg.nomenclature, cfg.acmacs_data, labelled_rows())
+        self._user = read_clade_tables(
+            store, cfg.nomenclature, cfg.acmacs_data, labelled_rows(), self._clade_refs
+        )
         self._colourings: dict[tuple[str, str], SubtypeColouring] = {}
         self._sets: dict[str, tuple[CladeSet, GroupSet | None]] = {}
 
@@ -143,7 +151,7 @@ class StoreColours:
         key = (row, scheme_name)
         if key not in self._colourings:
             self._colourings[key] = subtype_colouring(
-                self._store, self._clones, self._user, row, scheme_name
+                self._store, self._clones, self._user, row, scheme_name, self._clade_refs.get(row)
             )
         return self._colourings[key]
 
@@ -172,7 +180,7 @@ class StoreColours:
             )
         if row not in self._sets:  # clade_set_of refuses a row without clade labels (B/Yam)
             self._sets[row] = (
-                clade_set_of(self._store, self._clones, row),
+                clade_set_of(self._store, self._clones, row, self._clade_refs.get(row)),
                 self._user.group_set(clade_subtype),
             )
         clade_set, group_set = self._sets[row]
@@ -278,6 +286,9 @@ class StoreColours:
             "doubtful": dict(counts.doubtful),
             "rows": dict(counts.rows),
             "shadowed_rows": [str(s) for s in shadowed],
+            # clade tables labelled from another sequences version than the join read: dataset
+            # -> [the version they labelled, the version read]. Empty when they agree.
+            "clades_behind": {d: list(v) for d, v in sorted(self.links.clades_behind.items())},
             # antigens of another lineage than the map's (coloured by the map's row), by code
             "lineage_minority": dict(sorted(minority.items())),
             # how the coloured antigens got their colour, and which had no clade to go by
@@ -296,12 +307,12 @@ class StoreColours:
         return ChartColours(rows, tuple(labels), tuple(sequenced), provenance, tuple(basis))
 
     def store_refs(self) -> list[dict[str, str]]:
-        """The store versions every store-coloured figure of this run was drawn from."""
-        from af.serology.outputs import labelled_rows
-
+        """The store versions every store-coloured figure of this run was drawn from: exactly
+        the ones READ (serology, every sequences and clades dataset the join read), never
+        CURRENT at the time of asking, which may have moved since."""
         refs = [self.serology.to_json()]
-        for row in labelled_rows():
-            refs.append(self._store.current("clades", row).to_json())
+        refs += [self.links.refs["sequences"][d] for d in sorted(self.links.refs["sequences"])]
+        refs += sorted(self.links.refs["clades"], key=lambda r: r["dataset"])
         return refs
 
 
