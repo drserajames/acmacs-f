@@ -102,3 +102,77 @@ def test_chart_antigens_take_the_shared_choice(tmp_path: Path) -> None:
     assert got.provenance["ties"] == {} and got.provenance["doubtful"] == {}  # none in this chart
     assert "rows" in got.provenance
     assert len(got.provenance["matching_rules"]) == 6  # every rule table, with its hash
+    assert "scheme_origin" not in got.provenance  # a named scheme: its tables are its origin
+
+
+# ---------------------------------------------------------------- a scheme the caller built
+
+
+def caller_setup(tmp_path: Path) -> tuple[StoreColours, Chart, str]:
+    """Two sequenced antigens (one P.1.1, one P.2) and one unsequenced, with no named schemes:
+    a caller's scheme is judged against the store's clade set, injected here."""
+    sub = "A(H3N2)"
+    names = ["/".join(("A", "PLACE", str(n), "2021")) for n in (1, 2, 3)]
+    antigens = [Antigen(n, passage="E3") for n in names]
+    chart = Chart({"V": sub}, antigens, [], Titres([[] for _ in antigens]))
+    colours = object.__new__(StoreColours)
+    colours._sequences = {
+        (sub, names[0], "", (), "E3"): PreparationSequence("EPI_1", "A1", "P.1.1", "exact", False),
+        (sub, names[1], "", (), "E3"): PreparationSequence("EPI_2", "A2", "P.2", "exact", False),
+    }
+    colours._aligned = AlignedSequences(
+        {("EPI_1", "A1"): AlignedSequence("M"), ("EPI_2", "A2"): AlignedSequence("M")}
+    )
+    colours._colourings = {}
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    colours._sets = {clade_set.subtype: (clade_set, None)}
+    colours.rules = matching_rules(write_af_data(tmp_path / "af-data"))
+    return colours, chart, clade_set.subtype
+
+
+def test_a_callers_scheme_colours_as_a_named_one_would(tmp_path: Path) -> None:
+    colours, chart, clade_subtype = caller_setup(tmp_path)
+    own = CladeColourScheme(
+        clade_subtype,
+        "caller",
+        (
+            ColourEntry(1, "P", "Clade P", "#AA0000", False),
+            ColourEntry(2, "P.1", "Clade P.1", "#0000aa", False),
+        ),
+        source=Path("caller-rows.toml"),
+    )
+    got = colours.for_chart(chart, own)
+    assert got.labels == (frozenset({"P.1"}), frozenset({"P"}), frozenset())
+    painted = [got.scheme.paint(lb) for lb in got.labels]
+    assert [row.colour if row else None for row in painted] == ["#0000aa", "#aa0000", None]
+    p = got.provenance
+    assert p["source"] == "store" and p["scheme"] == f"{clade_subtype} caller"
+    assert p["scheme_origin"] == "caller-supplied" and p["scheme_file"] == "caller-rows.toml"
+    assert len(p["scheme_sha256"]) == 64
+    assert p["user_tables"] == {}  # no group rows, so nothing was read from the user's tables
+    # The hash follows the rows: a different colour is a different scheme.
+    recoloured = CladeColourScheme(
+        clade_subtype, "caller", (ColourEntry(1, "P", "Clade P", "#aa0001", False),)
+    )
+    assert colours.for_chart(chart, recoloured).provenance["scheme_sha256"] != p["scheme_sha256"]
+
+
+def test_a_callers_row_naming_no_clade_is_an_error(tmp_path: Path) -> None:
+    colours, chart, clade_subtype = caller_setup(tmp_path)
+    own = CladeColourScheme(
+        clade_subtype,
+        "caller",
+        (
+            ColourEntry(1, "P", "Clade P", "#aa0000", False),
+            ColourEntry(2, "Q.9", "Clade Q.9", "#0000aa", False),
+        ),
+    )
+    with pytest.raises(MapColouringError, match="'Q.9' is neither a clade"):
+        colours.for_chart(chart, own)
+
+
+def test_a_callers_scheme_for_another_subtype_is_an_error(tmp_path: Path) -> None:
+    colours, chart, _ = caller_setup(tmp_path)
+    own = CladeColourScheme("B/Vic", "caller", (ColourEntry(1, "P", "P", "#aa0000", False),))
+    with pytest.raises(MapColouringError, match="is for B/Vic"):
+        colours.for_chart(chart, own)
