@@ -26,6 +26,7 @@ _ARRAYS = ("titre_value", "titre_type", "column_bases", "disconnected")
 _OPTIONAL = ("weights", "avidity_adjust", "unmovable")
 # how a map from scratch is relaxed (MapOptions.scratch_precision), carried to every chunk
 _SETTINGS = ("scratch_precision",)
+_SETTING_ORIGINAL = {"scratch_precision": "fine"}  # what a problem without the key means
 
 
 def write_problem(
@@ -79,7 +80,15 @@ def _problem_data(
     data: dict[str, Any] = {k: arrays[k] for k in _ARRAYS}
     data.update({k: arrays[k] for k in _OPTIONAL if arrays.get(k) is not None})
     data["dodgy_is_regular"] = np.bool_(arrays.get("dodgy_is_regular", False))
-    data.update({k: np.str_(arrays[k]) for k in _SETTINGS if arrays.get(k) is not None})
+    # a setting at its original value is left out, as a problem written before it existed has
+    # it: the file means the same, and its digest matches the older run's (chunks resume)
+    data.update(
+        {
+            k: np.str_(arrays[k])
+            for k in _SETTINGS
+            if arrays.get(k) is not None and arrays[k] != _SETTING_ORIGINAL[k]
+        }
+    )
     data["seed"] = np.uint64(seed & (2**64 - 1))
     data["dimensions"] = np.int64(dimensions)
     data["optimiser"] = np.str_(optimiser)
@@ -125,25 +134,30 @@ def finished(path: Path, first: int, count: int) -> bool:
 
 
 def read_result(path: Path) -> list[MapResult]:
+    """The chunk's maps. Each array is read from the file ONCE and each map's layout is its own
+    copy: indexing `f["layouts"][i]` per map decompressed the whole chunk again for every map, and
+    each layout kept a view on its own full copy (2 Oct 2026: a 13,095-point merge_all driver held
+    ~99 GB resident, ~300 GB virtual, for 2 GB of layouts, and spent hours reading and swapping)."""
     with np.load(path, allow_pickle=False) as f:
-        n = len(f["stress"])
-        maps = []
-        for i in range(n):
-            m: MapResult = {
-                "layout": f["layouts"][i],
-                "stress": float(f["stress"][i]),
-                "dimensions": int(f["dimensions"][i]),
-                "n_iterations": int(f["n_iterations"][i]),
-                "start_seed": int(f["start_seed"][i]),
-            }
-            if "rng_seed" in f:
-                m["rng_seed"] = int(f["rng_seed"][i])
-                m["termination"] = int(f["termination"][i])
-            if "threads" in f:
-                m["threads"] = int(f["threads"][i])
-                m["cpus"] = int(f["cpus"][i])
-            maps.append(m)
-        return maps
+        data = {k: f[k] for k in f.files}
+    n = len(data["stress"])
+    maps = []
+    for i in range(n):
+        m: MapResult = {
+            "layout": data["layouts"][i].copy(),
+            "stress": float(data["stress"][i]),
+            "dimensions": int(data["dimensions"][i]),
+            "n_iterations": int(data["n_iterations"][i]),
+            "start_seed": int(data["start_seed"][i]),
+        }
+        if "rng_seed" in data:
+            m["rng_seed"] = int(data["rng_seed"][i])
+            m["termination"] = int(data["termination"][i])
+        if "threads" in data:
+            m["threads"] = int(data["threads"][i])
+            m["cpus"] = int(data["cpus"][i])
+        maps.append(m)
+    return maps
 
 
 def run_chunk(

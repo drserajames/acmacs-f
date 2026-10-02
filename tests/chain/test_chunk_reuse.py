@@ -98,3 +98,37 @@ def test_a_run_killed_after_its_array_reuses_the_chunks(arrays, tmp_path, monkey
     assert runner.ran == []  # the array is not paid for again
     fresh = Mapper(StubOptimiser(), SplitStarts(chunks=3, work_dir=tmp_path / "fresh"))
     assert _same(resumed, _make(fresh, CountingRunner(), arrays))
+
+
+def test_read_result_holds_each_layout_once(tmp_path):
+    # 2 Oct 2026: each map kept a view on its own full copy of the chunk (99 GB on one driver)
+    from af.chain.starts import read_result, write_result
+
+    n_maps, n_points = 30, 500
+    maps = [
+        {
+            "layout": np.full((n_points, 2), float(i)),
+            "stress": float(i),
+            "dimensions": 2,
+            "n_iterations": 1,
+            "start_seed": i,
+        }
+        for i in range(n_maps)
+    ]
+    back = read_result(write_result(tmp_path / "r.npz", maps))
+    held = sum(
+        m["layout"].nbytes if m["layout"].base is None else m["layout"].base.nbytes for m in back
+    )
+    assert held == n_maps * n_points * 2 * 8  # exactly the layouts, nothing more
+    assert [m["layout"][0, 0] for m in back] == [float(i) for i in range(n_maps)]
+
+
+def test_a_fine_problem_has_the_digest_of_one_written_before_the_setting(arrays):
+    # a run on an older release wrote no scratch_precision; pinned "fine" it resumes its chunks
+    from af.chain.starts import problem_digest
+
+    def digest(a: dict) -> str:
+        return problem_digest(a, seed=3, dimensions=2, optimiser="stub", start_layout=None)
+
+    assert digest({**arrays, "scratch_precision": "fine"}) == digest(arrays)
+    assert digest({**arrays, "scratch_precision": "rough"}) != digest(arrays)
