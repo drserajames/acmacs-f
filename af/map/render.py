@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 
 from af.map.labels import Placed
+from af.map.orient import rows_with_coordinates
 from af.map.style import MARKERS, Scene, ScenePoint
 from af.map.viewport import Box, Frame
 
@@ -246,9 +247,14 @@ def draw_scene(
         )
     if legend:
         _draw_legend(ax, scene, look, scale)
+    # Spelled out with np.asarray (as rows_with_coordinates is): older numpy stubs type a reduced
+    # comparison as possibly a scalar, which fails type checking on Python 3.11 (CI).
     with np.errstate(invalid="ignore"):
-        outside = ~((page >= 0) & (page <= 1)).all(axis=1) & np.isfinite(page).all(axis=1)
-    return tuple(p.id for p, out in zip(scene.points, outside, strict=True) if p.shown and out)
+        inside = np.asarray(((page >= 0) & (page <= 1)).all(axis=1), dtype=np.bool_)
+    outside = rows_with_coordinates(page) & ~inside
+    return tuple(
+        p.id for p, out in zip(scene.points, outside.tolist(), strict=True) if p.shown and out
+    )
 
 
 def _marker_patch(marker: str, x: float, y: float, size: float, style: dict[str, Any]) -> Any:
