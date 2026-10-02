@@ -178,7 +178,7 @@ def test_every_point_carries_the_sheets_lineage(tmp_path: Path, rules: Rules):
     res = cdc_xlsx.read([workbook(tmp_path / "old.xlsx")], rules)
     (t,) = res.tables
     assert t.lineage == "VICTORIA"
-    assert {p.lineage for p in (*t.antigens, *t.sera)} == {"VICTORIA"}
+    assert {a.lineage for a in t.antigens} | {s.lineage for s in t.sera} == {"VICTORIA"}
     assert any(
         "lineage VICTORIA from the sheet title for 3 antigens and 3 sera" in w for w in t.warnings
     )

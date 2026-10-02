@@ -178,9 +178,10 @@ class SheetReader:
             # The sheet states the lineage once, in its title ("TYPE B VICTORIA LINEAGE"), and
             # every point on it carries that lineage, as in the other labs' readers. Counted
             # in the run report; a point of another lineage is a control, removed by rule.
-            points = [*antigens, *(sr for _, sr in sera)]
-            for point in points:
-                point.lineage = lineage
+            for antigen in antigens:
+                antigen.lineage = lineage
+            for _, serum in sera:
+                serum.lineage = lineage
             self.warnings.append(
                 f"{self.s.where(0)}: lineage {lineage} from the sheet title for "
                 f"{len(antigens)} antigens and {len(sera)} sera"
