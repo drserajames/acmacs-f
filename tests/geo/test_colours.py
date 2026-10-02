@@ -5,7 +5,7 @@ from pathlib import Path
 
 from af.clades.colours import ColourEntry, ColourScheme
 from af.clades.sequence import AlignedSequence
-from af.geo.colours import UNCOLOURED, DotStyle, dot_styles
+from af.geo.colours import BASIS_CLADE, BASIS_GROUP_NO_CLADE, UNCOLOURED, DotStyle, dot_styles
 from af.geo.records import Month, geo_counts, to_i7
 from af.serology.joins import PreparationSequence
 from af.serology.query import Preparation
@@ -63,8 +63,8 @@ def test_styles_and_reasons(tmp_path: Path) -> None:
     for name, p in preps.items():
         style_calls["H-8"] = name == "H-8"
         got[name] = style(p)
-    assert got["A-1"] == DotStyle("Clade P.1", "#0000aa")
-    assert got["B-2"] == DotStyle("Clade P", "#aa0000")
+    assert got["A-1"] == DotStyle("Clade P.1", "#0000aa", BASIS_CLADE)
+    assert got["B-2"] == DotStyle("Clade P", "#aa0000", BASIS_CLADE)
     assert all(got[n] == UNCOLOURED for n in ("C-3", "D-4", "E-5", "F-6", "G-7", "H-8"))
     assert counts.coloured == {"Clade P.1": 1, "Clade P": 1}
     assert counts.uncoloured == {
@@ -105,8 +105,8 @@ def test_a_refused_tie_is_coloured_when_its_sequences_agree_else_by_aes_rank(
         key(preps["split-unranked"]): tie(one, three, ranked=None),
     }
     style, counts = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), SCHEME, clade_set)
-    assert style(preps["agree"]) == DotStyle("Clade P.1", "#0000aa")
-    assert style(preps["split"]) == DotStyle("Clade P", "#aa0000")
+    assert style(preps["agree"]) == DotStyle("Clade P.1", "#0000aa", BASIS_CLADE)
+    assert style(preps["split"]) == DotStyle("Clade P", "#aa0000", BASIS_CLADE)
     assert style(preps["split-unranked"]) == UNCOLOURED
     assert counts.ties == {TIE_AGREES: 1, TIE_RANKED: 1}
     assert counts.uncoloured == {"tie with no ranked sequence": 1}
@@ -165,8 +165,49 @@ def test_rows_naming_two_records_colour_by_the_passage_matched_one_else_by_agree
         key(preps["disagree"]): rows(None, ROWS_NONE_MATCH, p1, p2),
     }
     style, counts = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), SCHEME, clade_set)
-    assert style(preps["matched"]) == DotStyle("Clade P", "#aa0000")
-    assert style(preps["agree"]) == DotStyle("Clade P.1", "#0000aa")
+    assert style(preps["matched"]) == DotStyle("Clade P", "#aa0000", BASIS_CLADE)
+    assert style(preps["agree"]) == DotStyle("Clade P.1", "#0000aa", BASIS_CLADE)
     assert style(preps["disagree"]) == UNCOLOURED
     assert counts.rows == {ROWS_PASSAGE_MATCHED: 1, ROWS_SEVERAL_MATCH: 1}
     assert counts.uncoloured == {"rows name different sequences": 1}
+
+
+def test_a_group_needing_no_clade_colours_a_virus_with_none(tmp_path: Path) -> None:
+    """A sequence the nomenclature names no clade for is tested against groups with no anchor
+    (Sarah, 2 Oct 2026). Row order still decides (Q80): a group row placed first is the lowest
+    precedence, so a virus WITH a clade keeps its clade's colour."""
+    from af.clades.groups import Group, GroupSet, Substitution
+
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    groups = GroupSet(
+        SUBTYPE,
+        (
+            Group(SUBTYPE, "5K", None, (Substitution(5, "K"),)),
+            Group(SUBTYPE, "P 5K", "P", (Substitution(5, "K"),)),
+        ),
+    )
+    scheme = ColourScheme(
+        SUBTYPE,
+        "test",
+        (
+            ColourEntry(1, "5K", "5K, no clade", "#00aa00", True),  # first: lowest precedence
+            ColourEntry(2, "P", "Clade P", "#aa0000", False),
+            ColourEntry(3, "P 5K", "P with 5K", "#aa00aa", True),
+        ),
+    )
+    preps = {n: prep(n) for n in ("carries", "lacks", "clade")}
+    links = {
+        key(preps["carries"]): PreparationSequence("EPI_ISL_1", "C1", "", "exact", False),
+        key(preps["lacks"]): PreparationSequence("EPI_ISL_2", "C2", "", "exact", False),
+        key(preps["clade"]): PreparationSequence("EPI_ISL_3", "C3", "P.2", "exact", False),
+    }
+    sequences = {"C1": "K" * 30, "C2": "A" * 30, "C3": "K" * 30}
+    style, counts = dot_styles(
+        links, lambda epi, acc: AlignedSequence(sequences[acc]), scheme, clade_set, groups
+    )
+    assert style(preps["carries"]) == DotStyle("5K, no clade", "#00aa00", BASIS_GROUP_NO_CLADE)
+    # the anchored "P 5K" needs a clade, so it never colours a virus with none
+    assert style(preps["lacks"]) == UNCOLOURED  # no group matches: the old reason, unchanged
+    assert style(preps["clade"]) == DotStyle("P with 5K", "#aa00aa", BASIS_CLADE)
+    assert counts.uncoloured == {"nomenclature names no clade": 1}
+    assert counts.basis == {BASIS_GROUP_NO_CLADE: 1, BASIS_CLADE: 1}

@@ -216,3 +216,74 @@ def test_a_callers_scheme_for_a_lineage_without_clade_labels_is_an_error(tmp_pat
     own = CladeColourScheme("B/Yam", "caller", (ColourEntry(1, "P", "P", "#aa0000", False),))
     with pytest.raises(CladeSubtypeError, match="B/Yam has no clade labels"):
         colours.for_chart(chart, own)
+
+
+# ---------------------------------------------------------------- a caller's own groups
+
+
+def groups_setup(tmp_path: Path) -> tuple[StoreColours, Chart, str]:
+    """caller_setup, plus a third antigen the nomenclature names no clade for (clade "")."""
+    colours, chart, clade_subtype = caller_setup(tmp_path)
+    sub, name = "A(H3N2)", chart.antigens[2].name
+    colours._sequences[(sub, name, "", (), "E3")] = PreparationSequence(
+        "EPI_3", "A3", "", "exact", False
+    )
+    colours._aligned = AlignedSequences(
+        {
+            ("EPI_1", "A1"): AlignedSequence("M"),
+            ("EPI_2", "A2"): AlignedSequence("M"),
+            ("EPI_3", "A3"): AlignedSequence("MKKKK"),
+        }
+    )
+    return colours, chart, clade_subtype
+
+
+def test_a_callers_group_colours_a_virus_with_no_clade(tmp_path: Path) -> None:
+    from af.clades.groups import Group, GroupSet, Substitution
+
+    colours, chart, clade_subtype = groups_setup(tmp_path)
+    groups = GroupSet(clade_subtype, (Group(clade_subtype, "5K", None, (Substitution(5, "K"),)),))
+    own = CladeColourScheme(
+        clade_subtype,
+        "caller",
+        (
+            ColourEntry(1, "5K", "5K", "#00aa00", True),  # first row: the lowest precedence
+            ColourEntry(2, "P", "Clade P", "#aa0000", False),
+        ),
+    )
+    got = colours.for_chart(chart, own, groups=groups)
+    assert got.labels == (frozenset({"P"}), frozenset({"P"}), frozenset({"5K"}))
+    assert got.basis == ("clade", "clade", "group, no clade named")
+    p = got.provenance
+    assert p["coloured_without_clade"] == ["ag2"] and p["basis"] == {
+        "clade": 2,
+        "group, no clade named": 1,
+    }
+    assert p["groups_origin"] == "caller-supplied" and len(p["groups_sha256"]) == 64
+    assert p["user_tables"] == {}  # the caller's groups, not the user's tables
+
+
+def test_without_a_matching_group_the_reason_is_unchanged(tmp_path: Path) -> None:
+    colours, chart, clade_subtype = groups_setup(tmp_path)
+    own = CladeColourScheme(clade_subtype, "caller", (ColourEntry(1, "P", "P", "#aa0000", False),))
+    got = colours.for_chart(chart, own)
+    assert got.labels[2] == frozenset() and got.basis[2] == ""
+    assert got.provenance["uncoloured"] == {"nomenclature names no clade": 1}
+    assert got.provenance["coloured_without_clade"] == []
+
+
+def test_a_callers_groups_are_checked(tmp_path: Path) -> None:
+    from af.clades.groups import Group, GroupSet, Substitution
+
+    colours, chart, clade_subtype = groups_setup(tmp_path)
+    own = CladeColourScheme(clade_subtype, "caller", (ColourEntry(1, "P", "P", "#aa0000", False),))
+    unanchored = GroupSet(
+        clade_subtype, (Group(clade_subtype, "Q 5K", "Q.9", (Substitution(5, "K"),)),)
+    )
+    with pytest.raises(MapColouringError, match="anchors of Q 5K are not clades"):
+        colours.for_chart(chart, own, groups=unanchored)
+    other = GroupSet("B/Vic", (Group("B/Vic", "5K", None, (Substitution(5, "K"),)),))
+    with pytest.raises(MapColouringError, match="for B/Vic"):
+        colours.for_chart(chart, own, groups=other)
+    with pytest.raises(MapColouringError, match="groups= is for a caller's own scheme"):
+        colours.for_chart(chart, "test", groups=other)

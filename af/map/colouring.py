@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 from af.chart.model import Chart
 from af.clades.colours import ColourScheme as CladeColourScheme
 from af.clades.colours import ColourSchemeError, scheme_from_rows, shadowed_entries
+from af.geo.colours import BASIS_GROUP_NO_CLADE
 from af.map.config import ColouringConfig
 from af.map.style import ColourRow, ColourScheme
 from af.seq.matching_rules import MatchingRules
@@ -81,6 +82,13 @@ def labels_for(legend: str, keys: Mapping[str, str]) -> frozenset[str]:
     return frozenset({keys[legend]})
 
 
+def groups_sha256(groups: GroupSet) -> str:
+    """A content hash of a caller's groups (name, anchor, substitutions), as for its scheme."""
+    rows = [[g.name, g.anchor, [str(s) for s in g.substitutions]] for g in groups.groups]
+    text = json.dumps({"subtype": groups.subtype, "groups": rows})
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def scheme_sha256(scheme: CladeColourScheme) -> str:
     """A content hash of a scheme's rows (order, key, legend, colour, group or clade), so a
     figure coloured by a scheme with no file of its own still says exactly what coloured it."""
@@ -97,6 +105,8 @@ class ChartColours:
     labels: tuple[frozenset[str], ...]  # per antigen: the chosen entry's key, or nothing
     sequenced: tuple[bool, ...]  # per antigen: matched to a sequence (so it could be painted)
     provenance: dict[str, Any]
+    # per antigen: how it got its colour (af.geo.colours.BASIS_*), "" when uncoloured
+    basis: tuple[str, ...] = ()
 
 
 class StoreColours:
@@ -137,13 +147,19 @@ class StoreColours:
             )
         return self._colourings[key]
 
-    def _caller_colouring(self, row: str, scheme: CladeColourScheme) -> SubtypeColouring:
+    def _caller_colouring(
+        self, row: str, scheme: CladeColourScheme, groups: GroupSet | None
+    ) -> SubtypeColouring:
         """A scheme the caller built, checked exactly as a scheme from the user's tables is.
 
         Its keys are judged against the same clade set a named scheme is (the one the current
         ``clades/<subtype>`` table was labelled with), by af.clades' one validator, so a row
         naming no known clade or group is an error here too, never a row that silently colours
         nothing (design rule 1). Keys are taken as given: no legacy-name resolution.
+
+        ``groups``, when given, are the caller's own and the only groups its rows may name
+        (Sarah, 2 Oct 2026: a caller's groups stay in the caller's config); each anchor must be a
+        clade of that same set. Without them, the rows may name the user's groups.
         """
         from af.serology.outputs import SubtypeColouring, clade_set_of
         from af.util.subtypes import subtypes
@@ -160,6 +176,19 @@ class StoreColours:
                 self._user.group_set(clade_subtype),
             )
         clade_set, group_set = self._sets[row]
+        if groups is not None:
+            unknown = [g.name for g in groups.groups if g.anchor and g.anchor not in clade_set]
+            if groups.subtype != clade_subtype or unknown:
+                raise MapColouringError(
+                    f"groups for colour scheme {scheme.name!r}: "
+                    + (
+                        f"for {groups.subtype}, the chart is {clade_subtype}"
+                        if groups.subtype != clade_subtype
+                        else f"anchors of {', '.join(unknown)} are not clades of {clade_subtype} "
+                        f"at {clade_set.version}"
+                    )
+                )
+            group_set = groups
         rows = [
             (
                 f"entry {n} ({entry.key!r})",
@@ -174,20 +203,30 @@ class StoreColours:
             )
         except ColourSchemeError as exc:
             raise MapColouringError(str(exc)) from exc
-        # The user's tables are an input only if a row names one of their groups.
-        uses_groups = any(entry.is_group for entry in checked.entries)
+        # The user's tables are an input only if a row names one of THEIR groups.
+        uses_groups = groups is None and any(entry.is_group for entry in checked.entries)
         return SubtypeColouring(
             checked, clade_set, group_set, self._user.inputs if uses_groups else ()
         )
 
-    def for_chart(self, chart: Chart, scheme: str | CladeColourScheme) -> ChartColours:
+    def for_chart(
+        self,
+        chart: Chart,
+        scheme: str | CladeColourScheme,
+        *,
+        groups: GroupSet | None = None,
+    ) -> ChartColours:
         """Colour each antigen of ``chart`` with a scheme: a name from the user's tables, or a
-        :class:`af.clades.colours.ColourScheme` the caller built (chain-pages-af's own rows).
+        :class:`af.clades.colours.ColourScheme` the caller built (chain-pages-af's own rows),
+        optionally with the caller's own ``groups`` (an :class:`af.clades.groups.GroupSet`).
 
         The subtype is the chart's own ("V"), never the folder name's (design rule 10).
         Antigens are looked up by preparation (name, reassortant, annotations, passage), the key
         the serology store groups them by. A caller's scheme is checked as a named one is, and
-        its provenance says it came from the caller, with a hash of its rows.
+        its provenance says it came from the caller, with a hash of its rows (and of its groups).
+
+        Each antigen's ``basis`` says how it got its colour: by its clade, or by a group needing
+        no clade where the nomenclature names none (:mod:`af.geo.colours`).
         """
         from af.geo.colours import dot_styles
 
@@ -199,9 +238,14 @@ class StoreColours:
         )
         row_key = row.key
         if isinstance(scheme, str):
+            if groups is not None:
+                raise MapColouringError(
+                    f"groups= is for a caller's own scheme; the named scheme {scheme!r} uses the "
+                    "user's groups"
+                )
             colouring = self._colouring(row_key, scheme)
         else:
-            colouring = self._caller_colouring(row_key, scheme)
+            colouring = self._caller_colouring(row_key, scheme, groups)
         style, counts = dot_styles(
             self._sequences,
             self._aligned.get_pair,
@@ -210,11 +254,13 @@ class StoreColours:
             colouring.group_set,
         )
         keys = key_for_legend(colouring.scheme)
-        labels, sequenced = [], []
+        labels, sequenced, basis = [], [], []
         for i in range(chart.n_antigens):
             key = preparation_key(chart, "antigen", i)  # serology's one copy of the key (rule 6)
-            labels.append(labels_for(style(key).label, keys))
+            dot = style(key)
+            labels.append(labels_for(dot.label, keys))
             sequenced.append(key in self._sequences)
+            basis.append(dot.basis)
         rows = map_scheme(colouring.scheme)
         # Rows a later row always overrides can never colour anything (trap T9). Not an error:
         # row order is the user's (Q80). Listed so a dead legend row is visible, not silent.
@@ -234,12 +280,20 @@ class StoreColours:
             "shadowed_rows": [str(s) for s in shadowed],
             # antigens of another lineage than the map's (coloured by the map's row), by code
             "lineage_minority": dict(sorted(minority.items())),
+            # how the coloured antigens got their colour, and which had no clade to go by
+            "basis": dict(sorted(counts.basis.items())),
+            "coloured_without_clade": [
+                f"ag{i}" for i, b in enumerate(basis) if b == BASIS_GROUP_NO_CLADE
+            ],
         }
         if not isinstance(scheme, str):
             provenance["scheme_origin"] = "caller-supplied"
             provenance["scheme_file"] = str(scheme.source) if scheme.source else None
             provenance["scheme_sha256"] = scheme_sha256(colouring.scheme)
-        return ChartColours(rows, tuple(labels), tuple(sequenced), provenance)
+        if groups is not None:
+            provenance["groups_origin"] = "caller-supplied"
+            provenance["groups_sha256"] = groups_sha256(groups)
+        return ChartColours(rows, tuple(labels), tuple(sequenced), provenance, tuple(basis))
 
     def store_refs(self) -> list[dict[str, str]]:
         """The store versions every store-coloured figure of this run was drawn from."""
