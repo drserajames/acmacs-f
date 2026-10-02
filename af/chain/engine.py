@@ -39,7 +39,7 @@ from af.chain import adjust, select
 from af.chain.backend import Optimiser, default_optimiser
 from af.chain.config import ChainConfig, TableRef, config_to_json, option_parameters
 from af.chain.diagnostics import group_moves, run_threads, step_diagnostics, two_position_points
-from af.chain.starts import read_result, write_problem
+from af.chain.starts import finished, problem_digest, read_result, write_problem
 from af.chart.ace import read_chart, read_json, write_chart
 from af.chart.merge import ColumnBasisConvention, MergeOptions, MergeType, merge
 from af.chart.model import Chart, Projection
@@ -108,20 +108,40 @@ class Mapper:
                 arrays, n_starts, dim, seed, start_layout, move_groups=move_groups
             )
         work = self.split.work_dir / label
-        if work.exists():
-            shutil.rmtree(work)
-        work.mkdir(parents=True)
-        problem = write_problem(
-            work / "problem.npz",
+        problem = work / "problem.npz"
+        key = work / "problem.sha256"
+        digest = problem_digest(
             arrays,
             seed=seed,
             dimensions=dim,
             optimiser=self.optimiser.key,
             start_layout=start_layout,
         )
-        jobs = []
+        # Finished chunks of the SAME problem are kept, so a run killed after its array (e.g. in
+        # the driver's refine) does not pay for the array again (2 Oct 2026: ~830 core-h at stake
+        # on one map). Any other problem, or a missing key, starts the work directory afresh.
+        same = key.is_file() and key.read_text().strip() == digest and problem.is_file()
+        if not same:
+            if work.exists():
+                shutil.rmtree(work)
+            work.mkdir(parents=True)
+            write_problem(
+                problem,
+                arrays,
+                seed=seed,
+                dimensions=dim,
+                optimiser=self.optimiser.key,
+                start_layout=start_layout,
+            )
+            key.write_text(digest + "\n")
+        jobs, chunk_files, reused = [], [], 0
         for k, (first, count) in enumerate(_chunks(n_starts, self.split.chunks)):
             out = work / f"starts-{first:06d}-{count:06d}.npz"
+            chunk_files.append(out)
+            if same and finished(out, first, count):
+                reused += 1
+                continue
+            out.unlink(missing_ok=True)
             jobs.append(
                 Job(
                     name=f"{label.replace('/', '-')}-{k:03d}",
@@ -142,14 +162,16 @@ class Mapper:
                 )
             )
         log.info(
-            "%s: %d starts in %d jobs x %d thread(s) each",
+            "%s: %d starts in %d jobs x %d thread(s) each; %d finished chunk(s) reused",
             label,
             n_starts,
             len(jobs),
             self.split.threads,
+            reused,
         )
-        runner.run_many(jobs)
-        chunks = [m for job in jobs for m in read_result(Path(job.outputs[0].path))]
+        if jobs:
+            runner.run_many(jobs)
+        chunks = [m for path in chunk_files for m in read_result(path)]
         return self.optimiser.combine(
             arrays, chunks, incremental=start_layout is not None, move_groups=move_groups
         )
