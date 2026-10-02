@@ -56,10 +56,16 @@ def test_movers_go_to_median_of_painted_group() -> None:
 
 
 def test_mover_must_match_exactly_one() -> None:
-    with pytest.raises(CurationError, match="matches 0"):
+    with pytest.raises(CurationError, match="matches 0") as none:
         apply_move(
             rule(movers=("GHOST",)), LAYOUT, NAMES, PAINTED, stress_before=0.0, relax=no_relax
         )
+    assert none.value.fields() == {
+        "guard": "mover_match",
+        "measured": 0,
+        "limit": 1,
+        "bound": "exact",
+    }
     with pytest.raises(CurationError, match="matches 2"):
         apply_move(
             rule(movers=("IN 1",)),
@@ -72,10 +78,12 @@ def test_mover_must_match_exactly_one() -> None:
 
 
 def test_target_group_too_small() -> None:
-    with pytest.raises(CurationError, match="need at least 3"):
+    with pytest.raises(CurationError, match="need at least 3") as small:
         apply_move(
             rule(target_colour=RED), LAYOUT, NAMES, PAINTED, stress_before=0.0, relax=no_relax
         )
+    assert small.value.guard == "target_points" and small.value.bound == "min"
+    assert small.value.limit == 3 and small.value.measured < 3
 
 
 def test_guards() -> None:
@@ -87,8 +95,13 @@ def test_guards() -> None:
     def springs_back(start: np.ndarray, movable: np.ndarray) -> tuple[np.ndarray, float]:
         return LAYOUT.copy(), 0.0
 
-    with pytest.raises(CurationError, match="relaxed back"):
+    with pytest.raises(CurationError, match="relaxed back") as back:
         apply_move(rule(), LAYOUT, NAMES, PAINTED, stress_before=0.0, relax=springs_back)
+    # The refusal as data, so a report states it without parsing the message.
+    fields = back.value.fields()
+    assert fields["guard"] == "from_target" and fields["bound"] == "max"
+    assert fields["limit"] == rule().max_from_target
+    assert isinstance(fields["measured"], float) and fields["measured"] > fields["limit"]
 
 
 def test_continuity_starts_from_previous_positions() -> None:

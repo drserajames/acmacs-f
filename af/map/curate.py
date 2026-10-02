@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -44,7 +44,36 @@ class Relax(Protocol):
 
 
 class CurationError(ValueError):
-    """A curation rule matched the wrong points, or its result broke a guard."""
+    """A curation rule matched the wrong points, or its result broke a guard.
+
+    ``guard`` names the check that refused, with what it ``measured`` and the ``limit`` it was
+    held to (``bound``: "max", "min" or "exact"), so a report can state the refusal from data
+    rather than by parsing the message.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        guard: str,
+        measured: float,
+        limit: float,
+        bound: Literal["max", "min", "exact"],
+    ) -> None:
+        super().__init__(message)
+        self.guard = guard
+        self.measured = measured
+        self.limit = limit
+        self.bound = bound
+
+    def fields(self) -> dict[str, object]:
+        """The refusal as plain data: guard, measured, limit, bound."""
+        return {
+            "guard": self.guard,
+            "measured": round(float(self.measured), 4),
+            "limit": self.limit,
+            "bound": self.bound,
+        }
 
 
 @dataclass(frozen=True)
@@ -113,12 +142,20 @@ def apply_move(
     half-curated layout behind.
     """
     if not rule.movers:
-        raise CurationError(f"move {rule.name!r}: no movers")
+        raise CurationError(
+            f"move {rule.name!r}: no movers", guard="movers", measured=0, limit=1, bound="min"
+        )
     rows = []
     for want in rule.movers:
         hits = [i for i, d in enumerate(designations) if d == want]
         if len(hits) != 1:
-            raise CurationError(f"move {rule.name!r}: mover {want!r} matches {len(hits)} antigens")
+            raise CurationError(
+                f"move {rule.name!r}: mover {want!r} matches {len(hits)} antigens",
+                guard="mover_match",
+                measured=len(hits),
+                limit=1,
+                bound="exact",
+            )
         rows.append(hits[0])
     has_xy = rows_with_coordinates(layout)
     movers = set(rows)
@@ -133,7 +170,11 @@ def apply_move(
     if len(group) < rule.min_target_points:
         raise CurationError(
             f"move {rule.name!r}: {len(group)} points painted {rule.target_colour} by "
-            f"{rule.colour_scheme}, need at least {rule.min_target_points}"
+            f"{rule.colour_scheme}, need at least {rule.min_target_points}",
+            guard="target_points",
+            measured=len(group),
+            limit=rule.min_target_points,
+            bound="min",
         )
     target = np.median(layout[group], axis=0)
     start = layout.copy()
@@ -148,12 +189,20 @@ def apply_move(
     if stress_after - stress_before > rule.max_stress_rise:
         raise CurationError(
             f"move {rule.name!r}: stress rose {stress_after - stress_before:.3f} "
-            f"(cap {rule.max_stress_rise}); layout left unchanged"
+            f"(cap {rule.max_stress_rise}); layout left unchanged",
+            guard="stress_rise",
+            measured=stress_after - stress_before,
+            limit=rule.max_stress_rise,
+            bound="max",
         )
     if worst > rule.max_from_target:
         raise CurationError(
             f"move {rule.name!r}: a mover relaxed back {worst:.3f} from the target "
-            f"(cap {rule.max_from_target}); layout left unchanged"
+            f"(cap {rule.max_from_target}); layout left unchanged",
+            guard="from_target",
+            measured=worst,
+            limit=rule.max_from_target,
+            bound="max",
         )
     return MoveResult(
         layout=out,
@@ -292,12 +341,20 @@ def apply_block_offset(
 ) -> BlockResult:
     """Apply one :class:`BlockOffset`. Raises :class:`CurationError` if a guard fails."""
     if not rule.movers:
-        raise CurationError(f"block {rule.name!r}: no movers")
+        raise CurationError(
+            f"block {rule.name!r}: no movers", guard="movers", measured=0, limit=1, bound="min"
+        )
     rows = []
     for want in rule.movers:
         hits = [i for i, d in enumerate(designations) if d == want]
         if len(hits) != 1:
-            raise CurationError(f"block {rule.name!r}: mover {want!r} matches {len(hits)} antigens")
+            raise CurationError(
+                f"block {rule.name!r}: mover {want!r} matches {len(hits)} antigens",
+                guard="mover_match",
+                measured=len(hits),
+                limit=1,
+                bound="exact",
+            )
         rows.append(hits[0])
     has_xy = rows_with_coordinates(layout)
     movers = set(rows)
@@ -311,7 +368,11 @@ def apply_block_offset(
     ]
     if not group:
         raise CurationError(
-            f"block {rule.name!r}: no points painted {rule.target_colour} by {rule.colour_scheme}"
+            f"block {rule.name!r}: no points painted {rule.target_colour} by {rule.colour_scheme}",
+            guard="target_points",
+            measured=0,
+            limit=1,
+            bound="min",
         )
     start = layout.copy()
     start[rows] = start[rows] + np.asarray(rule.shift, dtype=float)
@@ -332,17 +393,29 @@ def apply_block_offset(
     if stress_after - stress_before > rule.max_stress_rise:
         raise CurationError(
             f"block {rule.name!r}: stress rose {stress_after - stress_before:.3f} "
-            f"(cap {rule.max_stress_rise}); layout left unchanged"
+            f"(cap {rule.max_stress_rise}); layout left unchanged",
+            guard="stress_rise",
+            measured=stress_after - stress_before,
+            limit=rule.max_stress_rise,
+            bound="max",
         )
     if settled < rule.min_settled:
         raise CurationError(
             f"block {rule.name!r}: only {settled} of {len(rows)} movers settled within "
-            f"{rule.settled_within} of the target (need {rule.min_settled}); layout left unchanged"
+            f"{rule.settled_within} of the target (need {rule.min_settled}); layout left unchanged",
+            guard="settled",
+            measured=settled,
+            limit=rule.min_settled,
+            bound="min",
         )
     if largest_other > rule.max_other_move:
         raise CurationError(
             f"block {rule.name!r}: another point moved {largest_other:.3f} "
-            f"(cap {rule.max_other_move}); layout left unchanged"
+            f"(cap {rule.max_other_move}); layout left unchanged",
+            guard="other_move",
+            measured=largest_other,
+            limit=rule.max_other_move,
+            bound="max",
         )
     return BlockResult(
         layout=out,

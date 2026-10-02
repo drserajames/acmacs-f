@@ -147,6 +147,7 @@ class VaccineDisableConfig:
     reason: str
     passage: str = "any"
     optional: bool = False
+    decided: dt.date | None = None  # optional: older rules carry no date
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,7 @@ class VaccineChooseConfig:
     passage_class: str
     passage: str
     optional: bool = False
+    decided: dt.date | None = None  # optional: older rules carry no date
 
 
 @dataclass(frozen=True)

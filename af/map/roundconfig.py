@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,12 @@ from af.map.config import (
 
 class ConfigError(ValueError):
     """The round's maps config does not make sense. The message says which key."""
+
+
+def _optional_date(row: Mapping[str, Any], where: str) -> dt.date | None:
+    """A row's ``decided`` date if it has one. Vaccine rules predate dated decisions, so the
+    date is optional there; the figure records null and the report says it is missing."""
+    return _date(row["decided"], where) if "decided" in row else None
 
 
 def _date(value: Any, where: str) -> dt.date:
@@ -292,16 +299,22 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
         )
     disable = []
     for v in m.get("vaccine_disable", ()):
-        _known(v, {"name", "reason", "passage", "optional"}, f"{where} vaccine_disable")
+        _known(v, {"name", "reason", "passage", "optional", "decided"}, f"{where} vaccine_disable")
         disable.append(
             VaccineDisableConfig(
-                v["name"], v["reason"], v.get("passage", "any"), bool(v.get("optional", False))
+                v["name"],
+                v["reason"],
+                v.get("passage", "any"),
+                bool(v.get("optional", False)),
+                _optional_date(v, f"{where} vaccine_disable {v['name']}"),
             )
         )
     choose = []
     for v in m.get("vaccine_choose", ()):
         _known(
-            v, {"name", "reason", "passage_class", "passage", "optional"}, f"{where} vaccine_choose"
+            v,
+            {"name", "reason", "passage_class", "passage", "optional", "decided"},
+            f"{where} vaccine_choose",
         )
         choose.append(
             VaccineChooseConfig(
@@ -310,6 +323,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
                 v["passage_class"],
                 v["passage"],
                 bool(v.get("optional", False)),
+                _optional_date(v, f"{where} vaccine_choose {v['name']}"),
             )
         )
     until = None

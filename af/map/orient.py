@@ -129,7 +129,13 @@ class Orientation:
             "fit_degrees": round(self.fit.degrees, 3),
             "fit_reflected": self.fit.reflected,
             "overrides": [
-                {"name": o.name, "degrees": o.degrees, "reflect": o.reflect, "reason": o.reason}
+                {
+                    "name": o.name,
+                    "degrees": o.degrees,
+                    "reflect": o.reflect,
+                    "reason": o.reason,
+                    "decided": o.decided,
+                }
                 for o in self.overrides
             ],
             "degrees": round(degrees, 3),
