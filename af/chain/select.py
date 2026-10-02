@@ -23,12 +23,13 @@ nothing, silently); the matches are counted per step.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from af.chart.ace import read_chart
-from af.chart.model import Antigen, Chart, Serum
+from af.chart.model import Antigen, Chart, Serum, Titres
 from af.chart.sera import FERRET_ONLY, Marker, non_ferret
+from af.chart.titre import MISSING_TITRE
 from af.map.vaccines import passage_class
 
 WHAT = ("antigens", "sera")
@@ -75,10 +76,78 @@ class RemoveRule:
 
 
 @dataclass(frozen=True)
+class DropCell:
+    """One reading kept out of the MAP, the table keeping the lab's value: `[[select.drop_cell]]`
+    {table, antigen, serum, reason, decided}. Antigen and serum are exact designations; the rule
+    must match exactly one present reading in that one table, or the chain refuses to start
+    (design rule 1). Sarah, 2 Oct 2026 (Q98): an implausible ">10240" set a serum's column basis
+    ~2 units high; the lab is asked (LAB-QUESTIONS L11) and the rule goes when it answers."""
+
+    table: str  # table id, e.g. <group>-20221208
+    antigen: str
+    serum: str
+    reason: str
+    decided: str
+
+    def __post_init__(self) -> None:
+        empty = [
+            k
+            for k in ("table", "antigen", "serum", "reason", "decided")
+            if not getattr(self, k).strip()
+        ]
+        if empty:
+            raise SelectError(f"select.drop_cell: empty {', '.join(empty)}")
+
+    def to_json(self) -> dict[str, str]:
+        return dict(vars(self))
+
+
+def drop_cells(rules: list[DropCell], table_id: str, chart: Chart) -> tuple[Chart, list[dict]]:
+    """`chart` (one table) with each rule for this table's reading made missing, and what each
+    rule dropped (the reading as the lab wrote it)."""
+    mine = [r for r in rules if r.table == table_id]
+    if not mine:
+        return chart, []
+    table = [list(row) for row in chart.titres.table]
+    report = []
+    for rule in mine:
+        i, j = _cell(rule, chart)
+        report.append({**rule.to_json(), "titre": str(table[i][j])})
+        table[i][j] = MISSING_TITRE
+    layers = [{k: v for k, v in layer.items() if k != (i, j)} for layer in chart.titres.layers]
+    return replace(chart, titres=Titres(table, layers)), report
+
+
+def _cell(rule: DropCell, chart: Chart) -> tuple[int, int]:
+    ags = [i for i, a in enumerate(chart.antigens) if a.designation() == rule.antigen]
+    srs = [j for j, s in enumerate(chart.sera) if s.designation() == rule.serum]
+    if len(ags) != 1 or len(srs) != 1:
+        raise SelectError(
+            f"select.drop_cell {rule.table}: antigen {rule.antigen!r} matches {len(ags)},"
+            f" serum {rule.serum!r} matches {len(srs)}; each must match exactly one"
+        )
+    if chart.titres.table[ags[0]][srs[0]].is_missing:
+        raise SelectError(f"select.drop_cell {rule.table}: that reading is already missing")
+    return ags[0], srs[0]
+
+
+def check_cells_match(rules: list[DropCell], tables: dict[str, Path]) -> None:
+    """Every drop_cell rule names one of the chain's tables and one present reading in it,
+    checked before any step runs."""
+    for rule in rules:
+        if rule.table not in tables:
+            raise SelectError(
+                f"select.drop_cell: table {rule.table} is not one of the chain's tables"
+            )
+        _cell(rule, read_chart(tables[rule.table]))
+
+
+@dataclass(frozen=True)
 class Selection:
     """The `[select]` table of a chain config."""
 
     remove: list[RemoveRule] = field(default_factory=list)
+    drop_cell: list[DropCell] = field(default_factory=list)
     # Ferret sera only (af.chart.sera.FERRET_ONLY): "exclude" is the default for every map; a
     # map that needs other sera says "keep" and why.
     non_ferret_sera: str = "exclude"
