@@ -68,15 +68,24 @@ class MapOptions:
     # merge_type "simple", 10,000 optimisations); Sarah, 1 Oct 2026: all 18 maps from scratch
     # until chains' composition and selection issues are settled. Set scratch_starts with it.
     merge_all: bool = False
+    # How a map from scratch is relaxed. "rough": every start rough, then the best 5 fine, as AD's
+    # chart-relax-grid (and af's incremental maps) do; 2.8x cheaper per start on a 7,094-point H1
+    # merge with the same best (06-optimiser). "fine": every start fine, af's method before
+    # 2 Oct 2026. Sarah, 2 Oct 2026: "Yes, match AD".
+    scratch_precision: str = "rough"
 
     def __post_init__(self) -> None:
         ColumnBasisConvention(self.column_bases)  # raises on an unknown convention
+        if self.scratch_precision not in ("rough", "fine"):
+            raise ChainConfigError(
+                f"scratch_precision must be rough or fine: {self.scratch_precision!r}"
+            )
 
 
 # Options added after chains were first published, with the value that reproduces them. They
 # enter a step's parameters (and chain.json) only when set otherwise, so adding one neither
 # reruns nor republishes existing chains.
-LATER_OPTIONS = {"move_groups": False, "merge_all": False}
+LATER_OPTIONS = {"move_groups": False, "merge_all": False, "scratch_precision": "fine"}
 
 
 def option_parameters(options: MapOptions) -> dict[str, Any]:

@@ -462,6 +462,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
     arrays = table.optimiser_arrays(
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
     )
+    arrays["scratch_precision"] = o.scratch_precision  # carried to split chunks in the problem file
     seed = _step_seed(cfg, 0, [t.path])
     all_maps = mapper.make(
         runner,
@@ -526,6 +527,7 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
     arrays = merged.optimiser_arrays(
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
     )
+    arrays["scratch_precision"] = o.scratch_precision  # carried to split chunks in the problem file
     seed = _step_seed(cfg, 0, [t.path for t in cfg.tables])
     all_maps = mapper.make(
         runner,
@@ -594,6 +596,7 @@ def _merge_step(
     arrays = merged.optimiser_arrays(
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
     )
+    arrays["scratch_precision"] = o.scratch_precision  # carried to split chunks in the problem file
     seed = _step_seed(cfg, index, [previous_path, table_ref.path])
     start = merged.projections[0].layout.copy()
     start[arrays["disconnected"]] = np.nan
