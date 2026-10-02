@@ -55,6 +55,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 RELEASE_FILE = "RELEASE.toml"
@@ -106,14 +107,14 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
     started = now()
     src, env = release / "src", release / "env"
     src.mkdir(parents=True)
-    step(f"exporting {sha[:12]} from {repo}")
+    step(f"exporting {sha[:12]} from {repo}", "export")
     archive = subprocess.run(
         ["git", "-C", str(repo), "archive", sha], check=True, capture_output=True
     )
     subprocess.run(["tar", "-x", "-C", str(src)], input=archive.stdout, check=True)
 
     base_env = clean_environment(args)
-    step("creating the environment from environment.yml")
+    step("creating the environment from environment.yml", "environment")
     run(
         [
             str(args.micromamba),
@@ -132,9 +133,13 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
     # The first launch of a freshly installed cmake can take longer than scikit-build-core's
     # probe allows (macOS scans a new binary; NFS is slow on first read): it then reports
     # "Could not find CMake". Launch the build tools once, untimed.
+    step("first launch of cmake and ninja", "tool_warmup")
     for tool in ("cmake", "ninja"):
         run([str(env / "bin" / tool), "--version"], build_env)
-    step(f"installing af (non-editable, extras {args.extras}) with {build_env.get('CXX', 'c++')}")
+    step(
+        f"installing af (non-editable, extras {args.extras}) with {build_env.get('CXX', 'c++')}",
+        "install",
+    )
     # On macOS, link the optimiser to the env's own libomp: numpy's OpenBLAS already loads
     # it, and a second libomp copy (e.g. Homebrew's) aborts the process at run time.
     # On Linux, a RUNPATH to the env's lib: _core's libgomp and libstdc++ then come from the
@@ -151,13 +156,15 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
         cwd=release,
     )
 
-    step("verifying")
+    step("verifying imports, linkage and the OpenMP runtime", "verify")
     verify_imports(release)
     verify_linkage(release)
     verify_one_openmp(python, build_env)
     with tempfile.TemporaryDirectory() as scratch:
+        step("smoke test", "smoke")
         smoke = [python, "-m", "af.run.smoke", "--local", "--work-dir", scratch]
         run(smoke, build_env, cwd=scratch)
+        step("tool tests", "tool_tests")
         # The tests without the source tree beside them, so they exercise the installed af
         # (with its compiled optimiser), not src/af.
         (Path(scratch) / "tests").symlink_to(src / "tests")
@@ -165,7 +172,7 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
         tool_tests = [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-m", "tool"]
         run([*tool_tests, "--require-tools", "--skip-tool", "pdflatex"], build_env, cwd=scratch)
 
-    step("recording")
+    step("recording", "record")
     (release / "conda-explicit.txt").write_text(
         capture(
             [str(args.micromamba), "env", "export", "--explicit", "--prefix", str(env)], base_env
@@ -177,6 +184,7 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
     (release / "bin").symlink_to("env/bin")  # so <release>/bin/python, like o's env/bin/python
     make_read_only(release)
     step(f"release {sha[:12]} ready in {release}")
+    print(f"== stage times: {stage_summary()}", flush=True)
 
 
 def clean_environment(args: argparse.Namespace) -> dict[str, str]:
@@ -331,6 +339,7 @@ def write_release_file(
         "host": platform.node(),
         "started": started,
         "finished": now(),
+        "stage_seconds": stage_summary(),
     }
     body = "".join(
         f'{key} = "{str(value).replace(chr(34), chr(39))}"\n' for key, value in fields.items()
@@ -431,8 +440,29 @@ def git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def step(message: str) -> None:
-    print(f"== {message}", flush=True)
+# Stages so far, as (key, start), for the timings printed and kept in RELEASE.toml. A release
+# build on CSD3 took 7, 12 and then 36 min with the same environment.yml (csd3-v2, 2 Oct
+# 2026), apparently all in "creating the environment", but unmeasured. Each stage now logs
+# its wall time, so the next slow build says where the time went.
+_stages: list[tuple[str, float]] = []
+
+
+def step(message: str, key: str | None = None) -> None:
+    """Log a stage (with UTC time); with ``key``, time it until the next step."""
+    if _stages and _stages[-1][0]:
+        name, started = _stages[-1]
+        print(f"   ({name}: {time.monotonic() - started:.0f} s)", flush=True)
+    _stages.append((key or "", time.monotonic()))
+    print(f"== {now()} {message}", flush=True)
+
+
+def stage_summary() -> str:
+    """Seconds per timed stage, in order, e.g. "export=2 environment=118 ..."; the stage
+    still running is counted up to now."""
+    ends = [start for _, start in _stages[1:]] + [time.monotonic()]
+    return " ".join(
+        f"{key}={end - start:.0f}" for (key, start), end in zip(_stages, ends, strict=True) if key
+    )
 
 
 def now() -> str:
