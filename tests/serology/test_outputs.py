@@ -485,3 +485,35 @@ def test_a_tie_coloured_through_a_partial_candidate_counts_as_partial() -> None:
     assert not _uses_partial(PreparationSequence(None, None, None, "", False, tied=(one,)), partial)
     assert _uses_partial(PreparationSequence("EPI_ISL_2", "ACC2", "P.1", "", False), partial)
     assert not _uses_partial(None, partial)
+
+
+def test_map_store_refs_are_what_the_join_read_not_current_later(tmp_path: Path, syn: Any) -> None:
+    """StoreColours.store_refs names the versions its join READ, sequences included. It used to
+    re-read clades CURRENT when asked (and left sequences out), so a figure could name a clade
+    table it was never coloured from once CURRENT moved."""
+    from af.map.colouring import StoreColours
+    from af.serology import query
+    from af.serology.joins import link_from_store
+
+    store, _, _ = _roots(tmp_path, syn)
+    _clades(store, tmp_path)
+    rules = matching_rules(
+        write_af_data(tmp_path / "af-data", submitters="", number="", equivalents="")
+    )
+    colours = object.__new__(StoreColours)  # the join only: no nomenclature clones needed
+    colours._store = store
+    colours.serology = store.current("serology", "all")
+    con = query.connect(store.resolve(colours.serology))
+    colours.links = link_from_store(con, store, rules, with_clades=True)
+    read_clades = store.current("clades", "h3")
+    read_sequences = {d: store.current("sequences", d) for d in ("bvic", "byam", "h1", "h3")}
+
+    _clades(store, tmp_path, extra=((2, "P.2"),))  # CURRENT moves after the join
+    assert store.current("clades", "h3") != read_clades
+
+    refs = colours.store_refs()
+    assert refs[0] == colours.serology.to_json()
+    assert [r for r in refs if r["kind"] == "clades"] == [read_clades.to_json()]
+    assert [r for r in refs if r["kind"] == "sequences"] == [
+        read_sequences[d].to_json() for d in sorted(read_sequences)
+    ]
