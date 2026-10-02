@@ -117,6 +117,7 @@ def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
     doc = json.loads(result.i7.read_text())
     assert doc["figure"]["sha256"] == hashlib.sha256(out.read_bytes()).hexdigest()
     assert doc["kind"] == "map" and doc["i7_version"] == 1
+    assert doc["map"]["y_axis"] == "up"  # point xy are y-up displayed coordinates (Q105)
     assert len(doc["map"]["antigens"]) == 124 and len(doc["map"]["sera"]) == 6  # complete list
     assert doc["map"]["colour_coverage"] == {
         "shown_antigens": 122,

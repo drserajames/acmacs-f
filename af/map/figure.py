@@ -14,6 +14,12 @@ outside :mod:`af.map.build` (which adds a round's config, curation and orientati
    report PDF (:func:`af.map.render.draw_pdf` calls it), so a panel is the report page scaled,
    not a lookalike.
 
+Also public: :func:`marker_for_passage`, a point's marker shape from its passage, for a caller
+that builds points itself (:func:`chart_scene` already sets every point's ``marker``).
+
+Displayed coordinates grow upwards, as in R (Q105): pass a chart's layout as stored, and the map
+looks as R draws it.
+
 Everything else in af.map is the build's own machinery; pin only to the names above.
 """
 
@@ -27,7 +33,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from af.chart.model import Chart
-from af.map.style import PointIn, Scene, Window, style_points
+from af.map.style import Marker, PointIn, Scene, Window, style_points
 from af.map.vaccines import marker_for, passage_class
 from af.map.viewport import Frame
 
@@ -47,6 +53,19 @@ def parse_date(text: str) -> dt.date | None:
         return dt.date.fromisoformat(text[:10])
     except (ValueError, TypeError):
         return None
+
+
+def marker_for_passage(kind: str, passage: str, reassortant: str = "") -> Marker:
+    """The marker shape af draws for a point (public): ``kind`` is "antigen" or "serum",
+    ``passage`` and ``reassortant`` as the chart records them. Egg-grown antigens are eggs and
+    egg-grown sera ugly eggs; every other antigen is a circle, every other serum a box.
+
+    Supported for callers: the same rule :func:`chart_scene` applies, decided in one place
+    (:func:`af.map.vaccines.marker_for`).
+    """
+    if kind not in ("antigen", "serum"):
+        raise FigureError(f"marker_for_passage: kind {kind!r} is not 'antigen' or 'serum'")
+    return marker_for(kind, passage_class(passage, reassortant))
 
 
 def chart_points(
@@ -136,7 +155,7 @@ def frame_around(scene: Scene, *, margin: float = 1.0, size: float | None = None
     lo, hi = xy.min(axis=0), xy.max(axis=0)
     side = float(size) if size is not None else float((hi - lo).max()) + 2 * margin
     centre = (lo + hi) / 2
-    return Frame(float(centre[0] - side / 2), float(centre[1] - side / 2), side)
+    return Frame(float(centre[0] - side / 2), float(centre[1] + side / 2), side)  # top-left
 
 
 def draw_axes(

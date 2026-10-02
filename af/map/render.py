@@ -140,7 +140,7 @@ def draw_scene(
     the page shrunk. Everything else is in page fractions already.
     """
     ax.set_xlim(0, 1)
-    ax.set_ylim(1, 0)  # y grows downward, as in the map frame
+    ax.set_ylim(1, 0)  # the PAGE grows downward; map y (up) became page y in Frame.page
     ax.axis("off")
     for k in range(int(frame.size) + 1):
         g = k / frame.size

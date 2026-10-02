@@ -47,6 +47,8 @@ def test_frame_covers_the_shown_points() -> None:
     f = frame_around(chart_scene(chart(), XY, COLOURS, title="T"), margin=1.0)
     assert f.size == pytest.approx(5.0)  # widest extent 3 + 2 * margin
     assert frame_around(chart_scene(chart(), XY, COLOURS, title="T"), size=10).size == 10
+    # Placed by its top-left corner as drawn, y up: the largest y, not the smallest (Q105).
+    assert (f.x, f.y) == pytest.approx((-1.5, 4.0))
 
 
 def test_draw_axes_refuses_a_stretched_panel() -> None:
@@ -72,3 +74,16 @@ def test_a_panel_is_the_page_scaled() -> None:
     assert title.get_fontsize() == pytest.approx(DEFAULT_LOOK.title_size * scale)
     assert len(ax.patches) >= 4  # 3 drawn points + legend box (antigen 2 has no coordinates)
     plt.close(fig)
+
+
+def test_marker_for_passage_is_the_scenes_rule() -> None:
+    from af.map.figure import marker_for_passage
+
+    c = chart()
+    scene = chart_scene(c, XY, COLOURS, title="T")
+    points = [("antigen", a) for a in c.antigens] + [("serum", s) for s in c.sera]
+    got = [marker_for_passage(kind, p.passage, p.reassortant) for kind, p in points]
+    assert got == [p.marker for p in scene.points]
+    assert set(got) >= {"circle", "egg", "uglyegg"}  # the fixture has cell, egg and an egg serum
+    with pytest.raises(FigureError, match="kind"):
+        marker_for_passage("titre", "E3")

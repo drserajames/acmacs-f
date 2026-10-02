@@ -12,6 +12,7 @@ from af.map.orient import (
     procrustes,
     rotation,
 )
+from af.map.viewport import from_y_down
 
 
 def cloud(n: int = 60, seed: int = 1) -> np.ndarray:
@@ -119,3 +120,28 @@ def test_drawn_pairs_keeps_only_points_the_reference_drew() -> None:
     on_drawn = procrustes(raw[kept[:, 0]], ref[kept[:, 1]])
     assert on_drawn.degrees == pytest.approx(15.0)
     assert abs(on_all.degrees - 15.0) > 1.0
+
+
+# ---------------------------------------------------------------- y grows UP (Sarah, Q105)
+
+
+def test_a_map_oriented_to_a_y_down_drawing_looks_like_it() -> None:
+    """The previous round's map was drawn y DOWN (kateri). Fitted to that drawing read through
+    from_y_down, this map's y-up displayed coordinates are the same picture, not its mirror."""
+    raw = cloud()
+    drawn_y_down = raw @ rotation(30.0) + [5.0, -2.0]
+    result = orient(
+        raw, from_y_down(drawn_y_down), pairs(len(raw)), reference="prev", min_common=10
+    )
+    displayed = raw @ result.matrix + result.translation
+    np.testing.assert_allclose(displayed, from_y_down(drawn_y_down), atol=1e-9)
+    assert result.report()["fit_reflected"] is True  # the mirror between ae's y-down and R's y-up
+
+
+def test_a_positive_override_turns_the_map_anticlockwise() -> None:
+    """Angles grow from +x towards +y. With y up, that is anticlockwise on the page, as in R."""
+    raw = cloud()
+    turn = RotationOverride("quarter turn", 90.0, "test", "2026-10-02")
+    result = orient(raw, raw, pairs(len(raw)), reference="self", min_common=10, overrides=(turn,))
+    east = np.array([[1.0, 0.0]]) @ result.matrix - np.zeros((1, 2)) @ result.matrix
+    np.testing.assert_allclose(east, [[0.0, 1.0]], atol=1e-9)  # +x goes to +y: up the page

@@ -8,9 +8,11 @@ in 15 of 18 folders. The other three were deliberate one-off rotations, which is
 :class:`RotationOverride` records (Sarah, 25 Sep 2026: previous-map default, an optional
 reference-lab rule behind a quality gate, and named overrides).
 
-Conventions (the same as ``.ace`` projections): points are rows, ``displayed = raw @ M + t``,
-the y axis grows downward on the page, and an angle is measured in the displayed frame,
-positive from +x towards +y.
+Conventions: points are rows and ``displayed = raw @ M + t``, as in ``.ace`` projections. The
+displayed y axis grows UPWARDS on the page, as R/Racmacs draws maps (Sarah, Q105, 2 Oct 2026), so
+an ``.ace`` projection drawn by af looks as it does in R. An angle is measured in the displayed
+frame, positive from +x towards +y: anticlockwise on the page. A reference drawn the other way up
+(ae/kateri draw y DOWN) is turned into these coordinates by its reader, before it gets here.
 """
 
 from __future__ import annotations
