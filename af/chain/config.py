@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from af.chain.adjust import ColumnBasisAdjustment
-from af.chain.select import RemoveRule, Selection, SeraPolicy
+from af.chain.select import DropCell, RemoveRule, Selection, SeraPolicy
 from af.chart.merge import ColumnBasisConvention
 from af.chart.sera import read_markers
 from af.util.artefacts import sha256_path
@@ -177,6 +177,7 @@ class ChainConfig:
     # measured against after the run; not a step parameter
     references: list[Reference] = field(default_factory=list)
     column_basis_adjustments: list[ColumnBasisAdjustment] = field(default_factory=list)
+    drop_cells: list[DropCell] = field(default_factory=list)  # readings kept out of the map
 
     def __post_init__(self) -> None:
         if self.column_basis_adjustments and not self.options.merge_all:
@@ -257,6 +258,7 @@ def load_chain_config(
             _sera_policy(path, s.select),
             s.reference,
             s.adjust_column_bases,
+            s.select.drop_cell,
         )
     if t.directory is not None and t.group is not None and t.dataset is None:
         tables = tables_from_directory(t.directory, t.group, start, end, set(t.exclude))
@@ -272,6 +274,7 @@ def load_chain_config(
             _sera_policy(path, s.select),
             s.reference,
             s.adjust_column_bases,
+            s.select.drop_cell,
         )
     raise ChainConfigError(f"{path}: [tables] needs either dataset or directory + group")
 
@@ -353,6 +356,7 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
         "tables_source": cfg.tables_source,
         "options": option_parameters(cfg.options),
         **({"select_remove": [r.to_json() for r in cfg.remove]} if cfg.remove else {}),
+        **({"select_drop_cell": [r.to_json() for r in cfg.drop_cells]} if cfg.drop_cells else {}),
         **({"selection": cfg.selection} if cfg.selection else {}),
         "non_ferret_sera": cfg.sera_policy.to_json(),
         **(

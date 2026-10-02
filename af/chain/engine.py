@@ -216,6 +216,8 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
     }
     if cfg.remove:  # only a chain that selects points gets the key: others keep their steps
         common["select_remove"] = [r.to_json() for r in cfg.remove]
+    if cfg.drop_cells:  # likewise
+        common["select_drop_cell"] = [r.to_json() for r in cfg.drop_cells]
     if _removes_sera(cfg):  # likewise: only a chain whose tables HAVE non-ferret sera changes
         common["non_ferret_sera"] = cfg.sera_policy.to_json()
     if cfg.column_basis_adjustments:  # they change the map; a map without them keeps its steps
@@ -336,6 +338,7 @@ def run_chain(
     """
     optimiser = optimiser or default_optimiser()
     select.check_rules_match(cfg.remove, [t.path for t in cfg.tables])
+    select.check_cells_match(cfg.drop_cells, {t.table_id: t.path for t in cfg.tables})
     # `root` is the chain's own directory (af.store.Work: <work>/chains/<dataset>); without
     # it, <store_root>/<name>. Pipeline state goes in <root>/state (DatasetWork.state).
     root = Path(root) if root is not None else Path(store_root) / cfg.name
@@ -483,6 +486,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
     t = cfg.tables[0]
     table, sera = select.apply_sera_policy(cfg.sera_policy, read_chart(t.path))
     table, removed = select.apply(cfg.remove, table)
+    table, dropped = select.drop_cells(cfg.drop_cells, t.table_id, table)
     arrays = table.optimiser_arrays(
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
     )
@@ -516,6 +520,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
         "start_stresses": {"scratch": [r["stress"] for r in all_maps]},
         "trapped_loop": {"scratch": _loop(all_maps)},
         **({"removed": removed} if cfg.remove else {}),
+        **({"dropped_cells_by_rule": dropped} if dropped else {}),
         "non_ferret_sera": sera,
     }
     diagnostics = step_diagnostics(chart, None, None, None, arrays, optimiser, cfg)
@@ -535,12 +540,15 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
     merged: Chart | None = None
     outcomes: Counter = Counter()
     removed: dict[str, list[dict]] = {}
+    dropped: list[dict] = []
     sera: dict[str, dict] = {}
     for t in cfg.tables:
         table, sera[t.table_id] = select.apply_sera_policy(cfg.sera_policy, read_chart(t.path))
         table, rule_report = select.apply(cfg.remove, table)
         if cfg.remove:
             removed[t.table_id] = rule_report
+        table, cells = select.drop_cells(cfg.drop_cells, t.table_id, table)
+        dropped += cells
         if merged is None:
             merged = table
             continue
@@ -590,6 +598,7 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
             "outcomes": dict(outcomes),
         },
         **({"removed": removed} if cfg.remove else {}),
+        **({"dropped_cells_by_rule": dropped} if dropped else {}),
         **({"column_basis_adjustments": adjustments} if adjustments else {}),
         "non_ferret_sera": sera,
     }
@@ -617,6 +626,7 @@ def _merge_step(
     previous = read_chart(previous_path)
     table, sera = select.apply_sera_policy(cfg.sera_policy, read_chart(table_ref.path))
     table, removed = select.apply(cfg.remove, table)
+    table, dropped = select.drop_cells(cfg.drop_cells, table_ref.table_id, table)
     merged, report = merge(previous, table, _merge_options(cfg))
     write_chart(merged, directory / "merge.ace")
     arrays = merged.optimiser_arrays(
@@ -679,6 +689,7 @@ def _merge_step(
         },
         "trapped_loop": {"incremental": _loop(all_incremental), "scratch": _loop(all_scratch)},
         **({"removed": removed} if cfg.remove else {}),
+        **({"dropped_cells_by_rule": dropped} if dropped else {}),
         "non_ferret_sera": sera,
         "merge": {
             "antigens": merged.n_antigens,
