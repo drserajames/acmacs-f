@@ -100,6 +100,7 @@ class VaccineDisable:
     passage: PassageClass | Literal["any"]
     reason: str
     optional: bool = False
+    decided: str | None = None  # ISO date, when the rule records one
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,7 @@ class VaccineChoice:
     passage: str
     reason: str
     optional: bool = False
+    decided: str | None = None  # ISO date, when the rule records one
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,7 @@ class VaccineReport:
     disabled: list[tuple[str, str, str]] = field(default_factory=list)
     unclassified_passages: int = 0
     unused_optional_rules: list[str] = field(default_factory=list)
+    used_rules: set[VaccineDisable | VaccineChoice] = field(default_factory=set)
 
 
 def select_vaccines(
@@ -182,6 +185,7 @@ def select_vaccines(
         for r in choose
         if r.optional and r not in used_choose
     ]
+    report.used_rules = {*used_disable, *used_choose}
     _require_used("disable", [r for r in disable if not r.optional], used_disable)
     _require_used("choose", [r for r in choose if not r.optional], used_choose)
     return report

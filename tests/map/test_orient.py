@@ -76,6 +76,7 @@ def test_orient_reports_and_applies_override() -> None:
     overrides = report["overrides"]
     assert isinstance(overrides, list)
     assert [o["name"] for o in overrides] == ["line up with another lab"]
+    assert overrides[0]["decided"] == "2026-09-18"  # when, as well as who and why
 
 
 def test_orient_refuses_too_few_common_points() -> None:

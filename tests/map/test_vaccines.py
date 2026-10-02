@@ -110,6 +110,8 @@ def test_optional_rules_may_match_nothing_but_are_reported() -> None:
     )
     assert applied.unused_optional_rules == []
     assert (OT7, "egg", "subtype default") in applied.disabled
+    assert applied.used_rules == {VaccineDisable(OT7, "any", "subtype default", optional=True)}
+    assert report.used_rules == set()
 
 
 def test_dead_rules_are_errors() -> None:

@@ -260,7 +260,14 @@ def apply_moves(
             )
         except CurationError as exc:
             flags.append(str(exc).split(";")[0])
-            reports.append({"override": m.name, "applied": False, "why": str(exc).split(";")[0]})
+            reports.append(
+                {
+                    "override": m.name,
+                    "applied": False,
+                    "why": str(exc).split(";")[0],
+                    **exc.fields(),
+                }
+            )
             continue
         layout, current = result.layout, result.stress_after
         report = {**result.report(rule), "applied": True}
@@ -561,7 +568,12 @@ def build_map(
         except CurationError as exc:
             flags.append(str(exc).split(";")[0])
             decisions.setdefault("blocks", []).append(
-                {"override": b.name, "applied": False, "why": str(exc).split(";")[0]}
+                {
+                    "override": b.name,
+                    "applied": False,
+                    "why": str(exc).split(";")[0],
+                    **exc.fields(),
+                }
             )
             continue
         layout = result_b.layout
@@ -599,12 +611,17 @@ def build_map(
     # folder naming is a local convention, and af must not depend on one (design rule 10).
     subtype = chart.info.get("V", "")
     disable: list[VaccineDisable] = list(vaccine_defaults.get(subtype, ()))
+    n_defaults = len(disable)
     if vaccine_defaults and subtype not in vaccine_defaults:
         decisions["vaccine_defaults"] = f"no subtype defaults for {subtype!r}"
     for d in cfg.vaccine_disable:
-        disable.append(VaccineDisable(d.name, _passage(d.passage), d.reason, d.optional))
+        disable.append(
+            VaccineDisable(d.name, _passage(d.passage), d.reason, d.optional, _iso(d.decided))
+        )
     choose = [
-        VaccineChoice(c.name, _class(c.passage_class), c.passage, c.reason, c.optional)
+        VaccineChoice(
+            c.name, _class(c.passage_class), c.passage, c.reason, c.optional, _iso(c.decided)
+        )
         for c in cfg.vaccine_choose
     ]
     vrep = select_vaccines(
@@ -622,6 +639,8 @@ def build_map(
     }
     if vrep.unused_optional_rules:
         decisions["vaccine_rules_unused_optional"] = list(vrep.unused_optional_rules)
+    if disable or choose:
+        decisions["vaccines"] = vaccine_rule_records(disable, choose, n_defaults, vrep.used_rules)
 
     points = chart_points(chart, xy, labels=labels, sequenced=sequenced, hidden=hidden)
 
@@ -667,6 +686,50 @@ def build_map(
 # ---------------------------------------------------------------- the command
 
 
+def _iso(day: dt.date | None) -> str | None:
+    return day.isoformat() if day is not None else None
+
+
+def vaccine_rule_records(
+    disable: Sequence[VaccineDisable],
+    choose: Sequence[VaccineChoice],
+    n_defaults: int,
+    used: set[VaccineDisable | VaccineChoice],
+) -> list[dict[str, Any]]:
+    """Every vaccine rule this map was built with, in order (the subtype defaults, then the
+    map's own), each with whether it matched anything on this chart. A rule with no recorded
+    date has ``decided`` null, so a report can say the date is missing rather than omit it."""
+    out: list[dict[str, Any]] = []
+    for n, d in enumerate(disable):
+        out.append(
+            {
+                "rule": "disable",
+                "scope": "subtype default" if n < n_defaults else "map",
+                "name": d.name,
+                "passage": d.passage,
+                "reason": d.reason,
+                "decided": d.decided,
+                "optional": d.optional,
+                "used": d in used,
+            }
+        )
+    for c in choose:
+        out.append(
+            {
+                "rule": "choose",
+                "scope": "map",
+                "name": c.name,
+                "passage": c.passage,
+                "passage_class": c.passage_class,
+                "reason": c.reason,
+                "decided": c.decided,
+                "optional": c.optional,
+                "used": c in used,
+            }
+        )
+    return out
+
+
 def load_vaccine_defaults(path: Path | None) -> dict[str, tuple[VaccineDisable, ...]]:
     """Subtype-wide vaccine rules shared by every round (one editable copy, design rule 6)."""
     if path is None:
@@ -683,6 +746,7 @@ def load_vaccine_defaults(path: Path | None) -> dict[str, tuple[VaccineDisable, 
                 r.get("passage", "any"),
                 r["reason"],
                 bool(r.get("optional", True)),
+                dt.date.fromisoformat(str(r["decided"])).isoformat() if "decided" in r else None,
             )
             for r in rows
         )

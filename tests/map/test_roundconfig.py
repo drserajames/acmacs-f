@@ -72,6 +72,33 @@ def test_loads_and_resolves_paths_against_the_file(tmp_path: Path) -> None:
     assert one.layout_stand_in == (tmp_path / "charts/example.ace").resolve()
 
 
+# Invented names, built rather than written out (see tools/WHO-DATA-GATE.md).
+OLD_ONE = "/".join(("OLDTOWN", "1", "2009"))
+OLD_TWO = "/".join(("OLDTOWN", "2", "2010"))
+VACCINE_RULES = f"""
+  [[maps.vaccine_disable]]
+  name = "{OLD_ONE}"
+  reason = "superseded"
+  decided = 2026-09-20
+
+  [[maps.vaccine_choose]]
+  name = "{OLD_TWO}"
+  reason = "the reference preparation"
+  passage_class = "cell"
+  passage = "MDCK1"
+"""
+
+
+def test_vaccine_rules_may_say_when_they_were_decided(tmp_path: Path) -> None:
+    config, _ = load_maps_config(write(tmp_path, GOOD + VACCINE_RULES))
+    (m,) = config.maps
+    assert m.vaccine_disable[0].decided == dt.date(2026, 9, 20)
+    assert m.vaccine_choose[0].decided is None  # optional: older rules carry no date
+    bad = GOOD + VACCINE_RULES.replace("2026-09-20", '"20 Sep"')
+    with pytest.raises(ConfigError, match="vaccine_disable"):
+        load_maps_config(write(tmp_path, bad))
+
+
 def test_unknown_key_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="unknown key"):
         load_maps_config(write(tmp_path, GOOD.replace("size = 25", "size = 25\nsized = 30")))
