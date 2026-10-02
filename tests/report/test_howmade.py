@@ -267,7 +267,26 @@ def test_within_table_repeat_drops_are_counted_from_the_tables_record(tmp_path: 
         (build.path / "steps/0000").mkdir(parents=True)
         (build.path / "steps/0000/step.json").write_text(json.dumps(step))
         (build.path / "chain.json").write_text(json.dumps(chain))
+        (build.path / "steps/0000/chosen.ace").write_text("the map")
         options = {**OPTIONS, "sd_limit": 1.0}
         ref = build.publish(Provenance("af.chain", (), {"options": options}, T0, T0))
     note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [])
     assert any("(sd_limit 1.0): 3 cell(s) in 2 of 3 tables" in line for line in note.lines)
+    records = tmp_path / "records"
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [], records)
+    assert "the reference comparison of these repeat drops" in note.missing  # no record yet
+    import hashlib
+
+    path = records / "labx/hi/merged" / f"{ref.version}.repeat-drops.json"
+    path.parent.mkdir(parents=True)
+    chosen = store.version_dir(ref) / "steps/0000/chosen.ace"
+    sha = hashlib.sha256(chosen.read_bytes()).hexdigest()
+    path.write_text(json.dumps({
+        "map_sha256": sha, "reference": {"label": "the old map"}, "map_dropped": 2,
+        "tables_with_map_drops": 1, "both": 1, "only_map": [{"cell": "x"}], "only_reference": [],
+        "measured": "2026-10-02", "measured_by": "a script"}))  # fmt: skip
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [], records)
+    assert any("Of the 2 cells in this map set to * this way (1 tables), the reference the old "
+               "map has no value for 1; it kept a value for 1; and it dropped 0" in line
+               for line in note.lines)  # fmt: skip
+    assert "the reference comparison of these repeat drops" not in note.missing

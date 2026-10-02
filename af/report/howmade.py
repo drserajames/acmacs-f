@@ -208,7 +208,32 @@ def _column_bases(note: Note, files: ChainFiles) -> None:
         note.item(f"Adjustment {rule}{value}: {effect} ({row.get('reason', '')}; {when})")
 
 
-def _selection(note: Note, files: ChainFiles) -> None:
+def _repeat_drops_record(note: Note, files: ChainFiles, records: Path | None) -> None:
+    """The map's repeat drops against the reference's, from a record beside the store."""
+    if records is None:
+        return
+    path = records / files.ref.dataset / f"{files.ref.version}.repeat-drops.json"
+    if not path.is_file():
+        what = "the reference comparison of these repeat drops"
+        note.item(note.gap(what, f"{path.name} beside the store"))
+        return
+    rec = json.loads(path.read_text())
+    if rec.get("map_sha256") != files.chosen_sha256:
+        what = "the reference comparison of these repeat drops"
+        note.item(note.gap(what, f"{path} (its map_sha256 is not this version's map)"))
+        return
+    label = rec.get("reference", {}).get("label", "the reference")
+    only_map, only_ref = rec.get("only_map", []), rec.get("only_reference", [])
+    note.item(
+        f"Of the {rec.get('map_dropped')} cells in this map set to * this way "
+        f"({rec.get('tables_with_map_drops')} tables), the reference {label} has no value for "
+        f"{rec.get('both')}; it kept a value for {len(only_map)}; and it dropped "
+        f"{len(only_ref)} cells this map kept. (Measured {rec.get('measured')} by "
+        f"{rec.get('measured_by')}; cells listed in {path.name}.)"
+    )
+
+
+def _selection(note: Note, files: ChainFiles, records: Path | None = None) -> None:
     config = files.chain.get("config", {})
     if "select_remove" not in config:
         # af.chain writes the key only when the chain has removal rules: absent = none.
@@ -234,8 +259,10 @@ def _selection(note: Note, files: ChainFiles) -> None:
             f"Within-table repeats: readings of one antigen against one serum in one table are "
             f"merged, and set to * when their spread is too large{rule}: {cells} cell(s) in "
             f"{len(dropped)} of {len(tables)} tables (listed in chain.json "
-            "config.tables[].repeat_drops)"
+            "config.tables[].repeat_drops; counted on the tables, so including cells on points "
+            "the selection rules then remove)"
         )
+        _repeat_drops_record(note, files, records)
     elif tables:
         note.item(
             f"Within-table repeats: no table records a dropped cell{rule} (af.chain lists "
@@ -500,7 +527,7 @@ def map_note(
         note.item(note.gap("the column bases", "a chain version (this map has none)"))
     note.section("Selection")
     if files:
-        _selection(note, files)
+        _selection(note, files, reference_records)
     else:
         note.item(note.gap("which points were removed", "a chain version (this map has none)"))
     note.section("Changes at the map stage (af.map.build)")
