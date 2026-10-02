@@ -1,0 +1,500 @@
+"""A human-readable note per map of how it was made, written from recorded artefacts only.
+
+Sarah, 2 Oct 2026: "an automatically generated human readable note in the round that explains
+how the map was created - direct from chain, column bases, additional modifications". Every
+statement is read from something a step recorded, never recomputed or inferred:
+
+- the map figure's I7: ``provenance.inputs`` (the chain version, the colour source),
+  ``provenance.decisions`` (moves, blocks, hides, map-stage column bases, sera, chain_until,
+  vaccine rules), ``provenance.stand_in``, ``map.orientation`` and ``map.flags``;
+- the chain version in the store (opened through its manifest hash): ``chain.json`` (mode,
+  tables, column-basis adjustments, selection, non-ferret sera, reference checks),
+  ``PROVENANCE.json`` (seed, optimiser, options) and the last step's ``step.json`` (release,
+  stress, diagnostics), and the dataset's ``CURRENT``;
+- the round's map config, only to catch a configured change that left no record;
+- the report comparison's rows for the map.
+
+A fact no artefact records is printed as **MISSING**, with the artefact that should carry it,
+and counted (design rule 1): never skipped, never filled in by hand. Configured reasons are
+quoted as written.
+
+Run: ``python -m af.report.howmade BUILD_RECORD --store S --maps-config config/maps.toml
+--comparison report/comparison/COMPARISON.json --out report/how-made``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from af.store import Store, StoreError, StoreRef
+
+MAP_PREFIX = "map/"
+
+
+@dataclass
+class Note:
+    folder: str
+    source: str = ""
+    mode: str = ""
+    lines: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    undated: dict[str, int] = field(default_factory=dict)  # kind of entry -> how many undated
+
+    def gap(self, what: str, where: str) -> str:
+        """A fact no artefact records: counted, and said in place."""
+        self.missing.append(what)
+        return f"**MISSING**: {what} (would come from {where})"
+
+    def section(self, title: str) -> None:
+        self.lines += ["", f"## {title}", ""]
+
+    def item(self, text: str) -> None:
+        self.lines.append(f"- {text}")
+
+
+def _num(value: Any, places: int = 3) -> str:
+    if isinstance(value, float):
+        return "nan" if math.isnan(value) else f"{value:.{places}f}"
+    return str(value)
+
+
+def _count(value: Any) -> Any:
+    return len(value) if isinstance(value, (list, dict)) else value
+
+
+def _when(note: Note, item: dict[str, Any], category: str) -> str:
+    """An entry's decision date; an undated one is counted, and said once per kind of entry."""
+    if item.get("decided"):
+        return str(item["decided"])
+    note.undated[category] = note.undated.get(category, 0) + 1
+    return "decision date not recorded"
+
+
+# ---------------------------------------------------------------- the chain version
+
+
+@dataclass
+class ChainFiles:
+    ref: StoreRef
+    chain: dict[str, Any]
+    provenance: dict[str, Any]
+    last_step: dict[str, Any]
+    current: str | None
+
+
+def open_chain(store: Store, ref: StoreRef) -> ChainFiles:
+    """The chain version's records, through the store's manifest-hash check."""
+    directory = store.resolve(ref)
+    chain = json.loads((directory / "chain.json").read_text())
+    provenance = json.loads((directory / "PROVENANCE.json").read_text())
+    last = chain["steps"][-1]
+    step = json.loads((directory / last["directory"] / "step.json").read_text())
+    try:
+        current: str | None = store.current(ref.kind, ref.dataset).version
+    except StoreError:
+        current = None
+    return ChainFiles(ref, chain, provenance, step, current)
+
+
+def _source(note: Note, files: ChainFiles) -> None:
+    ch, params, step = files.chain, files.provenance.get("parameters", {}), files.last_step
+    ref = files.ref
+    where = "the CURRENT version" if files.current == ref.version else (
+        f"not CURRENT: CURRENT is {files.current}" if files.current else "no CURRENT")  # fmt: skip
+    note.item(f"Chain `{ref.dataset}` version `{ref.version}` ({where})")
+    note.mode = ch.get("mode", "")
+    note.item("Mode: " + (ch["mode"] if "mode" in ch else note.gap(
+        "chain or merge_all", "chain.json mode (written since chain-merge-all)")))  # fmt: skip
+    src = ch.get("config", {}).get("tables_source")
+    note.item("Tables: " + (f"`{src.get('kind')}/{src.get('dataset')}` version "
+                            f"`{src.get('version')}`" if src else note.gap(
+        "tables version", "chain.json config.tables_source")))  # fmt: skip
+    if ch.get("mode") == "merge_all" and "merge_all" in step:
+        tables = [t["table_id"] for t in step["merge_all"]]
+        note.item(f"{len(tables)} tables merged in one step and optimised from scratch: "
+                  f"{tables[0]} to {tables[-1]}" if tables else "no tables merged")  # fmt: skip
+    else:
+        ids = [s.get("table_id", "?") for s in ch.get("steps", [])]
+        note.item(f"{len(ids)} steps, {ids[0]} to {ids[-1]}" if ids else note.gap(
+            "chain steps", "chain.json steps"))  # fmt: skip
+    release = step.get("platform", {}).get("release")
+    opts = params.get("options", {})
+    starts = ", ".join(f"{k.split('_')[0]} {opts[k]}" for k in
+                       ("scratch_starts", "incremental_starts") if k in opts)  # fmt: skip
+    note.item(
+        (
+            "af release `" + release[:12] + "`"
+            if release
+            else note.gap("af release", "last step.json platform.release")
+        )  # fmt: skip
+        + f"; seed {params.get('seed', '?')}; {params.get('optimiser', '?')}; "
+        f"{opts.get('dimensions', '?')} dimensions; starts: {starts or '?'}"
+    )
+    stress, chosen = step.get("stress", {}), step.get("chosen")
+    diag = step.get("diagnostics", {})
+    if chosen in stress:
+        others = ", ".join(f"{k} {_num(v)}" for k, v in stress.items() if k != chosen)
+        note.item(
+            f"Final map: stress {_num(stress[chosen])} ({chosen} chosen"
+            + (f"; {others}" if others else "") + f"); {diag.get('antigens', '?')} antigens, "
+            f"{diag.get('sera', '?')} sera; disconnected {_count(diag.get('disconnected', '?'))}, "
+            f"trapped {_count(diag.get('trapped', '?'))}, cells dropped by the SD limit "
+            f"{_count(diag.get('dropped_cells', '?'))} (listed in step.json)"
+        )  # fmt: skip
+    else:
+        note.item(note.gap("final stress", "last step.json stress / chosen"))
+
+
+def _column_bases(note: Note, files: ChainFiles) -> None:
+    opts = files.provenance.get("parameters", {}).get("options", {})
+    mcb = opts.get("minimum_column_basis")
+    if mcb is None:
+        mcb = note.gap(
+            "minimum column basis", "PROVENANCE.json parameters.options.minimum_column_basis"
+        )
+    mode = f"; column bases: {opts['column_bases']}" if "column_bases" in opts else ""
+    note.item(f"Minimum column basis: {mcb}{mode}")
+    config = files.chain.get("config", {})
+    if "column_basis_adjustments" not in config:
+        where = "chain.json config.column_basis_adjustments"
+        note.item("Named adjustments: " + note.gap("named column-basis adjustments", where))
+        return
+    measured = {m.get("rule"): m for m in files.last_step.get("column_basis_adjustments", [])}
+    rows = config["column_basis_adjustments"]
+    if not rows:
+        note.item("Named adjustments: none")
+    for row in rows:
+        rule = row.get("rule")
+        m = measured.get(rule)
+        if m:
+            effect = f"{m.get('sera_changed')} sera changed, largest {_num(m.get('max_change'))}"
+        else:
+            effect = note.gap(f"what adjustment {rule} changed", "step.json")
+        value = f" {row['value']}" if "value" in row else ""
+        when = _when(note, row, "column-basis adjustment(s)")
+        note.item(f"Adjustment {rule}{value}: {effect} ({row.get('reason', '')}; {when})")
+
+
+def _selection(note: Note, files: ChainFiles) -> None:
+    config = files.chain.get("config", {})
+    if "select_remove" not in config:
+        where = "chain.json config.select_remove"
+        note.item("Named removals: " + note.gap("named removals", where))
+    else:
+        removed = files.last_step.get("removed", {})
+        rules = config["select_remove"] or []
+        if not rules:
+            note.item("Named removals: none")
+        for rule in rules:
+            what = rule.get("what", "?")
+            name = rule.get("name") or rule.get("designation") or rule.get("passage") or ""
+            count = removed.get(what) if isinstance(removed, dict) else None
+            n = f"{_count(count)} point(s)" if count is not None else "count not in step.json"
+            note.item(f"Removed by rule {what} {name}: {n} ({rule.get('reason', '')})")
+    nf = files.chain.get("non_ferret_sera")
+    if nf:
+        note.item(f"Ferret-only sera: {nf.get('verification')}")
+    else:
+        where = "chain.json non_ferret_sera"
+        note.item("Ferret-only sera: " + note.gap("non-ferret sera removed", where))
+
+
+# ---------------------------------------------------------------- the map stage
+
+
+def _refused(entry: dict[str, Any]) -> str:
+    """A refused move or block in the guard's own numbers when recorded, else its sentence."""
+    if "guard" in entry:
+        limit = f"a {entry.get('bound', '?')} limit of {_num(entry.get('limit'))}"
+        numbers = f"{_num(entry.get('measured'))} against {limit}"
+        return f"REFUSED by the {entry['guard']} guard: {numbers}. {entry.get('why', '')}".strip()
+    return f"REFUSED: {entry.get('why', '')}"
+
+
+def _moves(note: Note, dec: dict[str, Any], cfg: dict[str, Any] | None) -> None:
+    recorded = set()
+    for mv in dec.get("moves", []):
+        recorded.add(mv.get("override"))
+        name = mv.get("override")
+        if not mv.get("applied"):
+            note.item(f"Move {name}: {_refused(mv)}")
+            continue
+        if mv.get("no_op"):
+            effect = "changed nothing"
+        else:
+            effect = f"worst mover {_num(mv.get('worst_from_target'))} u from target"
+        stress = f"stress {_num(mv.get('stress_before'))} -> {_num(mv.get('stress_after'))}"
+        when = _when(note, mv, "move(s)")
+        note.item(
+            f"Move {name}: applied, {mv.get('movers')} movers, {effect}; {stress} "
+            f"({mv.get('reason', '')}; {when})"
+        )
+    for block in dec.get("blocks", []):
+        name = block.get("override", "")
+        if block.get("applied") is False:
+            note.item(f"Block {name}: {_refused(block)}")
+        else:
+            shift = block.get("shift")
+            where = f"({_num(shift[0], 2)}, {_num(shift[1], 2)})" if shift else "?"
+            stress = (
+                f"stress {_num(block.get('stress_before'))} -> {_num(block.get('stress_after'))}"
+            )
+            when = _when(note, block, "block(s)")
+            note.item(
+                f"Block {name}: {block.get('movers', '?')} movers shifted by {where}, "
+                f"{block.get('settled', '?')} settled; {stress} ({block.get('reason', '')}; {when})"
+            )
+    for configured in [m.get("name") for m in (cfg or {}).get("moves", [])]:
+        if configured not in recorded:
+            what = f"what configured move {configured} did"
+            note.item(f"Move {configured}: " + note.gap(what, "figure provenance.decisions.moves"))
+
+
+def _vaccines(note: Note, dec: dict[str, Any], cfg: dict[str, Any] | None) -> None:
+    rules = dec.get("vaccines")
+    if rules is None:
+        if (cfg or {}).get("vaccine_choose") or (cfg or {}).get("vaccine_disable"):
+            what, where = "the configured vaccine rules as applied", "provenance.decisions.vaccines"
+            note.item("Vaccine rules: " + note.gap(what, where))
+        return
+    for v in rules:
+        used = "used" if v.get("used") else "matched nothing"
+        when = _when(note, v, "vaccine rule(s)")
+        note.item(
+            f"Vaccine rule ({v.get('scope', '')}) {v.get('rule', '')} {v.get('name', '')} "
+            f"{v.get('passage', '')}: {used} ({v.get('reason', '')}; {when})"
+        )
+
+
+def _orientation(note: Note, ori: dict[str, Any] | None) -> None:
+    if not ori:
+        return
+    for o in ori.get("overrides", []):
+        turn = f"{o.get('degrees')} deg" + (", reflected" if o.get("reflect") else "")
+        when = _when(note, o, "rotation(s)")
+        note.item(f"Rotation {o.get('name')}: {turn} ({o.get('reason', '')}; {when})")
+    fit = f"{_num(ori.get('fit_degrees'), 1)} deg, RMSD {_num(ori.get('rmsd'))}"
+    note.item(f"Orientation fitted to {ori.get('reference')} over {ori.get('common_points')} "
+              f"points: {fit}")  # fmt: skip
+
+
+def _map_stage(note: Note, fig: dict[str, Any], cfg: dict[str, Any] | None) -> None:
+    prov = fig.get("provenance", {})
+    dec = prov.get("decisions", {})
+    _moves(note, dec, cfg)
+    for hide in dec.get("hides", []):
+        when = _when(note, hide, "hide(s)")
+        reason = hide.get("reason", "")
+        note.item(f"Hide {hide.get('name')}: {hide.get('count')} point(s) ({reason}; {when})")
+    column_bases = dec.get("column_bases", [])
+    for cb in [column_bases] if isinstance(column_bases, dict) else column_bases:
+        when = _when(note, cb, "map-stage column-basis change(s)")
+        note.item(
+            f"Column bases at the map stage, {cb.get('override')}: {cb.get('changed')} of "
+            f"{cb.get('sera')} sera changed ({cb.get('reason', '')}; {when})"
+        )
+    if "chain_until" in dec:
+        cu = dec["chain_until"]
+        when = _when(note, cu, "chain cut(s)")
+        note.item(f"Chain used up to table {cu.get('table')} ({cu.get('reason', '')}; {when})")
+    if "sera" in dec:
+        note.item(f"Sera check: {dec['sera'].get('verification', '')}")
+    else:
+        what, where = "the map stage's non-ferret sera check", "figure provenance.decisions.sera"
+        note.item("Sera check: " + note.gap(what, where))
+    _orientation(note, fig.get("map", {}).get("orientation"))
+    _vaccines(note, dec, cfg)
+    for key in ("vaccine_defaults", "vaccine_rules_unused_optional"):
+        if key in dec:
+            note.item(f"{key.replace('_', ' ').capitalize()}: {dec[key]}")
+    for name, item in (prov.get("stand_in") or {}).items():
+        note.item(f"Stand-in {name}: {item}")
+    scheme = prov.get("inputs", {}).get("colour_scheme", {})
+    note.item(f"Colours: {scheme.get('name', '?')} (source: {scheme.get('source', '?')})")
+    flags = fig.get("map", {}).get("flags") or []
+    note.item("Flags: " + ("; ".join(flags) if flags else "none"))
+    for category, n in note.undated.items():
+        note.item(note.gap(f"decision dates of {n} {category}", "the config entries' `decided`"))
+    note.undated.clear()
+
+
+# ---------------------------------------------------------------- against the reference
+
+
+def _references(note: Note, files: ChainFiles | None) -> None:
+    from af.chain.reference import sentences
+
+    if files is None:
+        return
+    refs = files.chain.get("references")
+    if refs is None and "reference" in files.chain:  # the single-reference form of 1 Oct
+        refs = [{"label": files.chain["reference"].get("chart", "reference"),
+                 **files.chain["reference"]}]  # fmt: skip
+    if refs is None:
+        note.item(
+            "Chain reference checks: "
+            + note.gap("the chain's checks against the ae round's maps", "chain.json references")
+        )
+        return
+    for entry in refs:
+        for sentence in sentences(entry, entry.get("label", "reference")):
+            note.item(sentence)
+
+
+def _comparison(note: Note, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        where = "report/comparison/COMPARISON.json"
+        note.item("Report comparison: " + note.gap("the report's comparison of this map", where))
+        return
+    approvals: dict[tuple[str, str], list[str]] = {}
+    for row in rows:
+        window = row["slot"].rsplit("/", 1)[-1]
+        if "checks" not in row:
+            note.item(f"Report comparison, {window}: {row['status']}")
+            continue
+        a, s = row["detail"]["antigens"], row["detail"]["sera"]
+        p = row["detail"].get("procrustes", {})
+        failing = [c["check"] for c in row["checks"] if c["ok"] is False]
+        approved = [c for c in row["checks"] if c["ok"] == "expected"]
+        p95 = f"{_num(p['p95'])} u" if "p95" in p else "n/a"
+        note.item(
+            f"Report comparison, {window}: {row['status']}; antigens Jaccard {_num(a['jaccard'])}, "
+            f"sera {_num(s['jaccard'])}; p95 displacement {p95}"
+            + (f"; FAILING: {', '.join(failing)}" if failing else "")
+            + (f"; approved: {', '.join(c['check'] for c in approved)}" if approved else "")
+        )
+        for c in approved:
+            text = str(c.get("expected", "")).removeprefix("expected difference: ")
+            approvals.setdefault((c["check"], text.split("; found ")[0]), []).append(window)
+    for (check, why), windows in approvals.items():
+        note.item(f"Approved difference, {check} ({', '.join(windows)}): {why}")
+
+
+# ---------------------------------------------------------------- one map, all maps
+
+
+def map_note(
+    folder: str, figures: list[dict[str, Any]], store: Store | None,
+    cfg: dict[str, Any] | None, rows: list[dict[str, Any]],
+) -> Note:  # fmt: skip
+    """The note for one map: ``figures`` are its window figures' I7 documents."""
+    note = Note(folder)
+    note.lines += [
+        f"# {folder}: how this map was made",
+        "",
+        "_Written from recorded artefacts; **MISSING** marks a fact no artefact records. "
+        '"The ae round" is the round as shipped, the reference._',
+    ]
+    if not figures:
+        note.section("Source")
+        note.item(note.gap("the map's figures", "the build record's map slots"))
+        return note
+    chains = {json.dumps(f.get("provenance", {}).get("inputs", {}).get("chain"), sort_keys=True)
+              for f in figures}  # fmt: skip
+    fig = figures[0]
+    chain_input = fig.get("provenance", {}).get("inputs", {}).get("chain")
+    files: ChainFiles | None = None
+    note.section("Source")
+    if len(chains) > 1:
+        note.item("The windows of this map were drawn from different sources; this note reads "
+                  "the first window's")  # fmt: skip
+    if chain_input:
+        note.source = f"{chain_input.get('dataset')}@{chain_input.get('version')}"
+        if store is None:
+            note.item(note.gap("the chain's records", "the store (no --store given)"))
+        else:
+            try:
+                ref = StoreRef(chain_input["kind"], chain_input["dataset"],
+                               chain_input["version"], chain_input["manifest_sha256"])  # fmt: skip
+                files = open_chain(store, ref)
+            except (StoreError, OSError, KeyError, ValueError) as error:
+                note.item(note.gap("the chain's records", f"the store ({error})"))
+        if files:
+            _source(note, files)
+    else:
+        layout = (fig.get("provenance", {}).get("stand_in") or {}).get("layout")
+        note.source = "stand-in layout" if layout else "unknown"
+        if layout:
+            note.mode = "stand-in"
+            note.item(f"Not drawn from an af chain: the layout is a stand-in, {layout}")
+        else:
+            where = "figure provenance.inputs.chain or stand_in"
+            note.item(note.gap("the map's source", where))
+    note.section("Column bases")
+    if files:
+        _column_bases(note, files)
+    else:
+        note.item(note.gap("the column bases", "a chain version (this map has none)"))
+    note.section("Selection")
+    if files:
+        _selection(note, files)
+    else:
+        note.item(note.gap("which points were removed", "a chain version (this map has none)"))
+    note.section("Changes at the map stage (af.map.build)")
+    _map_stage(note, fig, cfg)
+    note.section("Against the ae round")
+    _references(note, files)
+    _comparison(note, rows)
+    note.lines += ["", f"_{len(note.missing)} fact(s) MISSING"
+                   + (f": {'; '.join(note.missing)}._" if note.missing else "._")]  # fmt: skip
+    return note
+
+
+def write_notes(
+    record: dict[str, Any], store: Store | None, maps_config: dict[str, Any] | None,
+    comparison: list[dict[str, Any]], out: Path,
+) -> list[Note]:  # fmt: skip
+    """One note per map folder in the build record, and an index; returns the notes."""
+    by_folder: dict[str, list[dict[str, Any]]] = {}
+    for fig in record["figures"]:
+        if fig["slot"].startswith(MAP_PREFIX):
+            folder = fig["slot"][len(MAP_PREFIX) :].split("/")[0]
+            by_folder.setdefault(folder, []).append(json.loads(Path(fig["i7"]).read_text()))
+    configs = {m["folder"]: m for m in (maps_config or {}).get("maps", [])}
+    rows: dict[str, list[dict[str, Any]]] = {}
+    for row in comparison:
+        if row["slot"].startswith(MAP_PREFIX):
+            rows.setdefault(row["slot"][len(MAP_PREFIX) :].split("/")[0], []).append(row)
+    out.mkdir(parents=True, exist_ok=True)
+    notes = []
+    for folder in sorted(by_folder):
+        note = map_note(folder, by_folder[folder], store, configs.get(folder), rows.get(folder, []))
+        (out / f"{folder}.md").write_text("\n".join(note.lines) + "\n")
+        notes.append(note)
+    index = [f"# How each map was made: {record.get('report', '')}", "",
+             f"{len(notes)} maps; {sum(len(n.missing) for n in notes)} fact(s) MISSING in all. "
+             "Each note says which artefact a MISSING fact would come from.", "",
+             "| Map | Source | Mode | MISSING |", "|---|---|---|---|"]  # fmt: skip
+    index += [f"| [{n.folder}]({n.folder}.md) | {n.source} | {n.mode or '?'} | {len(n.missing)} |"
+              for n in notes]  # fmt: skip
+    (out / "README.md").write_text("\n".join(index) + "\n")
+    return notes
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Write a how-this-map-was-made note per map.")
+    parser.add_argument("record", type=Path, help="the report's build record (<id>.build.json)")
+    parser.add_argument("--store", type=Path, help="the af store the maps' chains are in")
+    parser.add_argument("--maps-config", type=Path, help="the round's map config (maps.toml)")
+    parser.add_argument("--comparison", type=Path, help="the report comparison's COMPARISON.json")
+    parser.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args(argv)
+    record = json.loads(args.record.read_text())
+    store = Store.open(args.store) if args.store else None
+    maps_config = tomllib.loads(args.maps_config.read_text()) if args.maps_config else None
+    comparison = json.loads(args.comparison.read_text()) if args.comparison else []
+    notes = write_notes(record, store, maps_config, comparison, args.out)
+    print(f"{len(notes)} notes, {sum(len(n.missing) for n in notes)} fact(s) MISSING -> "
+          f"{args.out}", file=sys.stderr)  # fmt: skip
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
