@@ -351,6 +351,13 @@ def clade_centroids(pairs: list[tuple[str, Point, Point]], min_points: int = 10)
 def compare(ref: dict[str, Any], new: dict[str, Any], how: str = "name") -> dict[str, Any]:
     """Compare two map I7 documents; see the module docstring for what each number means."""
     rm, nm = ref["map"], new["map"]
+    if rm.get("y_axis") != nm.get("y_axis"):
+        # A y-down map against a y-up one would fit through the mirror and report every map as
+        # reflected and its rotation mirrored: refuse, so the reference is re-extracted instead.
+        raise ValueError(
+            f"{ref.get('title')!r} vs {new.get('title')!r}: y axes differ "
+            f"(reference {rm.get('y_axis') or 'unstated'}, new {nm.get('y_axis') or 'unstated'})"
+        )
     antigens = _group(rm["antigens"], nm["antigens"], how, clades=True)
     sera = _group(rm["sera"], nm["sera"], how, clades=False)
     ag_pairs, sr_pairs = antigens.pop("_pairs"), sera.pop("_pairs")
