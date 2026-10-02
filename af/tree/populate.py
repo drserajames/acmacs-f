@@ -241,8 +241,9 @@ def populate(
     def sequence_of(node: Node) -> str | None:
         if node.is_leaf:
             return leaves[node.name or ""].nucleotides
-        assert states is not None
-        return states.nucleotides.get(node.node_id)
+        # Without an ASR an internal node has no sequence. Every caller below either skips a None
+        # (the translation) or runs only when there are states (the branch changes).
+        return None if states is None else states.nucleotides.get(node.node_id)
 
     if states is not None:
         absent = [node.id_hex for node in tree.internal() if node.node_id not in states.nucleotides]
