@@ -21,7 +21,8 @@ types those calls take, re-exported here so a caller pins to this module alone: 
 map's legend rows), ``ChartColours`` (what ``StoreColours.for_chart`` returns; imported only
 when asked for, so drawing with your own colours does not load the stores), ``Scene``, ``Window``
 and ``Frame``; and, for a legend drawn like the report's, the marker paths ``egg_path`` and
-``ugly_egg_path`` and the colours ``GREY`` (old antigens) and ``SERUM_OUTLINE``.
+``ugly_egg_path`` and the colours ``GREY`` (old antigens) and ``SERUM_OUTLINE``; and
+``PointStyle``, one point's fill, outline and opacity for :func:`draw_axes`.
 
 Displayed coordinates grow upwards, as in R (Q105): pass a chart's layout as stored, and the map
 looks as R draws it.
@@ -39,7 +40,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 from af.chart.model import Chart
-from af.map.render import DEFAULT_LOOK, GREY, SERUM_OUTLINE, Look, egg_path, ugly_egg_path
+from af.map.render import (
+    DEFAULT_LOOK,
+    GREY,
+    SERUM_OUTLINE,
+    Look,
+    PointStyle,
+    egg_path,
+    ugly_egg_path,
+)
 from af.map.style import ColourRow, ColourScheme, Marker, PointIn, Scene, Window, style_points
 from af.map.vaccines import marker_for, passage_class
 from af.map.viewport import Frame
@@ -59,6 +68,7 @@ __all__ = [
     "FigureError",
     "Frame",
     "Look",
+    "PointStyle",
     "Scene",
     "Window",
     "chart_points",
@@ -205,7 +215,8 @@ def draw_axes(
     look: Look | None = None,
     legend: bool = True,
     title: bool = True,
-) -> None:
+    styles: Mapping[str, PointStyle] | None = None,
+) -> tuple[str, ...]:
     """Draw ``scene`` inside ``frame`` on a matplotlib Axes, exactly as the report PDF draws it.
 
     The Axes must be square on the figure: the map frame is square, and a stretched panel would
@@ -213,6 +224,13 @@ def draw_axes(
     sizes and line widths are the report page's, scaled by the Axes' side over the page's
     (``look.page_points``), so a panel is the report page shrunk. ``legend`` and ``title`` can be
     left off for small panels; nothing else differs from the PDF.
+
+    Opt-in, for figures in another style: ``look`` (:class:`Look`) sets every point's opacity and
+    the grid colour; ``styles`` overrides single points by id (:class:`PointStyle`: fill, outline
+    colour and width, opacity). Without them the drawing is the report's.
+
+    Returns the ids of shown points outside the frame, which the Axes clips, so a caller can
+    mark where they went (an arrowhead at the edge, say).
     """
     from af.map.render import draw_scene
 
@@ -225,4 +243,6 @@ def draw_axes(
             f"the Axes is {w_in:.3f} x {h_in:.3f} in: a map panel must be square, as the frame is"
         )
     scale = w_in * 72.0 / look.page_points
-    draw_scene(ax, scene, frame, labels or {}, look, scale=scale, legend=legend, title=title)
+    return draw_scene(
+        ax, scene, frame, labels or {}, look, scale=scale, legend=legend, title=title, styles=styles
+    )

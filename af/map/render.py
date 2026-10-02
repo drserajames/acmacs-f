@@ -17,7 +17,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from af.map.labels import Placed
+from af.map.orient import rows_with_coordinates
 from af.map.style import MARKERS, Scene, ScenePoint
 from af.map.viewport import Box, Frame
 
@@ -38,9 +41,41 @@ class Look:
     legend_row_height: float = 0.0275
     legend_char_width: float = 0.0105
     legend_pad: float = 0.0125
+    # Opt-in, for other figures than the report (pyacmapcheck draws in R's style); the defaults
+    # are the report's look.
+    alpha: float | None = None  # every point's fill and outline opacity; None: opaque
+    grid_colour: str = "#dddddd"
 
 
 DEFAULT_LOOK = Look()
+#: The Look fields a caller sets for another figure style; the I7 records those not at default.
+LOOK_OPT_INS = ("alpha", "grid_colour")
+
+
+def look_opt_ins(look: Look) -> dict[str, Any]:
+    """The opt-in Look settings that differ from the report's, for the figure's I7."""
+    return {
+        f: getattr(look, f) for f in LOOK_OPT_INS if getattr(look, f) != getattr(DEFAULT_LOOK, f)
+    }
+
+
+@dataclass(frozen=True)
+class PointStyle:
+    """One point's drawing, overriding the scene's (opt-in; None keeps the scene's own).
+
+    ``outline_width`` is in points on the report page, scaled like every other line width
+    (the defaults are 0.8 for a point and 1.0 for a box). ``alpha`` is the opacity of the
+    point's fill and outline, over :attr:`Look.alpha`.
+    """
+
+    fill: str | None = None
+    outline: str | None = None
+    outline_width: float | None = None
+    alpha: float | None = None
+
+    def recorded(self) -> dict[str, Any]:
+        """The fields set, for the figure's I7 (an unset field is the scene's own drawing)."""
+        return {k: v for k, v in vars(self).items() if v is not None}
 
 
 def ugly_egg_path(x: float, y: float, r: float) -> Any:
@@ -103,6 +138,7 @@ def draw_pdf(
     labels: Mapping[str, Placed],
     out_pdf: Path,
     look: Look = DEFAULT_LOOK,
+    styles: Mapping[str, PointStyle] | None = None,
 ) -> None:
     """Draw ``scene`` inside ``frame`` to ``out_pdf`` (one page). The drawing itself is
     :func:`draw_scene`, shared with :func:`af.map.figure.draw_axes`."""
@@ -114,7 +150,7 @@ def draw_pdf(
     side = look.page_points / 72.0
     fig = plt.figure(figsize=(side, side), dpi=72)
     ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
-    draw_scene(ax, scene, frame, labels, look)
+    draw_scene(ax, scene, frame, labels, look, styles=styles)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_pdf)
     plt.close(fig)
@@ -132,8 +168,12 @@ def draw_scene(
     scale: float = 1.0,
     legend: bool = True,
     title: bool = True,
-) -> None:
+    styles: Mapping[str, PointStyle] | None = None,
+) -> tuple[str, ...]:
     """Draw a scene on an Axes whose data limits become the page (0..1, y down).
+
+    ``styles`` override single points' drawing, by point id. Returns the ids of shown points
+    that lie outside the frame, which the Axes clips: a caller can mark where they went.
 
     ``scale`` multiplies every text size and line width: 1.0 on the report page; the Axes'
     side over ``look.page_points`` for a panel (:func:`af.map.figure.draw_axes`), so a panel is
@@ -144,9 +184,10 @@ def draw_scene(
     ax.axis("off")
     for k in range(int(frame.size) + 1):
         g = k / frame.size
-        ax.plot([g, g], [0, 1], color="#dddddd", lw=0.8 * scale, zorder=0)
-        ax.plot([0, 1], [g, g], color="#dddddd", lw=0.8 * scale, zorder=0)
+        ax.plot([g, g], [0, 1], color=look.grid_colour, lw=0.8 * scale, zorder=0)
+        ax.plot([0, 1], [g, g], color=look.grid_colour, lw=0.8 * scale, zorder=0)
     page = frame.page(scene.xy())
+    styles = styles or {}
 
     def order(p: ScenePoint) -> int:
         if p.kind == "serum":
@@ -161,14 +202,28 @@ def draw_scene(
             continue
         x, y = page[i]
         z = order(p) + 1
+        own = styles.get(p.id, PointStyle())
         if p.kind == "serum":
             s = look.serum_half_side
-            style: dict[str, Any] = {"fc": "none", "ec": SERUM_OUTLINE, "lw": scale, "zorder": z}
+            style: dict[str, Any] = {
+                "fc": own.fill or "none",
+                "ec": own.outline or SERUM_OUTLINE,
+                "lw": (own.outline_width if own.outline_width is not None else 1.0) * scale,
+                "zorder": z,
+            }
         else:
             grey = p.greyed or p.colour is None
             edge = "black" if p.vaccine else (GREY if grey else "black")
             s = look.antigen_radius * (look.vaccine_scale if p.vaccine else 1.0)
-            style = {"fc": GREY if grey else p.colour, "ec": edge, "lw": 0.8 * scale, "zorder": z}
+            style = {
+                "fc": own.fill or (GREY if grey else p.colour),
+                "ec": own.outline or edge,
+                "lw": (own.outline_width if own.outline_width is not None else 0.8) * scale,
+                "zorder": z,
+            }
+        alpha = own.alpha if own.alpha is not None else look.alpha
+        if alpha is not None:
+            style["alpha"] = alpha
         ax.add_patch(_marker_patch(p.marker, x, y, s, style))
     for lab in labels.values():
         ax.text(
@@ -192,6 +247,14 @@ def draw_scene(
         )
     if legend:
         _draw_legend(ax, scene, look, scale)
+    # Spelled out with np.asarray (as rows_with_coordinates is): older numpy stubs type a reduced
+    # comparison as possibly a scalar, which fails type checking on Python 3.11 (CI).
+    with np.errstate(invalid="ignore"):
+        inside = np.asarray(((page >= 0) & (page <= 1)).all(axis=1), dtype=np.bool_)
+    outside = rows_with_coordinates(page) & ~inside
+    return tuple(
+        p.id for p, out in zip(scene.points, outside.tolist(), strict=True) if p.shown and out
+    )
 
 
 def _marker_patch(marker: str, x: float, y: float, size: float, style: dict[str, Any]) -> Any:
