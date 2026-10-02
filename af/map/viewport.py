@@ -9,6 +9,10 @@ The size is fixed per subtype/assay in config, so maps of one subtype share a sc
 2026). Only the position is chosen. Frames are stored in absolute displayed coordinates, never
 relative to the layout's hull (ae's convention, under which one new far-away antigen moves every
 frame).
+
+Displayed map coordinates have y increasing UPWARDS, as R/Racmacs draws maps (Sarah, Q105, 2 Oct
+2026: "y-up everywhere"). The page has y increasing downwards, as pages do. :meth:`Frame.page` is
+the one place one becomes the other; nothing else flips.
 """
 
 from __future__ import annotations
@@ -24,21 +28,35 @@ Array = NDArray[np.float64]
 Mask = NDArray[np.bool_]
 
 
+def from_y_down(xy: Array) -> Array:
+    """Coordinates of a picture drawn with y DOWN (ae and kateri draw ``.ace`` maps that way) as
+    af's displayed coordinates (y up), so the picture looks the same: ``(x, y) -> (x, -y)``.
+
+    For a reference that is a drawing, such as the previous round's map as it was shipped. An
+    ``.ace`` layout itself is never flipped: af draws it y up, as R does.
+    """
+    return np.asarray(xy, dtype=float) * [1.0, -1.0]
+
+
 class FrameError(ValueError):
     """The points that must be shown cannot all be shown in a frame of the configured size."""
 
 
 @dataclass(frozen=True)
 class Frame:
-    """Square frame in displayed map coordinates (y grows downward): top-left corner and side."""
+    """Square frame in displayed map coordinates (y up): its top-left corner as drawn, which is
+    (smallest x, LARGEST y), and its side."""
 
     x: float
     y: float
     size: float
 
     def page(self, xy: Array) -> Array:
-        """Positions as fractions of the page, (0, 0) top-left, (1, 1) bottom-right."""
-        return (xy - [self.x, self.y]) / self.size
+        """Positions as fractions of the page, (0, 0) top-left, (1, 1) bottom-right.
+
+        The one conversion from displayed map coordinates (y up) to the page (y down).
+        """
+        return np.column_stack([xy[:, 0] - self.x, self.y - xy[:, 1]]) / self.size
 
 
 @dataclass(frozen=True)
@@ -102,14 +120,17 @@ def choose_frame(
         raise FrameError("no drawn point has coordinates")
     pts = xy[ok]
     masks = [p.mask[ok] for p in priorities]
-    focus = pts[masks[0]] if masks[0].any() else pts
+    # Candidates are searched in page orientation (x right, y DOWN, so ``-y``), stepping the
+    # frame's top-left corner as drawn, so the search does not depend on which way map y grows.
+    down = pts * [1.0, -1.0]
+    focus = down[masks[0]] if masks[0].any() else down
     centre = (focus.min(axis=0) + focus.max(axis=0)) / 2
-    lo = np.minimum(pts.min(axis=0), pts.max(axis=0) - size) - 1.0
-    hi = np.maximum(pts.min(axis=0), pts.max(axis=0) - size) + 1.0
+    lo = np.minimum(down.min(axis=0), down.max(axis=0) - size) - 1.0
+    hi = np.maximum(down.min(axis=0), down.max(axis=0) - size) + 1.0
     best: tuple[tuple[float, ...], Frame] | None = None
     for x in np.arange(lo[0], hi[0] + step / 2, step):
         for y in np.arange(lo[1], hi[1] + step / 2, step):
-            frame = Frame(round(float(x), 6), round(float(y), 6), size)
+            frame = Frame(round(float(x), 6), -round(float(y), 6), size)
             hidden = hidden_mask(frame.page(pts), furniture)
             offset = float(np.hypot(*(centre - [x + size / 2, y + size / 2])))
             cost = (*(float((hidden & m).sum()) for m in masks), offset)

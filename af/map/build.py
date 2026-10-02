@@ -59,6 +59,7 @@ from af.map.vaccines import (
     VaccineDisable,
     select_vaccines,
 )
+from af.map.viewport import from_y_down
 from af.store.ref import StoreRef
 from af.store.store import Store
 from af.util.subtypes import Subtype
@@ -310,9 +311,11 @@ def orientation_for(
         RotationOverride(r.name, r.degrees, r.reason, r.decided.isoformat(), r.reflect)
         for r in cfg.rotations
     )
+    # The previous round's map is an ae round's styled.ace, which kateri drew with y DOWN. Fit to
+    # it as it was DRAWN, so this round's map looks like last round's rather than mirrored (Q105).
     return orient(
         layout,
-        prev.projections[0].transformed_layout(),
+        from_y_down(prev.projections[0].transformed_layout()),
         drawn_pairs(pairs, prev_drawn),
         reference=f"{cfg.folder} previous round ({previous.parent.parent.name})",
         min_common=config.defaults.min_common_points,

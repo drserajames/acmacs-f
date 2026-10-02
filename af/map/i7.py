@@ -89,6 +89,9 @@ def i7_document(
             "name": scene.window.name,
             "since": scene.window.since.isoformat() if scene.window.since else None,
         },
+        # Displayed coordinates grow upwards (Q105); the viewport is [x, y, w, h] with (x, y) the
+        # frame's top-left corner as drawn, i.e. its largest y.
+        "y_axis": "up",
         "viewport": [frame.x, frame.y, frame.size, frame.size],
         "clade_scheme": scene.scheme,
         "legend": [{"clade": t, "count": n} for t, _, n in scene.legend],

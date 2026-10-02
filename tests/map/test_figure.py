@@ -47,6 +47,8 @@ def test_frame_covers_the_shown_points() -> None:
     f = frame_around(chart_scene(chart(), XY, COLOURS, title="T"), margin=1.0)
     assert f.size == pytest.approx(5.0)  # widest extent 3 + 2 * margin
     assert frame_around(chart_scene(chart(), XY, COLOURS, title="T"), size=10).size == 10
+    # Placed by its top-left corner as drawn, y up: the largest y, not the smallest (Q105).
+    assert (f.x, f.y) == pytest.approx((-1.5, 4.0))
 
 
 def test_draw_axes_refuses_a_stretched_panel() -> None:

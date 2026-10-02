@@ -136,7 +136,7 @@ def frame_around(scene: Scene, *, margin: float = 1.0, size: float | None = None
     lo, hi = xy.min(axis=0), xy.max(axis=0)
     side = float(size) if size is not None else float((hi - lo).max()) + 2 * margin
     centre = (lo + hi) / 2
-    return Frame(float(centre[0] - side / 2), float(centre[1] - side / 2), side)
+    return Frame(float(centre[0] - side / 2), float(centre[1] + side / 2), side)  # top-left
 
 
 def draw_axes(

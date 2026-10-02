@@ -3,7 +3,15 @@
 import numpy as np
 import pytest
 
-from af.map.viewport import Box, FrameError, Priority, choose_frame, hidden_mask
+from af.map.viewport import (
+    Box,
+    Frame,
+    FrameError,
+    Priority,
+    choose_frame,
+    from_y_down,
+    hidden_mask,
+)
 
 LEGEND = Box("legend", 0.0, 0.6, 0.3, 1.0)  # bottom-left, like today's report maps
 
@@ -53,3 +61,33 @@ def test_lower_priorities_only_break_ties() -> None:
 def test_mask_length_checked() -> None:
     with pytest.raises(ValueError, match="mask length"):
         choose_frame(np.zeros((3, 2)), (Priority("x", np.ones(2, bool)),), size=1.0, furniture=())
+
+
+# ---------------------------------------------------------------- y grows UP (Sarah, Q105)
+
+
+def test_map_y_grows_up_the_page() -> None:
+    """Displayed map coordinates are y-up, as in R; the page is y-down. A frame is placed by its
+    top-left corner as drawn, which has the LARGEST y."""
+    frame = Frame(0.0, 10.0, 10.0)
+    page = frame.page(np.array([[0.0, 10.0], [0.0, 0.0], [10.0, 5.0]]))
+    np.testing.assert_allclose(page, [[0.0, 0.0], [0.0, 1.0], [1.0, 0.5]])
+
+
+def test_a_chosen_frame_is_placed_by_its_top_left_corner() -> None:
+    xy = np.array([[0.0, 0.0], [4.0, 1.0], [2.0, 4.0]])
+    frame = choose_frame(xy, (Priority("all", np.ones(3, bool)),), size=6.0, furniture=()).frame
+    assert frame.y >= 4.0 and frame.y - frame.size <= 0.0  # top above the points, bottom below
+    page = frame.page(xy)
+    assert page[2, 1] < page[1, 1] < page[0, 1]  # higher y, higher on the page
+
+
+def test_a_y_down_drawing_keeps_its_picture() -> None:
+    """ae and kateri draw y DOWN. Read through from_y_down, the same picture comes out of af's
+    y-up frame: every point at the same place on the page."""
+    rng = np.random.default_rng(3)
+    drawn = rng.normal(size=(30, 2)) * 3.0  # as ae laid it out, y down the page
+    corner, size = drawn.min(axis=0) - 1.0, 12.0
+    on_ae_page = (drawn - corner) / size
+    ours = Frame(float(corner[0]), float(-corner[1]), size).page(from_y_down(drawn))
+    np.testing.assert_allclose(ours, on_ae_page)
