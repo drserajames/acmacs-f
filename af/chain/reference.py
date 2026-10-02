@@ -29,6 +29,10 @@ from af.chart.procrustes import procrustes
 
 LISTED = 50  # one-side points listed by name (all are counted)
 MOVERS = 20  # points listed by how far apart they sit in the two layouts
+GROUP_FROM = 1.0  # points further apart than this are grouped (map units)
+GROUP_LINK = 1.0  # two such points are linked when this close in the map AND displaced this alike
+GROUPS = 8  # groups described, largest first (all are counted)
+FAR = 5.0  # every point further apart than this is listed with its group
 LABS = r"^(NIID|VIDRL|CDC|CNIC|CRICK)\s+"  # af keeps the lab's serum-id prefix; others may not
 
 
@@ -165,12 +169,10 @@ def basin(
     fit = procrustes(np.asarray(proj.layout), np.asarray(best.layout))
     dist = np.nan_to_num(fit.distances)
     order = np.argsort(-dist)[:MOVERS]
-    names = [
-        chart.antigens[p].designation()
-        if p < chart.n_antigens
-        else "SR " + chart.sera[p - chart.n_antigens].designation()
-        for p in order
-    ]
+    names = _point_names(chart, [int(p) for p in order])
+    every = np.arange(chart.n_points)
+    layout = np.asarray(proj.layout)
+    grouped = moved_groups(chart, every, layout, fit.apply(np.asarray(best.layout)))
     seeded = float(best.stress)
     return {
         "starts": starts,
@@ -186,7 +188,108 @@ def basin(
         "movers": [
             {"point": n, "distance": float(dist[p])} for n, p in zip(names, order, strict=True)
         ],
+        "moved": grouped,
     }
+
+
+def _point_names(chart: Chart, points: Sequence[int]) -> list[str]:
+    return [
+        chart.antigens[p].designation()
+        if p < chart.n_antigens
+        else "SR " + chart.sera[p - chart.n_antigens].designation()
+        for p in points
+    ]
+
+
+def _year(chart: Chart, p: int) -> str:
+    """An antigen's year from its recorded date (not its name); sera and undated points: '?'."""
+    if p < chart.n_antigens:
+        date = chart.antigens[p].date
+        if len(date) >= 4 and date[:4].isdigit():
+            return date[:4]
+    return "?"
+
+
+def moved_groups(
+    chart: Chart, points: np.ndarray, layout: np.ndarray, fitted: np.ndarray
+) -> dict[str, Any]:
+    """Where two layouts of the same points differ, and whether the differences are GROUPS.
+
+    `points` are chart indices, `layout` this map's rows for them and `fitted` the other layout's,
+    already Procrustes-fitted onto it. Points further apart than GROUP_FROM are linked when they
+    are within GROUP_LINK of each other in this map AND moved alike (displacements within
+    GROUP_LINK); connected points form a group. A group's spread is the mean distance of its
+    members' displacements from the group's mean: small means a block carried elsewhere, large a
+    loose chain of neighbours.
+    """
+    ok = np.isfinite(layout).all(axis=1) & np.isfinite(fitted).all(axis=1)
+    dist = np.where(ok, np.linalg.norm(np.nan_to_num(layout - fitted), axis=1), 0.0)
+    disp = np.nan_to_num(layout - fitted)
+    far = np.nonzero(dist > GROUP_FROM)[0]
+    parent = list(range(len(far)))
+
+    def root(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    if len(far):
+        pos, dis = layout[far], disp[far]
+        for x in range(len(far)):
+            near = np.nonzero(
+                (np.linalg.norm(pos[x + 1 :] - pos[x], axis=1) <= GROUP_LINK)
+                & (np.linalg.norm(dis[x + 1 :] - dis[x], axis=1) <= GROUP_LINK)
+            )[0]
+            for y in near + x + 1:
+                parent[root(x)] = root(int(y))
+    members: dict[int, list[int]] = {}
+    for x in range(len(far)):
+        members.setdefault(root(x), []).append(int(far[x]))
+    ordered = sorted(members.values(), key=lambda g: (-len(g), g[0]))
+    group_of = {k: n for n, g in enumerate(ordered, start=1) for k in g}
+
+    def describe(n: int, g: list[int]) -> dict[str, Any]:
+        mean = disp[g].mean(axis=0)
+        years = Counter(_year(chart, int(points[k])) for k in g)
+        return {
+            "group": n,
+            "size": len(g),
+            "mean_shift": float(np.linalg.norm(mean)),
+            "spread": float(np.linalg.norm(disp[g] - mean, axis=1).mean()),
+            "years": dict(sorted(years.items())),
+            "points": _point_names(chart, [int(points[k]) for k in g]),
+        }
+
+    far_list = sorted((int(k) for k in far if dist[k] > FAR), key=lambda k: -dist[k])
+    return {
+        "compared": int(ok.sum()),
+        "apart_over_0_5": int((dist > 0.5).sum()),
+        "apart_over_1": int((dist > 1.0).sum()),
+        "apart_over_2": int((dist > 2.0).sum()),
+        "apart_over_5": int((dist > FAR).sum()),
+        "n_groups": len(ordered),
+        "group_sizes": [len(g) for g in ordered],
+        "groups": [describe(n, g) for n, g in enumerate(ordered[:GROUPS], start=1)],
+        "far": [
+            {"point": name, "distance": float(dist[k]), "group": group_of[k]}
+            for name, k in zip(
+                _point_names(chart, [int(points[k]) for k in far_list]), far_list, strict=True
+            )
+        ],
+    }
+
+
+def shipped(chart: Chart, ref: Chart, pairs: tuple[dict[int, int], dict[int, int]]) -> dict:
+    """This map against the reference's OWN layout, over the points that pair, no relaxation:
+    what a reader comparing the two maps sees."""
+    ag, sr = pairs
+    mine = [*ag, *(chart.n_antigens + i for i in sr)]
+    theirs = [*ag.values(), *(ref.n_antigens + j for j in sr.values())]
+    a = np.asarray(chart.best().layout)[mine]
+    b = np.asarray(ref.projections[0].layout)[theirs]
+    fit = procrustes(a, b)
+    return {"rmsd": float(fit.rmsd), **moved_groups(chart, np.asarray(mine), a, fit.apply(b))}
 
 
 def reference_check(
@@ -196,8 +299,22 @@ def reference_check(
     pairs = comp.pop("_pairs")
     return {
         "composition": comp,
+        "shipped": shipped(chart, ref, pairs),
         "basin": basin(chart, ref, pairs, starts=starts, seed=seed, threads=threads),
     }
+
+
+def _groups_sentence(m: dict[str, Any]) -> str:
+    if not m["n_groups"]:
+        return "no point is more than 1 apart."
+    head = "; ".join(
+        f"{g['size']} moved {g['mean_shift']:.2f} (spread {g['spread']:.2f})"
+        for g in m["groups"][:4]
+    )
+    return (
+        f"the {m['apart_over_1']} points more than 1 apart form {m['n_groups']} group(s), largest:"
+        f" {head}; {m['apart_over_5']} points are more than {FAR:g} apart."
+    )
 
 
 def sentences(check: dict[str, Any], label: str) -> list[str]:
@@ -211,6 +328,11 @@ def sentences(check: dict[str, Any], label: str) -> list[str]:
         f" {s['matched']} shared; Jaccard {c['jaccard']:.3f}. Jaccard says which points the maps"
         " share, not whether they sit alike."
     ]
+    if (sh := check.get("shipped")) is not None:
+        out.append(
+            f"As drawn: against {label}'s own layout ({sh['compared']} shared points fitted, no"
+            f" relaxation) the RMSD is {sh['rmsd']:.2f}; " + _groups_sentence(sh)
+        )
     d, rel = b["seeded_minus_map"], b["relative"]
     where = (
         f"RMSD {b['rmsd']:.2f}; {b['apart_over_0_5']} points more than 0.5 apart,"
@@ -225,6 +347,8 @@ def sentences(check: dict[str, Any], label: str) -> list[str]:
             f" map's {b['map_stress']:.3f}. {where}. Placed most differently: {movers}. The"
             f" cause is the search (which basin the starts reached), not the data."
         )
+        if "moved" in b:
+            out[-1] += " In groups: " + _groups_sentence(b["moved"])
     else:
         out.append(
             f"Basin: this map is at or below the layout relaxed from the reference's positions"

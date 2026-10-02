@@ -119,8 +119,11 @@ class TableSelection:
 class Reference:
     """A reference map of the same data to measure the finished map against (af.chain.reference):
     `chart` is relative to the run config's `references` directory (where reference maps live
-    is a fact about the machine). Measurement only: nothing from it enters the map."""
+    is a fact about the machine). Measurement only: nothing from it enters the map. A chain may
+    name several (`[[reference]]`), e.g. a round's unadjusted output and its adjusted map: Sarah,
+    2 Oct 2026, "Can not expect af to find the result of an adjustment"."""
 
+    label: str  # how the review and the provenance name it, e.g. "downloaded.ace (the ae round)"
     chart: str
     starts: int = 50  # seeded relaxations for the basin measurement
 
@@ -135,7 +138,7 @@ class ChainSettings:
     first_map: Path | None = None  # a seed chart with a projection (today's `first_source`)
     options: MapOptions = field(default_factory=MapOptions)
     select: Selection = field(default_factory=Selection)
-    reference: Reference | None = None
+    reference: list[Reference] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -168,7 +171,8 @@ class ChainConfig:
     selection: dict[str, Any] | None = None
     # Ferret sera only (af.chart.sera), applied to every table before the merge
     sera_policy: SeraPolicy = field(default_factory=SeraPolicy)
-    reference: Reference | None = None  # measured against after the run; not a step parameter
+    # measured against after the run; not a step parameter
+    references: list[Reference] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.options.merge_all and self.first_map is not None:
@@ -179,6 +183,9 @@ class ChainConfig:
             # the seed map would lose its stress (Chart.select unsets it: stale), which step 0
             # records; the round's selections apply to tables, so rules go with tables only
             raise ChainConfigError(f"{self.name}: select.remove cannot be used with first_map")
+        labels = [r.label for r in self.references]
+        if len(set(labels)) != len(labels):
+            raise ChainConfigError(f"{self.name}: two [[reference]] entries share a label")
         if not self.tables:
             raise ChainConfigError(f"{self.name}: no tables")
         ids = [t.table_id for t in self.tables]
@@ -338,8 +345,12 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
         **({"selection": cfg.selection} if cfg.selection else {}),
         "non_ferret_sera": cfg.sera_policy.to_json(),
         **(
-            {"reference": {"chart": cfg.reference.chart, "starts": cfg.reference.starts}}
-            if cfg.reference
+            {
+                "references": [
+                    {"label": r.label, "chart": r.chart, "starts": r.starts} for r in cfg.references
+                ]
+            }
+            if cfg.references
             else {}
         ),
         "tables": [
