@@ -439,6 +439,9 @@ class TestLocationForms:
         match = index(a, b).match(self.ANTIGEN, M.CELL)
         assert match.chosen is None
         assert M.AMBIGUOUS in match.flags and M.NAME_SPACING in match.flags
+        # the refused tie keeps its candidates and ae's pick, as a tie by exact name does (Q81):
+        # without them colouring has nothing to colour from
+        assert set(match.tied) == {a, b} and match.ranked is not None
 
     def test_two_forms_of_one_sequence_are_one_match(self) -> None:
         a = self.dep(1, "A/EXAMPLEPROVEXAMPLETOWN/31/2024", "a")
