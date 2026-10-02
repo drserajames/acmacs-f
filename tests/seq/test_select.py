@@ -6,6 +6,7 @@ import datetime
 from dataclasses import dataclass
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
 
 from af.seq import processed
@@ -190,3 +191,39 @@ def test_a_missing_host_override_file_is_an_error(store: Store, tmp_path: Path) 
     host = S.Rule("host", "host", "h", allow=["Human"], file=tmp_path / "absent.tsv")
     with pytest.raises(S.SelectionError, match="override file"):
         S.select(store, rules(host))
+
+
+def without_partial(store: Store, pull: str) -> None:
+    """Rewrite one pull's sequences partition as a build from before aa_partial would have."""
+    path = store.resolve(store.current("sequences", "h3")) / "sequences" / f"pull={pull}"
+    part = path / processed.PART
+    table = pq.read_table(part).drop_columns(["aa_partial"])
+    part.unlink()  # read-only, and a hard link shared with the earlier version
+    pq.write_table(table, part)
+
+
+@pytest.mark.parametrize(
+    ("stripped", "partial"),
+    [
+        ((), True),  # every pull re-stored since the column was added
+        (("p2",), True),  # mid-sweep: p1 re-stored, p2 not yet
+        (("p1", "p2"), False),  # nothing re-stored: no build then could store a partial protein
+    ],
+)
+def test_select_reads_partitions_with_and_without_aa_partial(
+    tmp_path: Path, stripped: tuple[str, ...], partial: bool
+) -> None:
+    st = Store.create(tmp_path / "s")
+    p1 = [record(1, accession="EPI1"), record(2, accession="EPI2")]
+    publish(st, "p1", p1, {"EPI_ISL_2": aligned(p1[1], amino_acids="TX", aa_partial=True)})
+    publish(st, "p2", [record(3, accession="EPI3")])
+    for pull in stripped:
+        without_partial(st, pull)
+    sel = S.select(st, rules(S.Rule("f", "date_floor", "x", floor="2000-01-01", optional=True)))
+    assert sorted(sel.keys) == [("EPI_ISL_1", "EPI1"), ("EPI_ISL_2", "EPI2"), ("EPI_ISL_3", "EPI3")]
+    loaded = S._load(st, st.current("sequences", "h3"))
+    assert {k: r.aligned.aa_partial for k, r in loaded.items()} == {
+        ("EPI_ISL_1", "EPI1"): False,
+        ("EPI_ISL_2", "EPI2"): partial,
+        ("EPI_ISL_3", "EPI3"): False,
+    }
