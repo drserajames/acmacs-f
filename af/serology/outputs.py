@@ -83,7 +83,8 @@ class OutputsReport:
     links: LinkCounts | None = None  # antigen -> sequence matching, when colouring
     colours: dict[str, ColourCounts] = field(default_factory=dict)  # subtype row -> counts
     uncoloured_subtypes: list[str] = field(default_factory=list)  # rows given no colouring
-    # subtype row -> dots coloured from a partially translated protein (aa_partial)
+    # subtype row -> coloured dots judged from a partially translated protein (aa_partial):
+    # their chosen sequence, or, with none chosen (a tie, two records), one of the candidates
     coloured_from_partial: dict[str, int] = field(default_factory=dict)
     # table subtype -> preparations left uncoloured because no row could be told: a B
     # preparation of unknown lineage with no matched sequence to say which
@@ -209,12 +210,7 @@ def _styles(
         if found is not None:
             dot = found(prep)
             linked = links.get(key)
-            if (
-                dot.label
-                and key not in partial_seen
-                and linked is not None
-                and (linked.epi_isl, linked.accession) in aligned.partial
-            ):
+            if dot.label and key not in partial_seen and _uses_partial(linked, aligned.partial):
                 partial_seen.add(key)
                 report.coloured_from_partial[row] = report.coloured_from_partial.get(row, 0) + 1
             return dot
@@ -223,6 +219,17 @@ def _styles(
         return uncoloured(row, "no colour scheme given", key)
 
     return style
+
+
+def _uses_partial(linked: PreparationSequence | None, partial: frozenset[tuple[str, str]]) -> bool:
+    """Whether a dot's colour rests on a partially translated protein: its chosen sequence is
+    one, or, with none chosen (a refused tie, rows naming two records), one of the candidates
+    whose agreement or rank coloured it is."""
+    if linked is None:
+        return False
+    if linked.epi_isl is not None:
+        return (linked.epi_isl, linked.accession) in partial
+    return any((c.epi_isl, c.accession) in partial for c in linked.tied or linked.alternatives)
 
 
 def _row_of(prep: Preparation, links: Mapping[Any, PreparationSequence]) -> str | None:

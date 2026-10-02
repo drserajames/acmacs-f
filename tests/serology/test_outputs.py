@@ -470,3 +470,18 @@ def test_dots_coloured_from_a_partial_protein_are_counted(tmp_path: Path, syn: A
     )  # fmt: skip
     assert report.colours["h3"].coloured == {"Clade P.1": 1}
     assert report.coloured_from_partial == {"h3": 1}
+
+
+def test_a_tie_coloured_through_a_partial_candidate_counts_as_partial() -> None:
+    """With no sequence chosen, the dot's colour rests on its candidates; if one of them is a
+    partial protein, the dot depends on it too."""
+    from af.serology.joins import PreparationSequence, TiedSequence
+    from af.serology.outputs import _uses_partial
+
+    partial = frozenset({("EPI_ISL_2", "ACC2")})
+    one, two = TiedSequence("EPI_ISL_1", "ACC1", "P.1"), TiedSequence("EPI_ISL_2", "ACC2", "P.1")
+    tie = PreparationSequence(None, None, None, "", conflict=False, tied=(one, two))
+    assert _uses_partial(tie, partial)
+    assert not _uses_partial(PreparationSequence(None, None, None, "", False, tied=(one,)), partial)
+    assert _uses_partial(PreparationSequence("EPI_ISL_2", "ACC2", "P.1", "", False), partial)
+    assert not _uses_partial(None, partial)
