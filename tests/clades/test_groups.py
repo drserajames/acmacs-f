@@ -158,3 +158,38 @@ def test_missing_column_is_fatal(tmp_path: Path) -> None:
     path.write_text("subtype\tgroup\tanchor\n")
     with pytest.raises(GroupError, match="missing column"):
         load_groups(path, sets)
+
+
+# ---- partial proteins (Sarah, Q95: keep HA1 when HA2 fails; the failed span is "X") ----
+
+
+def _padded(*, ha1_failed: bool, **states: str) -> AlignedSequence:
+    """A mature protein of this synthetic subtype (HA1 1-329, HA2 after), one CDS padded."""
+    residues = ["A"] * 400
+    span = range(0, 329) if ha1_failed else range(329, 400)
+    for index in span:
+        residues[index] = "X"
+    for position, state in states.items():
+        residues[int(position[1:]) - 1] = state
+    return AlignedSequence(amino_acids="".join(residues))
+
+
+def test_a_padded_cds_is_unobservable_never_a_wrong_residue(tmp_path: Path) -> None:
+    """A group on a translated locus can match a partial protein; one on the padded CDS
+    cannot (unobservable is not evidence), and nor is it contradicted."""
+    from af.clades.groups import Group, Substitution
+    from af.clades.sequence import Evidence
+
+    clade_set = synthetic(tmp_path)[SUBTYPE]
+    on_ha1 = Group(SUBTYPE, "ha1 group", None, (Substitution(20, "V"),))
+    on_ha2 = Group(SUBTYPE, "ha2 group", None, (Substitution(331, "W"),))
+
+    ha2_failed = _padded(ha1_failed=False, p20="V")
+    assert on_ha1.matches(None, ha2_failed, clade_set)
+    assert not on_ha2.matches(None, ha2_failed, clade_set)
+    assert ha2_failed.evidence("aa", 331, "W") is Evidence.UNOBSERVABLE
+
+    ha1_failed = _padded(ha1_failed=True, p331="W")
+    assert on_ha2.matches(None, ha1_failed, clade_set)
+    assert not on_ha1.matches(None, ha1_failed, clade_set)
+    assert ha1_failed.evidence("aa", 20, "V") is Evidence.UNOBSERVABLE
