@@ -13,6 +13,7 @@ laptop (af.run LocalRunner) and as a SLURM array (af.run SlurmRunner) unchanged.
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,45 @@ def write_problem(
     optimiser: str,
     start_layout: np.ndarray | None,
 ) -> Path:
+    data = _problem_data(
+        arrays, seed=seed, dimensions=dimensions, optimiser=optimiser, start_layout=start_layout
+    )
+    tmp = path.with_name(path.name + ".tmp.npz")
+    np.savez(tmp, **data)
+    tmp.replace(path)
+    return path
+
+
+def problem_digest(
+    arrays: dict,
+    *,
+    seed: int,
+    dimensions: int,
+    optimiser: str,
+    start_layout: np.ndarray | None,
+) -> str:
+    """sha256 of everything a chunk's maps depend on (the problem file's content, not its bytes:
+    an .npz holds zip timestamps). Per-start seeding makes a chunk's maps a function of this and
+    its start range alone, so a finished chunk of the same problem can be reused exactly."""
+    data = _problem_data(
+        arrays, seed=seed, dimensions=dimensions, optimiser=optimiser, start_layout=start_layout
+    )
+    h = hashlib.sha256()
+    for key in sorted(data):
+        a = np.asarray(data[key])
+        h.update(f"{key}|{a.dtype.str}|{a.shape}|".encode())
+        h.update(np.ascontiguousarray(a).tobytes())
+    return h.hexdigest()
+
+
+def _problem_data(
+    arrays: dict,
+    *,
+    seed: int,
+    dimensions: int,
+    optimiser: str,
+    start_layout: np.ndarray | None,
+) -> dict[str, Any]:
     data: dict[str, Any] = {k: arrays[k] for k in _ARRAYS}
     data.update({k: arrays[k] for k in _OPTIONAL if arrays.get(k) is not None})
     data["dodgy_is_regular"] = np.bool_(arrays.get("dodgy_is_regular", False))
@@ -45,10 +85,7 @@ def write_problem(
     data["optimiser"] = np.str_(optimiser)
     if start_layout is not None:
         data["start_layout"] = start_layout
-    tmp = path.with_name(path.name + ".tmp.npz")
-    np.savez(tmp, **data)
-    tmp.replace(path)
-    return path
+    return data
 
 
 def read_problem(path: Path) -> tuple[dict, int, int, str, np.ndarray | None]:
@@ -74,6 +111,17 @@ def write_result(path: Path, maps: list[MapResult]) -> Path:
     np.savez(tmp, **data)
     tmp.replace(path)
     return path
+
+
+def finished(path: Path, first: int, count: int) -> bool:
+    """Whether `path` holds this chunk's maps: readable, and exactly its starts (first ..
+    first + count - 1). Results are written atomically, so a present file is whole unless
+    something else broke it."""
+    try:
+        maps = read_result(path)
+    except Exception:  # noqa: BLE001  (unreadable: rerun the chunk)
+        return False
+    return sorted(m["start_seed"] for m in maps) == list(range(first, first + count))
 
 
 def read_result(path: Path) -> list[MapResult]:
