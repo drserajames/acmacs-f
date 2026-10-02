@@ -93,6 +93,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extras", default="dev,geo", help="af extras to install")
     parser.add_argument("--link", type=Path, help="point this symlink at the release")
     parser.add_argument("--replace-incomplete", action="store_true")
+    parser.add_argument(
+        "--time-solve",
+        action="store_true",
+        help="time the package solve alone first (a micromamba --dry-run), so a slow "
+        "'environment' stage can be split into solving and fetching/linking",
+    )
     return parser.parse_args()
 
 
@@ -114,20 +120,24 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
     subprocess.run(["tar", "-x", "-C", str(src)], input=archive.stdout, check=True)
 
     base_env = clean_environment(args)
+    create = [
+        str(args.micromamba),
+        "create",
+        "--yes",
+        "--quiet",
+        "--prefix",
+        str(env),
+        "--file",
+        str(src / "environment.yml"),
+    ]
+    if args.time_solve:
+        # Repodata + solve only; nothing is written. The real create solves again (from the
+        # now-warm repodata), so environment minus solve is about the fetch and link time:
+        # on CSD3 that is hard links on Lustre (package cache and releases on one filesystem).
+        step("solving environment.yml (dry run, timed alone)", "solve")
+        run([*create, "--dry-run"], base_env)
     step("creating the environment from environment.yml", "environment")
-    run(
-        [
-            str(args.micromamba),
-            "create",
-            "--yes",
-            "--quiet",
-            "--prefix",
-            str(env),
-            "--file",
-            str(src / "environment.yml"),
-        ],
-        base_env,
-    )
+    run(create, base_env)
     python = python_of(release)
     build_env = {**base_env, "PATH": f"{env / 'bin'}{os.pathsep}{base_env['PATH']}"}
     # The first launch of a freshly installed cmake can take longer than scikit-build-core's
