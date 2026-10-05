@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -110,6 +111,92 @@ class ChartColours:
     basis: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class Pins:
+    """The store versions a caller pinned for :class:`StoreColours`; None: read CURRENT.
+
+    Sequences and clades are pinned all or none: the join reads every ``sequences/*`` and every
+    ``clades/*`` dataset, and a partial pin would mix pinned and CURRENT versions in one join.
+    """
+
+    serology: StoreRef | None = None
+    sequences: Mapping[str, StoreRef] | None = None  # dataset -> ref, every dataset the join reads
+    clades: tuple[StoreRef, ...] | None = None  # every clades dataset in the store
+
+    def to_json(self) -> dict[str, str]:
+        sequences = self.sequences or {}
+        refs = [self.serology] if self.serology else []
+        refs += [sequences[d] for d in sorted(sequences)]
+        refs += list(self.clades or ())
+        return {f"{r.kind}/{r.dataset}": r.version for r in refs}
+
+    def check_clades_labelled(self, behind: Mapping[str, tuple[str | None, str]]) -> None:
+        """Refuse a PINNED clades version behind the sequences the join read: its clade calls
+        would change if it were relabelled from them. ``behind`` is the join's content-based
+        ``clades_behind`` (dataset -> (labelled, read)). A table labelled from another version
+        with identical call inputs is not behind, so it is read (and recorded in provenance as
+        ``clades_same_content``): refusing it would guard against nothing (ruling, 5 Oct 2026)."""
+        wrong = [
+            f"clades/{r.dataset}@{r.version} was labelled from "
+            + (f"sequences/{r.dataset}@{behind[r.dataset][0]}" if behind[r.dataset][0]
+               else "no single sequences version")
+            + f", not the sequences/{r.dataset}@{behind[r.dataset][1]} read"
+            for r in self.clades or ()
+            if r.dataset in behind
+        ]  # fmt: skip
+        if wrong:
+            raise MapColouringError(
+                "pinned clades and sequences were not produced together: " + "; ".join(wrong)
+            )
+
+
+PINNABLE = ("serology", "sequences", "clades")
+
+
+def pinned_refs(store: Store, versions: Mapping[str, str]) -> Pins:
+    """Turn ``{"kind/dataset": version}`` into store refs for :class:`StoreColours`.
+
+    Refused (design rule 1): a key StoreColours does not read (another kind, a serology dataset
+    other than ``all``, a dataset the store does not hold), a version the store does not hold,
+    and a partial pin of sequences or of clades (see :class:`Pins`).
+    """
+    from af.store.manifest import MANIFEST, Manifest
+    from af.store.store import VERSIONS
+    from af.util.subtypes import subtypes
+
+    refs: dict[str, dict[str, StoreRef]] = {kind: {} for kind in PINNABLE}
+    readable = {
+        "serology": ["all"],
+        "sequences": sorted(subtypes().keys()),
+        "clades": [ref.dataset for ref in store.list_datasets("clades")],
+    }
+    for key, version in versions.items():
+        kind, _, dataset = key.partition("/")
+        if kind not in PINNABLE or dataset not in readable[kind]:
+            raise MapColouringError(
+                f"versions: StoreColours does not read {key!r} (it reads "
+                + ", ".join(f"{k}/{d}" for k in PINNABLE for d in readable[k])
+                + ")"
+            )
+        manifest = store.dataset_dir(kind, dataset) / VERSIONS / version / MANIFEST
+        if not re.fullmatch(r"[0-9a-f]{16}", version) or not manifest.is_file():
+            raise MapColouringError(f"versions: {key}@{version} is not in the store")
+        sha = Manifest.from_bytes(manifest.read_bytes()).sha256()
+        refs[kind][dataset] = StoreRef(kind, dataset, version, sha)
+    for kind in ("sequences", "clades"):
+        missing = sorted(set(readable[kind]) - set(refs[kind]))
+        if refs[kind] and missing:
+            raise MapColouringError(
+                f"versions: {kind} are pinned all or none; not pinned: "
+                + ", ".join(f"{kind}/{d}" for d in missing)
+            )
+    return Pins(
+        serology=refs["serology"].get("all"),
+        sequences=refs["sequences"] or None,
+        clades=tuple(refs["clades"][d] for d in sorted(refs["clades"])) or None,
+    )
+
+
 class StoreColours:
     """Colours for every map of one run, read from the stores and the user's tables ONCE.
 
@@ -119,6 +206,7 @@ class StoreColours:
     """
 
     store_read: dict[str, Any] | None = None  # the guarded read, set by the constructor
+    pins: Pins = Pins()  # the caller's pinned versions (none: everything read from CURRENT)
 
     def __init__(
         self,
@@ -126,6 +214,7 @@ class StoreColours:
         cfg: ColouringConfig,
         rules: MatchingRules,
         *,
+        versions: Mapping[str, str] | None = None,
         ignore_busy: bool = False,
     ) -> None:
         """``rules`` are the matcher's tables, loaded once by the caller
@@ -133,7 +222,14 @@ class StoreColours:
 
         Every read happens under one guard (:meth:`af.store.Store.reading`): no colouring while
         a batch is writing the store, and none whose inputs moved while it read. ``ignore_busy``
-        reads anyway, for diagnosis; ``store_read`` records the guarded read for provenance."""
+        reads anyway, for diagnosis; ``store_read`` records the guarded read for provenance.
+
+        ``versions`` pins what is read instead of CURRENT, so a caller can reproduce its colours
+        after CURRENT moves (design rule 5): ``{"serology/all": v, "sequences/h3": v,
+        "clades/h3": v, ...}``. See :func:`pinned_refs` for what is refused. af's own round
+        builds never pin: they colour from CURRENT behind the serology staleness guard
+        (:func:`af.serology.update.require_current`), which a pinned serology skips."""
+        self.pins = pinned_refs(store, versions or {})
         with store.reading("map-colours", override=ignore_busy) as guard:
             self._read(store, cfg, rules)
         self.store_read = guard.to_json()
@@ -147,9 +243,17 @@ class StoreColours:
         self._store = store
         self._clones = cfg.nomenclature
         self.rules = rules
-        self.serology = store.current("serology", "all")
+        self.serology = self.pins.serology or store.current("serology", "all")
         con = query.connect(store.resolve(self.serology))
-        self.links = link_from_store(con, store, rules, with_clades=True)
+        self.links = link_from_store(
+            con,
+            store,
+            rules,
+            with_clades=True,
+            sequences=self.pins.sequences,
+            clades=self.pins.clades,
+        )
+        self.pins.check_clades_labelled(self.links.clades_behind)
         # The clade tables the join read: clade sets are judged by these same versions, never by
         # a CURRENT re-read a moment later (it may have moved).
         self._clade_refs = {
@@ -308,6 +412,11 @@ class StoreColours:
             # clade tables labelled from another sequences version than the join read: dataset
             # -> [the version they labelled, the version read]. Empty when they agree.
             "clades_behind": {d: list(v) for d, v in sorted(self.links.clades_behind.items())},
+            # clade tables labelled from another sequences version whose calls' inputs are
+            # identical: not behind, recorded so the version pair stays visible
+            "clades_same_content": {
+                d: list(v) for d, v in sorted(self.links.clades_same_content.items())
+            },
             # antigens of another lineage than the map's (coloured by the map's row), by code
             "lineage_minority": dict(sorted(minority.items())),
             # how the coloured antigens got their colour, and which had no clade to go by
@@ -315,7 +424,13 @@ class StoreColours:
             "coloured_without_clade": [
                 f"ag{i}" for i, b in enumerate(basis) if b == BASIS_GROUP_NO_CLADE
             ],
+            # the caller's pinned versions ("kind/dataset" -> version); empty: all CURRENT
+            "pins": self.pins.to_json(),
         }
+        if self.pins.serology is not None:
+            # The staleness guard compares serology CURRENT with tables CURRENT; a pinned
+            # serology is the caller's choice of what to read, so it is not applied.
+            provenance["serology_guard"] = "pinned: guard not applied"
         if not isinstance(scheme, str):
             provenance["scheme_origin"] = "caller-supplied"
             provenance["scheme_file"] = str(scheme.source) if scheme.source else None
