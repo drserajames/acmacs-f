@@ -561,9 +561,7 @@ def test_map_store_refs_are_what_the_join_read_not_current_later(tmp_path: Path,
     ]
 
 
-def test_map_colours_read_the_pinned_versions(
-    tmp_path: Path, syn: Any, monkeypatch: Any
-) -> None:
+def test_map_colours_read_the_pinned_versions(tmp_path: Path, syn: Any, monkeypatch: Any) -> None:
     """StoreColours(versions=...) reads the pinned versions, not CURRENT, and refuses a pinned
     clades table labelled from another sequences version than the one its join reads."""
     import types
