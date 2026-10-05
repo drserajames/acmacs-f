@@ -70,6 +70,7 @@ def i7_document(
             "id": p.id,
             "name": p.name,
             "passage_class": p.passage_class,
+            "passage": p.passage,
             "date": p.date.isoformat() if p.date else None,
             "xy": [round(p.xy[0], 4), round(p.xy[1], 4)] if p.xy is not None else None,
             "shown": p.shown,
