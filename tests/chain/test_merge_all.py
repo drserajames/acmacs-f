@@ -85,3 +85,20 @@ def test_the_selection_is_published(tables, tmp_path):  # noqa: F811
     )
     sel = config_to_json(load_chain_config(path))["selection"]
     assert sel == {"directory": str(tables), "group": "h9-hi-test-lab", "date_from": "2021-02-01"}
+
+
+def test_the_merge_record_counts_each_cell_once_and_reaches_the_diagnostics(tables, tmp_path):  # noqa: F811
+    # Each merge re-merges every layer, so summing the merges' outcomes counted a cell once per
+    # later merge (h3-hint: 2,384 "sd-too-big" for 32 cells). The last merge's report is the
+    # chart's.
+    [result] = run(merge_all(config(tables)), tmp_path / "s")
+    merged = read_chart(result.directory / "merge.ace")
+    cells = {k for layer in merged.titres.layers for k, t in layer.items() if not t.is_missing}
+    outcomes = result.record["merge"]["outcomes"]
+    assert len(merged.titres.layers) > 2 and sum(outcomes.values()) == len(cells)
+    d = result.record["diagnostics"]
+    assert d["sd_too_big_cells"] == outcomes.get("sd-too-big", 0)
+    dropping = outcomes.get("sd-too-big", 0) + outcomes.get("less-and-more-than", 0)
+    assert len(d["dropped_cells"]) == dropping
+    assert "column_basis_slack" in d
+    assert "control_flags" not in d  # those are per table; a one-step map has no "new" table
