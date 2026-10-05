@@ -36,7 +36,7 @@ def _chain(store: Store, *, full: bool) -> StoreRef:
         "table_id": "labx-t2", "chosen": "scratch", "stress": {"scratch": 100.0},
         "platform": {"release": "abcdef0123456789"},
         "diagnostics": {"antigens": 10, "sera": 2, "disconnected": [], "trapped": 0,
-                        "dropped_cells": [{"cell": "a"}]},
+                        "dropped_cells": [{"cell": "a"}], "sd_too_big_cells": 1},
     }  # fmt: skip
     chain: dict[str, Any] = {
         "config": {"tables_source": {"kind": "tables", "dataset": "labx/hi", "version": "1" * 16}},
@@ -292,3 +292,40 @@ def test_within_table_repeat_drops_are_counted_from_the_tables_record(tmp_path: 
                for line in note.lines)  # fmt: skip
     assert "the reference comparison of these repeat drops" not in note.missing
     assert any("paired with the reference by name and passage" in line for line in note.lines)
+
+
+def test_sd_limit_drops_come_from_the_diagnostics_or_a_record_checked_against_the_map(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+
+    store = Store.create(tmp_path / "store")
+    step = {"table_id": "t1", "chosen": "scratch", "stress": {"scratch": 1.0},
+            "platform": {"release": "abcdef0123456789"},
+            "diagnostics": {"antigens": 3, "sera": 1, "disconnected": 0, "trapped": 0}}  # fmt: skip
+    chain = {"mode": "merge_all", "steps": [{"directory": "steps/0000", "table_id": "t1"}]}
+    with store.build("chains", "labx/hi/merged") as build:
+        (build.path / "steps/0000").mkdir(parents=True)
+        (build.path / "steps/0000/step.json").write_text(json.dumps(step))
+        (build.path / "chain.json").write_text(json.dumps(chain))
+        (build.path / "steps/0000/chosen.ace").write_text("the map")
+        ref = build.publish(Provenance("af.chain", (), {"options": OPTIONS}, T0, T0))
+    what = "the final map's dropped cells count"
+    records = tmp_path / "records"
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [], records)
+    assert what in note.missing
+    path = records / "labx/hi/merged" / f"{ref.version}.merge-drops.json"
+    path.parent.mkdir(parents=True)
+    sha = hashlib.sha256((store.version_dir(ref) / "steps/0000/chosen.ace").read_bytes())
+    record = {"map_sha256": sha.hexdigest(), "sd_too_big_cells": 4,
+              "less_and_more_than_cells": 1, "measured": "2026-10-05", "measured_by": "a tool",
+              "outcomes": {"sd-too-big": 4}}  # fmt: skip
+    path.write_text(json.dumps(record))
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [], records)
+    assert what not in note.missing
+    expected = ("cells dropped by the SD limit 4, and 1 emptied for reading both < and > "
+                f"(from {path.name}, measured 2026-10-05 by a tool")  # fmt: skip
+    assert any(expected in line for line in note.lines)
+    path.write_text(json.dumps({**record, "map_sha256": "0" * 64}))  # another map's record
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [], records)
+    assert what in note.missing
