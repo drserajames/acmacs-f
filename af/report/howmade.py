@@ -117,7 +117,7 @@ def open_chain(store: Store, ref: StoreRef) -> ChainFiles:
     return ChainFiles(ref, chain, provenance, step, current, chosen_sha)
 
 
-def _source(note: Note, files: ChainFiles) -> None:
+def _source(note: Note, files: ChainFiles, records: Path | None = None) -> None:
     ch, params, step = files.chain, files.provenance.get("parameters", {}), files.last_step
     ref = files.ref
     where = "the CURRENT version" if files.current == ref.version else (
@@ -172,7 +172,7 @@ def _source(note: Note, files: ChainFiles) -> None:
             + (f"; {others}" if others else "")
             + f"); {diag_value('antigens')} antigens, {diag_value('sera')} sera; disconnected "
             f"{diag_value('disconnected')}, trapped {diag_value('trapped')}, cells dropped by the "
-            f"SD limit {diag_value('dropped_cells')}"
+            f"SD limit {_sd_dropped(note, files, records)}"
         )
     else:
         note.item(note.gap("final stress", "last step.json stress / chosen"))
@@ -206,6 +206,39 @@ def _column_bases(note: Note, files: ChainFiles) -> None:
         value = f" {row['value']}" if "value" in row else ""
         when = _when(note, row, "column-basis adjustment(s)")
         note.item(f"Adjustment {rule}{value}: {effect} ({row.get('reason', '')}; {when})")
+
+
+def _sd_dropped(note: Note, files: ChainFiles, records: Path | None) -> str:
+    """Cells the final merge dropped by the SD limit: the last step's diagnostics, else a record.
+
+    ``sd_too_big_cells``, not ``len(dropped_cells)`` (which also holds cells emptied for reading
+    both < and >) and not ``merge.outcomes`` (in a merge_all version that sums every
+    intermediate merge, each over the whole chart so far). Versions published before the engine
+    wrote the count have a record beside the store,
+    ``<records>/<dataset>/<version>.merge-drops.json``, checked against the chosen map.
+    """
+    diag = files.last_step.get("diagnostics", {})
+    if "sd_too_big_cells" in diag:
+        return str(diag["sd_too_big_cells"]) + _less_and_more(diag)
+    what = "the final map's dropped cells count"
+    name = f"{files.ref.version}.merge-drops.json"
+    path = records / files.ref.dataset / name if records is not None else None
+    if path is None or not path.is_file():
+        return note.gap(what, f"last step.json diagnostics, or {name} beside the store")
+    rec = json.loads(path.read_text())
+    if rec.get("map_sha256") != files.chosen_sha256:
+        return note.gap(what, f"{path} (its map_sha256 is not this version's map)")
+    if "sd_too_big_cells" not in rec:
+        return note.gap(what, f"{path.name} sd_too_big_cells")
+    return (
+        f"{rec['sd_too_big_cells']}{_less_and_more(rec)} (from {path.name}, measured "
+        f"{rec.get('measured')} by {rec.get('measured_by')}; cells listed there)"
+    )
+
+
+def _less_and_more(record: dict[str, Any]) -> str:
+    n = record.get("less_and_more_than_cells")
+    return f", and {n} emptied for reading both < and >" if n else ""
 
 
 def _repeat_drops_record(note: Note, files: ChainFiles, records: Path | None) -> None:
@@ -516,7 +549,7 @@ def map_note(
             except (StoreError, OSError, KeyError, ValueError) as error:
                 note.item(note.gap("the chain's records", f"the store ({error})"))
         if files:
-            _source(note, files)
+            _source(note, files, reference_records)
     else:
         layout = (fig.get("provenance", {}).get("stand_in") or {}).get("layout")
         note.source = "stand-in layout" if layout else "unknown"
