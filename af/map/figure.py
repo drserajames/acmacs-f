@@ -153,6 +153,7 @@ def chart_points(
                 bool((a.extra.get("T") or {}).get("R")),
                 sequenced=sequenced[i],
                 hide=hidden.get(i),
+                passage=a.passage,
                 marker=marker_for("antigen", passage_class(a.passage, a.reassortant)),
             )
         )
@@ -168,6 +169,7 @@ def chart_points(
                 passage_class=passage_class(s.passage, s.reassortant),
                 serum_id=s.serum_id,
                 marker=marker_for("serum", passage_class(s.passage, s.reassortant)),
+                passage=s.passage,
             )
         )
     return points

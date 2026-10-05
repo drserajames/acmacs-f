@@ -303,3 +303,36 @@ def test_a_point_can_be_drawn_larger() -> None:
     with pytest.raises(ValueError, match="positive"):
         PointStyle(scale=0.0)
     assert PointStyle(scale=1.4).recorded() == {"scale": 1.4}  # recorded in the I7 like the rest
+
+
+def test_i7_points_carry_the_full_passage(tmp_path: Any) -> None:
+    """Two preparations of one virus with one date and one passage class differ only by their
+    passage string; the I7 records it so a reader can tell them apart (11-reports)."""
+    import datetime as dt
+
+    from af.map.i7 import i7_document
+    from af.map.render import draw_pdf
+    from af.map.viewport import Frame
+
+    name = "/".join(("A(H3N2)", "OLDTOWN", "1", "2021"))
+    antigens = [Antigen(name, passage=p, date="2021-03-01") for p in ("SIAT1", "SIAT2", "")]
+    sera = [Serum("/".join(("A(H3N2)", "OLDTOWN", "9", "2020")), serum_id="S1", passage="E4")]
+    two = Chart({"V": "A(H3N2)"}, antigens, sera, Titres([[] for _ in antigens]))
+    scene = chart_scene(
+        two,
+        np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]),
+        ChartColours(SCHEME, (frozenset(),) * 3, (False,) * 3, {}),
+        title="T",
+    )
+    pdf = tmp_path / "p.pdf"
+    frame = Frame(-1.0, 2.0, 3.0)
+    draw_pdf(scene, frame, {}, pdf)
+    doc = i7_document(
+        scene, frame, {}, chart="c", pdf=pdf,
+        created=dt.datetime(2026, 10, 5, tzinfo=dt.UTC),
+        provenance={"inputs": {"x": {"sha256": "0" * 64}}},
+    )  # fmt: skip
+    ags = doc["map"]["antigens"]
+    assert [a["passage_class"] for a in ags[:2]] == ["cell", "cell"]  # the class cannot tell
+    assert [a["passage"] for a in ags] == ["SIAT1", "SIAT2", ""]  # the passage can; none is ""
+    assert doc["map"]["sera"][0]["passage"] == "E4"

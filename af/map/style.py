@@ -79,6 +79,9 @@ class PointIn:
     reference: bool = False
     serum_id: str | None = None
     sequenced: bool = False  # has a sequence, so the colour scheme could paint it
+    # The full passage as the chart has it ("MDCK2/SIAT1"): the class alone cannot tell apart
+    # several preparations of one virus with the same date (11-reports' point matching).
+    passage: str | None = None
     hide: str | None = None  # a named hide rule that selected this point
     # The marker shape, chosen when the scene is built (af side: af.map.vaccines.marker_for);
     # None draws the plain shape for the kind. The renderer draws what it is given.
@@ -105,6 +108,7 @@ class ScenePoint:
     mark: str | None = None
     sequenced: bool = False
     marker: Marker = "circle"
+    passage: str | None = None  # the full passage string (PointIn.passage)
 
     @property
     def vaccine(self) -> str | None:
@@ -243,6 +247,7 @@ def style_points(
                 reference=p.reference,
                 sequenced=p.sequenced,
                 serum_id=p.serum_id,
+                passage=p.passage,
                 mark=vaccines.get(p.id),
                 marker=p.marker or PLAIN_MARKER[p.kind],
             )
