@@ -1,6 +1,7 @@
 """The serology step against a real af.store and af.tables publish, all in tmp_path."""
 
 import datetime
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -208,3 +209,75 @@ def test_a_version_without_recorded_inputs_is_stale(store: Store, syn: Any) -> N
     assert caught_up.built and caught_up.ref != old
     again = update(store, syn.rules)
     assert not again.built and again.reason == "inputs unchanged"
+
+
+def _store_read(store: Store, ref: Any) -> dict[str, Any]:
+    provenance = json.loads((store.resolve(ref) / "PROVENANCE.json").read_text())
+    store_read: dict[str, Any] = provenance["parameters"]["store_read"]
+    return store_read
+
+
+def test_update_refuses_while_tables_are_being_published(store: Store, syn: Any) -> None:
+    """A start in the middle of a several-dataset tables publish would build serology/all from
+    a half-published set, and record that set as its inputs, so require_current could never
+    catch it later. The guarded read refuses to start instead, and publishes nothing."""
+    from af.store import StoreBusy
+
+    _publish(store, _tables(syn))
+    sweep = store.batch("tables-sweep", ["tables/labx/h3-hi-labx"])
+    with sweep, pytest.raises(StoreBusy, match="tables-sweep"):
+        update(store, syn.rules)
+    assert not (store.dataset_dir("serology", "all") / "CURRENT").exists()
+
+
+def test_provenance_says_guarded_or_overridden(store: Store, syn: Any) -> None:
+    """The recorded guard is what tells a later reader a guarded build from an overridden one."""
+    tables = _tables(syn)
+    _publish(store, tables)
+    guarded = update(store, syn.rules)
+    seen = _store_read(store, guarded.ref)
+    assert seen["read"] == "serology-update"
+    assert seen["overrode_batches"] == []
+    labx = store.current("tables", "labx/h3-hi-labx").version
+    assert seen["currents_read"]["tables/labx/h3-hi-labx"] == [labx]
+
+    tables[1] = replace(tables[1], titres=[[[">1280"]]])
+    _publish(store, tables)
+    with store.batch("tables-sweep", ["tables/laby/h3-hi-laby"]):
+        overridden = update(store, syn.rules, ignore_busy=True)
+    assert overridden.built
+    names = [m["name"] for m in _store_read(store, overridden.ref)["overrode_batches"]]
+    assert names == ["tables-sweep"]
+
+
+def test_a_tables_current_moving_mid_update_fails_naming_it(
+    store: Store, syn: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tables published while the update reads: it fails at the end naming the dataset that
+    moved and both its versions (the 2 Oct incident was only diagnosable because a report
+    said which versions it read), and serology/all stays where it was."""
+    import af.serology.update as step
+    from af.store import StoreBusy
+
+    tables = _tables(syn)
+    _publish(store, tables)
+    first = update(store, syn.rules)
+    tables[1] = replace(tables[1], titres=[[[">1280"]]])
+    _publish(store, tables)
+    was = store.current("tables", "labx/h3-hi-labx").version
+
+    real_build = step.build
+
+    def build_while_tables_move(*args: Any, **kwargs: Any) -> Any:
+        tables[1] = replace(tables[1], titres=[[["20"]]])
+        _publish(store, tables)  # a lab's tables land mid-update
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(step, "build", build_while_tables_move)
+    with pytest.raises(StoreBusy) as raised:
+        update(store, syn.rules)
+    now = store.current("tables", "labx/h3-hi-labx").version
+    assert now != was
+    assert f"tables/labx/h3-hi-labx moved from {was} to {now}" in str(raised.value)
+    assert "serology-update" in str(raised.value)
+    assert store.current("serology", "all") == first.ref  # nothing published
