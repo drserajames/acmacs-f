@@ -77,7 +77,12 @@ def _context(row: dict[str, Any], check: str) -> str:
     if check in ("antigens jaccard", "sera jaccard"):
         g = d.get(check.split()[0], {})
         only_new, only_ref = len(g.get("only_new_keys", [])), len(g.get("only_ref_keys", []))
-        return f"{only_new} af-only, {only_ref} reference-only"
+        text = f"{only_new} af-only, {only_ref} reference-only"
+        lab = g.get("serum_id_lab_dropped")
+        if lab and (lab["new"] or lab["ref"]):
+            text += (f"; matched after dropping a leading '{lab['lab']}' from serum ids "
+                     f"({lab['new']} af, {lab['ref']} reference)")  # fmt: skip
+        return text
     if check in ("p95 displacement", "frac moved > 1", "rotation deg"):
         p = d.get("procrustes", {})
         if p:

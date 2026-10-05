@@ -672,6 +672,11 @@ def _one_sided(slot: str, antigens: dict[str, Any], sera: dict[str, Any]) -> lis
                         else ""
                     )
                     out.append(f"- {slot} {group} {what} ({len(keys)}): {listed}{more}")
+        lab = g.get("serum_id_lab_dropped")
+        if lab and (lab["new"] or lab["ref"]):
+            out.append(f"- {slot} sera: serum ids compared without a leading '{lab['lab']}' "
+                       f"(dropped from {lab['new']} af and {lab['ref']} reference ids), so a "
+                       "matched pair need not have identical ids")  # fmt: skip
         shared = g.get("identity_fallback", {}).get("shared_identity", 0)
         if shared:
             out.append(f"- {slot} {group}: {shared} point(s) share an identity (isolate/year, "

@@ -23,6 +23,13 @@ on the other, RAS AL KHAIMAH CITY and RAK; the isolate, year, passage and date a
 missing one of those, or whose identity is shared by two points on either side, is matched by
 its ``loose`` key instead, on both sides, and counted. Keys that occur twice on one side are
 dropped and counted, never merged.
+
+Serum ids are compared without a leading token that is the map's own lab (``CRICK F01/99``
+and ``F01/99`` are one serum): af's merged maps prefix every serum id with the lab, where the
+ae round keeps the lab's own id, which for some labs already begins with the lab's name. Only
+that one token is dropped, on both sides, so a serum id of another lab's form is untouched; the
+counts dropped are reported (``sera.serum_id_lab_dropped``) so a matched pair is not read as
+two identical ids.
 """
 
 from __future__ import annotations
@@ -93,7 +100,35 @@ def point_key(point: Point, how: str) -> str:
 
 def _label(point: Point) -> str:
     """How a point is listed for a reader: its own spelling, whatever key matched it."""
+    if DRAWN_SERUM_ID in point:
+        return f"{point['name']}|{point[DRAWN_SERUM_ID]}"
     return point_key(point, "name")
+
+
+DRAWN_SERUM_ID = "_serum_id_as_drawn"  # the id before the lab token was dropped, for listing
+
+
+def map_lab(doc: dict[str, Any]) -> str | None:
+    """The lab a map figure was built for: the first part of its chain dataset, upper case.
+
+    af's figures record the chain they were drawn from (``provenance.inputs.chain.dataset``,
+    e.g. ``<lab>/<table group>/merged``); a figure that records none has no lab to drop.
+    """
+    chain = doc.get("provenance", {}).get("inputs", {}).get("chain")
+    dataset = chain.get("dataset") if isinstance(chain, dict) else None
+    return str(dataset).split("/")[0].upper() if dataset else None
+
+
+def drop_lab_token(points: Sequence[Point], lab: str) -> tuple[list[Point], int]:
+    """Points with a leading ``"<lab> "`` dropped from their serum ids; also how many had it."""
+    prefix, out, dropped = f"{lab} ", [], 0
+    for point in points:
+        serum_id = point.get("serum_id")
+        if serum_id and serum_id.startswith(prefix) and serum_id[len(prefix) :].strip():
+            point = {**point, "serum_id": serum_id[len(prefix) :], DRAWN_SERUM_ID: serum_id}
+            dropped += 1
+        out.append(point)
+    return out, dropped
 
 
 def normalise_key(key: str, how: str) -> str:
@@ -359,7 +394,13 @@ def compare(ref: dict[str, Any], new: dict[str, Any], how: str = "name") -> dict
             f"(reference {rm.get('y_axis') or 'unstated'}, new {nm.get('y_axis') or 'unstated'})"
         )
     antigens = _group(rm["antigens"], nm["antigens"], how, clades=True)
-    sera = _group(rm["sera"], nm["sera"], how, clades=False)
+    ref_sera, new_sera, lab = rm["sera"], nm["sera"], map_lab(new)
+    if lab:
+        ref_sera, ref_dropped = drop_lab_token(ref_sera, lab)
+        new_sera, new_dropped = drop_lab_token(new_sera, lab)
+    sera = _group(ref_sera, new_sera, how, clades=False)
+    if lab:
+        sera["serum_id_lab_dropped"] = {"lab": lab, "ref": ref_dropped, "new": new_dropped}
     ag_pairs, sr_pairs = antigens.pop("_pairs"), sera.pop("_pairs")
     out: dict[str, Any] = {
         "ref": ref["title"], "new": new["title"], "match": how,
