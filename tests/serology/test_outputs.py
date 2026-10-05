@@ -562,8 +562,10 @@ def test_map_store_refs_are_what_the_join_read_not_current_later(tmp_path: Path,
 
 
 def test_map_colours_read_the_pinned_versions(tmp_path: Path, syn: Any, monkeypatch: Any) -> None:
-    """StoreColours(versions=...) reads the pinned versions, not CURRENT, and refuses a pinned
-    clades table labelled from another sequences version than the one its join reads."""
+    """StoreColours(versions=...) reads the pinned versions, not CURRENT. A pinned clades table
+    labelled from another sequences version is refused only when it is behind that version in
+    content (coordinator ruling, 5 Oct 2026: 04-clades' three wordings); with the same content
+    it is read, and the version pair is recorded."""
     import types
 
     import pytest
@@ -589,7 +591,7 @@ def test_map_colours_read_the_pinned_versions(tmp_path: Path, syn: Any, monkeypa
             builder.publish(Provenance(step="clades-test", inputs=(labelled,), parameters={},
                                        started=NOW, finished=NOW))  # fmt: skip
     pinned_clades = store.history("clades", "h3")[0]["version"]
-    with store.build("sequences", "h3") as builder:  # sequences CURRENT moves on
+    with store.build("sequences", "h3") as builder:  # moves on, same content for the calls
         for part in ("isolates", "sequences"):
             builder.link(store.resolve(labelled) / f"{part}/pull=test/part-0.parquet",
                          f"{part}/pull=test/part-0.parquet")  # fmt: skip
@@ -607,6 +609,24 @@ def test_map_colours_read_the_pinned_versions(tmp_path: Path, syn: Any, monkeypa
         write_af_data(tmp_path / "af-data", submitters="", number="", equivalents="")
     )
 
+    same = store.current("sequences", "h3").version
+    colours = StoreColours(store, cfg, rules, versions={"clades/h3": pinned_clades})
+    assert colours.links.clades_behind == {}
+    assert colours.links.clades_same_content == {"h3": (labelled.version, same)}
+
+    # a sequence's Nextclade call changes: the pinned table is now behind, and refused
+    moved = tmp_path / "moved.parquet"
+    duckdb.execute(
+        f"COPY (SELECT epi_isl, accession, seq_hash, aa_aligned, 'Q.1' AS nextclade_subclade, "
+        f"nextclade_qc_status FROM read_parquet('"
+        f"{(store.resolve(labelled) / 'sequences/pull=test/part-0.parquet').as_posix()}')) "
+        f"TO '{moved.as_posix()}' (FORMAT parquet)"
+    )
+    with store.build("sequences", "h3") as builder:
+        builder.link(store.resolve(labelled) / "isolates/pull=test/part-0.parquet",
+                     "isolates/pull=test/part-0.parquet")  # fmt: skip
+        builder.copy(moved, "sequences/pull=test/part-0.parquet")
+        builder.publish(_provenance("sequences-test-moved"))
     with pytest.raises(MapColouringError, match="not produced together"):
         StoreColours(store, cfg, rules, versions={"clades/h3": pinned_clades})
 

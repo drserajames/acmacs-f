@@ -131,9 +131,11 @@ class Pins:
         return {f"{r.kind}/{r.dataset}": r.version for r in refs}
 
     def check_clades_labelled(self, behind: Mapping[str, tuple[str | None, str]]) -> None:
-        """Refuse a PINNED clades version labelled from another sequences version than the one
-        the join read: its clade calls would be judged against sequences they never saw.
-        ``behind`` is the join's ``clades_behind`` (dataset -> (labelled, read))."""
+        """Refuse a PINNED clades version behind the sequences the join read: its clade calls
+        would change if it were relabelled from them. ``behind`` is the join's content-based
+        ``clades_behind`` (dataset -> (labelled, read)). A table labelled from another version
+        with identical call inputs is not behind, so it is read (and recorded in provenance as
+        ``clades_same_content``): refusing it would guard against nothing (ruling, 5 Oct 2026)."""
         wrong = [
             f"clades/{r.dataset}@{r.version} was labelled from "
             + (f"sequences/{r.dataset}@{behind[r.dataset][0]}" if behind[r.dataset][0]
@@ -410,6 +412,11 @@ class StoreColours:
             # clade tables labelled from another sequences version than the join read: dataset
             # -> [the version they labelled, the version read]. Empty when they agree.
             "clades_behind": {d: list(v) for d, v in sorted(self.links.clades_behind.items())},
+            # clade tables labelled from another sequences version whose calls' inputs are
+            # identical: not behind, recorded so the version pair stays visible
+            "clades_same_content": {
+                d: list(v) for d, v in sorted(self.links.clades_same_content.items())
+            },
             # antigens of another lineage than the map's (coloured by the map's row), by code
             "lineage_minority": dict(sorted(minority.items())),
             # how the coloured antigens got their colour, and which had no clade to go by

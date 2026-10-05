@@ -96,6 +96,7 @@ def test_provenance_records_the_pins_and_the_skipped_guard(tmp_path: Path) -> No
     )
     unpinned = colours.for_chart(chart, own).provenance
     assert unpinned["pins"] == {} and "serology_guard" not in unpinned
+    assert unpinned["clades_same_content"] == {}  # nothing read: no version pairs to record
 
     sha = "cd" * 32
     colours.pins = Pins(serology=StoreRef("serology", "all", sha[:16], sha))
