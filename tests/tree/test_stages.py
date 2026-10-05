@@ -53,7 +53,12 @@ open(prefix + ".treefile", "w").write({NEWICK!r} + "\\n")
 """
 
 
-def make_project(root: Path) -> Path:
+FIXTURE_PURPOSE = "test"
+"""The synthetic projects build test trees: a weekly tree must carry pinned clades, which most tests
+do not need (stages.WEEKLY_PURPOSE)."""
+
+
+def make_project(root: Path, purpose: str = FIXTURE_PURPOSE) -> Path:
     """A work area, a store, the export's two files, and a config naming them relatively."""
     root.mkdir(parents=True)
     stub = root / "cmaple-stub"
@@ -88,6 +93,7 @@ asr_backend = "parsimony"
 alignment = "alignment.fasta"
 leaves = "leaves.parquet"
 placement_limits = "placement.tsv"
+purpose = "{purpose}"
 """
     )
     return root / "trees.toml"
@@ -126,7 +132,7 @@ def rules(outgroup: S.Outgroup = OUTGROUP) -> S.SubtypeRules:
 
 def exported_project(root: Path, *, test_only: bool = False, purpose: str | None = None) -> Path:
     """make_project's config, its inputs replaced by an export from its own store."""
-    config = make_project(root)
+    config = make_project(root, purpose or FIXTURE_PURPOSE)
     store = Store.open(root / "store")
     # The dataset the clades step's fallback reads the stored calls from (tests/clades/synthetic).
     fill(store, nextclade=raw_dataset(store, "synthetic", "P"))
@@ -137,8 +143,6 @@ def exported_project(root: Path, *, test_only: bool = False, purpose: str | None
         'alignment = "export/alignment.fasta"\nleaves = "export/leaves.parquet"\n'
         'export = "export/export.json"\n',
     )
-    if purpose is not None:
-        text += f'purpose = "{purpose}"\n'
     config.write_text(text)
     return config
 
@@ -152,7 +156,7 @@ def test_the_stages_run_in_order_and_publish_an_i6_version(tmp_path: Path) -> No
     assert statuses(config) == dict.fromkeys(TREE_STEPS, "ran")
 
     store = Store.open(tmp_path / "p" / "store")
-    ref = store.current("trees", "h3/weekly")
+    ref = store.current("trees", f"h3/{FIXTURE_PURPOSE}")
     version = store.version_dir(ref)
     meta = i6.read_metadata(version)
     assert meta["leaves"] == 5
@@ -257,6 +261,7 @@ def test_a_clade_set_without_clones_fails(tmp_path: Path) -> None:
         clade_agreement=tmp_path / "agreement.tsv",
         clade_conflicts=tmp_path / "conflicts.tsv",
         placement_limits=tmp_path / "placement.tsv",
+        purpose=FIXTURE_PURPOSE,
     )
     with pytest.raises(stages.StageError, match=r"needs \[paths\] nomenclature"):
         stages.clade_source(inputs, None)
@@ -281,10 +286,71 @@ def test_a_clade_set_needs_sibling_conflict_limits(tmp_path: Path) -> None:
         )
 
 
+def weekly_inputs(tmp_path: Path, **clades: object) -> stages.SubtypeInputs:
+    return stages.SubtypeInputs(
+        alignment=tmp_path / "a.fasta",
+        leaves=tmp_path / "l.parquet",
+        placement_limits=tmp_path / "placement.tsv",
+        purpose=stages.WEEKLY_PURPOSE,
+        **clades,  # type: ignore[arg-type]
+    )
+
+
+def test_a_weekly_tree_needs_a_clade_set_and_a_pin(tmp_path: Path) -> None:
+    """2 Oct 2026: a weekly tree published unlabelled, and only the clades publish noticed."""
+    with pytest.raises(stages.StageError, match="needs clade_set and clade_pin"):
+        weekly_inputs(tmp_path)
+
+
+def test_a_weekly_tree_needs_a_pin(tmp_path: Path) -> None:
+    """Unpinned, the labels follow whatever commit the clone happens to be at."""
+    limits = {"clade_agreement": tmp_path / "a.tsv", "clade_conflicts": tmp_path / "c.tsv"}
+    with pytest.raises(stages.StageError, match="needs clade_pin:"):
+        weekly_inputs(tmp_path, clade_set="A(H3N2)", **limits)
+    weekly_inputs(tmp_path, clade_set="A(H3N2)", clade_pin="abc1234", **limits)
+
+
+def test_a_weekly_tree_needs_the_nomenclature_path(tmp_path: Path) -> None:
+    config = make_project(tmp_path / "p", purpose=stages.WEEKLY_PURPOSE)
+    config.write_text(
+        config.read_text()
+        + 'clade_set = "A(H3N2)"\nclade_pin = "abc1234"\nclade_agreement = "agreement.tsv"\n'
+        + 'clade_conflicts = "conflicts.tsv"\n'
+    )
+    with pytest.raises(Exception, match=r"\[paths\] nomenclature .* required"):
+        stages.load_run_config(config)
+
+
+def test_other_purposes_need_no_clades(tmp_path: Path) -> None:
+    """Test and comparison trees (task 5.7's pair) build without a nomenclature."""
+    for purpose in ("test-incr-a", "report"):
+        stages.SubtypeInputs(
+            alignment=tmp_path / "a.fasta",
+            leaves=tmp_path / "l.parquet",
+            placement_limits=tmp_path / "placement.tsv",
+            purpose=purpose,
+        )
+
+
+def test_a_pinned_weekly_tree_runs_through_the_clades_step(tmp_path: Path) -> None:
+    config = exported_project(tmp_path / "p", purpose=stages.WEEKLY_PURPOSE)
+    with_clades(config)
+    clone = tmp_path / "p" / "clones" / "synthetic_HA"
+    head = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    config.write_text(config.read_text() + f'clade_pin = "{head}"\n')
+    assert statuses(config) == dict.fromkeys((*TREE_STEPS, "clades"), "ran")
+    store = Store.open(tmp_path / "p" / "store")
+    meta = i6.read_metadata(store.version_dir(store.current("trees", "h3/weekly")))
+    assert meta["clade_set_version"] == f"synthetic_HA@{head}"
+
+
 def test_inputs_for_an_unconfigured_subtype_are_refused(tmp_path: Path) -> None:
     config = make_project(tmp_path / "p")
     text = config.read_text() + '\n[inputs.h1]\nalignment = "alignment.fasta"\n'
-    config.write_text(text + 'leaves = "leaves.parquet"\nplacement_limits = "placement.tsv"\n')
+    text += 'leaves = "leaves.parquet"\nplacement_limits = "placement.tsv"\n'
+    config.write_text(text + f'purpose = "{FIXTURE_PURPOSE}"\n')
     with pytest.raises(Exception, match="h1"):
         stages.load_run_config(config)
 
@@ -318,7 +384,7 @@ def test_the_clades_step_publishes_clades_from_the_tree_version(tmp_path: Path) 
     with_clades(config)
     assert statuses(config) == dict.fromkeys((*TREE_STEPS, "clades"), "ran")
     store = Store.open(tmp_path / "p" / "store")
-    tree_meta = i6.read_metadata(store.version_dir(store.current("trees", "h3/weekly")))
+    tree_meta = i6.read_metadata(store.version_dir(store.current("trees", f"h3/{FIXTURE_PURPOSE}")))
     assert tree_meta["clade_set_version"].startswith("synthetic_HA@")
     assert store.current("clades", "h3") is not None
 
@@ -444,7 +510,7 @@ def test_subtypes_build_side_by_side(tmp_path: Path) -> None:
     assert sorted(outcomes) == ["h1", "h3"]
     assert all(o.status == "ran" for results in outcomes.values() for o in results)
     store = Store.open(tmp_path / "p" / "store")
-    assert store.current("trees", "h1/weekly") is not None
+    assert store.current("trees", f"h1/{FIXTURE_PURPOSE}") is not None
 
 
 def test_resources_for_an_unknown_stage_are_refused(tmp_path: Path) -> None:
@@ -487,7 +553,7 @@ def test_the_stage_assigns_no_continent_and_says_why(tmp_path: Path) -> None:
     config = make_project(tmp_path / "p")
     statuses(config)
     store = Store.open(tmp_path / "p" / "store")
-    version = store.version_dir(store.current("trees", "h3/weekly"))
+    version = store.version_dir(store.current("trees", f"h3/{FIXTURE_PURPOSE}"))
     assert i6.read_metadata(version)["counts"]["continent_not_assigned"].startswith("no country")
     nodes = i6.read_nodes(version, columns=["is_leaf", "continent"]).to_pylist()
     assert {n["continent"] for n in nodes if n["is_leaf"]} == {None}

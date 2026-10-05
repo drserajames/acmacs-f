@@ -114,6 +114,11 @@ TEST_PURPOSE = "test"
 """A test-only export (a stand-in outgroup) publishes only under a purpose starting with this:
 weekly and report trees are read by people, and must never be rooted on a stand-in."""
 
+WEEKLY_PURPOSE = "weekly"
+"""The tree people read every week, and the one the clades step labels. It must be labelled when it
+is built: on 2 Oct 2026 an H1 weekly tree published with no clade inputs, and nothing refused it
+until the clades publish found it held no clades, days later and after it had become CURRENT."""
+
 CODE_VERSION = 2
 """Bump when a stage's code changes what it writes, so existing records stop counting."""
 
@@ -153,7 +158,7 @@ class SubtypeInputs:
     """The clone's directory name, when it is not the usual one for ``clade_set``."""
     clade_pin: str | None = None
     """The nomenclature commit to use. Checked against the clone, never assumed. Absent: the
-    clone's current commit, read when the pipeline is set up."""
+    clone's current commit, read when the pipeline is set up; a ``weekly`` tree refuses that."""
     placement_limits: Path | None = None
     """``trees/placement.tsv``: the minimum placement correlation per subtype, with its reason
     (af.tree.placement). Required, because every tree is checked: a tree whose leaves sit where
@@ -197,6 +202,14 @@ class SubtypeInputs:
             )
         if self.incremental and self.previous is None:
             raise StageError("incremental = true needs a previous tree to start from")
+        if self.purpose == WEEKLY_PURPOSE:
+            missing = [name for name in ("clade_set", "clade_pin") if getattr(self, name) is None]
+            if missing:
+                raise StageError(
+                    f"a {WEEKLY_PURPOSE!r} tree needs {' and '.join(missing)}: it is labelled "
+                    "when it is built, at a pinned nomenclature commit (with [paths] nomenclature "
+                    "naming the clones); a test or comparison tree uses a purpose of its own"
+                )
 
 
 @dataclass(frozen=True)

@@ -17,6 +17,7 @@ from af.tree.io import i6
 from af.tree.io.fasta import read_alignment
 
 from .test_stages import (
+    FIXTURE_PURPOSE,
     OUTGROUP,
     TREE_STEPS,
     exported_project,
@@ -107,7 +108,7 @@ def test_the_tree_records_the_sequence_version_it_was_built_from(tmp_path: Path)
     sequences = store.current("sequences", "h3")
     build = json.loads((tmp_path / "p/work/trees/h3/build/build.json").read_text())
     assert build["source"]["sequences"] == sequences.to_json()
-    tree = store.current("trees", "h3/weekly")
+    tree = store.current("trees", f"h3/{FIXTURE_PURPOSE}")
     version = store.version_dir(tree)
     meta = i6.read_metadata(version)
     assert (meta["embargoed_leaves"], meta["source"]["test_only"]) == (1, None)
@@ -128,10 +129,11 @@ def test_the_clades_step_labels_from_the_same_sequence_version(tmp_path: Path) -
 
 
 def test_a_test_only_export_builds_only_for_a_test_purpose(tmp_path: Path) -> None:
-    config = exported_project(tmp_path / "weekly", test_only=True)
+    # Any purpose not starting "test": a weekly one would be refused sooner, for lacking clades.
+    config = exported_project(tmp_path / "report", test_only=True, purpose="report")
     with pytest.raises(JobFailed, match="test-only"):
         stages.run(config)
-    assert not (tmp_path / "weekly/work/trees/h3/build/cmaple").exists()  # before CMAPLE
+    assert not (tmp_path / "report/work/trees/h3/build/cmaple").exists()  # before CMAPLE
     config = exported_project(tmp_path / "test", test_only=True, purpose="test-smoke")
     assert statuses(config) == dict.fromkeys(TREE_STEPS, "ran")
     store = Store.open(tmp_path / "test" / "store")
@@ -152,7 +154,7 @@ def test_a_stage_tree_meets_the_clade_stores_identity_checks(tmp_path: Path) -> 
     config = exported_project(tmp_path / "p")
     statuses(config)
     store = Store.open(tmp_path / "p" / "store")
-    version = store.version_dir(store.current("trees", "h3/weekly"))
+    version = store.version_dir(store.current("trees", f"h3/{FIXTURE_PURPOSE}"))
     inputs = json.loads((version / "PROVENANCE.json").read_text())["inputs"]
     sequences = [i["store"] for i in inputs if i.get("store", {}).get("kind") == "sequences"]
     assert len(sequences) == 1
