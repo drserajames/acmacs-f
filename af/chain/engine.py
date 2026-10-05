@@ -41,7 +41,7 @@ from af.chain.config import ChainConfig, TableRef, config_to_json, option_parame
 from af.chain.diagnostics import group_moves, run_threads, step_diagnostics, two_position_points
 from af.chain.starts import finished, problem_digest, read_result, write_problem
 from af.chart.ace import read_chart, read_json, write_chart
-from af.chart.merge import ColumnBasisConvention, MergeOptions, MergeType, merge
+from af.chart.merge import ColumnBasisConvention, MergeOptions, MergeReport, MergeType, merge
 from af.chart.model import Chart, Projection
 from af.chart.procrustes import procrustes
 from af.chart.sera import non_ferret
@@ -538,7 +538,9 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
     o = cfg.options
     options = dataclasses.replace(_merge_options(cfg), merge_type=MergeType.SIMPLE)
     merged: Chart | None = None
-    outcomes: Counter = Counter()
+    # Every merge re-merges all layers, so its report covers the whole chart so far: only the
+    # last one describes the merged chart (summing them counted each cell once per later merge).
+    report: MergeReport | None = None
     removed: dict[str, list[dict]] = {}
     dropped: list[dict] = []
     sera: dict[str, dict] = {}
@@ -553,7 +555,6 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
             merged = table
             continue
         merged, report = merge(merged, table, options)
-        outcomes.update({str(k): v for k, v in report.outcomes.items()})
     assert merged is not None  # ChainConfig refuses a chain without tables
     write_chart(merged, directory / "merge.ace")  # as merged; the adjustments follow
     merged, adjustments = adjust.apply(cfg.column_basis_adjustments, merged)
@@ -595,14 +596,17 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
             "antigens": merged.n_antigens,
             "sera": merged.n_sera,
             "layers": len(merged.titres.layers),
-            "outcomes": dict(outcomes),
+            "outcomes": {str(k): v for k, v in report.outcomes.items()} if report else {},
         },
         **({"removed": removed} if cfg.remove else {}),
         **({"dropped_cells_by_rule": dropped} if dropped else {}),
         **({"column_basis_adjustments": adjustments} if adjustments else {}),
         "non_ferret_sera": sera,
     }
-    diagnostics = step_diagnostics(chart, None, None, None, arrays, mapper.optimiser, cfg)
+    diagnostics = step_diagnostics(chart, None, None, None, arrays, mapper.optimiser, cfg, report)
+    # control_flags are the flags the step's own table newly completes: here that would be the
+    # last table's only, read as the whole map's. Not recorded for a merge_all map.
+    diagnostics.pop("control_flags", None)
     diagnostics.update(run_threads({"scratch": _threads(all_maps)}))
     diagnostics.update(two_position_points(chart, all_maps))
     if o.move_groups:
