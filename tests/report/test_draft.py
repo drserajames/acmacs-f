@@ -149,3 +149,14 @@ def test_both_sides_are_named_in_every_output(tmp_path: Path) -> None:
     default = sides_from(args, {"report": "rep-1", "af": {"commit": "0123456789abcdef"}})
     assert default.ref == f"the reference I7s in {tmp_path / 'ref-i7'}"
     assert default.new == "af's report rep-1 (af 0123456789ab)"
+
+
+def test_a_sera_row_says_ids_were_matched_after_dropping_the_lab_token() -> None:
+    dropped = {"lab": "LABX", "ref": 0, "new": 5}
+    sera = {"only_new_keys": ["a"], "only_ref_keys": [], "serum_id_lab_dropped": dropped}
+    row = {"detail": {"sera": sera}}
+    text = draft._context(row, "sera jaccard")
+    assert text == (
+        "1 af-only, 0 reference-only; matched after dropping a leading 'LABX' from serum ids "
+        "(5 af, 0 reference)"
+    )

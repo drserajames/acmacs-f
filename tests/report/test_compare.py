@@ -935,3 +935,42 @@ def test_maps_with_different_y_axes_are_refused() -> None:
     both = _map(pts, ["X"] * 5)
     both["map"]["y_axis"] = "up"
     assert maps.compare(both, up)["antigens"]["jaccard"] == 1.0
+
+
+def _sera(ids: list[str]) -> list[dict[str, Any]]:
+    return [
+        {"id": f"sr{i}", "name": f"TEST/{90 + i}/2020", "passage_class": "egg", "xy": [i, 1.0],
+         "shown": True, "in_viewport": True, "clade": None, "serum_id": serum_id}
+        for i, serum_id in enumerate(ids)
+    ]  # fmt: skip
+
+
+def test_serum_ids_match_without_the_maps_own_lab_token() -> None:
+    """af writes '<LAB> <id>' where the reference keeps '<id>'; another lab's token stays."""
+    pts = [(float(i), float(i % 3)) for i in range(6)]
+    ref, new = _map(pts, ["X"] * 6), _map(pts, ["X"] * 6)
+    ref["map"]["sera"] = _sera(["F01/99", "F02/99", "OTHERLAB 7"])
+    new["map"]["sera"] = _sera(["LABX F01/99", "LABX F02/99", "LABX OTHERLAB 7"])
+    assert maps.compare(ref, new, "identity")["sera"]["jaccard"] == 0.0  # no lab recorded
+    new["provenance"] = {"inputs": {"chain": {"dataset": "labx/group-labx/merged"}}}
+    sera = maps.compare(ref, new, "identity")["sera"]
+    assert sera["jaccard"] == 1.0
+    assert sera["serum_id_lab_dropped"] == {"lab": "LABX", "ref": 0, "new": 3}
+    # a token naming another lab is not dropped
+    new["map"]["sera"] = _sera(["LABX F01/99", "LABX F02/99", "OTHERLAB 7"])
+    ref["map"]["sera"] = _sera(["F01/99", "F02/99", "7"])
+    sera = maps.compare(ref, new, "identity")["sera"]
+    other = new["map"]["sera"][2]["name"]
+    assert sera["common"] == 2 and sera["only_new_keys"] == [f"{other}|OTHERLAB 7"]
+
+
+def test_ids_that_already_begin_with_the_lab_still_match_and_list_as_drawn() -> None:
+    pts = [(float(i), float(i % 3)) for i in range(6)]
+    ref, new = _map(pts, ["X"] * 6), _map(pts, ["X"] * 6)
+    ref["map"]["sera"] = _sera(["LABX 2001-001", "LABX 2001-002"])
+    new["map"]["sera"] = _sera(["LABX 2001-001", "LABX 2001-003"])
+    new["provenance"] = {"inputs": {"chain": {"dataset": "labx/group-labx/merged"}}}
+    sera = maps.compare(ref, new, "identity")["sera"]
+    assert sera["common"] == 1 and sera["serum_id_lab_dropped"]["ref"] == 2
+    drawn = new["map"]["sera"][1]["name"]
+    assert sera["only_new_keys"] == [f"{drawn}|LABX 2001-003"]  # the id as drawn
