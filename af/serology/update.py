@@ -34,6 +34,7 @@ DATASET = "all"
 STEP = "serology"
 INPUTS = "inputs.json"
 FIX = "run af.serology.update"
+READ = "serology-update"  # the guarded read's name, in provenance and refusals
 
 
 @dataclass
@@ -45,31 +46,45 @@ class UpdateResult:
     report: dict[str, Any] = field(default_factory=dict)
 
 
-def update(store: Store, rules: IdentityRules, *, force: bool = False) -> UpdateResult:
-    """Bring ``serology/all`` up to date with the current tables store."""
-    inputs = store.list_datasets("tables")
-    if not inputs:
-        raise StoreError("no tables datasets in the store: nothing to build serology from")
-    current = _current_or_none(store)
-    reasons = stale(store, rules)
-    if not force and not reasons:
-        assert current is not None  # stale() says so when there is none
-        return UpdateResult(current, built=False, reason="inputs unchanged")
-    covered = _covered(store, current)
-    before = covered["tables"] if covered is not None else {}
-    changed = [ref.dataset for ref in inputs if before.get(ref.dataset) != ref.version]
+def update(
+    store: Store, rules: IdentityRules, *, force: bool = False, ignore_busy: bool = False
+) -> UpdateResult:
+    """Bring ``serology/all`` up to date with the current tables store.
 
-    started = _now()
-    tables = [read_table(path) for _, path in current_tables(store).values()]
-    previous = store.resolve(current) if current is not None else None
+    Everything it reads runs under ``Store.reading`` (as map-build and report-build do): it
+    refuses to start while a batch is publishing tables, and fails if a CURRENT it read moved
+    before it finished, naming the dataset. Without that, a start in the middle of a
+    several-dataset tables publish builds from a half-published set, and since this is itself
+    a publish, :func:`require_current` downstream cannot catch it: the half-published set is
+    what it recorded. The version is published only after the guard has closed cleanly, and
+    its provenance carries what the guard saw (``store_read``). ``ignore_busy`` reads anyway,
+    for diagnosis only; the provenance then names the batches it overrode.
+    """
     with store.build(KIND, DATASET) as builder:
-        report = build(tables, builder.path, rules, previous=previous)
-        _write_inputs(builder.path / INPUTS, inputs, rules)
+        with store.reading(READ, override=ignore_busy) as guard:
+            inputs = store.list_datasets("tables")
+            if not inputs:
+                raise StoreError("no tables datasets in the store: nothing to build serology from")
+            current = _current_or_none(store)
+            reasons = stale(store, rules)
+            if not force and not reasons:
+                assert current is not None  # stale() says so when there is none
+                return UpdateResult(current, built=False, reason="inputs unchanged")
+            covered = _covered(store, current)
+            before = covered["tables"] if covered is not None else {}
+            changed = [ref.dataset for ref in inputs if before.get(ref.dataset) != ref.version]
+
+            started = _now()
+            tables = [read_table(path) for _, path in current_tables(store).values()]
+            previous = store.resolve(current) if current is not None else None
+            report = build(tables, builder.path, rules, previous=previous)
+            _write_inputs(builder.path / INPUTS, inputs, rules)
+        # the guard closed without raising: nothing read moved, so the inputs are one set
         ref = builder.publish(
             Provenance(
                 step=STEP,
                 inputs=tuple(inputs),
-                parameters={"identity_version": rules.version},
+                parameters={"identity_version": rules.version, "store_read": guard.to_json()},
                 started=started,
                 finished=_now(),
             ),
