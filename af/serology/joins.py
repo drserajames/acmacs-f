@@ -27,7 +27,6 @@ it means the clade store is behind the sequence store, or cannot align the seque
 
 from __future__ import annotations
 
-import json
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -37,6 +36,8 @@ from typing import Any
 import pyarrow as pa
 
 from af.chart.model import Chart
+from af.clades.coverage import clades_behind_in_content
+from af.clades.store import CladeStoreError
 from af.seq.matching import Match, SequenceIndex
 from af.seq.matching_rules import MatchingRules
 from af.seq.passage_match import PassageMatcher
@@ -65,9 +66,13 @@ class LinkCounts:
     by_status_and_pairing: dict[tuple[str, str], int] = field(default_factory=dict)
     matched_without_clade_row: int = 0
     matched_with_empty_clade: int = 0
-    # clade dataset -> (sequences version it labelled, or None if its provenance names none,
-    # current sequences version), for every clade table behind the sequence store
+    # clade dataset -> (sequences version it labelled, or None if its provenance names none
+    # or several, sequences version the join read), for every clade table behind in content:
+    # one whose calls would change if it were relabelled from the sequences read
     clades_behind: dict[str, tuple[str | None, str]] = field(default_factory=dict)
+    # the same pair for clade tables labelled from another sequences version whose clade
+    # calls' inputs are identical (af.clades.coverage): not behind, the versions only differ
+    clades_same_content: dict[str, tuple[str, str]] = field(default_factory=dict)
     # the store versions the join read (link_from_store): {"sequences": {dataset: ref json},
     # "clades": [ref json, ...]}, so a result can be reproduced from them (design rule 5)
     refs: dict[str, Any] = field(default_factory=dict)
@@ -600,6 +605,7 @@ def link_from_store(
     clade_paths = None
     clade_refs: list[StoreRef] = []
     behind: dict[str, tuple[str | None, str]] = {}
+    same: dict[str, tuple[str, str]] = {}
     if with_clades:
         clade_refs = list(clades) if clades is not None else list(store.list_datasets("clades"))
         if not clade_refs:
@@ -607,11 +613,12 @@ def link_from_store(
         clade_paths = [
             p for ref in clade_refs for p in sorted(store.resolve(ref).glob("*.parquet"))
         ]
-        behind = _clades_behind(store, clade_refs, read)
+        behind, same = _clades_behind(store, clade_refs, read)
     elif clades is not None:
         raise StoreError("clades pinned for a sequences-only join (with_clades=False)")
     counts = link_sequences(con, indexes, isolates, clade_paths, class_of)
     counts.clades_behind = behind
+    counts.clades_same_content = same
     counts.refs = {
         "sequences": {d: ref.to_json() for d, ref in read.items()},
         "clades": [ref.to_json() for ref in clade_refs],
@@ -621,26 +628,33 @@ def link_from_store(
 
 def _clades_behind(
     store: Any, refs: Sequence[Any], read: Mapping[str, StoreRef]
-) -> dict[str, tuple[str | None, str]]:
-    """Clade tables labelled from another sequences version than the one the join read.
+) -> tuple[dict[str, tuple[str | None, str]], dict[str, tuple[str, str]]]:
+    """Clade tables behind the sequences the join read, and those only labelled from another
+    version.
 
-    A clade table covers the sequences version its provenance names; sequences added since
-    have no row until the clade table is refreshed, and show up as "matched without clade
-    row". This says why, per dataset, instead of leaving the count to be puzzled over.
+    A clade table covers the sequences its provenance names; sequences added since have no row
+    until it is refreshed, and show up as "matched without clade row". This says why, per
+    dataset, instead of leaving the count to be puzzled over. It compares content
+    (:func:`af.clades.coverage.clades_behind_in_content`), not version labels: a sequences
+    republish that changes nothing the clade calls read (a name fixed, a protein padded) leaves
+    the table current, and a relabel would return the same table. Such tables are returned
+    separately, with their version pair, so the difference stays visible.
     """
-    out: dict[str, tuple[str | None, str]] = {}
+    behind: dict[str, tuple[str | None, str]] = {}
+    same: dict[str, tuple[str, str]] = {}
     for ref in refs:
-        provenance = json.loads((store.resolve(ref) / "PROVENANCE.json").read_text())
-        labelled = [
-            item["store"]["version"]
-            for item in provenance.get("inputs", [])
-            if "store" in item and item["store"].get("kind") == "sequences"
-            and item["store"].get("dataset") == ref.dataset
-        ]  # fmt: skip
-        current = (
+        sequences = (
             read[ref.dataset] if ref.dataset in read else store.current("sequences", ref.dataset)
-        ).version
-        version = labelled[0] if len(labelled) == 1 else None
-        if version != current:
-            out[ref.dataset] = (version, current)
-    return out
+        )
+        try:
+            content = clades_behind_in_content(store, ref, sequences)
+        except CladeStoreError:
+            # provenance names no sequences version of its own (or several): cannot be current
+            behind[ref.dataset] = (None, sequences.version)
+            continue
+        pair = (content.labelled.version, sequences.version)
+        if content.behind:
+            behind[ref.dataset] = pair
+        elif not content.same_version:
+            same[ref.dataset] = pair
+    return behind, same

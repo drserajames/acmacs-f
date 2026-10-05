@@ -32,6 +32,11 @@ def _name(prefix: str, number: int) -> str:
     return "/".join([prefix, "EXAMPLETOWN", str(number), "2021"])
 
 
+# what the clade fallback reads (af.clades.fallback.STORE_COLUMNS) is there, so a clade
+# table's content check (af.clades.coverage) can fingerprint the version
+_SEQ_COLUMNS = "epi_isl, accession, seq_hash, aa_aligned, nextclade_subclade, nextclade_qc_status"
+
+
 def _sequences(
     store: Store,
     tmp_path: Path,
@@ -60,14 +65,15 @@ def _sequences(
             f"TO '{isolates.as_posix()}' (FORMAT parquet)"
         )
         if partial:
-            seqs = ", ".join(f"('EPI_ISL_{n}', 'ACC{n}', 'hash{n}', '{'K' * 40}', {n in partial})"
-                             for n, _ in numbers)  # fmt: skip
-            columns = "epi_isl, accession, seq_hash, aa_aligned, aa_partial"
+            seqs = ", ".join(f"('EPI_ISL_{n}', 'ACC{n}', 'hash{n}', '{'K' * 40}', 'P.1', 'good', "
+                             f"{n in partial})" for n, _ in numbers)  # fmt: skip
+            columns = _SEQ_COLUMNS + ", aa_partial"
         else:
             seqs = ", ".join(
-                f"('EPI_ISL_{n}', 'ACC{n}', 'hash{n}', '{'K' * 40}')" for n, _ in numbers
+                f"('EPI_ISL_{n}', 'ACC{n}', 'hash{n}', '{'K' * 40}', 'P.1', 'good')"
+                for n, _ in numbers
             )
-            columns = "epi_isl, accession, seq_hash, aa_aligned"
+            columns = _SEQ_COLUMNS
         duckdb.execute(
             f"COPY (SELECT * FROM (VALUES {seqs}) AS v({columns})) "
             f"TO '{sequences.as_posix()}' (FORMAT parquet)"
@@ -210,6 +216,7 @@ def test_clade_tables_behind_the_sequence_store_are_reported(tmp_path: Path, syn
     counts = link_from_store(con, store, rules, with_clades=True)
     assert counts.clades_behind == {}  # labels the current sequences version
 
+    # a republish that changes nothing the clade calls read: versions differ, content does not
     newer = tmp_path / "newer.parquet"
     duckdb.execute(f"COPY (SELECT 1 AS x) TO '{newer.as_posix()}' (FORMAT parquet)")
     with store.build("sequences", "h3") as builder:
@@ -225,9 +232,44 @@ def test_clade_tables_behind_the_sequence_store_are_reported(tmp_path: Path, syn
         builder.publish(_provenance("sequences-test"))  # fmt: skip
     con = query.connect(store.resolve(store.current("serology", "all")))
     counts = link_from_store(con, store, rules, with_clades=True)
+    same = store.current("sequences", "h3").version
+    assert same != labelled.version
+    assert counts.clades_behind == {}
+    assert counts.clades_same_content == {"h3": (labelled.version, same)}
+
+    # a sequence's Nextclade call changes: a relabel would change the table, so it is behind
+    moved = tmp_path / "moved.parquet"
+    duckdb.execute(
+        f"COPY (SELECT epi_isl, accession, seq_hash, aa_aligned, 'Q.1' AS nextclade_subclade, "
+        f"nextclade_qc_status FROM read_parquet('"
+        f"{(store.resolve(labelled) / 'sequences/pull=test/part-0.parquet').as_posix()}')) "
+        f"TO '{moved.as_posix()}' (FORMAT parquet)"
+    )
+    with store.build("sequences", "h3") as builder:
+        builder.link(
+            store.resolve(labelled) / "isolates/pull=test/part-0.parquet",
+            "isolates/pull=test/part-0.parquet",
+        )
+        builder.copy(moved, "sequences/pull=test/part-0.parquet")
+        builder.publish(_provenance("sequences-test-moved"))  # fmt: skip
+    con = query.connect(store.resolve(store.current("serology", "all")))
+    counts = link_from_store(con, store, rules, with_clades=True)
     current = store.current("sequences", "h3").version
-    assert current != labelled.version
     assert counts.clades_behind == {"h3": (labelled.version, current)}
+    assert counts.clades_same_content == {}
+
+    # a table whose provenance names no sequences version cannot be shown current
+    unlabelled = tmp_path / "unlabelled.parquet"
+    duckdb.execute(
+        f"""COPY (SELECT * FROM (VALUES ('EPI_ISL_1', 'ACC1', 'Q.1', 'fallback'))
+            AS v(epi_isl, accession, clade, method))
+            TO '{unlabelled.as_posix()}' (FORMAT parquet)"""
+    )
+    with store.build("clades", "h3") as builder:
+        builder.copy(unlabelled, "assignments.parquet")
+        builder.publish(_provenance("clades-test-unlabelled"))
+    counts = link_from_store(con, store, rules, with_clades=True)
+    assert counts.clades_behind == {"h3": (None, current)}
 
 
 def test_rule_tables_reach_the_matcher(tmp_path: Path, syn: Any) -> None:
