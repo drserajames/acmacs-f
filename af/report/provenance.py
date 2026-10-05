@@ -11,6 +11,10 @@ builder:
   **stale** figure: one not pinned in the config resting on any version that is not its
   dataset's CURRENT. However recently it was drawn, it shows old data (today's stale-figure
   failures, B-report-layer §4.1);
+- compares a clades table with the sequences a figure read by **content**, not version label
+  (``af.clades.coverage``): labelled from another sequences version whose clade-call inputs are
+  identical, it is recorded as ``clades_same_content`` and the older label is not followed;
+  behind in content, or not labelled from exactly one version, it is refused;
 - writes the report manifest in the store's snapshot format (``af.store.write_manifest``), which
   is what "reproduce this report" starts from.
 
@@ -24,6 +28,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from af.clades.coverage import clades_behind_in_content
+from af.clades.store import CladeStoreError
 from af.report.figures import Resolved
 from af.store import Store, StoreError, StoreRef, check_refs
 from af.store.manifest import PROVENANCE
@@ -51,12 +57,19 @@ class StoreUse:
     refs: list[StoreRef] = field(default_factory=list)
     used_by: dict[tuple[str, str], list[str]] = field(default_factory=dict)
     not_from_store: list[str] = field(default_factory=list)
+    # clade dataset -> (sequences version it was labelled from, sequences version the figures
+    # read), for clade tables labelled from another version whose clade calls' inputs are
+    # identical: not behind, the versions only differ (af.serology.joins uses the same name)
+    clades_same_content: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
             "refs": [ref.to_json() for ref in self.refs],
             "used_by": {f"{k}/{d}": slots for (k, d), slots in sorted(self.used_by.items())},
             "not_from_store": self.not_from_store,
+            "clades_same_content": {
+                d: list(pair) for d, pair in sorted(self.clades_same_content.items())
+            },
         }
 
 
@@ -96,6 +109,37 @@ def upstream_refs(store: Store, ref: StoreRef) -> list[StoreRef]:
     return [StoreRef.from_json(item["store"]) for item in record["inputs"] if "store" in item]
 
 
+def clades_label_only(
+    store: Store, clades: StoreRef, read: dict[str, StoreRef], use: StoreUse
+) -> StoreRef | None:
+    """The sequences version ``clades`` cites if it differs from the figures' only in label.
+
+    Checked when the figures read a version of the sequences dataset the table is named for,
+    by content (:func:`af.clades.coverage.clades_behind_in_content`). Same content: recorded in
+    ``use.clades_same_content`` and returned, so the walk does not follow the older label.
+    Behind in content, or a table whose provenance names no sequences version or several, is
+    refused. Same version, or no sequences read: None.
+    """
+    sequences = read.get(clades.dataset)
+    if sequences is None:
+        return None
+    try:
+        result = clades_behind_in_content(store, clades, sequences)
+    except CladeStoreError as err:
+        raise ProvenanceError(str(err)) from err
+    if result.behind:
+        raise ProvenanceError(
+            f"clades/{clades.dataset} {clades.version} was labelled from "
+            f"sequences/{clades.dataset} {result.labelled.version} and is behind "
+            f"{sequences.version}, which the figures read, in content: its clade calls would "
+            "change (refresh the clades table and redraw)"
+        )
+    if result.same_version:
+        return None
+    use.clades_same_content[clades.dataset] = (result.labelled.version, sequences.version)
+    return result.labelled
+
+
 def expand_upstream(use: StoreUse, store: Store) -> None:
     """Add every version the figures' versions were built from, transitively (in place).
 
@@ -105,6 +149,8 @@ def expand_upstream(use: StoreUse, store: Store) -> None:
     """
     by_dataset: dict[tuple[str, str], dict[StoreRef, set[str]]] = {}
     queue = [(ref, slot) for ref in use.refs for slot in use.used_by[(ref.kind, ref.dataset)]]
+    read = {ref.dataset: ref for ref in use.refs if ref.kind == "sequences"}
+    labels: dict[StoreRef, StoreRef | None] = {}
     seen: set[tuple[StoreRef, str]] = set()
     while queue:
         ref, slot = queue.pop()
@@ -112,7 +158,10 @@ def expand_upstream(use: StoreUse, store: Store) -> None:
             continue
         seen.add((ref, slot))
         by_dataset.setdefault((ref.kind, ref.dataset), {}).setdefault(ref, set()).add(slot)
-        queue.extend((up, slot) for up in upstream_refs(store, ref))
+        if ref.kind == "clades" and ref not in labels:
+            labels[ref] = clades_label_only(store, ref, read, use)
+        label_only = labels.get(ref)
+        queue.extend((up, slot) for up in upstream_refs(store, ref) if up != label_only)
     conflicts = [
         f"{kind}/{dataset}: "
         + "; ".join(f"{ref.version} under {', '.join(sorted(s))}" for ref, s in versions.items())

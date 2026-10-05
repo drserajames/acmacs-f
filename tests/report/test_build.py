@@ -16,6 +16,8 @@ from af.store import Provenance, Store, StoreError, StoreRef, read_manifest
 from af.util.artefacts import sha256_path
 from af.util.config import ConfigError
 
+from ..clades import test_coverage as coverage
+
 T0 = dt.datetime(2026, 9, 1, 12, tzinfo=dt.UTC)
 CONFIG = """
 [report]
@@ -277,6 +279,53 @@ def test_current_chain_on_old_tables_is_stale(tmp_path: Path) -> None:
         _real_figure(root, slot, [chain], T0 + dt.timedelta(hours=1), "v1")
     _publish(store, "tables", "labx/m", "tables v2")  # new tables; the chain was not rebuilt
     with pytest.raises(ProvenanceError, match="stale: .* rest on tables/labx/m"):
+        build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                               tmp_path / "m.json", deep=False)  # fmt: skip
+
+
+def _clade_coloured(tmp: Path, grow: bool) -> tuple[Path, Path, Store, StoreRef, StoreRef]:
+    """Figures coloured from the store: sequences republished after the clades were labelled.
+
+    ``grow`` adds a clade call (behind in content); otherwise only a name changes (same content).
+    """
+    cfg, root = _setup(tmp, allow=False)
+    store, dataset, first, clades = coverage.labelled(tmp)
+    rows = [(*row[:4], row[4].upper()) for row in coverage.ROWS]
+    if grow:
+        rows.append(("EPI_ISL_920003", "EPI920003", "P", "good", "virus three"))
+    read = coverage.version(store, rows, dataset)
+    for slot in load(cfg).all_slots():
+        _real_figure(root, slot, [read, clades], T0 + dt.timedelta(hours=1), "v1")
+    return cfg, root, store, first, read
+
+
+def test_clades_labelled_from_same_content_sequences_are_recorded_not_refused(
+    tmp_path: Path,
+) -> None:
+    """Two sequences labels under one figure, identical clade-call inputs: info, not a conflict."""
+    cfg, root, store, first, read = _clade_coloured(tmp_path, grow=False)
+    use = build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                                 tmp_path / "m.json", deep=False)  # fmt: skip
+    assert use.clades_same_content == {"h3": (first.version, read.version)}
+    assert first not in use.refs and read in use.refs  # the older label is not followed
+    assert use.to_json()["clades_same_content"] == {"h3": [first.version, read.version]}
+
+
+def test_clades_behind_in_content_are_refused(tmp_path: Path) -> None:
+    cfg, root, store, _, read = _clade_coloured(tmp_path, grow=True)
+    with pytest.raises(ProvenanceError, match=f"behind {read.version}.* in content"):
+        build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                               tmp_path / "m.json", deep=False)  # fmt: skip
+
+
+def test_clades_naming_no_sequences_version_are_refused(tmp_path: Path) -> None:
+    cfg, root = _setup(tmp_path, allow=False)
+    store = Store.create(tmp_path / "store")
+    read = _publish(store, "sequences", "h3", "sequences v1")
+    clades = _publish(store, "clades", "h3", "clades with no sequences input")
+    for slot in load(cfg).all_slots():
+        _real_figure(root, slot, [read, clades], T0 + dt.timedelta(hours=1), "v1")
+    with pytest.raises(ProvenanceError, match="names 0 sequences/h3 versions"):
         build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
                                tmp_path / "m.json", deep=False)  # fmt: skip
 
