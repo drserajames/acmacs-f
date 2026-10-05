@@ -13,7 +13,7 @@ from pathlib import Path
 from af.store import Store
 from af.tree import stages
 
-from .test_stages import make_project
+from .test_stages import FIXTURE_PURPOSE, make_project
 
 
 def test_the_driver_runs_its_jobs_when_started_with_dash_m(tmp_path: Path) -> None:
@@ -26,7 +26,7 @@ def test_the_driver_runs_its_jobs_when_started_with_dash_m(tmp_path: Path) -> No
     )
     assert result.returncode == 0, result.stderr[-2000:]
     store = Store.open(tmp_path / "p" / "store")
-    assert store.current("trees", "h3/weekly") is not None
+    assert store.current("trees", f"h3/{FIXTURE_PURPOSE}") is not None
     job_log = (tmp_path / "p/work/trees/h3/build/job.log").read_text()
     assert "__main__" not in job_log
 
@@ -45,4 +45,6 @@ def test_a_relative_config_path_reaches_the_jobs(tmp_path: Path) -> None:
         text=True,
     )
     assert result.returncode == 0, result.stderr[-2000:]
-    assert Store.open(tmp_path / "p" / "store").current("trees", "h3/weekly") is not None
+    assert (
+        Store.open(tmp_path / "p" / "store").current("trees", f"h3/{FIXTURE_PURPOSE}") is not None
+    )
