@@ -9,9 +9,12 @@ Which points are the same across tables is `identity.py`.
 
 from __future__ import annotations
 
+import copy
 import enum
 from collections import Counter
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -76,6 +79,54 @@ class MergeReport:
     column_basis_slack: dict[int, float] = field(
         default_factory=dict
     )  # serum -> forced - table-only
+    # merge_many only: each table's own point counts, in order (the fields above describe the
+    # last step and the final table, as a fold's last report does)
+    steps: list[MergeStep] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe, with stable keys: ints, floats, strings and lists only."""
+        return {
+            **MergeStep.of(self).to_dict(),
+            "outcomes": {str(k): int(v) for k, v in sorted(self.outcomes.items())},
+            "dropped": [[int(i), int(j), str(o)] for i, j, o in self.dropped],
+            "column_basis_slack": {
+                str(int(j)): float(v) for j, v in sorted(self.column_basis_slack.items())
+            },
+            "steps": [step.to_dict() for step in self.steps],
+        }
+
+
+@dataclass(frozen=True)
+class MergeStep:
+    """What one table did to the points of a merge_many (its cells are merged at the end)."""
+
+    common_antigens: int
+    common_sera: int
+    new_antigens: int
+    new_sera: int
+    cheating_assay: bool
+    skipped_reference_antigens: int
+
+    @classmethod
+    def of(cls, report: MergeReport) -> MergeStep:
+        return cls(
+            report.common_antigens,
+            report.common_sera,
+            len(report.new_antigens),
+            len(report.new_sera),
+            report.cheating_assay,
+            report.skipped_reference_antigens,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "common_antigens": int(self.common_antigens),
+            "common_sera": int(self.common_sera),
+            "new_antigens": int(self.new_antigens),
+            "new_sera": int(self.new_sera),
+            "cheating_assay": bool(self.cheating_assay),
+            "skipped_reference_antigens": int(self.skipped_reference_antigens),
+        }
 
 
 # ----------------------------------------------------------------------
@@ -209,50 +260,21 @@ def merge_layers(
 def merge(
     chart1: Chart, chart2: Chart, options: MergeOptions | None = None
 ) -> tuple[Chart, MergeReport]:
-    """Merge chart2 (normally one new table) into chart1 (the running merge)."""
+    """Merge chart2 (normally one new table) into chart1 (the running merge).
+
+    The result shares chart1's layer dicts and every point's `extra` dict with the inputs
+    (titres are immutable). Copying them at every step of a fold would cost time that grows
+    with the square of the number of tables; `merge_many` builds its own and shares nothing.
+    """
     options = options or MergeOptions()
     for chart, which in ((chart1, "primary"), (chart2, "secondary")):
         if dups := find_duplicates(chart):
             raise MergeError(f"{which} chart has duplicates: {dups[:5]}")
     report = MergeReport()
-
-    ag_match = match_points(chart1.antigens, chart2.antigens, _antigen_key)
-    sr_match = match_points(chart1.sera, chart2.sera, _serum_key)
-
-    secondary_antigens = list(range(chart2.n_antigens))
-    if options.combine_cheating_assays:
-        secondary_antigens = _cheating_assay_test_antigens(
-            chart1, chart2, ag_match, sr_match, report
-        )
-
-    # target indexes: all of chart1, then chart2's new points in their order
     antigens = [Antigen(**vars(a)) for a in chart1.antigens]
-    ag2_target: dict[int, int] = {}
-    for j in secondary_antigens:
-        if j in ag_match:
-            ag2_target[j] = ag_match[j]
-            _update_antigen(antigens[ag_match[j]], chart2.antigens[j])
-            report.common_antigens += 1
-        else:
-            ag2_target[j] = len(antigens)
-            report.new_antigens.append(len(antigens))
-            antigens.append(Antigen(**vars(chart2.antigens[j])))
     sera = [Serum(**vars(s)) for s in chart1.sera]
-    sr2_target: dict[int, int] = {}
-    for j in range(chart2.n_sera):
-        if j in sr_match:
-            sr2_target[j] = sr_match[j]
-            report.common_sera += 1
-        else:
-            sr2_target[j] = len(sera)
-            report.new_sera.append(len(sera))
-            sera.append(Serum(**vars(chart2.sera[j])))
-
     layers = list(chart_layers(chart1))  # chart1's indexes are unchanged in the merge
-    for layer2 in chart_layers(chart2):
-        layers.append(
-            {(ag2_target[i], sr2_target[j]): t for (i, j), t in layer2.items() if i in ag2_target}
-        )
+    layers += _join(chart1, chart2, antigens, sera, options, report, _shallow)
 
     table, forced = merge_layers(layers, len(antigens), len(sera), options, report)
     merged = Chart(
@@ -267,6 +289,137 @@ def merge(
     if options.merge_type == MergeType.INCREMENTAL and chart1.projections:
         merged.projections = [_incremental_projection(chart1, merged)]
     return merged, report
+
+
+def merge_many(
+    charts: Sequence[Chart], options: MergeOptions | None = None
+) -> tuple[Chart, MergeReport]:
+    """Merge charts in order: the same chart as folding `merge` over them, cells merged once.
+
+    A fold re-merges every cell of the running merge at each step, so its cost grows with the
+    square of the number of tables. Here each step only matches points and maps the new table's
+    layers, exactly as `merge` does (`_join`); the layers are merged once at the end. Points,
+    their order, cheating assays, the table, forced column bases and dropped cells are those
+    of the fold (tests/chart/test_merge_many.py). The report is the fold's last report plus
+    `steps`, each table's point counts. Nothing mutable is shared with the inputs.
+
+    Simple merges only: an incremental merge carries chart1's layout, which a fold rebuilds
+    at every step. One chart is returned as a copy, unmerged, with an empty report.
+    """
+    options = options or MergeOptions(merge_type=MergeType.SIMPLE)
+    if options.merge_type != MergeType.SIMPLE:
+        raise MergeError("merge_many makes simple merges only")
+    if not charts:
+        raise MergeError("merge_many needs at least one chart")
+    for k, chart in enumerate(charts):
+        if dups := find_duplicates(chart):
+            raise MergeError(f"chart {k} has duplicates: {dups[:5]}")
+    first = charts[0]
+    if len(charts) == 1:
+        return copy.deepcopy(first), MergeReport()
+    antigens: list[Antigen] = [_own(a) for a in first.antigens]  # type: ignore[misc]
+    sera: list[Serum] = [_own(s) for s in first.sera]  # type: ignore[misc]
+    layers = [dict(layer) for layer in chart_layers(first)]
+    ag_keys = {antigen_key(a): i for i, a in enumerate(antigens) if not a.distinct}
+    sr_keys = {serum_key(s): i for i, s in enumerate(sera) if not s.distinct}
+    running, info, steps = first, first.info, []
+    for chart2 in charts[1:]:
+        report = MergeReport()
+        layers += _join(running, chart2, antigens, sera, options, report, _own)
+        info = _merge_info(running, chart2)
+        dups = _new_duplicates(antigens, report.new_antigens, ag_keys, antigen_key, "AG")
+        dups += _new_duplicates(sera, report.new_sera, sr_keys, serum_key, "SR")
+        if dups:
+            raise MergeError(f"merge has duplicates: {dups[:5]}")
+        steps.append(MergeStep.of(report))
+        # the running merge as the next step reads it: its points and layers, never its table
+        running = Chart(info=info, antigens=antigens, sera=sera, titres=Titres([], layers))
+    table, forced = merge_layers(layers, len(antigens), len(sera), options, report)
+    report.steps = steps
+    merged = Chart(
+        info=copy.deepcopy(info),
+        antigens=antigens,
+        sera=sera,
+        titres=Titres(table=table, layers=layers),
+        forced_column_bases=forced,
+    )
+    return merged, report
+
+
+def _new_duplicates(
+    points: list, new: list[int], keys: dict[tuple, int], key: Callable, kind: str
+) -> list[str]:
+    """The fold's duplicate check on the merged chart, for the points this step added: the
+    points already merged were checked before, and matching never changes a point's key.
+    Listed in the order the fold lists them (first occurrence in the merged chart)."""
+    dups: dict[tuple, int] = {}
+    for i in new:
+        if points[i].distinct:
+            continue
+        k = key(points[i])
+        if k in keys:
+            dups.setdefault(k, keys[k])
+        else:
+            keys[k] = i
+    return [f"{kind} {k}" for k in sorted(dups, key=dups.__getitem__)]
+
+
+def _shallow(point: Antigen | Serum) -> Antigen | Serum:
+    return type(point)(**vars(point))
+
+
+def _own(point: Antigen | Serum) -> Antigen | Serum:
+    return type(point)(**{**vars(point), "extra": copy.deepcopy(point.extra)})
+
+
+def _join(
+    chart1: Chart,
+    chart2: Chart,
+    antigens: list[Antigen],
+    sera: list[Serum],
+    options: MergeOptions,
+    report: MergeReport,
+    copy_point: Callable,
+) -> list[Layer]:
+    """Match chart2's points to chart1's and return chart2's layers in the merge's numbering.
+
+    `antigens` and `sera` hold copies of chart1's points, in chart1's order: matched points are
+    updated in place and chart2's new points appended (copied by `copy_point`), so all of
+    chart1 keeps its indexes and the new points follow in chart2's order.
+    """
+    ag_match = match_points(chart1.antigens, chart2.antigens, _antigen_key)
+    sr_match = match_points(chart1.sera, chart2.sera, _serum_key)
+
+    secondary_antigens = list(range(chart2.n_antigens))
+    if options.combine_cheating_assays:
+        secondary_antigens = _cheating_assay_test_antigens(
+            chart1, chart2, ag_match, sr_match, report
+        )
+
+    ag2_target: dict[int, int] = {}
+    for j in secondary_antigens:
+        if j in ag_match:
+            ag2_target[j] = ag_match[j]
+            _update_antigen(antigens[ag_match[j]], chart2.antigens[j])
+            report.common_antigens += 1
+        else:
+            ag2_target[j] = len(antigens)
+            report.new_antigens.append(len(antigens))
+            antigens.append(copy_point(chart2.antigens[j]))
+    sr2_target: dict[int, int] = {}
+    for j in range(chart2.n_sera):
+        if j in sr_match:
+            sr2_target[j] = sr_match[j]
+            report.common_sera += 1
+        else:
+            sr2_target[j] = len(sera)
+            report.new_sera.append(len(sera))
+            sera.append(copy_point(chart2.sera[j]))
+
+    return [
+        {(ag2_target[i], sr2_target[j]): t for (i, j), t in layer2.items() if i in ag2_target}
+        for layer2 in chart_layers(chart2)
+    ]
 
 
 def _update_antigen(target: Antigen, src: Antigen) -> None:

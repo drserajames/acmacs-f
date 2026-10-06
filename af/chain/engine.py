@@ -41,7 +41,14 @@ from af.chain.config import ChainConfig, TableRef, config_to_json, option_parame
 from af.chain.diagnostics import group_moves, run_threads, step_diagnostics, two_position_points
 from af.chain.starts import finished, problem_digest, read_result, write_problem
 from af.chart.ace import read_chart, read_json, write_chart
-from af.chart.merge import ColumnBasisConvention, MergeOptions, MergeReport, MergeType, merge
+from af.chart.merge import (
+    ColumnBasisConvention,
+    MergeOptions,
+    MergeReport,
+    MergeType,
+    merge,
+    merge_many,
+)
 from af.chart.model import Chart, Projection
 from af.chart.procrustes import procrustes
 from af.chart.sera import non_ferret
@@ -537,10 +544,7 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
     the merged chart from scratch."""
     o = cfg.options
     options = dataclasses.replace(_merge_options(cfg), merge_type=MergeType.SIMPLE)
-    merged: Chart | None = None
-    # Every merge re-merges all layers, so its report covers the whole chart so far: only the
-    # last one describes the merged chart (summing them counted each cell once per later merge).
-    report: MergeReport | None = None
+    tables: list[Chart] = []
     removed: dict[str, list[dict]] = {}
     dropped: list[dict] = []
     sera: dict[str, dict] = {}
@@ -551,11 +555,14 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
             removed[t.table_id] = rule_report
         table, cells = select.drop_cells(cfg.drop_cells, t.table_id, table)
         dropped += cells
-        if merged is None:
-            merged = table
-            continue
-        merged, report = merge(merged, table, options)
-    assert merged is not None  # ChainConfig refuses a chain without tables
+        tables.append(table)
+    # The merge a fold of merge() makes, each cell merged once; its report describes the merged
+    # chart (a fold's last report). ChainConfig refuses a chain without tables.
+    report: MergeReport | None = None
+    if len(tables) == 1:
+        merged = tables[0]
+    else:
+        merged, report = merge_many(tables, options)
     write_chart(merged, directory / "merge.ace")  # as merged; the adjustments follow
     merged, adjustments = adjust.apply(cfg.column_basis_adjustments, merged)
     arrays = merged.optimiser_arrays(
