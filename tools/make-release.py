@@ -65,7 +65,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -283,9 +282,19 @@ def earlier_releases(releases: Path, platform_name: str) -> list[Path]:
     return [release for _, release in sorted(found, reverse=True)]
 
 
+FINISHED = re.compile(r'^finished = "([^"]+)"$', re.MULTILINE)
+
+
 def finished_at(release: Path) -> datetime.datetime:
-    with (release / RELEASE_FILE).open("rb") as handle:
-        return datetime.datetime.fromisoformat(tomllib.load(handle)["finished"])
+    """When a release was finished, from the line every make-release version writes.
+
+    Read with a pattern, not tomllib: the sites run make-release under their bootstrap
+    python, which may predate 3.11.
+    """
+    found = FINISHED.search((release / RELEASE_FILE).read_text())
+    if not found:
+        raise SystemExit(f"{release / RELEASE_FILE} has no finished time")
+    return datetime.datetime.fromisoformat(found[1])
 
 
 def choose_lock(
