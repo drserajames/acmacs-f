@@ -556,6 +556,26 @@ def test_a_b_pull_names_both_lineage_datasets(
         build.pull_datasets(config, "definitive-2021-0312-h9n2")
 
 
+def test_an_a_pull_names_its_dataset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # source_subtypes says "A(H3N2)" and placement says "A / H3N2": the same subtype
+    config = b_config(
+        tmp_path, b_set(tmp_path, monkeypatch),
+        placement=[build.PlacementConfig(SUBTYPE, "", "h3", "no lineage for A(H3N2)"),
+                   *b_config(tmp_path, tmp_path).placement],
+        source_subtypes={"h3n2": "A(H3N2)", "b": "B"},
+    )  # fmt: skip
+    assert build.pull_datasets(config, PULL) == ["h3"]
+    assert build.pull_datasets(config, B_PULL) == ["bvic", "byam"]
+
+
+@pytest.mark.parametrize(
+    ("gisaid", "terms"),
+    [("A / H3N2", "A(H3N2)"), ("A / H1", "A(H1)"), ("B", "B"), (" A /  H1N1 ", "A(H1N1)")],
+)
+def test_name_terms(gisaid: str, terms: str) -> None:
+    assert build.name_terms(gisaid) == terms
+
+
 def test_the_marker_is_held_for_the_whole_run_and_refuses_readers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
