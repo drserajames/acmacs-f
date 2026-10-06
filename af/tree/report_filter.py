@@ -65,6 +65,8 @@ class TitratedIndex:
             for antigen in table.antigens:
                 n_antigens += 1
                 names.setdefault(name_key(antigen.name), set()).add(table.lab)
+                if antigen.epi_isl:  # the lab's own pairing, where the table format carries one
+                    epi.setdefault(antigen.epi_isl, set()).add(table.lab)
                 for field_name in epi_fields:
                     value = str(antigen.source.get(field_name) or "").strip()
                     if value:

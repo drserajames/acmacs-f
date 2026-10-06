@@ -20,6 +20,7 @@ names (``parent``, ``edge``, ``leaf_id``, ``name``, ``date``, ``date_precision``
 
 from __future__ import annotations
 
+import datetime
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -241,6 +242,125 @@ def read_nodes(directory: Path, columns: list[str] | None = None) -> pa.Table:
 def read_ancestral(directory: Path) -> dict[str, str]:
     table = pq.read_table(Path(directory) / ANCESTRAL_FILE)
     return dict(zip(table["node_id"].to_pylist(), table["nucleotides"].to_pylist(), strict=True))
+
+
+def read(directory: Path, alignment: Mapping[str, str]) -> PopulatedTree:
+    """A published version back as the :class:`PopulatedTree` that wrote it.
+
+    For steps that derive a tree from a published one without rebuilding (the report tree,
+    af.tree.report_stage). ``alignment`` gives the leaves' sequences, which I6 does not hold (they
+    are in the export the tree was built from); every leaf must be in it. The ASR's run time is
+    not stored, so ``states.seconds`` is 0.0. Proof of the round trip: :func:`write` of the result
+    reproduces ``nodes.parquet`` and ``tree.json`` (tests/tree/test_i6_read.py).
+    """
+    from af.tree.asr.base import AncestralStates
+    from af.tree.populate import CladeCall, LeafRecord, PopulatedTree
+
+    directory = Path(directory)
+    meta = read_metadata(directory)
+    tree = newick.load(directory / TREE_FILE)
+    labels = {id(node): node.name for node in tree.internal()}
+    tree.assign_ids()
+    for node in tree.internal():
+        if labels[id(node)] != node.id_hex:
+            raise I6Error(
+                f"{directory}: internal label {labels[id(node)]!r} is not its id {node.id_hex}"
+            )
+        node.name = None
+    rows = read_nodes(directory).to_pylist()
+    by_hex = {node.id_hex: node for node in tree.preorder()}
+    if [row["node_id"] for row in rows] != [node.id_hex for node in tree.preorder()]:
+        raise I6Error(f"{directory}: nodes.parquet is not the tree's pre-order")
+    leaves: dict[str, LeafRecord] = {}
+    clades: dict[str, CladeCall] = {}
+    ml_lengths: dict[int, float] = {}
+    nuc_changes: dict[int, int] = {}
+    aa: dict[int, str] = {}
+    aa_subs: dict[int, list[str]] = {}
+    nuc_subs: dict[int, list[str]] = {}
+    flags: dict[int, list[str]] = {}
+    continents: dict[str, str | None] = {}
+    titrated: dict[str, bool] = {}
+    titrated_by: dict[str, list[str]] = {}
+    for row in rows:
+        node = by_hex[row["node_id"]]
+        node.branch_length = row["edge"]  # full precision; tree.nwk rounds to 12 digits
+        ml_lengths[node.node_id] = row["edge_ml"]
+        if row["nuc_changes"] is not None:
+            nuc_changes[node.node_id] = row["nuc_changes"]
+        if row["aa"] is not None:
+            aa[node.node_id] = row["aa"]
+        if row["aa_subs"]:
+            aa_subs[node.node_id] = row["aa_subs"]
+        if row["nuc_subs"]:
+            nuc_subs[node.node_id] = row["nuc_subs"]
+        if row["flags"]:
+            flags[node.node_id] = row["flags"]
+        if row["clade_support"] is not None:
+            clades[row["node_id"]] = CladeCall(
+                row["clade"],
+                row["clade_support"],
+                row["clade_unobservable"],
+                row["clade_inherited"],
+            )
+        if not row["is_leaf"]:
+            continue
+        key = row["leaf_id"]
+        sequence = alignment.get(key)
+        if sequence is None:
+            raise I6Error(f"{directory}: leaf {key!r} has no sequence in the alignment given")
+        leaves[key] = LeafRecord(
+            epi_isl=row["epi_isl"],
+            accession=row["accession"],
+            name=row["name"],
+            nucleotides=sequence,
+            collection_date=None
+            if row["date"] is None
+            else datetime.date.fromisoformat(row["date"]),
+            date_precision=row["date_precision"],
+            collection_date_first=row["collection_date_first"],
+            collection_date_last=row["collection_date_last"],
+            country=row["country"],
+            region=row["region"],
+            embargoed=row["embargoed"],
+        )
+        continents[key] = row["continent"]
+        if row["titrated"] is not None:
+            titrated[key] = row["titrated"]
+            titrated_by[key] = row["titrated_by"]
+    asr = meta["asr"]
+    states = None
+    if asr is not None:
+        states = AncestralStates(
+            nucleotides={int(h, 16): seq for h, seq in read_ancestral(directory).items()},
+            backend=asr["backend"],
+            backend_version=asr["version"],
+            seconds=0.0,
+            parameters=asr["parameters"],
+        )
+    return PopulatedTree(
+        tree=tree,
+        subtype=meta["subtype"],
+        alignment_length=meta["alignment_length"],
+        branch_scale=meta["branch_scale"],
+        leaves=leaves,
+        states=states,
+        ml_lengths=ml_lengths,
+        nuc_changes=nuc_changes,
+        aa=aa,
+        aa_subs=aa_subs,
+        nuc_subs=nuc_subs,
+        clades=clades,
+        clade_set_version=meta["clade_set_version"],
+        clade_parents=dict(meta["clade_parents"]),
+        continents=continents,
+        flags=flags,
+        excluded=read_excluded(directory),
+        titrated=titrated,
+        titrated_by=titrated_by,
+        counts=dict(meta["counts"]),
+        gaps_reconstructed=True if asr is None else asr["reconstructs_gaps"],
+    )
 
 
 def draw_columns(directory: Path) -> Mapping[str, list[Any]]:
