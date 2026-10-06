@@ -82,6 +82,8 @@ def _context(row: dict[str, Any], check: str) -> str:
         if lab and (lab["new"] or lab["ref"]):
             text += (f"; matched after dropping a leading '{lab['lab']}' from serum ids "
                      f"({lab['new']} af, {lab['ref']} reference)")  # fmt: skip
+        if rules := maps.serum_rules_text(g):
+            text += f"; serum ids matched {rules}"
         return text
     if check in ("p95 displacement", "frac moved > 1", "rotation deg"):
         p = d.get("procrustes", {})

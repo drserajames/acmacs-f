@@ -695,6 +695,8 @@ def _one_sided(slot: str, antigens: dict[str, Any], sera: dict[str, Any]) -> lis
             out.append(f"- {slot} sera: serum ids compared without a leading '{lab['lab']}' "
                        f"(dropped from {lab['new']} af and {lab['ref']} reference ids), so a "
                        "matched pair need not have identical ids")  # fmt: skip
+        if group == "sera" and (rules := maps.serum_rules_text(g)):
+            out.append(f"- {slot} sera: serum ids matched {rules} (Sarah, 6 Oct)")
         shared = g.get("identity_fallback", {}).get("shared_identity", 0)
         if shared:
             out.append(f"- {slot} {group}: {shared} point(s) share an identity (isolate/year, "

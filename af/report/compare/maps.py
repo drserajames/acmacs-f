@@ -30,11 +30,19 @@ ae round keeps the lab's own id, which for some labs already begins with the lab
 that one token is dropped, on both sides, so a serum id of another lab's form is untouched; the
 counts dropped are reported (``sera.serum_id_lab_dropped``) so a matched pair is not read as
 two identical ids.
+
+Then, by Sarah's rulings on serum ids (DECISIONS, 6 Oct), also on both sides and also counted
+(``sera.serum_id_normalised``): letter case is ignored; a trailing bleed-day suffix (``-14D``) is
+ignored, the id itself keeping it ("Keep the suffix, but merge without the suffix"); and an id
+that only says it is unknown (``UNKNOWN-<passage>``) is no id, so the serum is matched as one
+with none. Qualifier words (a source or kind written in the id) are part of the identity and are
+NOT ignored: "Not all NIB/CDC sera will be the same".
 """
 
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -129,6 +137,49 @@ def drop_lab_token(points: Sequence[Point], lab: str) -> tuple[list[Point], int]
             dropped += 1
         out.append(point)
     return out, dropped
+
+
+BLEED_DAY = re.compile(r"-\d{1,3}D$")
+UNKNOWN_ID = re.compile(r"^UNKNOWN-[A-Z&/]+$")
+
+
+def match_serum_ids(points: Sequence[Point]) -> tuple[list[Point], dict[str, int]]:
+    """Serum ids as matching reads them (see the module docstring); counts of each change."""
+    counts = {"case": 0, "bleed_day_suffix": 0, "unknown_as_none": 0}
+    out = []
+    for point in points:
+        drawn = point.get("serum_id")
+        if not drawn:
+            out.append(point)
+            continue
+        serum_id: str | None = drawn.upper()
+        counts["case"] += serum_id != drawn
+        if serum_id and BLEED_DAY.search(serum_id):
+            serum_id = BLEED_DAY.sub("", serum_id)
+            counts["bleed_day_suffix"] += 1
+        if serum_id and UNKNOWN_ID.match(serum_id):
+            serum_id = None
+            counts["unknown_as_none"] += 1
+        if serum_id != drawn:
+            point = {**point, "serum_id": serum_id,
+                     DRAWN_SERUM_ID: point.get(DRAWN_SERUM_ID, drawn)}  # fmt: skip
+        out.append(point)
+    return out, counts
+
+
+SERUM_RULE_WORDS = {"case": "letter case", "bleed_day_suffix": "a bleed-day suffix",
+                    "unknown_as_none": "an UNKNOWN id"}  # fmt: skip
+
+
+def serum_rules_text(sera: dict[str, Any]) -> str:
+    """What serum-id matching ignored, with counts per side, or "" when it ignored nothing."""
+    rules = sera.get("serum_id_normalised", {})
+    parts = [
+        f"{words} ({rules['new'][k]} af, {rules['ref'][k]} reference)"
+        for k, words in SERUM_RULE_WORDS.items()
+        if rules and (rules["new"][k] or rules["ref"][k])
+    ]
+    return "ignoring " + ", ".join(parts) if parts else ""
 
 
 def normalise_key(key: str, how: str) -> str:
@@ -398,9 +449,12 @@ def compare(ref: dict[str, Any], new: dict[str, Any], how: str = "name") -> dict
     if lab:
         ref_sera, ref_dropped = drop_lab_token(ref_sera, lab)
         new_sera, new_dropped = drop_lab_token(new_sera, lab)
+    ref_sera, ref_rules = match_serum_ids(ref_sera)
+    new_sera, new_rules = match_serum_ids(new_sera)
     sera = _group(ref_sera, new_sera, how, clades=False)
     if lab:
         sera["serum_id_lab_dropped"] = {"lab": lab, "ref": ref_dropped, "new": new_dropped}
+    sera["serum_id_normalised"] = {"ref": ref_rules, "new": new_rules}
     ag_pairs, sr_pairs = antigens.pop("_pairs"), sera.pop("_pairs")
     out: dict[str, Any] = {
         "ref": ref["title"], "new": new["title"], "match": how,
