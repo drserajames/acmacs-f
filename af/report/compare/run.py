@@ -29,7 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from af.report.compare import geo, maps, trees
+from af.report.compare import ae_hash, geo, maps, trees
+from af.store import Store
 from af.store.work import PathsConfig
 from af.util.config import ConfigError, load_config
 
@@ -372,9 +373,13 @@ def load_limits(path: Path) -> Limits:
 
 def compare_report(
     record: dict[str, Any], reference: Path, limits: Limits, how: str,
-    clades: CladesConfig | None = None,
+    clades: CladesConfig | None = None, store: Store | None = None,
 ) -> tuple[list[dict[str, Any]], int]:  # fmt: skip
-    """Compare every figure in a build ``record``; return the rows and the number failing."""
+    """Compare every figure in a build ``record``; return the rows and the number failing.
+
+    ``store`` is needed only for tree figures whose leaves are EPI_ISL keyed, which are matched
+    to the reference by sequence (:mod:`af.report.compare.ae_hash`).
+    """
     manifest = record
     if limits.adoption.status not in ("provisional", "final"):
         raise ValueError(f"adoption.status: {limits.adoption.status!r} not provisional|final")
@@ -428,7 +433,9 @@ def compare_report(
             rows.append({"slot": slot, "status": status, "geo_checks": checks, "detail": res})
         elif new["kind"] == "tree":
             clade_set = clade_set_for(new, clades, clade_cache) if clades else None
-            res = trees.compare_figures(json.loads(ref_path.read_text()), new, clade_set)
+            hashes, source = ae_hash.figure_hashes(store, new)
+            res = trees.compare_figures(json.loads(ref_path.read_text()), new, clade_set, hashes)
+            res["matching"].update(source)
             checks = tree_checks(res, limits.tree)
             apply_expected(slot, checks, limits.expected)
             status = slot_status(checks)
@@ -609,6 +616,17 @@ def markdown(
                          + " | ".join(_cell(c) for c in row["tree_checks"]) + " |")  # fmt: skip
             notes += [f"- {row['slot']} / {c['check']}: {c['expected']}"
                       for c in row["tree_checks"] if "expected" in c]  # fmt: skip
+            m = d.get("matching", {})
+            if m.get("how") == "sequence, then name":
+                q = m["sequences"]
+                notes.append(
+                    f"- {row['slot']}: leaves paired by ae sequence hash {m['by_sequence']} "
+                    f"({m['by_sequence_named']} of them by isolate name within a sequence), by "
+                    f"isolate name {m['by_name']}; af leaves with no sequence "
+                    f"{m['new_without_sequence']} ({m.get('sequences_version')}). Distinct "
+                    f"sequences drawn: ref {q['ref']}, af {q['new']}, both {q['common']} "
+                    f"(jaccard {q['jaccard']:.3f})"
+                )
             sec = d["sections"]
             for side in ("ref", "new"):
                 if sec["unresolved"][side]:
@@ -721,11 +739,17 @@ def main(argv: list[str] | None = None) -> int:
         "--clades", type=Path,
         help="clades config (TOML): map tree clade labels to canonical names before comparing",
     )  # fmt: skip
+    parser.add_argument(
+        "--store", type=Path,
+        help="the af store: needed when a tree figure's leaves are EPI_ISL keyed, to match them "
+        "to the reference by sequence",
+    )  # fmt: skip
     args = parser.parse_args(argv)
     limits = load_limits(args.limits)
     clades = load_clades(args.clades) if args.clades else None
     manifest = json.loads(args.record.read_text())
-    rows, failed = compare_report(manifest, args.reference, limits, args.match, clades)
+    store = Store.open(args.store) if args.store else None
+    rows, failed = compare_report(manifest, args.reference, limits, args.match, clades, store)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "COMPARISON.json").write_text(json.dumps(rows, indent=1))
     sides = sides_from(args, manifest)

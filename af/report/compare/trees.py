@@ -261,6 +261,95 @@ def _figure_leaves(doc: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], int]
     return unique, sum(n for n in counts.values() if n > 1)
 
 
+ISOLATE = re.compile(r"^(?:[AB](?:\([^)]*\))?/)?(.*?/\d{4})")
+
+
+def isolate_key(name: str) -> str:
+    """Type prefix and anything after the year dropped, spelling-normalised.
+
+    ae's leaf names carry the passage after the year (``<place>/<number>/<year>_<passage>``);
+    af's carry the type before the place. Both reduce to the isolate.
+    """
+    from af.report.compare.maps import spelling_key
+
+    m = ISOLATE.match(name.upper())
+    return spelling_key(m.group(1) if m else strain_key(name))
+
+
+def _sequence_keyed(
+    ref: dict[str, Any], new: dict[str, Any], new_hashes: dict[str, str]
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any]]:
+    """Drawn leaves of both figures keyed for pairing: by ae sequence hash, then by isolate name.
+
+    Several leaves can carry one sequence on either side (isolates with identical sequences), in
+    different numbers. Within a sequence, leaves pair by isolate name first, then the rest in tree
+    order: identical sequences are interchangeable for order, clade and depth. Leaves left over,
+    and leaves with no sequence, are paired by isolate name when it is unique on both sides.
+    Counts say how each pair was made; ``sequences`` compares the distinct sequences drawn.
+    """
+    from af.report.compare.ae_hash import reference_hash
+
+    rdrawn = [leaf for leaf in ref["tree"]["leaves"] if leaf["shown"]]
+    ndrawn = [leaf for leaf in new["tree"]["leaves"] if leaf["shown"]]
+    rgroups: dict[str, list[dict[str, Any]]] = {}
+    ngroups: dict[str, list[dict[str, Any]]] = {}
+    rest_ref = [leaf for leaf in rdrawn if not reference_hash(str(leaf["id"]))]
+    rest_new = [leaf for leaf in ndrawn if str(leaf["id"]) not in new_hashes]
+    for leaf in rdrawn:
+        if h := reference_hash(str(leaf["id"])):
+            rgroups.setdefault(h, []).append(leaf)
+    for leaf in ndrawn:
+        if h := new_hashes.get(str(leaf["id"])):
+            ngroups.setdefault(h, []).append(leaf)
+    counts = {"by_sequence": 0, "by_sequence_named": 0, "by_name": 0,
+              "new_without_sequence": len(rest_new)}  # fmt: skip
+    ri: dict[str, dict[str, Any]] = {}
+    ni: dict[str, dict[str, Any]] = {}
+    for h in sorted(rgroups):
+        rs = sorted(rgroups[h], key=lambda leaf: leaf["order"])
+        ns = sorted(ngroups.get(h, []), key=lambda leaf: leaf["order"])
+        if not ns:
+            rest_ref += rs
+            continue
+        pairs, left = [], []
+        for r in rs:
+            same = next((n for n in ns if isolate_key(n["name"]) == isolate_key(r["name"])), None)
+            if same is None:
+                left.append(r)
+            else:
+                ns.remove(same)
+                pairs.append((r, same))
+        counts["by_sequence_named"] += len(pairs)
+        pairs += list(zip(left, ns, strict=False))
+        rest_ref += left[len(ns) :]
+        rest_new += ns[len(left) :]
+        for i, (r, n) in enumerate(pairs):
+            ri[f"#{h}:{i}"], ni[f"#{h}:{i}"] = r, n
+        counts["by_sequence"] += len(pairs)
+    rest_new += [leaf for h, group in sorted(ngroups.items()) if h not in rgroups for leaf in group]
+    rnames = Counter(isolate_key(leaf["name"]) for leaf in rest_ref)
+    nnames = Counter(isolate_key(leaf["name"]) for leaf in rest_new)
+    by_name = {
+        isolate_key(leaf["name"]): leaf
+        for leaf in rest_ref
+        if rnames[isolate_key(leaf["name"])] == 1
+    }
+    paired: set[int] = set()
+    for leaf in rest_new:
+        key = isolate_key(leaf["name"])
+        if nnames[key] == 1 and key in by_name:
+            r = by_name.pop(key)
+            ri[f"n:{key}"], ni[f"n:{key}"] = r, leaf
+            paired.update((id(r), id(leaf)))
+            counts["by_name"] += 1
+    ri.update({f"@r{i}": x for i, x in enumerate(x for x in rest_ref if id(x) not in paired)})
+    ni.update({f"@n{i}": x for i, x in enumerate(x for x in rest_new if id(x) not in paired)})
+    rh, nh = set(rgroups), set(ngroups)
+    sequences = {"ref": len(rh), "new": len(nh), "common": len(rh & nh),
+                 "jaccard": len(rh & nh) / max(1, len(rh | nh))}  # fmt: skip
+    return ri, ni, {**counts, "sequences": sequences}
+
+
 def _spearman(x: list[float], y: list[float]) -> float:
     """Rank correlation (no ties expected: positions are distinct)."""
     n = len(x)
@@ -280,7 +369,10 @@ def _spearman(x: list[float], y: list[float]) -> float:
 
 
 def compare_figures(
-    ref: dict[str, Any], new: dict[str, Any], clade_set: Any = None
+    ref: dict[str, Any],
+    new: dict[str, Any],
+    clade_set: Any = None,
+    new_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Same-science comparison of two tree-figure I7s: which leaves, their order, clades, sections.
 
@@ -295,12 +387,23 @@ def compare_figures(
     local sub-groups fold into their upstream parent. Labels that map to nothing are kept as
     "unmapped:<label>" (their own group) and listed, never dropped. Without a clade set, labels
     are compared as written.
+
+    With ``new_hashes`` (af leaf id -> ae sequence hash, :mod:`af.report.compare.ae_hash`),
+    leaves are paired by sequence first and by name second (:func:`_sequence_keyed`); the counts
+    are in ``matching``. Without them, by spelling-normalised strain name only.
     """
-    ri, rdup = _figure_leaves(ref)
-    ni, ndup = _figure_leaves(new)
+    if new_hashes is None:
+        ri, rdup = _figure_leaves(ref)
+        ni, ndup = _figure_leaves(new)
+        matching: dict[str, Any] = {"how": "name"}
+    else:
+        ri, ni, counts = _sequence_keyed(ref, new, new_hashes)
+        rdup = ndup = 0
+        matching = {"how": "sequence, then name", **counts}
     common = sorted(ri.keys() & ni.keys())
     out: dict[str, Any] = {
         "ref_drawn": len(ri), "new_drawn": len(ni), "common": len(common),
+        "matching": matching,
         "ambiguous_dropped": {"ref": rdup, "new": ndup},
         "jaccard": len(common) / max(1, len(ri.keys() | ni.keys())),
         "only_ref_keys": sorted(ri[k]["name"] for k in ri.keys() - ni.keys()),
