@@ -123,3 +123,196 @@ def test_stage_times_are_logged_and_summarised(
     assert mr.stage_summary() == "export=2 environment=118 verify=5"
     log = capsys.readouterr().out
     assert "(export: 2 s)" in log and "(environment: 118 s)" in log and "(verify: 5 s)" in log
+
+
+# Package locks. Explicit-lock lines in micromamba's format; the packages are public conda
+# packages, the versions invented.
+def lock_text(platform_name: str, packages: dict[str, str]) -> str:
+    head = f"# created by micromamba\n# platform: {platform_name}\n@EXPLICIT\n"
+    lines = [
+        f"https://conda.anaconda.org/conda-forge/{platform_name}/{name}-{vb}.conda#00{i}"
+        for i, (name, vb) in enumerate(sorted(packages.items()))
+    ]
+    return head + "\n".join(lines) + "\n"
+
+
+FREEZE = "acmacs-f @ file:///r/src\nnumpy @ file:///b/numpy\npytest==9.0.0\nruff==0.16.0\n"
+
+
+def make_release(
+    root: Path,
+    name: str,
+    *,
+    platform_name: str,
+    env_yml: str,
+    finished: str,
+    packages: dict[str, str],
+    freeze: str = FREEZE,
+) -> Path:
+    release = root / name
+    (release / "src").mkdir(parents=True)
+    (release / "src" / "environment.yml").write_text(env_yml)
+    (release / "conda-explicit.txt").write_text(lock_text(platform_name, packages))
+    (release / "pip-freeze.txt").write_text(freeze)
+    (release / "RELEASE.toml").write_text(f'commit = "{name}"\nfinished = "{finished}"\n')
+    return release
+
+
+PKGS = {"python": "3.12.1-h0_0", "nextclade": "3.23.0-h1_0", "sqlite": "3.53.4-h2_1"}
+
+
+@pytest.fixture
+def releases(tmp_path: Path) -> Path:
+    """Three releases: two osx-arm64 with one environment.yml, one linux-64, and a
+    half-made one (no RELEASE.toml) that must never be chosen."""
+    make_release(
+        tmp_path,
+        "aaa",
+        platform_name="osx-arm64",
+        env_yml="e1",
+        finished="2026-10-01T10:00:00+00:00",
+        packages=PKGS,
+    )
+    make_release(
+        tmp_path,
+        "bbb",
+        platform_name="osx-arm64",
+        env_yml="e1",
+        finished="2026-10-02T09:00:00+00:00",
+        packages={**PKGS, "nextclade": "3.24.0-h1_0"},
+    )
+    make_release(
+        tmp_path,
+        "ccc",
+        platform_name="linux-64",
+        env_yml="e1",
+        finished="2026-10-03T09:00:00+00:00",
+        packages=PKGS,
+    )
+    half = make_release(
+        tmp_path,
+        "ddd",
+        platform_name="osx-arm64",
+        env_yml="e1",
+        finished="2026-10-04T09:00:00+00:00",
+        packages=PKGS,
+    )
+    (half / "RELEASE.toml").unlink()
+    return tmp_path
+
+
+def test_lock_platform_is_read_from_the_lock(mr: ModuleType) -> None:
+    assert mr.lock_platform(lock_text("linux-64", PKGS)) == "linux-64"
+    with pytest.raises(SystemExit, match="platform"):
+        mr.lock_platform("@EXPLICIT\nhttps://x/osx-arm64/a-1-0.conda\n")
+
+
+def test_earlier_releases_are_this_platforms_complete_ones_newest_first(
+    mr: ModuleType, releases: Path
+) -> None:
+    assert [r.name for r in mr.earlier_releases(releases, "osx-arm64")] == ["bbb", "aaa"]
+    assert [r.name for r in mr.earlier_releases(releases, "linux-64")] == ["ccc"]
+
+
+def test_same_environment_yml_replays_the_newest_lock_on_this_platform(
+    mr: ModuleType, releases: Path
+) -> None:
+    choice = mr.choose_lock(releases, b"e1", "osx-arm64", resolve=False)
+    assert (choice.replay.name, choice.previous.name) == ("bbb", "bbb")
+    assert "replayed the lock of bbb (osx-arm64)" in choice.reason
+
+
+def test_a_lock_is_never_replayed_on_another_platform(mr: ModuleType, releases: Path) -> None:
+    """ccc (linux-64) is the newest release with this environment.yml; osx must not take it,
+    and the first build on a new platform solves afresh and says so."""
+    assert mr.choose_lock(releases, b"e1", "osx-arm64", resolve=False).replay.name == "bbb"
+    first = mr.choose_lock(releases, b"e1", "linux-aarch64", resolve=False)
+    assert (first.replay, first.previous) == (None, None)
+    assert "first release on linux-aarch64" in first.reason
+
+
+def test_changed_environment_yml_or_resolve_solves_afresh(mr: ModuleType, releases: Path) -> None:
+    changed = mr.choose_lock(releases, b"e2", "osx-arm64", resolve=False)
+    assert changed.replay is None and changed.previous.name == "bbb"
+    assert "environment.yml changed since bbb" in changed.reason
+    forced = mr.choose_lock(releases, b"e1", "osx-arm64", resolve=True)
+    assert forced.replay is None and forced.previous.name == "bbb" and "--resolve" in forced.reason
+
+
+def test_package_section_is_generated_from_the_two_locks(mr: ModuleType) -> None:
+    old = lock_text("osx-arm64", PKGS)
+    new = lock_text(
+        "osx-arm64",
+        {**PKGS, "nextclade": "3.24.0-h1_0", "sqlite": "3.53.4-h2_102", "zlib": "1.3-h3_0"},
+    )
+    choice = mr.LockChoice(
+        None, Path("/r/bbb"), "osx-arm64", "solved afresh (osx-arm64): --resolve"
+    )
+    section = mr.package_section(
+        choice, (old, FREEZE), new, FREEZE.replace("ruff==0.16.0", "ruff==0.16.1")
+    )
+    assert section.splitlines() == [
+        "# packages: solved afresh (osx-arm64): --resolve",
+        "# packages vs bbb: conda 3 changed/added/removed of 4; pip pins 1 changed/added/removed",
+        "#   conda nextclade 3.23.0 h1_0 -> 3.24.0 h1_0",
+        "#   conda sqlite 3.53.4 h2_1 -> 3.53.4 h2_102",
+        "#   conda + zlib 1.3 h3_0",
+        "#   pip ruff 0.16.0 -> 0.16.1",
+    ]
+    first = mr.LockChoice(
+        None, None, "linux-64", "solved afresh: the first release on linux-64 in /r"
+    )
+    assert "no earlier release on linux-64" in mr.package_section(first, None, new, FREEZE)
+
+
+def test_contents_pr_lines_still_grep_cleanly_under_the_package_header(mr: ModuleType) -> None:
+    """Consumers grep '^#182' in CONTENTS.txt: package lines start '# ', never '#<digit>'."""
+    choice = mr.LockChoice(None, Path("/r/bbb"), "osx-arm64", "x")
+    new = lock_text("osx-arm64", {**PKGS, "python": "3.12.2-h0_0"})
+    section = mr.package_section(choice, (lock_text("osx-arm64", PKGS), FREEZE), new, FREEZE)
+    assert all(line.startswith("# ") for line in section.splitlines())
+
+
+def test_pip_pins_skip_url_lines_and_names_normalise(mr: ModuleType) -> None:
+    pins = mr.pip_pins("acmacs-f @ file:///s\nPygments==2.21.0\nast_serialize==0.12.1\n")
+    assert pins == {"pygments": "Pygments==2.21.0", "ast-serialize": "ast_serialize==0.12.1"}
+
+
+def test_replay_check_ignores_where_af_came_from_but_nothing_else(
+    mr: ModuleType, releases: Path
+) -> None:
+    bbb = releases / "bbb"
+    lock = (bbb / "conda-explicit.txt").read_text()
+    editable = "# Editable install with no version control (acmacs-f==0.1)\n-e /w/acmacs-f-x\n"
+    mr.check_replay(bbb, lock, editable + FREEZE.replace("acmacs-f @ file:///r/src\n", ""))
+    with pytest.raises(SystemExit, match="conda-explicit.txt differs"):
+        mr.check_replay(bbb, lock.replace("3.24.0", "3.25.0"), FREEZE)
+    with pytest.raises(SystemExit, match="pip-freeze.txt differs"):
+        mr.check_replay(bbb, lock, FREEZE.replace("ruff==0.16.0", "ruff==0.16.1"))
+
+
+def test_dev_env_refuses_a_lock_for_another_platform(mr: ModuleType, releases: Path) -> None:
+    """Checked before anything is created, so no micromamba is needed to see the refusal."""
+    import subprocess
+
+    other = "ccc" if mr.conda_platform() != "linux-64" else "bbb"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "tools" / "dev-env.py"),
+            "--release",
+            str(releases / other),
+            "--prefix",
+            str(releases / "env"),
+            "--worktree",
+            str(REPO_ROOT),
+            "--micromamba",
+            "/nonexistent/micromamba",
+            "--mamba-root",
+            str(releases / "m"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0 and "this machine is" in result.stderr
+    assert not (releases / "env").exists()
