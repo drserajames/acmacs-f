@@ -36,7 +36,7 @@ from .locations import ChineseLocations
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
 from .rules import Rules
-from .sheet import Sheet, SheetError, apply_cell_fixes, load
+from .sheet import Sheet, SheetError, apply_cell_fixes, load_or_error
 
 FORMAT_LABEL = "AC Excel format 2.1"
 ASSAYS = {"HI": "HI"}
@@ -59,7 +59,10 @@ def read(paths: list[Path], rules: Rules, locations: ChineseLocations, *, lab: s
             "sha256": hashlib.sha256(data).hexdigest(),
             "reader": "af.tables.ac21",
         }
-        for sheet in load(path):
+        sheets = load_or_error(path, result.errors)
+        if sheets is None:
+            continue
+        for sheet in sheets:
             if not sheet.find(re.escape(FORMAT_LABEL)):
                 result.skipped_tests.append(f"{sheet.where(0)}: no '{FORMAT_LABEL}' label")
                 continue

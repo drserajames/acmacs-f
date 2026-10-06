@@ -219,20 +219,20 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
             settings.locations.locdb, settings.locations.chinese_aliases
         )
         for inputs in settings.ac21:
-            files = _held_out(_dated_files(inputs), inputs, rules, report)
+            files = _folder_files(inputs, rules, report, errors)
             result = ac21.read(files, rules, locations, lab=inputs.lab)
             _add_workbooks(inputs, files, result, tables, report, errors)
     for inputs in settings.niid:
         from . import niid
 
-        files = _held_out(_dated_files(inputs), inputs, rules, report)
+        files = _folder_files(inputs, rules, report, errors)
         _add_workbooks(
             inputs, files, niid.read(files, rules, lab=inputs.lab), tables, report, errors
         )
     for vinputs in settings.vidrl:
         from . import vidrl
 
-        files = _held_out(_dated_files(vinputs), vinputs, rules, report)
+        files = _folder_files(vinputs, rules, report, errors)
         result = vidrl.read(
             files, rules, lab=vinputs.lab, subtype=vinputs.subtype, lineage=vinputs.lineage
         )
@@ -240,7 +240,7 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
     for cinputs in settings.crick:
         from . import crick
 
-        files = _held_out(_dated_files(cinputs), cinputs, rules, report)
+        files = _folder_files(cinputs, rules, report, errors)
         result = crick.read(
             files, rules, lab=cinputs.lab, subtype=cinputs.subtype, lineage=cinputs.lineage
         )
@@ -367,29 +367,41 @@ def _held_out(
     return kept
 
 
+def _folder_files(
+    inputs: AC21Inputs | VIDRLInputs, rules: Rules, report: list[str], errors: list[str]
+) -> list[Path]:
+    """The folder's workbooks to read: dated on or after ``start`` and not held out. An
+    undated file name is counted as an error here and the rest of the folder is still read."""
+    files, undated = _dated_files(inputs)
+    errors.extend(undated)
+    return _held_out(files, inputs, rules, report)
+
+
 def _file_date(path: Path) -> str | None:
     m = re.search(r"(\d{4})(\d{2})(\d{2})", path.stem)
     return dt.date(int(m[1]), int(m[2]), int(m[3])).isoformat() if m else None
 
 
-def _dated_files(inputs: AC21Inputs | VIDRLInputs) -> list[Path]:
+def _dated_files(inputs: AC21Inputs | VIDRLInputs) -> tuple[list[Path], list[str]]:
     """Workbooks in the folder dated on or after ``start``; Excel lock files (~$) are not
-    workbooks. A workbook whose name carries no date is an error, not silently skipped."""
+    workbooks. A workbook whose name carries no date is an error, not silently skipped: it is
+    returned as one, per file, so that one bad name does not stop the rest of the folder."""
     if not inputs.dir.is_dir():
         raise FileNotFoundError(f"workbook folder missing: {inputs.dir}")
     start = dt.date.fromisoformat(inputs.start).isoformat()
     if missing := [n for n in inputs.exclude if not (inputs.dir / n).is_file()]:
         raise FileNotFoundError(f"{inputs.dir}: excluded workbooks not found: {missing}")
-    out = []
+    out, errors = [], []
     for path in sorted(inputs.dir.glob("*.xlsx")):
         if path.name.startswith("~$") or path.name in inputs.exclude:
             continue
         day = _file_date(path)
         if day is None:
-            raise ValueError(f"{path}: no YYYYMMDD date in the file name")
+            errors.append(f"{path}: no YYYYMMDD date in the file name")
+            continue
         if dt.date.fromisoformat(day) >= dt.date.fromisoformat(start):
             out.append(path)
-    return out
+    return out, errors
 
 
 def _read_cdc(inputs: CDCInputs, rules: Rules) -> tuple[list[Table], list[str], list[str]]:
@@ -446,7 +458,7 @@ def _input_files(settings: TablesSettings) -> list[Path]:
         *settings.crick,
     ]
     for inputs in folders:
-        files += _dated_files(inputs)
+        files += _dated_files(inputs)[0]  # an undated name is no input: the read reports it
     files += [s.file for s in settings.crick_sheets]
     return files
 

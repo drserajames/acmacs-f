@@ -72,7 +72,7 @@ from .cdc import ReadResult
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
 from .rules import Rules
-from .sheet import Sheet, SheetError, apply_cell_fixes, load
+from .sheet import Sheet, SheetError, apply_cell_fixes, load_or_error
 
 FERRET = re.compile(r"\s*Ferret\s+number\s*", re.IGNORECASE)
 PASSAGE_LABEL = re.compile(r"\s*Passage(\s+history)?\s*", re.IGNORECASE)
@@ -126,10 +126,8 @@ def read(
             "sha256": hashlib.sha256(data).hexdigest(),
             "reader": "af.tables.crick",
         }
-        try:
-            workbook = load(path)
-        except Exception as err:  # openpyxl raises zip and XML errors of many kinds
-            result.errors.append(f"{path.name}: not a readable workbook ({type(err).__name__})")
+        workbook = load_or_error(path, result.errors)
+        if workbook is None:
             continue
         file_date = _file_date(path)
         read_here, errors_before = 0, len(result.errors)

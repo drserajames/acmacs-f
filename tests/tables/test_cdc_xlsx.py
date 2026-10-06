@@ -8,6 +8,8 @@ import pytest
 
 from af.tables.rules import Rules
 
+from .broken import broken_workbooks
+
 openpyxl = pytest.importorskip("openpyxl")
 from af.tables import cdc_xlsx  # noqa: E402
 
@@ -188,3 +190,14 @@ def test_a_cell_fix_repairs_a_passage_date(tmp_path: Path, rules: Rules):
     (table,) = cdc_xlsx.read([workbook(tmp_path / "fix.xlsx")], rules).tables
     assert table.antigens[0].passage_date == "2030-07-18"
     assert any("fixed as" in w for w in table.warnings)
+
+
+def test_an_unreadable_workbook_is_an_error_and_the_rest_are_read(tmp_path: Path, rules: Rules):
+    good = workbook(tmp_path / "run.xlsx")
+    empty, corrupt = broken_workbooks(good, "empty.xlsx", "corrupt.xlsx")
+    res = cdc_xlsx.read([empty, good, corrupt], rules)
+    assert res.errors == [
+        "empty.xlsx: not a readable workbook (BadZipFile)",
+        "corrupt.xlsx: not a readable workbook (ParseError)",
+    ]
+    assert len(res.tables) == 1

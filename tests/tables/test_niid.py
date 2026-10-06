@@ -9,6 +9,8 @@ import pytest
 from af.tables.passage import PassageParser
 from af.tables.rules import Rules
 
+from .broken import broken_workbooks
+
 openpyxl = pytest.importorskip("openpyxl")
 from af.tables import niid  # noqa: E402
 
@@ -274,3 +276,14 @@ def test_cell_fixes_apply(tmp_path, rules):
     t = one_table(read(workbook(tmp_path / "labn-fix-20300102.xlsx"), rules))
     assert t.titres[0][0] == ["1280"]
     assert any("fixed as '1280'" in w for w in t.warnings)
+
+
+def test_an_unreadable_workbook_is_an_error_and_the_rest_are_read(tmp_path, rules):
+    good = workbook(tmp_path / "labn-20300102.xlsx")
+    empty, corrupt = broken_workbooks(good, "labn-20300103.xlsx", "labn-20300104.xlsx")
+    res = niid.read([empty, good, corrupt], rules, lab="LABN")
+    assert res.errors == [
+        "labn-20300103.xlsx: not a readable workbook (BadZipFile)",
+        "labn-20300104.xlsx: not a readable workbook (ParseError)",
+    ]
+    assert len(res.tables) == 1

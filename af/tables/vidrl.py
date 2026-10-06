@@ -42,7 +42,7 @@ from .cdc import ReadResult
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
 from .rules import Rules
-from .sheet import Sheet, SheetError, apply_cell_fixes, load
+from .sheet import Sheet, SheetError, apply_cell_fixes, load_or_error
 
 TEST_DATE = re.compile(r"\s*Test\s+Date\s*:\s*(.*)", re.IGNORECASE)
 RBC_TYPE = re.compile(r"\s*RBC\s+Type\s*:\s*([A-Za-z ]+?)\s*(#\s*\d+)?\s*", re.IGNORECASE)
@@ -81,10 +81,8 @@ def read(
             "sha256": hashlib.sha256(data).hexdigest(),
             "reader": "af.tables.vidrl",
         }
-        try:
-            sheets = load(path)
-        except Exception as err:  # openpyxl raises zip and XML errors of many kinds
-            result.errors.append(f"{path.name}: not a readable workbook ({type(err).__name__})")
+        sheets = load_or_error(path, result.errors)
+        if sheets is None:
             continue
         file_date = _file_date(path)
         read_here, sheet_errors = 0, []

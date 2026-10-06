@@ -52,7 +52,7 @@ from .cdc import ReadResult
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
 from .rules import Rules
-from .sheet import Sheet, SheetError, apply_cell_fixes, load
+from .sheet import Sheet, SheetError, apply_cell_fixes, load_or_error
 
 LAB_ID = r"\s*NIID-ID\s*"
 COLUMNS = ("Strains", "Passage History", "Sample date")
@@ -163,7 +163,10 @@ def read(paths: list[Path], rules: Rules, *, lab: str) -> ReadResult:
             "sha256": hashlib.sha256(data).hexdigest(),
             "reader": "af.tables.niid",
         }
-        for sheet in load(path):
+        sheets = load_or_error(path, result.errors)
+        if sheets is None:
+            continue
+        for sheet in sheets:
             if not sheet.find(LAB_ID, stop=15):
                 result.skipped_tests.append(f"{sheet.where(0)}: no 'NIID-ID' header")
                 continue

@@ -11,6 +11,8 @@ import pytest
 from af.tables.locations import ChineseLocations
 from af.tables.rules import Rules
 
+from .broken import broken_workbooks
+
 openpyxl = pytest.importorskip("openpyxl")
 from af.tables import ac21  # noqa: E402
 
@@ -180,3 +182,14 @@ def test_unmapped_chinese_location_is_an_error(tmp_path, rules, locations):
 def test_wrong_lab_is_refused(tmp_path, rules, locations):
     res = ac21.read([workbook(tmp_path / "t.xlsx")], rules, locations, lab="OTHER")
     assert res.tables == [] and "OTHER" in res.errors[0]
+
+
+def test_an_unreadable_workbook_is_an_error_and_the_rest_are_read(tmp_path, rules, locations):
+    good = workbook(tmp_path / "t.xlsx")
+    empty, corrupt = broken_workbooks(good, "empty.xlsx", "corrupt.xlsx")
+    res = ac21.read([empty, good, corrupt], rules, locations, lab="LABX")
+    assert res.errors == [
+        "empty.xlsx: not a readable workbook (BadZipFile)",
+        "corrupt.xlsx: not a readable workbook (ParseError)",
+    ]
+    assert len(res.tables) == 1
