@@ -186,3 +186,26 @@ def test_dash_bar_key_matching_no_leaf_is_an_error(tmp_path):
             standard_tree(), PARENTS, replace(config(), dash_bars=bars), tmp_path / "f.pdf", {}
         )
     assert not (tmp_path / "f.pdf").exists()
+
+
+def test_leaf_name_layer_names_every_drawn_leaf_searchably(tmp_path):
+    pdf = tmp_path / "f.pdf"
+    report = make_figure(
+        standard_tree(), PARENTS, replace(config(), leaf_names=True), pdf, {"tree": "x"}
+    )
+    assert report["leaf_names"] == report["rows"]
+    raw = pdf.read_bytes()
+    assert b"/FontFile2" in raw  # Type 42 (TrueType) embedded: text carries a Unicode map
+    assert b"/ca 0" in raw  # the names are transparent: searchable, no ink on the tree
+    plain = tmp_path / "plain.pdf"
+    assert make_figure(standard_tree(), PARENTS, config(), plain, {})["leaf_names"] is None
+    assert b"/FontFile2" not in plain.read_bytes()
+
+
+def test_leaf_name_layer_leaves_visible_labels_where_they_were(tmp_path):
+    on = make_figure(
+        standard_tree(), PARENTS, replace(config(), leaf_names=True), tmp_path / "a.pdf", {}
+    )
+    off = make_figure(standard_tree(), PARENTS, config(), tmp_path / "b.pdf", {})
+    assert on["aa_label_placement"] == off["aa_label_placement"]
+    assert on["strains"] == off["strains"]

@@ -113,6 +113,10 @@ class FigureSpec:
     colour_by: str = "continent"  # or "clade": matrix and branches by lettered band
     clade_colours: dict[str, str] = field(default_factory=dict)
     geometry: Geometry = field(default_factory=Geometry)
+    # Every drawn leaf's name as text at its row: too small to read (a row is ~0.01 pt on a big
+    # tree) but searchable, so a reader can find a strain on the page. The Sep 2026 report's H1
+    # and H3 tree pages carried the same layer.
+    leaf_names: bool = False
 
 
 @dataclass
@@ -123,6 +127,7 @@ class Drawn:
     label_metrics: dict
     strains: list[dict]
     continents_not_in_legend: dict[str, int]  # value -> rows drawn grey for it
+    leaf_names: int | None = None  # names written (None: layer off)
 
 
 class _Page:
@@ -408,6 +413,29 @@ def _draw_strains(
     return boxes, report
 
 
+def _draw_leaf_names(ax: Axes, spec: FigureSpec, pg: _Page) -> int:
+    """One text per drawn row, "<name> <leaf id>" (names repeat across passages; the id makes
+    each search hit one leaf), left-aligned just right of the leaf's tip at the row's height.
+
+    Fully transparent: matplotlib cannot write text under 1 pt (FreeType), and 1 pt names on
+    rows ~0.01 pt apart paint the tree over (7.6% of an H1 page's pixels changed). Transparent
+    text is still found by a viewer's search, which highlights the row. Drawn last and kept out
+    of the ink grid: it must not move any visible label."""
+    t, lay = spec.tree, spec.layout
+    for r, i in enumerate(lay.leaf_nodes):
+        ax.text(
+            float(pg.nx[i]) + 0.5,
+            float(pg.row_y(r)),
+            f"{t.name[i]} {t.leaf_id[i]}",
+            fontsize=1.0,
+            family="DejaVu Sans",
+            alpha=0.0,
+            ha="left",
+            va="center",
+        )
+    return len(lay.leaf_nodes)
+
+
 def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: list[Box]):
     g = pg.g
     font = FontProperties(family="DejaVu Sans Mono", size=g.label_font)
@@ -488,10 +516,14 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     placed, metrics = _draw_labels(ax, spec, pg, grid, strain_boxes)
     _draw_key(ax, spec, pg)
     ax.text(g.tree_left + 30, 16, spec.title, fontsize=15, ha="left", va="center")
+    names = _draw_leaf_names(ax, spec, pg) if spec.leaf_names else None
 
-    fig.savefig(pdf_path, metadata={"CreationDate": None, "Creator": "acmacs-f"})
+    # Type 42 fonts carry a Unicode map, so viewers can search the name layer; matplotlib's
+    # default Type 3 has none. Only with the layer, so other figures keep their bytes.
+    with plt.rc_context({"pdf.fonttype": 42} if spec.leaf_names else {}):
+        fig.savefig(pdf_path, metadata={"CreationDate": None, "Creator": "acmacs-f"})
     plt.close(fig)
-    return Drawn(placed, metrics, strain_report, continents_not_in_legend(spec))
+    return Drawn(placed, metrics, strain_report, continents_not_in_legend(spec), names)
 
 
 def with_centre_column(g: Geometry, width: float = 14.0) -> Geometry:
