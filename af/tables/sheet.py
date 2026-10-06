@@ -117,6 +117,17 @@ def load(path: Path) -> list[Sheet]:
         workbook.close()
 
 
+def load_or_error(path: Path, errors: list[str]) -> list[Sheet] | None:
+    """Every worksheet, or None when the file is not a readable workbook at all. The reason
+    goes to ``errors`` and the caller moves on to the next file: one broken file must not stop
+    the rest of the folder being read. It is still an error, so it still blocks a publish."""
+    try:
+        return load(path)
+    except Exception as err:  # openpyxl raises zip and XML errors of many kinds
+        errors.append(f"{path.name}: not a readable workbook ({type(err).__name__})")
+        return None
+
+
 def _text(value: object) -> str:
     if value is None:
         return ""

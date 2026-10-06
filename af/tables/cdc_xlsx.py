@@ -32,7 +32,7 @@ from .cdc import LAB, ReadResult, _titre_order
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
 from .rules import Rule, Rules
-from .sheet import Sheet, SheetError, apply_cell_fixes, load
+from .sheet import Sheet, SheetError, apply_cell_fixes, load_or_error
 
 TITLE = r"HEMAGGLUTINATION INHIBITION REACTIONS OF INFLUENZA (.+) VIRUSES"
 TITLE_SUBTYPES = {
@@ -126,7 +126,10 @@ def read(paths: list[Path], rules: Rules) -> ReadResult:
             "sha256": hashlib.sha256(data).hexdigest(),
             "reader": "af.tables.cdc_xlsx",
         }
-        for sheet in load(path):
+        sheets = load_or_error(path, result.errors)
+        if sheets is None:
+            continue
+        for sheet in sheets:
             if not sheet.find(REFERENCE):
                 result.skipped_tests.append(
                     f"{sheet.where(0)}: no REFERENCE VIRUSES label, not a titre sheet"
