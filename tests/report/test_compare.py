@@ -937,7 +937,7 @@ def test_maps_with_different_y_axes_are_refused() -> None:
     assert maps.compare(both, up)["antigens"]["jaccard"] == 1.0
 
 
-def _sera(ids: list[str]) -> list[dict[str, Any]]:
+def _sera(ids: list[str | None]) -> list[dict[str, Any]]:
     return [
         {"id": f"sr{i}", "name": f"TEST/{90 + i}/2020", "passage_class": "egg", "xy": [i, 1.0],
          "shown": True, "in_viewport": True, "clade": None, "serum_id": serum_id}
@@ -974,3 +974,24 @@ def test_ids_that_already_begin_with_the_lab_still_match_and_list_as_drawn() -> 
     assert sera["common"] == 1 and sera["serum_id_lab_dropped"]["ref"] == 2
     drawn = new["map"]["sera"][1]["name"]
     assert sera["only_new_keys"] == [f"{drawn}|LABX 2001-003"]  # the id as drawn
+
+
+def test_serum_ids_match_ignoring_case_bleed_day_and_unknown_but_not_qualifiers() -> None:
+    """Sarah's rulings (6 Oct): suffix and case ignored, UNKNOWN is no id, qualifiers kept."""
+    pts = [(float(i), float(i % 3)) for i in range(6)]
+    ref, new = _map(pts, ["X"] * 6), _map(pts, ["X"] * 6)
+    ref["map"]["sera"] = _sera(["F01", "A9052-13D", "UNKNOWN-EGG", "Ser77", "F02"])
+    new["map"]["sera"] = _sera(["LABX F01-14D", "LABX A9052", None, "LABX SER77", "LABX NIB F02"])
+    new["provenance"] = {"inputs": {"chain": {"dataset": "labx/group-labx/merged"}}}
+    sera = maps.compare(ref, new, "identity")["sera"]
+    assert sera["common"] == 4  # all but the qualified id, which stays one-sided on both sides
+    assert sera["only_ref"] == 1 and sera["only_new"] == 1
+    assert sera["only_new_keys"] == [f"{new['map']['sera'][4]['name']}|LABX NIB F02"]  # as drawn
+    assert sera["serum_id_normalised"] == {
+        "ref": {"case": 1, "bleed_day_suffix": 1, "unknown_as_none": 1},
+        "new": {"case": 0, "bleed_day_suffix": 1, "unknown_as_none": 0},
+    }
+    assert maps.serum_rules_text(sera) == (
+        "ignoring letter case (0 af, 1 reference), a bleed-day suffix (1 af, 1 reference), "
+        "an UNKNOWN id (0 af, 1 reference)"
+    )
