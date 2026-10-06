@@ -259,9 +259,9 @@ def _step_info(s: dict, r: dict) -> list[str]:
                 f" · {pf.get('system')} {pf.get('machine')}"
             )
         )
-    if m.get("cheating_assay"):
+    if m.get("copied_references") or m.get("cheating_assay"):  # the key before 6 Oct 2026
         info.append(
-            f"cheating assay: {m['skipped_reference_antigens']} reference antigens not merged"
+            f"copied references: {m['skipped_reference_antigens']} reference antigens not merged"
         )
     return info
 

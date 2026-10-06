@@ -15,7 +15,7 @@ from af.chart.merge import MergeError, MergeOptions, MergeStep, MergeType, merge
 
 from .test_merge import AG, SR, table
 
-SIMPLE = MergeOptions(merge_type=MergeType.SIMPLE, combine_cheating_assays=True)
+SIMPLE = MergeOptions(merge_type=MergeType.SIMPLE, combine_copied_references=True)
 TITRES = ["<10", "10", "20", "40", "80", "160", "320", "640", "1280", "2560", ">2560", ">5120"]
 
 
@@ -76,7 +76,7 @@ def assert_same(a, b, last, rb, reports):
         "common_sera",
         "new_antigens",
         "new_sera",
-        "cheating_assay",
+        "copied_references",
         "skipped_reference_antigens",
         "outcomes",
         "dropped",
@@ -95,10 +95,10 @@ def test_same_chart_and_report_as_the_fold(seed):
 
 
 def test_the_synthetic_tables_exercise_every_rule():
-    seen = {"cheating": 0, "dropped": 0, "slack": 0}
+    seen = {"copied": 0, "dropped": 0, "slack": 0}
     for seed in range(20):
         _, rm = merge_many(random_tables(seed), SIMPLE)
-        seen["cheating"] += sum(s.cheating_assay for s in rm.steps)
+        seen["copied"] += sum(s.copied_references for s in rm.steps)
         seen["dropped"] += len(rm.dropped)
         seen["slack"] += len(rm.column_basis_slack)
     assert all(seen.values()), seen
@@ -154,7 +154,7 @@ def test_report_to_dict_is_json_with_stable_keys():
         "common_sera",
         "new_antigens",
         "new_sera",
-        "cheating_assay",
+        "copied_references",
         "skipped_reference_antigens",
         "outcomes",
         "dropped",

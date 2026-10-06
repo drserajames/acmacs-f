@@ -307,7 +307,7 @@ def step_diagnostics(
         ]
         d["sd_too_big_cells"] = report.outcomes.get("sd-too-big", 0)
         d["dropped_cells"] = _dropped_cells(chosen, report.dropped)
-        if not report.cheating_assay:  # a skipped table adds no layer, so no new readings
+        if not report.copied_references:  # a skipped table adds no layer, so no new readings
             d["control_flags"] = control_flags(chosen)
     if optimiser is not None and arrays is not None and cfg.options.grid_test:
         gt = optimiser.grid_test(best.layout, arrays)

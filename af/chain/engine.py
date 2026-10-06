@@ -384,7 +384,7 @@ def _merge_options(cfg: ChainConfig) -> MergeOptions:
     o = cfg.options
     return MergeOptions(
         merge_type=MergeType.INCREMENTAL,
-        combine_cheating_assays=o.combine_cheating_assays,
+        combine_copied_references=o.combine_copied_references,
         titres=MergeSettings(sd_limit=o.sd_limit),
         column_bases=ColumnBasisConvention(o.column_bases),
     )
@@ -710,7 +710,7 @@ def _merge_step(
             "common_sera": report.common_sera,
             "new_antigens": report.new_antigens,
             "new_sera": report.new_sera,
-            "cheating_assay": report.cheating_assay,
+            "copied_references": report.copied_references,
             "skipped_reference_antigens": report.skipped_reference_antigens,
             "outcomes": dict(report.outcomes),
             "column_basis_slack": {str(k): v for k, v in report.column_basis_slack.items()},
