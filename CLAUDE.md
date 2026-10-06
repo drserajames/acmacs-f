@@ -30,6 +30,13 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m mypy
 ```
 
+To check anything a release will produce (figures above all), develop in an env with
+exactly that release's packages, not a plain venv: a venv takes whatever python and
+matplotlib are newest, and draws figures differently from the release.
+`tools/dev-env.py --release <releases>/<sha12> --prefix <dir> --worktree . --micromamba <path>
+--mamba-root <dir>` replays the release's locks and installs this worktree's af editable.
+The env follows that worktree: after removing or switching it, make the env again.
+
 On macOS use `/opt/homebrew/bin/python3`. `/usr/local/bin/python3` and `timeout` are x86_64
 there, and running under them silently builds for the wrong architecture.
 

@@ -8,14 +8,19 @@ and an H1 chain had to be rerun from scratch. A release can't change after it is
 
     python3 tools/make-release.py --repo <git clone> --rev <commit> \\
         --releases <dir> --micromamba <path> --mamba-root <dir> \\
-        [--cxx /usr/bin/g++] [--extras dev,geo] [--link <path>]
+        [--cxx /usr/bin/g++] [--extras dev,geo] [--link <path>] [--resolve]
 
 It makes ``<releases>/<sha12>/`` containing:
 
 - ``src/``: the commit's files (``git archive``; not a clone, so it cannot be pulled);
-- ``env/``: its own micromamba environment from that commit's environment.yml, which
-  also freezes the tool versions. micromamba hard-links from its package cache, so a
-  release costs little disk;
+- ``env/``: its own micromamba environment, which also freezes the tool versions.
+  micromamba hard-links from its package cache, so a release costs little disk. **Packages
+  are locked per platform:** if an earlier complete release in ``<releases>`` was built for
+  this platform from a byte-identical environment.yml, the newest such release's
+  ``conda-explicit.txt`` and pip-only pins are replayed exactly, with no solve, and the new
+  release's locks are checked to be identical to it. Otherwise (the first release on this
+  platform, a changed environment.yml, or ``--resolve``) environment.yml is solved afresh.
+  A lock is never replayed on another platform: each site's releases dir is its own chain;
 - af installed into ``env`` **non-editable**, with the C++ optimiser built there using
   ``--cxx`` (recorded), in a clean environment. Compiler flags exported by your shell
   (LDFLAGS, CPPFLAGS, …) are not inherited;
@@ -23,8 +28,11 @@ It makes ``<releases>/<sha12>/`` containing:
   passes with ``--require-tools`` (pdflatex excepted); ``af.run.smoke --local`` passes;
 - ``RELEASE.toml`` (commit, compiler, versions, host, time), ``conda-explicit.txt`` and
   ``pip-freeze.txt``, written last. The whole tree is then made read-only;
-- ``CONTENTS.txt``: every pull request merged into the commit's history, newest first, one
-  per line (``#182<TAB>maps-align<TAB><merge sha><TAB><date><TAB><title>``). A project that
+- ``CONTENTS.txt``: first, ``# packages:`` lines saying how the env was made (replayed or
+  solved, and why) and every package that moved since the newest earlier release on this
+  platform, generated from the two releases' locks; then every pull request merged into the
+  commit's history, newest first, one per line
+  (``#182<TAB>maps-align<TAB><merge sha><TAB><date><TAB><title>``). A project that
   pins a release can see whether it has the change it needs with ``grep '^#182' CONTENTS.txt``,
   without a clone or a git walk.
 
@@ -46,6 +54,7 @@ To delete one: ``chmod -R u+w <release> && rm -rf <release>``.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime
 import fcntl
 import os
@@ -56,6 +65,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 
 RELEASE_FILE = "RELEASE.toml"
@@ -94,6 +105,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--link", type=Path, help="point this symlink at the release")
     parser.add_argument("--replace-incomplete", action="store_true")
     parser.add_argument(
+        "--resolve",
+        action="store_true",
+        help="solve environment.yml afresh even when an earlier release on this platform has "
+        "the same environment.yml (by default its packages are replayed exactly)",
+    )
+    parser.add_argument(
         "--time-solve",
         action="store_true",
         help="time the package solve alone first (a micromamba --dry-run), so a slow "
@@ -120,26 +137,26 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
     subprocess.run(["tar", "-x", "-C", str(src)], input=archive.stdout, check=True)
 
     base_env = clean_environment(args)
-    create = [
-        str(args.micromamba),
-        "create",
-        "--yes",
-        "--quiet",
-        "--prefix",
-        str(env),
-        "--file",
-        str(src / "environment.yml"),
-    ]
-    if args.time_solve:
+    choice = choose_lock(
+        release.parent, (src / "environment.yml").read_bytes(), conda_platform(), args.resolve
+    )
+    step(f"packages: {choice.reason}")
+    spec = choice.replay / LOCK_FILE if choice.replay else src / "environment.yml"
+    create = [str(args.micromamba), "create", "--yes", "--quiet", "--prefix", str(env)]
+    create += ["--file", str(spec)]
+    if args.time_solve and not choice.replay:
         # Repodata + solve only; nothing is written. The real create solves again (from the
         # now-warm repodata), so environment minus solve is about the fetch and link time:
         # on CSD3 that is hard links on Lustre (package cache and releases on one filesystem).
         step("solving environment.yml (dry run, timed alone)", "solve")
         run([*create, "--dry-run"], base_env)
-    step("creating the environment from environment.yml", "environment")
+    step(f"creating the environment from {spec.relative_to(release.parent)}", "environment")
     run(create, base_env)
     python = python_of(release)
     build_env = {**base_env, "PATH": f"{env / 'bin'}{os.pathsep}{base_env['PATH']}"}
+    if choice.replay:
+        step("installing the locked pip-only packages", "pip_lock")
+        install_pip_pins(python, (choice.replay / PIP_FILE).read_text(), build_env, release)
     # The first launch of a freshly installed cmake can take longer than scikit-build-core's
     # probe allows (macOS scans a new binary; NFS is slow on first read): it then reports
     # "Could not find CMake". Launch the build tools once, untimed.
@@ -160,11 +177,11 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
         openmp = [f"--config-settings=cmake.define.AF_OPENMP_PREFIX={env}"]
     else:
         openmp = [f"--config-settings=cmake.define.CMAKE_INSTALL_RPATH={env / 'lib'}"]
-    run(
-        [python, "-m", "pip", "install", "--no-build-isolation", *openmp, f"{src}[{args.extras}]"],
-        build_env,
-        cwd=release,
-    )
+    # Replaying a lock, every dependency is already in place at its locked version: --no-deps
+    # stops pip fetching a newer one from PyPI (it took the day's newest dev extras before).
+    no_deps = ["--no-deps"] if choice.replay else []
+    install = [python, "-m", "pip", "install", "--no-build-isolation", *no_deps, *openmp]
+    run([*install, f"{src}[{args.extras}]"], build_env, cwd=release)
 
     step("verifying imports, linkage and the OpenMP runtime", "verify")
     verify_imports(release)
@@ -183,18 +200,213 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
         run([*tool_tests, "--require-tools", "--skip-tool", "pdflatex"], build_env, cwd=scratch)
 
     step("recording", "record")
-    (release / "conda-explicit.txt").write_text(
-        capture(
-            [str(args.micromamba), "env", "export", "--explicit", "--prefix", str(env)], base_env
-        )
+    lock = capture(
+        [str(args.micromamba), "env", "export", "--explicit", "--prefix", str(env)], base_env
     )
-    (release / "pip-freeze.txt").write_text(capture([python, "-m", "pip", "freeze"], build_env))
-    (release / "CONTENTS.txt").write_text(contents(args.repo, sha))
+    pip = capture([python, "-m", "pip", "freeze"], build_env)
+    if choice.replay:
+        check_replay(choice.replay, lock, pip)
+    (release / LOCK_FILE).write_text(lock)
+    (release / PIP_FILE).write_text(pip)
+    previous = None
+    if choice.previous:
+        previous = (
+            (choice.previous / LOCK_FILE).read_text(),
+            (choice.previous / PIP_FILE).read_text(),
+        )
+    packages = package_section(choice, previous, lock, pip)
+    (release / "CONTENTS.txt").write_text(packages + contents(args.repo, sha))
     write_release_file(args, release, sha, started, build_env)
     (release / "bin").symlink_to("env/bin")  # so <release>/bin/python, like o's env/bin/python
     make_read_only(release)
     step(f"release {sha[:12]} ready in {release}")
     print(f"== stage times: {stage_summary()}", flush=True)
+
+
+LOCK_FILE = "conda-explicit.txt"
+PIP_FILE = "pip-freeze.txt"
+
+# Package locks. environment.yml has lower bounds only, so solving it again for every release
+# let packages move between releases unasked (af67b40 -> 6653bec, 5 Oct 2026: nextclade
+# 3.23.0 -> 3.24.0, openssl, sqlite; and the dev extras came from PyPI at the day's newest).
+# A release whose environment.yml is byte-identical to an earlier release's ON THIS PLATFORM
+# replays that release's exact packages instead. A lock lists one platform's binaries, so each
+# site (laptop osx-arm64, o and CSD3 linux-64, each its own releases dir) keeps its own chain.
+
+CONDA_PLATFORMS = {
+    ("Darwin", "arm64"): "osx-arm64",
+    ("Darwin", "x86_64"): "osx-64",
+    ("Linux", "x86_64"): "linux-64",
+    ("Linux", "aarch64"): "linux-aarch64",
+}
+
+
+def conda_platform() -> str:
+    key = (platform.system(), platform.machine())
+    if key not in CONDA_PLATFORMS:
+        raise SystemExit(f"no conda platform known for {key}; add it to CONDA_PLATFORMS")
+    return CONDA_PLATFORMS[key]
+
+
+def lock_platform(text: str) -> str:
+    """The ``# platform: <subdir>`` line micromamba writes into an explicit lock."""
+    for line in text.splitlines():
+        if line.startswith("# platform:"):
+            return line.partition(":")[2].strip()
+    raise SystemExit("a conda-explicit lock with no '# platform:' line: cannot tell its platform")
+
+
+@dataclasses.dataclass(frozen=True)
+class LockChoice:
+    replay: Path | None  # the release whose packages are replayed; None = solve afresh
+    previous: Path | None  # the newest earlier release on this platform, for the package diff
+    platform: str
+    reason: str
+
+
+def earlier_releases(releases: Path, platform_name: str) -> list[Path]:
+    """Complete releases in ``releases`` built for ``platform_name``, newest first.
+
+    Complete means RELEASE.toml (written last), the lock, the pip freeze and the
+    environment.yml it came from. Releases for another platform are skipped by their lock's
+    own platform line, not by where they live, so a copied-in lock can never be replayed
+    on the wrong platform.
+    """
+    found = []
+    for release in sorted(releases.iterdir()):
+        files = (release / RELEASE_FILE, release / LOCK_FILE, release / PIP_FILE)
+        if not all(path.is_file() for path in files) or not (release / "src").is_dir():
+            continue
+        if lock_platform((release / LOCK_FILE).read_text()) != platform_name:
+            continue
+        found.append((finished_at(release), release))
+    return [release for _, release in sorted(found, reverse=True)]
+
+
+def finished_at(release: Path) -> datetime.datetime:
+    with (release / RELEASE_FILE).open("rb") as handle:
+        return datetime.datetime.fromisoformat(tomllib.load(handle)["finished"])
+
+
+def choose_lock(
+    releases: Path, environment_yml: bytes, platform_name: str, resolve: bool
+) -> LockChoice:
+    """Replay the newest earlier release on this platform with the same environment.yml."""
+    earlier = earlier_releases(releases, platform_name)
+    previous = earlier[0] if earlier else None
+    if resolve:
+        return LockChoice(
+            None, previous, platform_name, f"solved afresh ({platform_name}): --resolve"
+        )
+    for release in earlier:
+        source = release / "src" / "environment.yml"
+        if source.is_file() and source.read_bytes() == environment_yml:
+            reason = (
+                f"replayed the lock of {release.name} ({platform_name}): environment.yml identical"
+            )
+            return LockChoice(release, previous, platform_name, reason)
+    if previous is None:
+        reason = f"solved afresh: the first release on {platform_name} in {releases}"
+    else:
+        reason = f"solved afresh ({platform_name}): environment.yml changed since {previous.name}"
+    return LockChoice(None, previous, platform_name, reason)
+
+
+def pip_pins(freeze: str) -> dict[str, str]:
+    """``name==version`` lines of a pip freeze, by normalised name (``@`` lines are not pins)."""
+    pins = {}
+    for line in freeze.splitlines():
+        name, sep, _ = line.partition("==")
+        if sep and " @ " not in line:
+            pins[normalise(name)] = line.strip()
+    return pins
+
+
+def normalise(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower().strip()
+
+
+def install_pip_pins(python: str, freeze: str, env: dict[str, str], cwd: Path) -> None:
+    """Install, at their locked versions, the lock's pip packages the conda env lacks.
+
+    The release's dev extras (pytest, ruff, mypy and their dependencies) come from PyPI, not
+    conda, so the conda lock alone does not hold them.
+    """
+    installed = {
+        normalise(line.partition("==")[0].partition(" @ ")[0])
+        for line in capture([python, "-m", "pip", "freeze"], env).splitlines()
+        if line.strip()
+    }
+    missing = [pin for name, pin in sorted(pip_pins(freeze).items()) if name not in installed]
+    if missing:
+        run([python, "-m", "pip", "install", "--no-deps", *missing], env, cwd=cwd)
+
+
+def without_af(freeze: str) -> list[str]:
+    """A pip freeze without af's own lines: they name where af came from (the release's src,
+    or an editable worktree as ``-e …`` under a ``#`` comment), which is meant to differ."""
+    return [
+        line
+        for line in freeze.splitlines()
+        if not line.startswith(("acmacs-f ", "-e ", "#")) and line.strip()
+    ]
+
+
+def check_replay(replayed: Path, lock: str, pip: str) -> None:
+    """A replay must reproduce the lock exactly, or the release is not what it claims to be."""
+    if lock != (replayed / LOCK_FILE).read_text():
+        raise SystemExit(f"the new env's {LOCK_FILE} differs from {replayed.name}'s: not a replay")
+    if without_af(pip) != without_af((replayed / PIP_FILE).read_text()):
+        raise SystemExit(f"the new env's {PIP_FILE} differs from {replayed.name}'s: not a replay")
+
+
+def lock_packages(text: str) -> dict[str, tuple[str, str]]:
+    """Package name -> (version, build), from the URLs of an explicit lock."""
+    packages = {}
+    for line in text.splitlines():
+        if not line.startswith(("http://", "https://", "file://")):
+            continue
+        filename = line.split("#", 1)[0].rsplit("/", 1)[1]
+        stem = filename.removesuffix(".conda").removesuffix(".tar.bz2")
+        name, version, build = stem.rsplit("-", 2)
+        packages[name] = (version, build)
+    return packages
+
+
+def package_diff(
+    old: Mapping[str, tuple[str, ...]], new: Mapping[str, tuple[str, ...]]
+) -> list[str]:
+    """``name old -> new`` for changed packages, ``+``/``-`` for added and removed."""
+    lines = []
+    for name in sorted(old.keys() | new.keys()):
+        if name not in new:
+            lines.append(f"- {name} {' '.join(old[name])}")
+        elif name not in old:
+            lines.append(f"+ {name} {' '.join(new[name])}")
+        elif old[name] != new[name]:
+            lines.append(f"{name} {' '.join(old[name])} -> {' '.join(new[name])}")
+    return lines
+
+
+def package_section(
+    choice: LockChoice, previous: tuple[str, str] | None, lock: str, pip: str
+) -> str:
+    """CONTENTS.txt's packages header: how the env was made and what moved since the newest
+    earlier release on this platform, generated from the two locks (never written by hand)."""
+    out = [f"# packages: {choice.reason}"]
+    if choice.previous is None or previous is None:
+        out.append(f"# packages: no earlier release on {choice.platform} to compare with")
+        return "".join(f"{line}\n" for line in out)
+    conda = package_diff(lock_packages(previous[0]), lock_packages(lock))
+    pins = {name: (pin.partition("==")[2],) for name, pin in pip_pins(pip).items()}
+    old_pins = {name: (pin.partition("==")[2],) for name, pin in pip_pins(previous[1]).items()}
+    pypi = package_diff(old_pins, pins)
+    out.append(
+        f"# packages vs {choice.previous.name}: conda {len(conda)} changed/added/removed of "
+        f"{len(lock_packages(lock))}; pip pins {len(pypi)} changed/added/removed"
+    )
+    out += [f"#   conda {line}" for line in conda] + [f"#   pip {line}" for line in pypi]
+    return "".join(f"{line}\n" for line in out)
 
 
 def clean_environment(args: argparse.Namespace) -> dict[str, str]:
