@@ -80,15 +80,15 @@ def test_forced_column_bases_from_discarded_more_than():
     assert m2.forced_column_bases is None
 
 
-def test_cheating_assay_merges_only_test_antigens():
+def test_copied_references_merges_only_test_antigens():
     ref = [AG(1), AG(2)]
     sera = [SR(1, "F1"), SR(2, "F2")]
     cells = {(0, 0): "640", (0, 1): "80", (1, 0): "40", (1, 1): "320"}
     a = table(ref + [AG(5)], sera, {**cells, (2, 0): "20"})
     b = table(ref + [AG(6)], sera, {**cells, (2, 1): "160"}, date="20210201")
-    m, rep = merge(a, b, MergeOptions(combine_cheating_assays=True))
-    assert rep.cheating_assay and rep.skipped_reference_antigens == 2
+    m, rep = merge(a, b, MergeOptions(combine_copied_references=True))
+    assert rep.copied_references and rep.skipped_reference_antigens == 2
     assert not any(ag < 2 for ag, _ in m.titres.layers[1])  # no reference titres in the new layer
     assert str(m.titres.table[0][0]) == "640"
     _, plain = merge(a, b)
-    assert not plain.cheating_assay
+    assert not plain.copied_references

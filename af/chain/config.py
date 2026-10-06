@@ -56,7 +56,9 @@ class MapOptions:
     incremental_starts: int = 1000
     projections_to_keep: int = 10  # distinct basins kept per map (Procrustes RMSD > 0.5)
     disconnect_threshold: int | None = 3  # fewer REGULAR titres than this -> disconnected
-    combine_cheating_assays: bool = True
+    # A table whose reference block repeats an earlier table's titres exactly merges only its
+    # test antigens (ae's "cheating assay"; renamed by Sarah, 6 Oct 2026).
+    combine_copied_references: bool = True
     column_bases: str = ColumnBasisConvention.ADJUST_TO_NEXT.value
     sd_limit: float = 1.0
     grid_test: bool = True
@@ -89,12 +91,17 @@ class MapOptions:
 LATER_OPTIONS = {"move_groups": False, "merge_all": False, "scratch_precision": "fine"}
 
 
+# Options renamed after chains were published: they enter a step's parameters (and chain.json)
+# under the name they were published with, in the same place, so a rename reruns nothing.
+PUBLISHED_NAMES = {"combine_copied_references": "combine_cheating_assays"}
+
+
 def option_parameters(options: MapOptions) -> dict[str, Any]:
     params = asdict(options)
     for name, old in LATER_OPTIONS.items():
         if params[name] == old:
             del params[name]
-    return params
+    return {PUBLISHED_NAMES.get(k, k): v for k, v in params.items()}
 
 
 @dataclass(frozen=True)
@@ -213,6 +220,9 @@ REQUIRED_OPTIONS = ("minimum_column_basis",)
 
 def _require_explicit(path: Path) -> None:
     options = tomllib.loads(Path(path).read_text()).get("options", {})
+    for new, old in PUBLISHED_NAMES.items():
+        if old in options:
+            raise ChainConfigError(f"{path}: [options] {old} is now called {new}")
     missing = [k for k in REQUIRED_OPTIONS if k not in options]
     if missing:
         raise ChainConfigError(

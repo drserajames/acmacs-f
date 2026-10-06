@@ -57,7 +57,7 @@ class ColumnBasisConvention(enum.Enum):
 @dataclass(frozen=True)
 class MergeOptions:
     merge_type: MergeType = MergeType.INCREMENTAL
-    combine_cheating_assays: bool = False
+    combine_copied_references: bool = False
     titres: MergeSettings = MergeSettings()
     column_bases: ColumnBasisConvention = ColumnBasisConvention.ADJUST_TO_NEXT
 
@@ -70,7 +70,7 @@ class MergeReport:
     common_sera: int = 0
     new_antigens: list[int] = field(default_factory=list)  # indexes in the merge
     new_sera: list[int] = field(default_factory=list)
-    cheating_assay: bool = False
+    copied_references: bool = False
     skipped_reference_antigens: int = 0
     outcomes: Counter = field(default_factory=Counter)  # MergeOutcome -> cells
     # Cells a merge rule turned into `*` although they had readings: (antigen, serum, outcome).
@@ -104,7 +104,7 @@ class MergeStep:
     common_sera: int
     new_antigens: int
     new_sera: int
-    cheating_assay: bool
+    copied_references: bool
     skipped_reference_antigens: int
 
     @classmethod
@@ -114,7 +114,7 @@ class MergeStep:
             report.common_sera,
             len(report.new_antigens),
             len(report.new_sera),
-            report.cheating_assay,
+            report.copied_references,
             report.skipped_reference_antigens,
         )
 
@@ -124,7 +124,7 @@ class MergeStep:
             "common_sera": int(self.common_sera),
             "new_antigens": int(self.new_antigens),
             "new_sera": int(self.new_sera),
-            "cheating_assay": bool(self.cheating_assay),
+            "copied_references": bool(self.copied_references),
             "skipped_reference_antigens": int(self.skipped_reference_antigens),
         }
 
@@ -299,7 +299,7 @@ def merge_many(
     A fold re-merges every cell of the running merge at each step, so its cost grows with the
     square of the number of tables. Here each step only matches points and maps the new table's
     layers, exactly as `merge` does (`_join`); the layers are merged once at the end. Points,
-    their order, cheating assays, the table, forced column bases and dropped cells are those
+    their order, copied references, the table, forced column bases and dropped cells are those
     of the fold (tests/chart/test_merge_many.py). The report is the fold's last report plus
     `steps`, each table's point counts. Nothing mutable is shared with the inputs.
 
@@ -391,8 +391,8 @@ def _join(
     sr_match = match_points(chart1.sera, chart2.sera, _serum_key)
 
     secondary_antigens = list(range(chart2.n_antigens))
-    if options.combine_cheating_assays:
-        secondary_antigens = _cheating_assay_test_antigens(
+    if options.combine_copied_references:
+        secondary_antigens = _copied_reference_test_antigens(
             chart1, chart2, ag_match, sr_match, report
         )
 
@@ -462,7 +462,7 @@ def _incremental_projection(chart1: Chart, merged: Chart) -> Projection:
     )
 
 
-def _cheating_assay_test_antigens(
+def _copied_reference_test_antigens(
     chart1: Chart,
     chart2: Chart,
     ag_match: dict[int, int],
@@ -471,7 +471,7 @@ def _cheating_assay_test_antigens(
 ) -> list[int]:
     """If chart2 repeats chart1's reference block exactly, merge only its test antigens.
 
-    A "cheating assay" re-runs the reference antigens and sera with the same titres
+    A table with "copied references" repeats the reference antigens and sera with the same titres
     alongside new test viruses. Merging those references again would weight them twice,
     so ae keeps only the test antigens (`merge.cc:134-209`).
     """
@@ -498,9 +498,9 @@ def _cheating_assay_test_antigens(
     test = [i for i in range(chart2.n_antigens) if i not in set(refs)]
     if not test:
         raise MergeError(
-            "cheating assay and chart has no test antigens: "
-            "remove the table or disable combine_cheating_assays"
+            "copied references and chart has no test antigens: "
+            "remove the table or disable combine_copied_references"
         )
-    report.cheating_assay = True
+    report.copied_references = True
     report.skipped_reference_antigens = len(refs)
     return test
