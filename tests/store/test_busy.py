@@ -88,6 +88,146 @@ def test_batch_name_is_checked(store: Store) -> None:
         pass
 
 
+def test_a_batch_that_fails_part_way_keeps_its_marker_until_resumed(store: Store) -> None:
+    """7 Oct 2026: a sweep published its first pull, failed on the second, and released its
+    marker, leaving the store half swept and unguarded for 3.6 min. Now the marker stays."""
+    path = busy.busy_dir(store.root) / "sweep.json"
+    with pytest.raises(RuntimeError), store.batch("sweep", ["sequences/h3", "sequences/h1"]):
+        publish(store, "sequences", "h3", "pull 1")
+        raise RuntimeError("unknown country")
+    (marker,) = busy.read_markers(store.root)
+    assert marker.failed and "RuntimeError: unknown country" in marker.failed["error"]
+    assert marker.published == ("sequences/h3",) and busy.is_partial(marker)
+    with pytest.raises(StoreBusy, match="PARTIAL|FAILED.*Resume it"), store.reading("map-build"):
+        pass
+    # nobody writes its datasets meanwhile, this process included, outside the batch
+    with pytest.raises(StoreBusy, match="publish to sequences/h1 refused: a PARTIAL batch"):
+        publish(store, "sequences", "h1", "stray")
+    publish(store, "tables", "cdc-h3", "unrelated")  # a dataset it does not name: allowed
+    with pytest.raises(StoreBusy), store.batch("other", ["sequences/h1"]):
+        publish(store, "sequences", "h1", "another batch")
+    # the same batch resumes it, carries what was published, and completes
+    with store.batch("sweep", ["sequences/h1"]) as resumed:
+        assert resumed.resumed_from and resumed.resumed_from["failed"]
+        assert resumed.published == ("sequences/h3",) and not resumed.failed
+        assert set(resumed.datasets) == {"sequences/h3", "sequences/h1"}
+        publish(store, "sequences", "h1", "pull 2")
+    assert not path.exists()
+    with store.reading("map-build"):
+        pass
+
+
+def test_a_resumed_batch_that_fails_again_stays_partial_without_new_publishes(
+    store: Store,
+) -> None:
+    with pytest.raises(RuntimeError), store.batch("sweep", ["sequences/h3"]):
+        publish(store, "sequences", "h3", "pull 1")
+        raise RuntimeError("first failure")
+    with pytest.raises(RuntimeError), store.batch("sweep", ["sequences/h3"]):
+        raise RuntimeError("second failure, before publishing anything")
+    (marker,) = busy.read_markers(store.root)
+    assert marker.failed and "second failure" in marker.failed["error"]
+    assert marker.published == ("sequences/h3",)
+
+
+def test_the_marker_exists_and_names_the_dataset_before_any_publish(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Marker first, always: the marker is on disk when the first publish starts."""
+    seen = []
+    check = busy.check_write
+
+    def watching(root: Path, kind: str, dataset: str) -> None:
+        (marker,) = busy.read_markers(root)
+        seen.append((marker.name, f"{kind}/{dataset}" in marker.datasets))
+        check(root, kind, dataset)
+
+    monkeypatch.setattr(busy, "check_write", watching)
+    with store.batch("sweep", ["sequences/h3"]):
+        publish(store, "sequences", "h3", "two")
+    assert seen == [("sweep", True)]
+
+
+def test_a_second_writer_to_a_dataset_another_batch_names_is_refused(store: Store) -> None:
+    """Another live process's batch (the test's parent stands in for it)."""
+    parent = os.getppid()
+    write_marker(store, pid=parent, process_started=busy.process_start(parent) or busy.UNKNOWN)
+    with pytest.raises(StoreBusy, match="publish to sequences/h3 refused: a running batch"):
+        publish(store, "sequences", "h3", "second writer")
+    publish(store, "sequences", "h1", "a dataset it does not name")
+    publish(store, "clades", "h3", "nor this one")
+
+
+def test_own_batch_writes_its_datasets(store: Store) -> None:
+    with store.batch("sweep", ["sequences/h3"]):
+        publish(store, "sequences", "h3", "two")
+        (marker,) = busy.read_markers(store.root)
+        assert marker.published == ("sequences/h3",)
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGKILL])
+def test_a_holder_stopped_after_publishing_leaves_a_partial_marker(
+    store: Store, sig: signal.Signals, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """SIGTERM fails the batch (marked failed); kill -9 runs no Python at all, but the marker
+    already lists the publish, so the dead holder's batch is partial, not stale."""
+    script = (
+        "import sys, time, datetime\n"
+        "from af.store import Store, Provenance\n"
+        "from af.run.job import run_main, signals_as_exceptions\n"
+        "T = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)\n"
+        "def main():\n"
+        "    store = Store.open(sys.argv[1])\n"
+        "    names = ['sequences/h3', 'sequences/h1']\n"
+        "    with signals_as_exceptions(), store.batch('sweep', names):\n"
+        "        with store.build('sequences', 'h3') as b:\n"
+        "            (b.path / 'data.txt').write_text('pull 1')\n"
+        "            p = Provenance(step='t', inputs=(), parameters={}, started=T, finished=T)\n"
+        "            b.publish(p)\n"
+        "        print('published', flush=True)\n"
+        "        time.sleep(60)\n"
+        "    return 0\n"
+        "run_main(main)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(store.root)], stdout=subprocess.PIPE, text=True
+    )
+    assert process.stdout is not None and process.stdout.readline().strip() == "published"
+    process.send_signal(sig)
+    process.wait(timeout=20)
+    (marker,) = busy.read_markers(store.root)
+    assert busy.is_partial(marker) and marker.published == ("sequences/h3",)
+    assert bool(marker.failed) is (sig == signal.SIGTERM)
+    with pytest.raises(StoreBusy), store.reading("r"):
+        pass
+    assert store_main(["busy", str(store.root)]) == 0
+    assert "PARTIAL 'sweep'" in capsys.readouterr().out
+
+
+def test_clearing_a_partial_batch_needs_a_reason_and_is_recorded(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(RuntimeError), store.batch("sweep", ["sequences/h3"]):
+        publish(store, "sequences", "h3", "pull 1")
+        raise RuntimeError("failed")
+    with pytest.raises(StoreError, match="partial batch.*--reason"):
+        store_main(["busy", str(store.root), "--clear", "sweep"])
+    with pytest.raises(StoreError, match="--reason"):
+        store_main(["busy", str(store.root), "--clear", "sweep", "--reason", "  "])
+    reason = "pull 1 is complete on its own; the rest is a separate sweep"
+    assert store_main(["busy", str(store.root), "--clear", "sweep", "--reason", reason]) == 0
+    assert "recorded in" in capsys.readouterr().out
+    (record,) = [
+        json.loads(line)
+        for line in (busy.busy_dir(store.root) / busy.CLEARED).read_text().splitlines()
+    ]
+    assert record["reason"] == reason and record["partial"] is True
+    assert record["marker"]["name"] == "sweep" and record["marker"]["failed"]
+    assert busy.read_markers(store.root) == []
+    with store.reading("r"):
+        pass
+
+
 # ---- readers ------------------------------------------------------------------------------
 
 

@@ -19,7 +19,13 @@ A crashed writer must not leave a permanent lock. A marker from this host whose 
 is gone (pid plus the process's start time, so a reused pid does not count) is stale; a
 marker from another host is stale once older than its ``max_age_hours``. Stale markers
 are reported and ignored, and the next batch of the same name replaces one.
-``python -m af.store busy <store>`` lists markers; ``--clear <name>`` removes one.
+
+A batch that stops part way (an exception, a signal, a dead holder) after publishing
+anything is *partial*, never stale: its marker records each publish as it happens, and it
+blocks readers and other writers until a batch of the same name resumes it, or someone
+clears it with a recorded reason. Writers check markers too: a publish to a dataset that
+another process's batch names is refused.
+``python -m af.store busy <store>`` lists markers; ``--clear <name> [--reason …]`` removes one.
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ import subprocess
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +65,11 @@ class Marker:
     started: str  # UTC, ISO 8601
     datasets: tuple[str, ...]
     max_age_hours: float = DEFAULT_MAX_AGE_HOURS
+    # "kind/dataset" for each publish made under the batch so far (rewritten on every
+    # publish), so a holder that dies part way still says the store is half done
+    published: tuple[str, ...] = ()
+    failed: dict[str, str] | None = None  # {"error", "at"} once the batch has failed part way
+    resumed_from: dict[str, Any] | None = None  # the partial marker this batch took over
 
     def age_hours(self) -> float:
         started = datetime.datetime.fromisoformat(self.started)
@@ -66,17 +77,41 @@ class Marker:
 
     def describe(self) -> str:
         datasets = ", ".join(self.datasets) or "(none named)"
-        return (
+        text = (
             f"{self.name!r} (pid {self.pid} on {self.host}, started {self.started}, "
-            f"{self.age_hours():.1f} h ago; datasets: {datasets})"
+            f"{self.age_hours():.1f} h ago; datasets: {datasets}"
         )
+        if self.published:
+            text += f"; {len(self.published)} published so far"
+        if self.failed:
+            text += f"; FAILED at {self.failed['at']}: {self.failed['error']}"
+        return text + ")"
 
     def to_json(self) -> dict[str, Any]:
-        return {**asdict(self), "datasets": list(self.datasets)}
+        return {**asdict(self), "datasets": list(self.datasets), "published": list(self.published)}
 
 
 def stale_reason(marker: Marker) -> str | None:
-    """Why ``marker`` no longer holds the store, or None if it is live.
+    """Why ``marker`` no longer holds the store, or None if it still does.
+
+    A *partial* batch (one that failed, or whose holder is gone, after publishing part of
+    its work) is never stale: the store is half done until the same batch resumes or someone
+    clears it with a reason (7 Oct 2026: a sweep failed after its first pull, released its
+    marker, and left the store half swept and unguarded).
+    """
+    if marker.failed:
+        return None
+    reason = holder_gone(marker)
+    return None if reason is None or marker.published else reason
+
+
+def is_partial(marker: Marker) -> bool:
+    """Failed, or its holder gone, after publishing part of the batch."""
+    return bool(marker.failed) or (bool(marker.published) and holder_gone(marker) is not None)
+
+
+def holder_gone(marker: Marker) -> str | None:
+    """Why ``marker``'s holder no longer runs, or None if it may still.
 
     On the marker's own host the process decides. Elsewhere, or where processes cannot be
     inspected (a sandbox that forbids ``ps``), only the marker's age can.
@@ -139,7 +174,9 @@ def read_markers(root: Path) -> list[Marker]:
     for path in sorted(directory.glob("*.json")):
         try:
             data = json.loads(path.read_text())
-            markers.append(Marker(**{**data, "datasets": tuple(data["datasets"])}))
+            data["datasets"] = tuple(data["datasets"])
+            data["published"] = tuple(data.get("published", ()))
+            markers.append(Marker(**data))
         except (OSError, ValueError, TypeError, KeyError) as error:
             raise StoreError(f"unreadable batch marker {path}: {error}") from error
     return markers
@@ -171,7 +208,13 @@ def batch(
     *,
     max_age_hours: float = DEFAULT_MAX_AGE_HOURS,
 ) -> Iterator[Marker]:
-    """Hold ``BUSY/<name>.json`` for the duration; see :meth:`Store.batch`."""
+    """Hold ``BUSY/<name>.json`` until the batch completes; see :meth:`Store.batch`.
+
+    A batch that fails, or is stopped, after publishing anything keeps its marker, marked
+    failed: readers and other writers go on refusing until a batch of the same name resumes
+    it (and completes), or someone clears it with a reason. One that fails before
+    publishing anything left the store untouched, and its marker is removed.
+    """
     path = busy_dir(root) / f"{check_name(name)}.json"
     path.parent.mkdir(exist_ok=True)
     marker = Marker(
@@ -183,48 +226,178 @@ def batch(
         datasets=tuple(datasets),
         max_age_hours=max_age_hours,
     )
-    _create(path, marker)
+    held = _Held(path, _create(path, marker))
+    key = Path(root).resolve()
+    with _held_lock:
+        _holding.setdefault(key, []).append(held)
     try:
-        yield marker
+        yield held.marker
+    except GeneratorExit:
+        raise
+    except BaseException as error:  # SIGTERM and Ctrl-C arrive as exceptions too
+        _fail(held, f"{type(error).__name__}: {error}")
+        raise
+    else:
+        _release(path, held.marker)
     finally:
-        _release(path, marker)
+        with _held_lock:
+            _holding[key].remove(held)
+            if not _holding[key]:
+                del _holding[key]
 
 
-def _create(path: Path, marker: Marker) -> None:
+@dataclass
+class _Held:
+    """A batch this process holds: its marker as last written."""
+
+    path: Path
+    marker: Marker
+
+
+_holding: dict[Path, list[_Held]] = {}
+_held_lock = threading.Lock()
+
+
+def _create(path: Path, marker: Marker) -> Marker:
+    """Take ``path`` for ``marker``; a partial marker of the same name is resumed, a stale
+    one replaced, a live one refused. Returns the marker as written."""
     for _attempt in range(2):
         try:
             with path.open("x") as handle:  # O_EXCL: two writers cannot both hold one name
                 json.dump(marker.to_json(), handle, indent=2)
                 handle.write("\n")
-            return
+            return marker
         except FileExistsError:
             (existing,) = [m for m in read_markers(path.parent.parent) if m.name == marker.name]
-            reason = stale_reason(existing)
-            if reason is None:
+            if is_partial(existing):
+                # Carry what it published and named: until this batch completes, the store
+                # is as half done as it was, and a failure here must keep the marker.
+                log.warning("resuming partial batch %s", existing.describe())
+                marker = replace(
+                    marker,
+                    datasets=tuple(dict.fromkeys(existing.datasets + marker.datasets)),
+                    published=existing.published,
+                    resumed_from=existing.to_json(),
+                )
+            elif (reason := stale_reason(existing)) is None:
                 raise StoreBusy(f"batch {existing.describe()} is already running") from None
-            log.warning("replacing stale batch marker %s: %s", existing.describe(), reason)
+            else:
+                log.warning("replacing stale batch marker %s: %s", existing.describe(), reason)
             path.unlink(missing_ok=True)
     raise StoreBusy(f"could not take batch marker {path}")
 
 
-def _release(path: Path, marker: Marker) -> None:
-    """Remove the marker only if it is still ours (it may have been cleared and retaken)."""
+def _ours(path: Path, marker: Marker) -> bool:
+    """Is the marker at ``path`` still ``marker`` (it may have been cleared and retaken)?"""
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
-        return
-    if data.get("pid") == marker.pid and data.get("started") == marker.started:
+        return False
+    return bool(data.get("pid") == marker.pid and data.get("started") == marker.started)
+
+
+def _rewrite(path: Path, marker: Marker) -> None:
+    """Replace the marker file atomically (readers never see half of it)."""
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(marker.to_json(), indent=2) + "\n")
+    temporary.replace(path)
+
+
+def _release(path: Path, marker: Marker) -> None:
+    if _ours(path, marker):
         path.unlink(missing_ok=True)
 
 
-def clear(root: Path, name: str) -> Marker:
-    """Remove a marker by name (diagnosis; the CLI's --clear)."""
+def _fail(held: _Held, error: str) -> None:
+    if not _ours(held.path, held.marker):
+        return
+    if not held.marker.published:
+        _release(held.path, held.marker)  # nothing published: the store is as it was
+        return
+    at = datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+    held.marker = replace(held.marker, failed={"error": error[:500], "at": at})
+    _rewrite(held.path, held.marker)
+    log.error("batch %s failed part way: its marker stays until it is resumed", held.marker.name)
+
+
+def record_publish(root: Path, kind: str, dataset: str) -> None:
+    """Called by every publish: add it to each batch this process holds on this store."""
+    key = Path(root).resolve()
+    with _held_lock:
+        for held in _holding.get(key, ()):
+            entry = f"{kind}/{dataset}"
+            if entry not in held.marker.published and _ours(held.path, held.marker):
+                held.marker = replace(held.marker, published=(*held.marker.published, entry))
+                _rewrite(held.path, held.marker)
+
+
+def is_own(marker: Marker) -> bool:
+    """Taken by this very process (pid plus its start time)."""
+    return (
+        marker.host == socket.gethostname()
+        and marker.pid == os.getpid()
+        and marker.process_started == (process_start(os.getpid()) or UNKNOWN)
+    )
+
+
+def check_write(root: Path, kind: str, dataset: str) -> None:
+    """Refuse a publish to a dataset a batch of ANOTHER process names (live or partial).
+
+    Dataset-level: a batch keeps the datasets it names consistent with each other, and a
+    publish elsewhere cannot break that (7 Oct 2026: tables published during a sequences
+    sweep, harmless to it). A second writer to a dataset in the sweep is the real conflict.
+    """
+    entry = f"{kind}/{dataset}"
+    for marker in live_markers(root, report_stale=False):
+        # A failed batch blocks its own process too: only a resuming batch (which rewrites
+        # the marker as its own, not failed) may write those datasets again.
+        if entry in marker.datasets and (marker.failed or not is_own(marker)):
+            what = "a PARTIAL batch" if is_partial(marker) else "a running batch"
+            raise StoreBusy(
+                f"publish to {entry} refused: {what} {marker.describe()} names it. "
+                + _partial_help(root, marker)
+            )
+
+
+def _partial_help(root: Path, marker: Marker) -> str:
+    if not is_partial(marker):
+        return "Wait for it to finish."
+    return (
+        f"Resume it (run the batch {marker.name!r} again), or, if the half state is acceptable, "
+        f"python -m af.store busy {root} --clear {marker.name} --reason '<why>'."
+    )
+
+
+CLEARED = "CLEARED.jsonl"
+
+
+def clear(root: Path, name: str, reason: str | None = None) -> Marker:
+    """Remove a marker by name (the CLI's --clear); recorded in ``BUSY/CLEARED.jsonl``.
+
+    A partial batch's marker needs a reason: accepting a half-done store is a decision, so
+    it is written down, not just a deleted file.
+    """
     path = busy_dir(root) / f"{check_name(name)}.json"
     found = [m for m in read_markers(root) if m.name == name]
     if not found:
         raise StoreError(f"no batch marker named {name!r} in {busy_dir(root)}")
+    marker = found[0]
+    if is_partial(marker) and not (reason and reason.strip()):
+        raise StoreError(
+            f"{marker.describe()} is a partial batch: the store is half done. Resume it, or "
+            "clear it with --reason saying why the half state is acceptable."
+        )
+    record = {
+        "cleared": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+        "by": f"{os.environ.get('USER', '?')}@{socket.gethostname()}",
+        "reason": reason,
+        "partial": is_partial(marker),
+        "marker": marker.to_json(),
+    }
+    with (busy_dir(root) / CLEARED).open("a") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
     path.unlink()
-    return found[0]
+    return marker
 
 
 # ---- reads ------------------------------------------------------------------------------
@@ -291,7 +464,9 @@ def reading(
             raise StoreBusy(
                 f"{name}: the store {root} is being written by "
                 + "; ".join(m.describe() for m in held)
-                + ". Wait for it to finish, or pass the override to read anyway (diagnosis)."
+                + ". "
+                + " ".join(dict.fromkeys(_partial_help(root, m) for m in held))
+                + " Or pass the override to read anyway (diagnosis)."
             )
         holders = "; ".join(m.describe() for m in held)
         log.warning("%s: reading despite %s (override)", name, holders)
@@ -329,22 +504,30 @@ def _moved(guard: ReadGuard, current: Callable[[str, str], str | None]) -> list[
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``python -m af.store busy <store> [--clear NAME]``: list or clear batch markers."""
+    """``python -m af.store busy <store> [--clear NAME [--reason TEXT]]``: list or clear
+    batch markers. Clearing a partial batch needs a reason; every clear is recorded."""
     import argparse
 
     parser = argparse.ArgumentParser(prog="python -m af.store busy", description=main.__doc__)
     parser.add_argument("store", type=Path)
     parser.add_argument("--clear", metavar="NAME", help="remove this batch marker")
+    parser.add_argument(
+        "--reason", help="why a partial batch's half-done state is acceptable (recorded)"
+    )
     args = parser.parse_args(argv)
     if args.clear:
-        removed = clear(args.store, args.clear)
-        print(f"removed {removed.describe()}")
+        removed = clear(args.store, args.clear, args.reason)
+        print(f"removed {removed.describe()}; recorded in {busy_dir(args.store) / CLEARED}")
         return 0
     markers = read_markers(args.store)
     if not markers:
         print(f"no batch markers in {busy_dir(args.store)}")
     for marker in markers:
         reason = stale_reason(marker)
-        state = f"STALE {marker.describe()}: {reason}" if reason else f"LIVE  {marker.describe()}"
-        print(state)
+        if is_partial(marker):
+            print(f"PARTIAL {marker.describe()}: {_partial_help(args.store, marker)}")
+        elif reason:
+            print(f"STALE {marker.describe()}: {reason}")
+        else:
+            print(f"LIVE  {marker.describe()}")
     return 0

@@ -351,6 +351,10 @@ class VersionBuilder:
         if not manifest.files:
             raise StoreError(f"{self.kind}/{self.dataset}: refusing to publish an empty version")
         ref = StoreRef(self.kind, self.dataset, manifest.version(), manifest.sha256())
+        busy.check_write(self.store.root, self.kind, self.dataset)
+        # Before, not after: a holder killed mid-publish must not leave a marker that says
+        # nothing was published (it would then count as stale, not partial).
+        busy.record_publish(self.store.root, self.kind, self.dataset)
         dataset_dir = self.store.dataset_dir(self.kind, self.dataset)
         with _locked(dataset_dir):
             self._publish_locked(ref, manifest, provenance, summary)
