@@ -12,7 +12,7 @@ pytest.importorskip(
 )
 
 from af.tree.draw.defaults import load_defaults  # noqa: E402
-from af.tree.draw.figure import FigureConfig, Overrides, make_figure  # noqa: E402
+from af.tree.draw.figure import DashBarError, FigureConfig, Overrides, make_figure  # noqa: E402
 from af.tree.draw.render import DashBar  # noqa: E402
 from af.tree.draw.sections import SectionOverrideError  # noqa: E402
 
@@ -164,3 +164,25 @@ def test_leaves_carry_depth_before_page_scaling(tmp_path):
     assert all(leaf["depth"] == pytest.approx(expected[leaf["id"]]) for leaf in i7["leaves"])
     make_figure(t, PARENTS, config(), tmp_path / "e.pdf", {})
     assert "depth_unit" not in json.loads((tmp_path / "e.i7.json").read_text())["tree"]
+
+
+def test_dash_bars_counted_in_report(tmp_path):
+    report = make_figure(standard_tree(), PARENTS, config(), tmp_path / "f.pdf", {"tree": "x"})
+    (bar,) = report["dash_bars"]
+    assert bar["pos"] == 2
+    assert (
+        sum(bar["coloured"].values())
+        + sum(bar["transparent"].values())
+        + sum(bar["no_colour"].values())
+        == report["rows"]
+    )
+    assert set(bar["coloured"]) == {"N"} and set(bar["transparent"]) == {"K"}
+
+
+def test_dash_bar_key_matching_no_leaf_is_an_error(tmp_path):
+    bars = [DashBar(2, {"N": "#e72f27", "Q": "#03569b"}, [])]
+    with pytest.raises(DashBarError, match=r"position 2: colour key\(s\) \['Q'\]"):
+        make_figure(
+            standard_tree(), PARENTS, replace(config(), dash_bars=bars), tmp_path / "f.pdf", {}
+        )
+    assert not (tmp_path / "f.pdf").exists()

@@ -8,7 +8,7 @@ hierarchy, and a :class:`FigureConfig`. Output: the PDF, its I7 JSON and a draw 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -107,6 +107,8 @@ def make_figure(
     bands = [(b.first, b.last) for cs in selection.shown for b in cs.bands]
     labels, label_counts = select_labels(tree, layout, bands, config.labels)
 
+    dash_bars = dash_bar_counts(tree, layout.leaf_nodes, config.dash_bars)
+
     marked = None
     geometry = config.geometry
     if config.marked_ids:
@@ -168,6 +170,7 @@ def make_figure(
         ],
         "aa_label_filter": label_counts,
         "aa_label_placement": drawn.label_metrics,
+        "dash_bars": dash_bars,
         "strains": drawn.strains,
         "continents_not_in_legend": drawn.continents_not_in_legend,
         "flagged_drawn": _count_flags(
@@ -179,6 +182,50 @@ def make_figure(
     }
     pdf.with_suffix(".draw.json").write_text(json.dumps(report, indent=1, default=str))
     return report
+
+
+class DashBarError(ValueError):
+    """A dash-bar colour key that no drawn leaf has (design rule 1)."""
+
+
+def dash_bar_counts(
+    tree: DrawTree, leaf_nodes: Iterable[int], bars: Sequence[DashBar]
+) -> list[dict[str, Any]]:
+    """Drawn rows per residue for each bar: coloured, transparent, and with no colour.
+
+    A colour key that matches no drawn row is an error: it means the bar was configured for
+    other residues (or another numbering), and the figure would show an empty or wrong bar with
+    a legend that looks right. A residue with no colour is counted, not an error: it is simply
+    not drawn. ``""`` counts rows whose sequence does not reach the position.
+    """
+    out, problems = [], []
+    for bar in bars:
+        rows: dict[str, int] = {}
+        for i in leaf_nodes:
+            a = tree.aa[i]
+            residue = a[bar.pos - 1] if a and len(a) >= bar.pos else ""
+            rows[residue] = rows.get(residue, 0) + 1
+        unmatched = sorted(k for k in bar.colours if rows.get(k, 0) == 0)
+        if unmatched:
+            seen = ", ".join(f"{k or '(none)'} {n}" for k, n in sorted(rows.items()))
+            problems.append(
+                f"position {bar.pos}: colour key(s) {unmatched} match no drawn leaf ({seen})"
+            )
+        kind = {
+            k: "no_colour"
+            if k not in bar.colours
+            else "transparent"
+            if bar.colours[k] == "transparent"
+            else "coloured"
+            for k in rows
+        }
+        entry: dict[str, Any] = {"pos": bar.pos, "coloured": {}, "transparent": {}, "no_colour": {}}
+        for k, n in sorted(rows.items()):
+            entry[kind[k]][k] = n
+        out.append(entry)
+    if problems:
+        raise DashBarError("dash bars: " + "; ".join(problems))
+    return out
 
 
 def _rows_of_names(tree: DrawTree, layout, names: frozenset[str]) -> set[int]:
