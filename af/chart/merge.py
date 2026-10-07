@@ -41,6 +41,29 @@ class MergeType(enum.Enum):
     INCREMENTAL = "incremental"  # copy chart1's best layout; new points NaN
 
 
+class Match(enum.Enum):
+    """How the points of two charts are paired.
+
+    STRICT is ae's rule (af.chart.identity): name, reassortant, annotations and passage (antigen)
+    or serum id (serum), all equal; a point without the passage or serum id never matches. The
+    chains use it. STRICT_THEN_NAME (Sarah, 1 Oct 2026) then pairs, among the points still
+    unmatched on both sides, a point lacking that field with the one point of the same name,
+    reassortant and annotations on the other side; with several candidates it pairs nothing
+    (counted as ambiguous). The merged point takes the partner's field and keeps it (Sarah, Q131
+    R2, 6 Oct 2026).
+    """
+
+    STRICT = "strict"
+    STRICT_THEN_NAME = "strict-then-name"
+
+
+MATCHING_KINDS = ("strict", "name_fallback", "ambiguous", "caller")
+
+
+def _no_matching() -> dict[str, dict[str, int]]:
+    return {kind: {"antigens": 0, "sera": 0} for kind in MATCHING_KINDS}
+
+
 class ColumnBasisConvention(enum.Enum):
     """How a merged chart's column bases treat `>` titres the merge discards.
 
@@ -79,6 +102,12 @@ class MergeReport:
     column_basis_slack: dict[int, float] = field(
         default_factory=dict
     )  # serum -> forced - table-only
+    # pairs made by each rule, and points left unpaired because the name was ambiguous:
+    # {"strict" | "name_fallback" | "ambiguous" | "caller": {"antigens": n, "sera": n}}
+    matching: dict[str, dict[str, int]] = field(default_factory=_no_matching)
+    # points (indexes in the merge) that took their partner's passage / serum id
+    filled_antigens: list[int] = field(default_factory=list)
+    filled_sera: list[int] = field(default_factory=list)
     # merge_many only: each table's own point counts, in order (the fields above describe the
     # last step and the final table, as a fold's last report does)
     steps: list[MergeStep] = field(default_factory=list)
@@ -106,6 +135,7 @@ class MergeStep:
     new_sera: int
     copied_references: bool
     skipped_reference_antigens: int
+    matching: dict[str, dict[str, int]] = field(default_factory=_no_matching)
 
     @classmethod
     def of(cls, report: MergeReport) -> MergeStep:
@@ -116,6 +146,7 @@ class MergeStep:
             len(report.new_sera),
             report.copied_references,
             report.skipped_reference_antigens,
+            {k: dict(v) for k, v in report.matching.items()},
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -126,6 +157,10 @@ class MergeStep:
             "new_sera": int(self.new_sera),
             "copied_references": bool(self.copied_references),
             "skipped_reference_antigens": int(self.skipped_reference_antigens),
+            "matching": {
+                kind: {p: int(self.matching[kind][p]) for p in ("antigens", "sera")}
+                for kind in MATCHING_KINDS
+            },
         }
 
 
@@ -185,10 +220,24 @@ def serum_key(s: Serum) -> tuple:
     return (s.name, " ".join(s.annotations), s.reassortant, s.serum_id)
 
 
-def find_duplicates(chart: Chart) -> list[str]:
-    ag = Counter(antigen_key(a) for a in chart.antigens if not a.distinct)
-    sr = Counter(serum_key(s) for s in chart.sera if not s.distinct)
+def find_duplicates(chart: Chart, match: Match = Match.STRICT) -> list[str]:
+    """Points one chart holds twice. Under STRICT, as ae: two points equal but for a missing
+    passage or serum id are duplicates. Otherwise such points are told apart by the matching
+    (paired by name or not at all), so a collision on an empty field is not one."""
+    ag = Counter(antigen_key(a) for a in chart.antigens if _checked(a, match))
+    sr = Counter(serum_key(s) for s in chart.sera if _checked(s, match))
     return [f"AG {k}" for k, n in ag.items() if n > 1] + [f"SR {k}" for k, n in sr.items() if n > 1]
+
+
+def _checked(point: Antigen | Serum, match: Match) -> bool:
+    if point.distinct:
+        return False
+    return match == Match.STRICT or bool(_field_value(point))
+
+
+def _field_value(point: Antigen | Serum) -> str:
+    """The field strict identity needs and a name match may lack: passage or serum id."""
+    return point.passage if isinstance(point, Antigen) else point.serum_id
 
 
 # ----------------------------------------------------------------------
@@ -258,23 +307,39 @@ def merge_layers(
 
 
 def merge(
-    chart1: Chart, chart2: Chart, options: MergeOptions | None = None
+    chart1: Chart,
+    chart2: Chart,
+    options: MergeOptions | None = None,
+    *,
+    match: Match = Match.STRICT,
+    ag_pairs: dict[int, int] | None = None,
+    sr_pairs: dict[int, int] | None = None,
 ) -> tuple[Chart, MergeReport]:
     """Merge chart2 (normally one new table) into chart1 (the running merge).
+
+    `match` pairs the points (`Match`). `ag_pairs` / `sr_pairs` (chart2 index -> chart1 index)
+    replace it for the antigens / sera: the caller's pairs, checked (in range, one to one, never
+    DISTINCT); every other point is new. A merge with caller pairs checks duplicates as
+    STRICT_THEN_NAME does.
 
     The result shares chart1's layer dicts and every point's `extra` dict with the inputs
     (titres are immutable). Copying them at every step of a fold would cost time that grows
     with the square of the number of tables; `merge_many` builds its own and shares nothing.
     """
     options = options or MergeOptions()
+    dup_rule = Match.STRICT_THEN_NAME if ag_pairs is not None or sr_pairs is not None else match
     for chart, which in ((chart1, "primary"), (chart2, "secondary")):
-        if dups := find_duplicates(chart):
+        if dups := find_duplicates(chart, dup_rule):
             raise MergeError(f"{which} chart has duplicates: {dups[:5]}")
+    pairs = (
+        _caller_pairs(ag_pairs, chart2.antigens, chart1.antigens, "antigen"),
+        _caller_pairs(sr_pairs, chart2.sera, chart1.sera, "serum"),
+    )
     report = MergeReport()
     antigens = [Antigen(**vars(a)) for a in chart1.antigens]
     sera = [Serum(**vars(s)) for s in chart1.sera]
     layers = list(chart_layers(chart1))  # chart1's indexes are unchanged in the merge
-    layers += _join(chart1, chart2, antigens, sera, options, report, _shallow)
+    layers += _join(chart1, chart2, antigens, sera, options, report, _shallow, match, pairs)
 
     table, forced = merge_layers(layers, len(antigens), len(sera), options, report)
     merged = Chart(
@@ -284,7 +349,7 @@ def merge(
         titres=Titres(table=table, layers=layers),
         forced_column_bases=forced,
     )
-    if dups := find_duplicates(merged):
+    if dups := find_duplicates(merged, dup_rule):
         raise MergeError(f"merge has duplicates: {dups[:5]}")
     if options.merge_type == MergeType.INCREMENTAL and chart1.projections:
         merged.projections = [_incremental_projection(chart1, merged)]
@@ -292,7 +357,7 @@ def merge(
 
 
 def merge_many(
-    charts: Sequence[Chart], options: MergeOptions | None = None
+    charts: Sequence[Chart], options: MergeOptions | None = None, *, match: Match = Match.STRICT
 ) -> tuple[Chart, MergeReport]:
     """Merge charts in order: the same chart as folding `merge` over them, cells merged once.
 
@@ -304,7 +369,8 @@ def merge_many(
     `steps`, each table's point counts. Nothing mutable is shared with the inputs.
 
     Simple merges only: an incremental merge carries chart1's layout, which a fold rebuilds
-    at every step. One chart is returned as a copy, unmerged, with an empty report.
+    at every step. One chart is returned as a copy, unmerged, with an empty report. `match`
+    as for `merge`; caller pairs are per step, so they are `merge`'s only.
     """
     options = options or MergeOptions(merge_type=MergeType.SIMPLE)
     if options.merge_type != MergeType.SIMPLE:
@@ -312,7 +378,7 @@ def merge_many(
     if not charts:
         raise MergeError("merge_many needs at least one chart")
     for k, chart in enumerate(charts):
-        if dups := find_duplicates(chart):
+        if dups := find_duplicates(chart, match):
             raise MergeError(f"chart {k} has duplicates: {dups[:5]}")
     first = charts[0]
     if len(charts) == 1:
@@ -320,15 +386,15 @@ def merge_many(
     antigens: list[Antigen] = [_own(a) for a in first.antigens]  # type: ignore[misc]
     sera: list[Serum] = [_own(s) for s in first.sera]  # type: ignore[misc]
     layers = [dict(layer) for layer in chart_layers(first)]
-    ag_keys = {antigen_key(a): i for i, a in enumerate(antigens) if not a.distinct}
-    sr_keys = {serum_key(s): i for i, s in enumerate(sera) if not s.distinct}
+    ag_keys = {antigen_key(a): i for i, a in enumerate(antigens) if _checked(a, match)}
+    sr_keys = {serum_key(s): i for i, s in enumerate(sera) if _checked(s, match)}
     running, info, steps = first, first.info, []
     for chart2 in charts[1:]:
         report = MergeReport()
-        layers += _join(running, chart2, antigens, sera, options, report, _own)
+        layers += _join(running, chart2, antigens, sera, options, report, _own, match)
         info = _merge_info(running, chart2)
-        dups = _new_duplicates(antigens, report.new_antigens, ag_keys, antigen_key, "AG")
-        dups += _new_duplicates(sera, report.new_sera, sr_keys, serum_key, "SR")
+        dups = _new_duplicates(antigens, report, ag_keys, antigen_key, "AG", match)
+        dups += _new_duplicates(sera, report, sr_keys, serum_key, "SR", match)
         if dups:
             raise MergeError(f"merge has duplicates: {dups[:5]}")
         steps.append(MergeStep.of(report))
@@ -347,14 +413,22 @@ def merge_many(
 
 
 def _new_duplicates(
-    points: list, new: list[int], keys: dict[tuple, int], key: Callable, kind: str
+    points: list,
+    report: MergeReport,
+    keys: dict[tuple, int],
+    key: Callable,
+    kind: str,
+    match: Match,
 ) -> list[str]:
-    """The fold's duplicate check on the merged chart, for the points this step added: the
-    points already merged were checked before, and matching never changes a point's key.
+    """The fold's duplicate check on the merged chart, for the points this step added or
+    changed: the points already merged were checked before, and only a point that took its
+    partner's passage or serum id (a name match) changes its key.
     Listed in the order the fold lists them (first occurrence in the merged chart)."""
+    new = report.new_antigens if kind == "AG" else report.new_sera
+    filled = report.filled_antigens if kind == "AG" else report.filled_sera
     dups: dict[tuple, int] = {}
-    for i in new:
-        if points[i].distinct:
+    for i in sorted({*filled, *new}):
+        if not _checked(points[i], match):
             continue
         k = key(points[i])
         if k in keys:
@@ -380,6 +454,8 @@ def _join(
     options: MergeOptions,
     report: MergeReport,
     copy_point: Callable,
+    match: Match = Match.STRICT,
+    pairs: tuple[dict[int, int] | None, dict[int, int] | None] = (None, None),
 ) -> list[Layer]:
     """Match chart2's points to chart1's and return chart2's layers in the merge's numbering.
 
@@ -387,13 +463,19 @@ def _join(
     updated in place and chart2's new points appended (copied by `copy_point`), so all of
     chart1 keeps its indexes and the new points follow in chart2's order.
     """
-    ag_match = match_points(chart1.antigens, chart2.antigens, _antigen_key)
-    sr_match = match_points(chart1.sera, chart2.sera, _serum_key)
+    ag_strict, ag_match = _pairs(
+        chart1.antigens, chart2.antigens, _antigen_key, match, pairs[0], report, "antigens"
+    )
+    sr_strict, sr_match = _pairs(
+        chart1.sera, chart2.sera, _serum_key, match, pairs[1], report, "sera"
+    )
 
     secondary_antigens = list(range(chart2.n_antigens))
     if options.combine_copied_references:
+        # strict pairs only: a name match must not make a table's references look copied
+        # (Sarah, Q131 R1 (c), 6 Oct 2026)
         secondary_antigens = _copied_reference_test_antigens(
-            chart1, chart2, ag_match, sr_match, report
+            chart1, chart2, ag_strict, sr_strict, report
         )
 
     ag2_target: dict[int, int] = {}
@@ -401,6 +483,8 @@ def _join(
         if j in ag_match:
             ag2_target[j] = ag_match[j]
             _update_antigen(antigens[ag_match[j]], chart2.antigens[j])
+            if _take_field(antigens[ag_match[j]], chart2.antigens[j]):
+                report.filled_antigens.append(ag_match[j])
             report.common_antigens += 1
         else:
             ag2_target[j] = len(antigens)
@@ -410,6 +494,8 @@ def _join(
     for j in range(chart2.n_sera):
         if j in sr_match:
             sr2_target[j] = sr_match[j]
+            if _take_field(sera[sr_match[j]], chart2.sera[j]):
+                report.filled_sera.append(sr_match[j])
             report.common_sera += 1
         else:
             sr2_target[j] = len(sera)
@@ -420,6 +506,90 @@ def _join(
         {(ag2_target[i], sr2_target[j]): t for (i, j), t in layer2.items() if i in ag2_target}
         for layer2 in chart_layers(chart2)
     ]
+
+
+def _pairs(
+    points1: list,
+    points2: list,
+    key: Callable,
+    match: Match,
+    caller: dict[int, int] | None,
+    report: MergeReport,
+    kind: str,
+) -> tuple[dict[int, int], dict[int, int]]:
+    """(strict pairs, all pairs), chart2 index -> chart1 index, counted in report.matching."""
+    if caller is not None:
+        report.matching["caller"][kind] = len(caller)
+        return caller, caller
+    strict = match_points(points1, points2, key)
+    report.matching["strict"][kind] = len(strict)
+    if match == Match.STRICT:
+        return strict, strict
+    by_name, ambiguous = _name_pairs(points1, points2, strict)
+    report.matching["name_fallback"][kind] = len(by_name)
+    report.matching["ambiguous"][kind] = ambiguous
+    return strict, {**strict, **by_name}
+
+
+def _name_pairs(points1: list, points2: list, strict: dict[int, int]) -> tuple[dict[int, int], int]:
+    """Among points unmatched on both sides, pair a point lacking its passage / serum id with
+    the one point of the same name, reassortant and annotations on the other side (either side
+    may lack it). A name with more candidates pairs nothing: its points lacking the field are
+    counted as ambiguous. DISTINCT points never pair."""
+
+    def by_name(points: list, used) -> dict[tuple, list[int]]:
+        out: dict[tuple, list[int]] = {}
+        for i, p in enumerate(points):
+            if i not in used and not p.distinct:
+                out.setdefault((p.name, p.reassortant, tuple(p.annotations)), []).append(i)
+        return out
+
+    g1, g2 = by_name(points1, set(strict.values())), by_name(points2, strict)
+    pairs: dict[int, int] = {}
+    ambiguous = 0
+    for name in g1.keys() & g2.keys():
+        lacking = sum(1 for i in g1[name] if not _field_value(points1[i])) + sum(
+            1 for j in g2[name] if not _field_value(points2[j])
+        )
+        if not lacking:
+            continue
+        if len(g1[name]) == 1 and len(g2[name]) == 1:
+            pairs[g2[name][0]] = g1[name][0]
+        else:
+            ambiguous += lacking
+    return pairs, ambiguous
+
+
+def _caller_pairs(
+    pairs: dict[int, int] | None, points2: list, points1: list, kind: str
+) -> dict[int, int] | None:
+    if pairs is None:
+        return None
+    pairs = {int(j): int(i) for j, i in pairs.items()}
+    bad = [
+        (j, i)
+        for j, i in pairs.items()
+        if not (0 <= j < len(points2) and 0 <= i < len(points1))
+        or points2[j].distinct
+        or points1[i].distinct
+    ]
+    if bad:
+        raise MergeError(f"{kind} pairs out of range or DISTINCT: {bad[:5]}")
+    if len(set(pairs.values())) != len(pairs):
+        raise MergeError(f"{kind} pairs are not one to one")
+    return pairs
+
+
+def _take_field(target: Antigen | Serum, src: Antigen | Serum) -> bool:
+    """A point lacking its passage / serum id takes its partner's (Sarah, Q131 R2): True if it
+    did. Strict pairs have equal fields, so for them this never changes anything."""
+    if _field_value(target) or not _field_value(src):
+        return False
+    if isinstance(target, Antigen):
+        target.passage = src.passage
+    else:
+        target.serum_id = src.serum_id  # type: ignore[union-attr]
+    return True
 
 
 def _update_antigen(target: Antigen, src: Antigen) -> None:
