@@ -53,6 +53,14 @@ def test_tree_method_says_only_what_tree_json_records() -> None:
         "was constructed using toolname/9.9 under the GTR substitution model, and zero-length "
         "branches were collapsed into multifurcations."
     )
+    partial = {"aligned": FULL["aligned"], "build": {"version": "toolname/9.9",
+               "parameters": {}, "zero_length_collapsed": True}}  # fmt: skip
+    assert text.tree_method(partial) == (
+        "Nucleotide sequences of the mature HA (HA1 and HA2) were aligned. The phylogenetic tree "
+        "was constructed using toolname/9.9, and zero-length branches were collapsed into "
+        "multifurcations.",
+        ["tree.json build.parameters.model"],
+    )
     assert text.tree_method({"asr": {"backend": "x"}})[1] == [
         "tree.json aligned.region", "tree.json build.version",
         "tree.json build.parameters.model", "tree.json build.zero_length_collapsed",
