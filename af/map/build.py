@@ -553,6 +553,7 @@ def build_map(
             b.settled_within,
             b.min_settled,
             b.max_other_move,
+            to=b.to,
         )
         try:
             result_b = apply_block_offset(

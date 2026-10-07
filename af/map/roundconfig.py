@@ -232,6 +232,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
                 "movers_file",
                 "shift",
                 "derived_from",
+                "to",
                 "target_legend",
                 "max_stress_rise",
                 "settled_within",
@@ -240,23 +241,38 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
             },
             f"{where} block",
         )
-        shift = b["shift"]
-        if not (isinstance(shift, list) and len(shift) == 2):
+        shift = b.get("shift")
+        if "to" in b:
+            from af.map.curate import TO_TARGET_MEDIAN
+
+            if b["to"] != TO_TARGET_MEDIAN:
+                raise ConfigError(
+                    f"{where} block {b['name']}: to must be {TO_TARGET_MEDIAN!r}, not {b['to']!r}"
+                )
+            if "shift" in b or "derived_from" in b:
+                raise ConfigError(
+                    f"{where} block {b['name']}: to = {b['to']!r} computes the shift; "
+                    "give no shift or derived_from"
+                )
+        elif not (isinstance(shift, list) and len(shift) == 2):
             raise ConfigError(f"{where} block {b['name']}: shift must be [dx, dy]")
+        elif "derived_from" not in b:
+            raise ConfigError(f"{where} block {b['name']}: a fixed shift needs derived_from")
         blocks.append(
             BlockOffsetConfig(
                 b["name"],
                 b["reason"],
                 _date(b["decided"], f"{where} block {b['name']}"),
                 tuple(b.get("movers", ())),
-                (float(shift[0]), float(shift[1])),
-                b["derived_from"],
+                (float(shift[0]), float(shift[1])) if shift is not None else None,
+                b.get("derived_from"),
                 b["target_legend"],
                 float(b["max_stress_rise"]),
                 float(b["settled_within"]),
                 int(b["min_settled"]),
                 float(b["max_other_move"]),
                 _path(b["movers_file"], base) if "movers_file" in b else None,
+                b.get("to"),
             )
         )
     column_bases = []
