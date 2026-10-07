@@ -31,6 +31,7 @@ import datetime
 import hashlib
 import json
 import sys
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,6 +96,16 @@ class LineageCheckConfig:
 
 
 @dataclass(frozen=True)
+class ReferenceCheckConfig:
+    """One ``[[reference_check]]`` row (:class:`processed.ReferenceCheck`)."""
+
+    dataset: str
+    max_substitutions: int
+    expect_lineages: list[str]
+    reason: str
+
+
+@dataclass(frozen=True)
 class LocationsConfig:
     """What the new-locations check reads (LOCATIONS-PROPOSAL §6c)."""
 
@@ -115,6 +126,8 @@ class SequencesConfig:
     source_subtypes: dict[str, str] = field(default_factory=dict)
     #: Subtypes placed by alignment rather than GISAID's label (processed.LineageCheck).
     lineage_check: list[LineageCheckConfig] = field(default_factory=list)
+    #: Datasets kept to their reference's lineage (processed.ReferenceCheck).
+    reference_check: list[ReferenceCheckConfig] = field(default_factory=list)
     #: The new-locations check; absent, the provenance records that it did not run.
     locations: LocationsConfig | None = None
 
@@ -229,6 +242,7 @@ def store_pull(config: SequencesConfig, pull_id: str, runner: Runner) -> dict[st
             config.nextclade, references, dataset, group, area, runner
         )
     _merge(placed, unchecked)
+    held_counts = _hold_far_records(config, placed, alignments)
     new_locations = _check_new_locations(
         config.locations, placed, area.root / NEW_LOCATIONS, started
     )
@@ -248,12 +262,52 @@ def store_pull(config: SequencesConfig, pull_id: str, runner: Runner) -> dict[st
                 "workbook_line_breaks": dict(workbook.line_breaks),
                 "placement": _placement_used(config.placement, group, dataset),
                 "lineage_check": lineage_flags,
+                "reference_check": held_counts.get(dataset, {}),
                 "alignment": summaries[dataset],
                 "new_locations": new_locations[dataset],
             },
             started=started,
         )
     return refs
+
+
+def _hold_far_records(
+    config: SequencesConfig,
+    placed: dict[str, list[SequenceRecord]],
+    alignments: Mapping[str, Mapping[str, nc.Aligned]],
+) -> dict[str, dict[str, int]]:
+    """Apply every ``reference_check`` to ``placed`` in place; returns the flag counts.
+
+    Held records are removed from the dataset and so are never published: they stay in the
+    raw pull only. A dataset left with nothing is fatal rather than a silent no-op, so a
+    pull of another lineage stops the run instead of looking stored.
+    """
+    seen = Counter(item.dataset for item in config.reference_check)
+    if twice := sorted(d for d, n in seen.items() if n > 1):
+        raise ConfigError("<config>", [f"reference_check: {twice} named twice"])
+    counts: dict[str, dict[str, int]] = {}
+    for item in config.reference_check:
+        if item.dataset not in placed:
+            continue
+        check = processed.ReferenceCheck(
+            item.dataset, item.max_substitutions, tuple(item.expect_lineages), item.reason
+        )
+        kept, held, flags = processed.hold_far_from_reference(
+            placed[item.dataset], alignments[item.dataset], check
+        )
+        counts[item.dataset] = {
+            "max_substitutions": item.max_substitutions,
+            "held": len(held),
+            **dict(sorted(flags.items())),
+        }
+        if not kept:
+            raise processed.StoreBuildError(
+                f"reference_check held every record of {item.dataset!r}"
+                f" ({len(held)} over {item.max_substitutions} substitutions):"
+                " exclude the pull or widen the rule, deliberately"
+            )
+        placed[item.dataset] = kept
+    return counts
 
 
 def _check_new_locations(
