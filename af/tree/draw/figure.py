@@ -18,17 +18,20 @@ from af.store import StoreRef
 from .aa_labels import LabelParams, select_labels
 from .defaults import load_defaults
 from .i7 import tree_block, write_i7
-from .layout import HideRules, compute_layout, rows_matching
+from .layout import HideRules, Layout, compute_layout, rows_matching
 from .model import DrawTree
 from .render import DashBar, FigureSpec, Geometry, render, with_centre_column
 from .sections import (
     BandParams,
+    HzBand,
     SectionOverrideError,
+    Selection,
     SelectParams,
     clade_membership,
     hz_partition,
     select_clades,
 )
+from .timeseries import TimeSeries
 from .timeseries import compute as compute_timeseries
 
 
@@ -79,32 +82,7 @@ def make_figure(
     ``flags`` (leaf id -> reasons, from the tree store) are counted, never acted on: whether a
     flagged leaf is drawn is a hide rule's decision, not the flag's.
     """
-    hide = HideRules(
-        config.hide.min_edge,
-        config.hide.names | config.overrides.hide_leaves,
-        config.hide.flag_reasons,
-    )
-    layout = compute_layout(tree, hide, flags)
-    ts = compute_timeseries(
-        [tree.date[i] for i in layout.leaf_nodes],
-        [tree.date_precision[i] for i in layout.leaf_nodes],
-        config.window_start,
-        config.window_end,
-    )
-    member = clade_membership([tree.clade[i] for i in layout.leaf_nodes], parents)
-    selection = select_clades(
-        member,
-        parents,
-        ts.in_window,
-        config.select,
-        config.bands,
-        config.overrides.show_clades,
-        config.overrides.hide_clades,
-    )
-    hz_first_rows = _rows_of_names(tree, layout, config.overrides.hide_hz_starting_at)
-    hz = hz_partition(
-        selection, parents, ts.in_window, config.select, hide_first_rows=frozenset(hz_first_rows)
-    )
+    layout, ts, selection, hz = arrange(tree, parents, config, flags)
     bands = [(b.first, b.last) for cs in selection.shown for b in cs.bands]
     labels, label_counts = select_labels(tree, layout, bands, config.labels)
 
@@ -185,6 +163,43 @@ def make_figure(
     }
     pdf.with_suffix(".draw.json").write_text(json.dumps(report, indent=1, default=str))
     return report
+
+
+def arrange(
+    tree: DrawTree,
+    parents: Mapping[str, str | None],
+    config: FigureConfig,
+    flags: Mapping[str, list[str]] | None = None,
+) -> tuple[Layout, TimeSeries, Selection, list[HzBand]]:
+    """Rows, time window, clade selection and lettered bands: shared by the figure and the
+    leaf book, so a row and a band letter mean the same leaf in both."""
+    hide = HideRules(
+        config.hide.min_edge,
+        config.hide.names | config.overrides.hide_leaves,
+        config.hide.flag_reasons,
+    )
+    layout = compute_layout(tree, hide, flags)
+    ts = compute_timeseries(
+        [tree.date[i] for i in layout.leaf_nodes],
+        [tree.date_precision[i] for i in layout.leaf_nodes],
+        config.window_start,
+        config.window_end,
+    )
+    member = clade_membership([tree.clade[i] for i in layout.leaf_nodes], parents)
+    selection = select_clades(
+        member,
+        parents,
+        ts.in_window,
+        config.select,
+        config.bands,
+        config.overrides.show_clades,
+        config.overrides.hide_clades,
+    )
+    hz_first_rows = _rows_of_names(tree, layout, config.overrides.hide_hz_starting_at)
+    hz = hz_partition(
+        selection, parents, ts.in_window, config.select, hide_first_rows=frozenset(hz_first_rows)
+    )
+    return layout, ts, selection, hz
 
 
 class DashBarError(ValueError):
