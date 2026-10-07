@@ -25,7 +25,7 @@ purpose; a subtype missing from it is uncoloured too, and the report says so.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -72,6 +72,11 @@ class OutputsReport:
     serology: StoreRef
     files: list[Path] = field(default_factory=list)
     geo_drawn: dict[str, dict[str, int]] = field(default_factory=dict)  # subtype -> month -> dots
+    # table subtype -> its I7 geo document (af.geo.records.to_i7): what the PDFs drew, for a
+    # caller that files each month as a report figure (af.geo.figures)
+    geo_docs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # where each location was drawn (the sequence workstream's lookup), for the same caller
+    coordinates: Callable[[str], tuple[float, float] | None] | None = None
     geo_unplaced: dict[str, int] = field(default_factory=dict)  # location -> dots not drawn
     geo_not_counted: dict[str, Any] = field(default_factory=dict)  # undated / no location
     stat_unknown_region: dict[str, int] = field(default_factory=dict)
@@ -136,9 +141,11 @@ def make_geo_and_stat(
     for subtype in sorted({s for s, _, _, _ in geo.dots}):
         prefix = subtypes().table_subtype(subtype).geo
         doc = to_i7(geo, subtype)
+        report.geo_docs[subtype] = doc
         records = geo_dir / f"{prefix}-records.json"
         records.write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         drawn = render_geo(doc, lookup.coordinates, coastline, geo_dir, prefix)
+        report.coordinates = lookup.coordinates
         report.files += [records, *drawn.files]
         report.geo_drawn[subtype] = drawn.drawn
         for name, n in drawn.no_coordinates.items():

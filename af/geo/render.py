@@ -20,6 +20,7 @@ locations had no coordinates, so a thin map says why.
 
 from __future__ import annotations
 
+import functools
 import math
 from collections import Counter
 from collections.abc import Callable, Mapping
@@ -76,6 +77,24 @@ def render_geo(
     return report
 
 
+def render_period(
+    period: Mapping[str, Any],
+    coordinates: Coordinates,
+    coastline: Path,
+    path: Path,
+    look: Look | None = None,
+    no_coordinates: Counter[str] | None = None,
+) -> int:
+    """Draw one period of an I7 ``geo`` document to ``path``; the number of dots drawn.
+
+    For a caller that files each month separately (the report's one figure per folder).
+    Locations it cannot place are added to ``no_coordinates``.
+    """
+    unplaced = no_coordinates if no_coordinates is not None else Counter()
+    look = look if look is not None else Look()
+    return _render_period(period, coordinates, _coastline(coastline), path, look, unplaced)
+
+
 def packed_offsets(n: int, spacing: float) -> list[tuple[float, float]]:
     """Centre first, then hexagonal rings of 6k points: dense, and the same for every n."""
     offsets = [(0.0, 0.0)]
@@ -89,6 +108,12 @@ def packed_offsets(n: int, spacing: float) -> list[tuple[float, float]]:
 
 
 def _coastline(path: Path) -> list[Any]:
+    return list(_read_coastline(str(Path(path).resolve())))
+
+
+@functools.cache
+def _read_coastline(path: str) -> tuple[Any, ...]:
+    """Read once per process: every month of every subtype draws the same outline."""
     if not Path(path).is_file():
         raise GeoRenderError(f"coastline shapefile not found: {path}")
     from cartopy.io import shapereader
@@ -96,7 +121,7 @@ def _coastline(path: Path) -> list[Any]:
     geometries = list(shapereader.Reader(str(path)).geometries())
     if not geometries:
         raise GeoRenderError(f"coastline shapefile has no shapes: {path}")
-    return geometries
+    return tuple(geometries)
 
 
 def _render_period(
