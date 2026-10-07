@@ -477,7 +477,7 @@ def build_map(
         scheme = coloured.scheme
         labels = list(coloured.labels)
         sequenced = list(coloured.sequenced)
-        store_refs.extend(colours.store_refs())
+        store_refs.extend(colours.store_refs(coloured.provenance["datasets"]))
         colour_note: dict[str, Any] = coloured.provenance
     else:
         scheme, labels = _stand_in_colours(chart, cfg, inputs)

@@ -103,3 +103,52 @@ def test_provenance_records_the_pins_and_the_skipped_guard(tmp_path: Path) -> No
     pinned = colours.for_chart(chart, own).provenance
     assert pinned["pins"] == {"serology/all": sha[:16]}
     assert pinned["serology_guard"] == "pinned: guard not applied"
+
+
+def test_a_pinned_behind_table_refuses_only_charts_that_read_it() -> None:
+    from af.store import StoreRef
+
+    sha = "ef" * 32
+    pins = Pins(clades=(StoreRef("clades", "h1", sha[:16], sha),))
+    behind = {"h1": ("1" * 16, "2" * 16)}
+    pins.check_clades_labelled(behind, {"bvic"})  # a B/Vic chart: not its table
+    with pytest.raises(MapColouringError, match="clades/h1"):
+        pins.check_clades_labelled(behind, {"h1"})
+
+
+def test_a_chart_cites_only_the_datasets_its_colours_come_from(tmp_path: Path) -> None:
+    """Its own row, plus any dataset an antigen matched in; the rest of the run's join is not
+    the figure's input (7 Oct 2026), so a behind table elsewhere does not mark it stale."""
+    import dataclasses
+
+    from af.clades.colours import ColourEntry
+    from af.clades.colours import ColourScheme as CladeColourScheme
+    from af.serology.joins import LinkCounts
+    from af.store import StoreRef
+    from tests.map.test_colouring import caller_setup
+
+    colours, chart, clade_subtype = caller_setup(tmp_path)
+    key = next(iter(colours._sequences))
+    colours._sequences[key] = dataclasses.replace(
+        colours._sequences[key], datasets=frozenset({"h3", "other"})
+    )
+    colours.links = LinkCounts(
+        clades_behind={"h1": ("1" * 16, "2" * 16), "other": ("3" * 16, "4" * 16)},
+        refs={
+            "sequences": {d: {"kind": "sequences", "dataset": d} for d in ("h1", "h3", "other")},
+            "clades": [{"kind": "clades", "dataset": d} for d in ("h1", "h3")],
+        },
+    )
+    sha = "ab" * 32
+    colours.serology = StoreRef("serology", "all", sha[:16], sha)
+    own = CladeColourScheme(
+        clade_subtype, "caller", (ColourEntry(1, "P", "Clade P", "#aa0000", False),)
+    )
+    p = colours.for_chart(chart, own).provenance
+    assert p["datasets"] == ["h3", "other"]  # its row, and where one antigen matched
+    assert p["clades_behind"] == {"other": ["3" * 16, "4" * 16]}  # h1 is not this chart's
+    refs = colours.store_refs(p["datasets"])
+    assert [(r["kind"], r["dataset"]) for r in refs] == [
+        ("serology", "all"), ("sequences", "h3"), ("sequences", "other"), ("clades", "h3")
+    ]  # fmt: skip
+    assert len(colours.store_refs()) == 6  # no datasets: the whole run, as before

@@ -570,6 +570,7 @@ def test_map_colours_read_the_pinned_versions(tmp_path: Path, syn: Any, monkeypa
 
     import pytest
 
+    from af.chart.model import Antigen, Chart, Titres
     from af.map.colouring import MapColouringError, StoreColours
 
     store, _, _ = _roots(tmp_path, syn)
@@ -627,8 +628,17 @@ def test_map_colours_read_the_pinned_versions(tmp_path: Path, syn: Any, monkeypa
                      "isolates/pull=test/part-0.parquet")  # fmt: skip
         builder.copy(moved, "sequences/pull=test/part-0.parquet")
         builder.publish(_provenance("sequences-test-moved"))
+    # Refused per chart (7 Oct 2026): an H3 chart colours from the behind clades/h3, a B/Vic
+    # chart does not read it and is not held up by it.
+    behind = StoreColours(store, cfg, rules, versions={"clades/h3": pinned_clades})
+    h3_chart = Chart({"V": H3}, [Antigen(_name("A", 1), passage="SIAT1")], [], Titres([[]]))
     with pytest.raises(MapColouringError, match="not produced together"):
-        StoreColours(store, cfg, rules, versions={"clades/h3": pinned_clades})
+        behind.for_chart(h3_chart, "test")
+    b_chart = Chart({"V": "B"}, [Antigen("/".join(("B", "EXAMPLETOWN", "3", "2021")),
+                                         extra={"L": "V"})], [], Titres([[]]))  # fmt: skip
+    assert behind.chart_datasets(b_chart, "bvic") == {"bvic"}
+    behind.pins.check_clades_labelled(behind.links.clades_behind, {"bvic"})  # not refused
+    assert [r["dataset"] for r in behind.store_refs({"bvic"})] == ["all", "bvic"]
 
     sequences = {f"sequences/{d}": store.current("sequences", d).version
                  for d in ("bvic", "byam", "h1")}  # fmt: skip

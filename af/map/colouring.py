@@ -21,7 +21,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -130,19 +130,25 @@ class Pins:
         refs += list(self.clades or ())
         return {f"{r.kind}/{r.dataset}": r.version for r in refs}
 
-    def check_clades_labelled(self, behind: Mapping[str, tuple[str | None, str]]) -> None:
+    def check_clades_labelled(
+        self,
+        behind: Mapping[str, tuple[str | None, str]],
+        datasets: Collection[str] | None = None,
+    ) -> None:
         """Refuse a PINNED clades version behind the sequences the join read: its clade calls
         would change if it were relabelled from them. ``behind`` is the join's content-based
         ``clades_behind`` (dataset -> (labelled, read)). A table labelled from another version
         with identical call inputs is not behind, so it is read (and recorded in provenance as
-        ``clades_same_content``): refusing it would guard against nothing (ruling, 5 Oct 2026)."""
+        ``clades_same_content``): refusing it would guard against nothing (ruling, 5 Oct 2026).
+        ``datasets``, when given, limits the check to the clades a chart colours with: a B/Vic
+        chart is not refused over a behind H1 table it never reads (7 Oct 2026)."""
         wrong = [
             f"clades/{r.dataset}@{r.version} was labelled from "
             + (f"sequences/{r.dataset}@{behind[r.dataset][0]}" if behind[r.dataset][0]
                else "no single sequences version")
             + f", not the sequences/{r.dataset}@{behind[r.dataset][1]} read"
             for r in self.clades or ()
-            if r.dataset in behind
+            if r.dataset in behind and (datasets is None or r.dataset in datasets)
         ]  # fmt: skip
         if wrong:
             raise MapColouringError(
@@ -253,7 +259,6 @@ class StoreColours:
             sequences=self.pins.sequences,
             clades=self.pins.clades,
         )
-        self.pins.check_clades_labelled(self.links.clades_behind)
         # The clade tables the join read: clade sets are judged by these same versions, never by
         # a CURRENT re-read a moment later (it may have moved).
         self._clade_refs = {
@@ -367,6 +372,9 @@ class StoreColours:
             if str(a.extra.get("L", "")) != row.ace_lineage
         )
         row_key = row.key
+        datasets = self.chart_datasets(chart, row_key)
+        # A pinned clades table behind its sequences refuses only the charts that colour from it.
+        self.pins.check_clades_labelled(self.links.clades_behind, datasets)
         if isinstance(scheme, str):
             if groups is not None:
                 raise MapColouringError(
@@ -411,12 +419,19 @@ class StoreColours:
             "shadowed_rows": [str(s) for s in shadowed],
             # clade tables labelled from another sequences version than the join read: dataset
             # -> [the version they labelled, the version read]. Empty when they agree.
-            "clades_behind": {d: list(v) for d, v in sorted(self.links.clades_behind.items())},
+            "clades_behind": {
+                d: list(v) for d, v in sorted(self.links.clades_behind.items()) if d in datasets
+            },
             # clade tables labelled from another sequences version whose calls' inputs are
             # identical: not behind, recorded so the version pair stays visible
             "clades_same_content": {
-                d: list(v) for d, v in sorted(self.links.clades_same_content.items())
+                d: list(v)
+                for d, v in sorted(self.links.clades_same_content.items())
+                if d in datasets
             },
+            # the sequence datasets this chart's colours come from (its own row, plus any other
+            # its antigens matched in): the only ones its figure cites (store_refs(datasets))
+            "datasets": sorted(datasets),
             # antigens of another lineage than the map's (coloured by the map's row), by code
             "lineage_minority": dict(sorted(minority.items())),
             # how the coloured antigens got their colour, and which had no clade to go by
@@ -440,14 +455,39 @@ class StoreColours:
             provenance["groups_sha256"] = groups_sha256(groups)
         return ChartColours(rows, tuple(labels), tuple(sequenced), provenance, tuple(basis))
 
-    def store_refs(self) -> list[dict[str, str]]:
-        """The store versions every store-coloured figure of this run was drawn from: exactly
-        the ones READ (serology, every sequences and clades dataset the join read), never
-        CURRENT at the time of asking, which may have moved since."""
+    def store_refs(self, datasets: Collection[str] | None = None) -> list[dict[str, str]]:
+        """The store versions a store-coloured figure was drawn from: exactly the ones READ
+        (serology, and the sequences and clades the join read), never CURRENT at the time of
+        asking, which may have moved since.
+
+        ``datasets`` limits sequences and clades to the ones a chart colours with (its
+        provenance ``datasets``, :meth:`chart_datasets`): a figure cites what its colours
+        depend on, so a B/Vic figure is not held stale by an H1 clade table (7 Oct 2026).
+        Without it, every dataset the run's join read."""
+        wanted = (lambda d: True) if datasets is None else (lambda d: d in datasets)
+        sequences = self.links.refs["sequences"]
         refs = [self.serology.to_json()]
-        refs += [self.links.refs["sequences"][d] for d in sorted(self.links.refs["sequences"])]
-        refs += sorted(self.links.refs["clades"], key=lambda r: r["dataset"])
+        refs += [sequences[d] for d in sorted(sequences) if wanted(d)]
+        refs += sorted(
+            (r for r in self.links.refs["clades"] if wanted(r["dataset"])),
+            key=lambda r: r["dataset"],
+        )
         return refs
+
+    def chart_datasets(self, chart: Chart, row: str) -> frozenset[str]:
+        """The sequence datasets a chart's colours can come from: its own subtype row, plus
+        every dataset its antigens' preparations matched a sequence in.
+
+        A preparation is matched only within its own table subtype and lineage
+        (:mod:`af.serology.joins`), so this is the chart's row today; a Yamagata-lineage antigen
+        on a B/Victoria chart would add byam. The row is always in, so a chart with no
+        sequenced antigen still names what it was coloured against."""
+        found: set[str] = {row}
+        for i in range(chart.n_antigens):
+            prep = self._sequences.get(preparation_key(chart, "antigen", i))
+            if prep is not None:
+                found |= prep.datasets
+        return frozenset(found)
 
 
 def chart_subtype(chart: Chart) -> Subtype:
