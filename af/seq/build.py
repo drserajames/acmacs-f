@@ -136,13 +136,25 @@ def pull_datasets(config: SequencesConfig, pull_id: str) -> list[str]:
     if label not in config.source_subtypes:
         raise ConfigError("<config>", [f"source_subtypes: no entry for pull label {label!r}"])
     subtype = config.source_subtypes[label]
-    names = {rule.dataset for rule in config.placement if rule.gisaid_subtype == subtype}
+    names = {
+        rule.dataset for rule in config.placement if name_terms(rule.gisaid_subtype) == subtype
+    }
     for check in config.lineage_check:
-        if check.gisaid_subtype == subtype:
+        if name_terms(check.gisaid_subtype) == subtype:
             names.update(check.candidates.values())
     if not names:
         raise ConfigError("<config>", [f"placement: no dataset receives {subtype!r} records"])
     return sorted(names)
+
+
+def name_terms(gisaid_subtype: str) -> str:
+    """GISAID's subtype ("A / H3N2", "B") in the name normaliser's terms ("A(H3N2)", "B").
+
+    ``source_subtypes`` is written in the normaliser's terms and placement in GISAID's, so
+    comparing them as written matches only B, and every A pull would name no dataset.
+    """
+    flu_type, sep, rest = gisaid_subtype.partition("/")
+    return f"{flu_type.strip()}({rest.strip()})" if sep else gisaid_subtype.strip()
 
 
 def store_pulls(
