@@ -36,6 +36,10 @@ if TYPE_CHECKING:  # af.tree.populate imports af.tree.asr, which imports this pa
     from af.tree.populate import PopulatedTree
 
 FORMAT = "af-tree-i6/1"
+ALIGNED_REGION = "mature HA (HA1 and HA2)"
+"""What every af tree is built on: af.tree.export takes Nextclade's alignment of the mature HA
+(af.seq), HA1 and HA2 both, numbered from the mature protein. Written to tree.json as
+``aligned``, so a report states it from the tree rather than from a sentence in config."""
 TREE_FILE = "tree.nwk"
 NODES_FILE = "nodes.parquet"
 ANCESTRAL_FILE = "ancestral.parquet"
@@ -161,6 +165,12 @@ def metadata(
             "reconstructs_gaps": populated.gaps_reconstructed,
             "gap_blind_override": populated.counts.get("gap_blind_override"),
         },
+        "aligned": {
+            "region": ALIGNED_REGION,
+            "length_nt": populated.alignment_length,
+            "numbering": "mature HA",
+        },
+        **({} if populated.build is None else {"build": populated.build}),
         "excluded_before_build": len(populated.excluded),
         "clade_set_version": populated.clade_set_version,
         "clade_parents": dict(sorted(populated.clade_parents.items())),
@@ -360,6 +370,7 @@ def read(directory: Path, alignment: Mapping[str, str]) -> PopulatedTree:
         titrated_by=titrated_by,
         counts=dict(meta["counts"]),
         gaps_reconstructed=True if asr is None else asr["reconstructs_gaps"],
+        build=meta.get("build"),
     )
 
 

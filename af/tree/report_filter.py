@@ -184,6 +184,7 @@ def report_tree(
         continent_of=continent_of,
         outgroup=outgroup,
     )
+    result.build = populated.build  # pruning does not change how the topology was built
     if continent_of is None:
         result.continents = {key: populated.continents.get(key) for key in keep}
     result.titrated = {key: how[key] is not None for key in keep}

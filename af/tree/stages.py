@@ -561,6 +561,8 @@ def _build_step(
             "excluded": exclude.records(),
             "source": source,
             "starting_tree": starting_counts,
+            "cmaple": parameters["cmaple"],
+            "incremental": inputs.incremental,
         }
         layout.build_meta.write_text(json.dumps(meta, indent=1, default=str) + "\n")
 
@@ -708,6 +710,33 @@ def clade_source(inputs: SubtypeInputs, clones: Path | None) -> CladeSource | No
     return CladeSource(subtype=inputs.clade_set, clone=clone, commit=commit)
 
 
+def build_record(meta: Mapping[str, Any]) -> dict[str, Any]:
+    """tree.json's ``build`` block from build.json: what a report says about how the tree was made.
+
+    Only what the build recorded. A build.json from before 7 Oct 2026 has no ``cmaple`` settings,
+    so ``model`` and ``min_branch_length`` are then absent from ``parameters``, never filled in.
+    """
+    counts = meta["counts"]
+    builder = str(counts["builder"])
+    settings = meta.get("cmaple") or {}
+    parameters: dict[str, Any] = {
+        key: settings[key] for key in ("model", "min_branch_length") if key in settings
+    }
+    parameters["search"] = counts["search"]
+    parameters["seed"] = counts["seed"]
+    parameters["from_scratch"] = counts["from_scratch"] == "yes"
+    starting = meta.get("starting_tree")
+    return {
+        "backend": builder.split("/", 1)[0],
+        "version": builder,
+        "parameters": parameters,
+        "starting_tree": None if not starting else "previous",
+        "zero_length_collapsed": True,  # finish_tree always collapses at the tolerance (>= 0)
+        "collapse_tolerance": counts["collapse_tolerance"],
+        "branches_collapsed": counts["branches_collapsed"],
+    }
+
+
 def _populate_step(
     subtype: str,
     sub: SubtypeSettings,
@@ -766,6 +795,7 @@ def _populate_step(
             excluded=excluded,
         )
         populated.counts["continent_not_assigned"] = CONTINENT_NOT_ASSIGNED
+        populated.build = build_record(json.loads(layout.build_meta.read_text()))
         try:
             direction = check_clock_direction(populated)
         except InvertedClockError as error:
