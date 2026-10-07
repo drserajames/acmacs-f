@@ -230,6 +230,21 @@ def test_update_refuses_while_tables_are_being_published(store: Store, syn: Any)
     assert not (store.dataset_dir("serology", "all") / "CURRENT").exists()
 
 
+def test_a_batch_over_other_kinds_does_not_hold_the_update_off(store: Store, syn: Any) -> None:
+    """The update reads only tables and serology/all, so a sequences sweep (which can hold the
+    store for hours) must not hold it off; the provenance says which kinds were guarded and
+    names the batch that was running, so a later reader sees it was not overridden."""
+    _publish(store, _tables(syn))
+    sweep = store.batch("sequences-sweep", ["sequences/h3", "sequences/h1"])
+    with sweep:
+        built = update(store, syn.rules)
+    assert built.built
+    seen = _store_read(store, built.ref)
+    assert seen["kinds"] == ["serology", "tables"]
+    assert seen["overrode_batches"] == []
+    assert [m["name"] for m in seen["batches_of_other_kinds"]] == ["sequences-sweep"]
+
+
 def test_provenance_says_guarded_or_overridden(store: Store, syn: Any) -> None:
     """The recorded guard is what tells a later reader a guarded build from an overridden one."""
     tables = _tables(syn)
