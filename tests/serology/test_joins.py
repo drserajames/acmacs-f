@@ -365,3 +365,44 @@ def test_a_preparations_one_clade_keeps_unknown_apart_from_no_clade() -> None:
     assert preparation_clade(unchosen("P.1", "P.2", tie=False)) is None  # conflict, disagreeing
     assert preparation_clade(unchosen("P.1", "P.1", tie=False)) == "P.1"  # conflict, agreeing
     assert preparation_clade(unchosen("", "")) == ""  # agreeing on no clade
+
+
+def test_a_padded_joined_isolate_matches_the_stores_spelling(tmp_path: Path, syn: Any) -> None:
+    """Sequence names are stored normalised ("ABC-1"); a table keeps the lab's "ABC-01". The
+    join keys the antigen as the store spells it, and counts the rows it respelt."""
+    from af.serology.joins import NAME_NORMALISED
+
+    padded = "/".join(("A(H3N2)", "SOMEWHERE", "-".join(("ABC", "01")), "2021"))
+    stored = "/".join(("A", "SOMEWHERE", "-".join(("ABC", "1")), "2021"))
+    a = {"name": padded, "passage": "MDCK1", "date": "2021-01-05"}
+    serum = {"name": syn.virus("SOMEWHERE", 9), "serum_id": "S-1"}
+    build([syn.table("t1", [a], [serum], [[["40"]]])], tmp_path / "v", syn.rules)
+    con = query.connect(tmp_path / "v")
+    isolates, clades = _isolates_and_clades(tmp_path)
+    index = SequenceIndex()
+    index.add(_candidate("EPI_ISL_1", "ACC1", stored, "cell", "s1"))
+    counts = link_sequences(con, {"h3": index}, [isolates], [clades], class_of=cell)
+    assert counts.by_flag[NAME_NORMALISED] == 1
+    row = con.execute("SELECT status, epi_isl FROM antigen_sequences").fetchone()
+    assert row == ("matched", "EPI_ISL_1")
+
+
+def test_a_distinct_repeat_is_keyed_as_its_preparation() -> None:
+    """A chain marks a repeated sample DISTINCT to keep it apart on the chart; serology has no
+    such annotation, so the mark must not stop the repeat finding its preparation."""
+    from af.chart.model import Antigen, Chart, Serum, Titres
+    from af.chart.titre import Titre
+    from af.serology.joins import preparation_key
+
+    name = "/".join(("A(H3N2)", "ONETOWN", "1", "2021"))
+    chart = Chart(
+        {"V": "A(H3N2)"},
+        [
+            Antigen(name, passage="SIAT2", annotations=("CLONE-1",)),
+            Antigen(name, passage="SIAT2", annotations=("CLONE-1", "DISTINCT")),
+        ],
+        [Serum("/".join(("A(H3N2)", "SOMEWHERE", "9", "2021")), serum_id="S-1")],
+        Titres([[Titre.parse("40")], [Titre.parse("80")]]),
+    )
+    first, repeat = (preparation_key(chart, "antigen", i) for i in (0, 1))
+    assert repeat == first and first[3] == ("CLONE-1",)

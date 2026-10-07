@@ -40,6 +40,7 @@ from af.clades.coverage import clades_behind_in_content
 from af.clades.store import CladeStoreError
 from af.seq.matching import Match, SequenceIndex
 from af.seq.matching_rules import MatchingRules
+from af.seq.names import normalise
 from af.seq.passage_match import PassageMatcher
 from af.serology.store import StoreError
 from af.store import StoreRef
@@ -48,6 +49,10 @@ from af.util.subtypes import SubtypeError, subtypes
 STATUSES = ("matched", "doubtful", "unmatched")
 SEVERAL_DATASETS = "serology.matched-in-several-datasets"
 NO_DATASET = "serology.no-sequence-dataset"
+# a chain's mark on a repeated sample (af.chart.identity): the chart's, not the preparation's
+DISTINCT = "DISTINCT"
+# an antigen matched by its name as the sequence store spells it (_match_name)
+NAME_NORMALISED = "serology.name-normalised"
 
 ClassOf = Callable[[Mapping[str, Any]], str]
 
@@ -190,6 +195,19 @@ def _match_rows(
     counts.by_method = dict(sorted(methods.items()))
 
 
+def _match_name(raw: str) -> str:
+    """The antigen's name as the sequence store spells it, for the matcher's key.
+
+    Sequence names are stored through :func:`af.seq.names.normalise`; table names are not, and
+    keep what it strips, a zero-padded part of a joined isolate ("ABC-01" is "ABC-1" in the
+    store). Keyed raw, such an antigen finds no sequence although its sequence is there. Only
+    a name normalise parses cleanly is used: one it reports a problem with is matched as
+    written, so the join never guesses at a name's shape.
+    """
+    normalised = normalise(raw)
+    return normalised.name if normalised.ok else raw
+
+
 def _match_row(
     row: Mapping[str, Any], indexes: Mapping[str, SequenceIndex], class_of: ClassOf
 ) -> Match | None:
@@ -205,9 +223,10 @@ def _match_row(
     datasets = tuple(r.key for r in rows)
     if any(d not in indexes for d in datasets):
         return None
+    name = _match_name(row["name"])
     results = [
         indexes[d].match(
-            row["name"],
+            name,
             class_of(row),
             epi_isl=row.get("epi_isl") or "",
             reassortant=row.get("reassortant") or "",
@@ -218,10 +237,14 @@ def _match_row(
     ]
     found = [r for r in results if r.chosen is not None]
     if len(found) <= 1:
-        return found[0] if found else results[0]
-    # a B antigen of unknown lineage matched in both B datasets: keep the first, flagged;
-    # _match_rows makes it doubtful, since which lineage it is decides everything downstream
-    return replace(found[0], flags=(*found[0].flags, SEVERAL_DATASETS))
+        result = found[0] if found else results[0]
+    else:
+        # a B antigen of unknown lineage matched in both B datasets: keep the first, flagged;
+        # _match_rows makes it doubtful, since which lineage it is decides everything downstream
+        result = replace(found[0], flags=(*found[0].flags, SEVERAL_DATASETS))
+    if name != row["name"]:  # counted, so the rows keyed by a respelt name stay visible
+        result = replace(result, flags=(*result.flags, NAME_NORMALISED))
+    return result
 
 
 _MATCH_COLUMNS: dict[str, pa.DataType] = {
@@ -356,6 +379,11 @@ def preparation_key(chart: Chart, kind: str, index: int) -> PreparationKey:
     harvest date (:meth:`af.tables.model.Antigen.ae_passage`), so it is used as written. The
     subtype is the chart's own ("V"), the table subtype. Only antigens are preparations: a
     serum is not, and asking for one is an error.
+
+    A chain merge marks a repeated sample ``DISTINCT`` so the chart keeps it apart
+    (:mod:`af.chart.identity`); that is the chart's bookkeeping, not part of the preparation,
+    and no serology row carries it. It is dropped, so the repeat is coloured as the
+    preparation it is (the same virus, the same sequence) instead of finding no sequence.
     """
     if kind != "antigen":
         raise ValueError(f"preparation_key: {kind!r} points are not preparations (antigen only)")
@@ -365,7 +393,8 @@ def preparation_key(chart: Chart, kind: str, index: int) -> PreparationKey:
     if not 0 <= index < len(chart.antigens):
         raise IndexError(f"preparation_key: antigen {index} of {len(chart.antigens)}")
     a = chart.antigens[index]
-    return (str(subtype), a.name, a.reassortant, tuple(a.annotations), a.passage)
+    annotations = tuple(x for x in a.annotations if x != DISTINCT)
+    return (str(subtype), a.name, a.reassortant, annotations, a.passage)
 
 
 _PREP = "t.subtype, a.name, a.reassortant, a.annotations, a.identity_passage"
