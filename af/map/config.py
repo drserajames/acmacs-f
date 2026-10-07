@@ -96,24 +96,27 @@ class HideConfig:
 
 @dataclass(frozen=True)
 class BlockOffsetConfig:
-    """Shift named points by a fixed offset, keeping their shape, then relax.
+    """Shift named points, keeping their shape, then relax: by a fixed offset, or (``to =
+    "target-median"``) so their median lands on the target legend row's median.
 
-    The offset is round-bound — it is derived from one round's layout — so ``derived_from`` says
-    how it was obtained and must be re-derived when the map is rebuilt.
+    A fixed offset is round-bound — it is derived from one round's layout — so ``derived_from``
+    says how it was obtained and must be re-derived when the map is rebuilt. A target needs no
+    re-deriving (:class:`af.map.curate.BlockOffset`).
     """
 
     name: str
     reason: str
     decided: dt.date
     movers: tuple[str, ...]
-    shift: tuple[float, float]
-    derived_from: str
+    shift: tuple[float, float] | None
+    derived_from: str | None
     target_legend: str
     max_stress_rise: float
     settled_within: float
     min_settled: int
     max_other_move: float
     movers_file: Path | None = None
+    to: str | None = None
 
     def load_movers(self) -> tuple[str, ...]:
         return _movers(self.name, self.movers, self.movers_file)

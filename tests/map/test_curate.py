@@ -205,3 +205,43 @@ def test_block_offset_ignores_a_rotation_when_measuring_collateral() -> None:
     )
     assert result.largest_other_move < 1e-6  # the rotation is fitted out, not counted as movement
     assert abs(result.rotation_degrees) == pytest.approx(25.0, abs=0.01)
+
+
+def target_rule(**changes: object) -> BlockOffset:
+    return block_rule(shift=None, derived_from=None, to="target-median", **changes)
+
+
+def test_a_target_block_lands_its_median_on_the_target_median() -> None:
+    """Sarah, 7 Oct 2026: the shift comes from the layout, so the block lands on its target."""
+    result = apply_block_offset(
+        target_rule(), LAYOUT, NAMES, PAINTED, stress_before=0.0, relax=no_relax
+    )
+    # target = median of IN 1-3 = (1, 0); movers' median = (9.5, 9.5)
+    np.testing.assert_allclose(result.shift, (-8.5, -9.5))
+    np.testing.assert_allclose(np.median(result.layout[[3, 4]], axis=0), (1.0, 0.0))
+    np.testing.assert_allclose(result.layout[4] - result.layout[3], LAYOUT[4] - LAYOUT[3])
+    report = result.report(target_rule())
+    assert report["shift"] == [-8.5, -9.5] and report["to"] == "target-median"
+    assert "derived_from" not in report  # nothing round-bound to explain
+
+
+def test_a_target_block_survives_a_re_layout_a_fixed_offset_does_not() -> None:
+    """The same map turned and moved (a from-scratch re-layout): the fixed offset, derived on
+    the old layout, sends the block elsewhere; the target still lands it."""
+    moved = LAYOUT @ rotation(120.0) + np.array([30.0, -4.0])
+    fixed = block_rule(shift=(-8.5, -9.5), derived_from="the old layout")
+    with pytest.raises(CurationError, match="settled within"):
+        apply_block_offset(fixed, moved, NAMES, PAINTED, stress_before=0.0, relax=no_relax)
+    result = apply_block_offset(
+        target_rule(), moved, NAMES, PAINTED, stress_before=0.0, relax=no_relax
+    )
+    assert result.settled == 2
+
+
+def test_a_block_is_a_fixed_shift_or_a_target_never_both() -> None:
+    with pytest.raises(ValueError, match="computes the shift"):
+        block_rule(to="target-median")  # still has shift and derived_from
+    with pytest.raises(ValueError, match="needs shift and derived_from"):
+        block_rule(shift=None)
+    with pytest.raises(ValueError, match="to must be"):
+        block_rule(shift=None, derived_from=None, to="somewhere")

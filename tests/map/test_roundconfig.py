@@ -239,3 +239,41 @@ def test_colouring_may_not_carry_its_own_af_data(tmp_path: Path) -> None:
     text = GOOD + STORE_COLOURING + 'af_data = "elsewhere"\n'
     with pytest.raises(ConfigError, match="moved to the top-level af_data"):
         load_maps_config(write(tmp_path, text))
+
+
+BLOCK = """
+  [[maps.blocks]]
+  name = "outliers to the clade"
+  reason = "decided at the meeting"
+  decided = 2026-10-07
+  movers = ["ONE", "TWO"]
+  target_legend = "a clade"
+  max_stress_rise = 60.0
+  settled_within = 2.0
+  min_settled = 2
+  max_other_move = 4.0
+"""
+
+
+def test_a_block_takes_a_fixed_shift_or_a_target(tmp_path: Path) -> None:
+    fixed = BLOCK + 'shift = [1.0, -2.0]\nderived_from = "the old layout"\n'
+    config, _ = load_maps_config(write(tmp_path, GOOD + fixed))
+    (b,) = config.maps[0].blocks
+    assert b.shift == (1.0, -2.0) and b.to is None
+    config, _ = load_maps_config(write(tmp_path, GOOD + BLOCK + 'to = "target-median"\n'))
+    (b,) = config.maps[0].blocks
+    assert b.to == "target-median" and b.shift is None and b.derived_from is None
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ('to = "target-median"\nshift = [1.0, 2.0]\n', "computes the shift"),
+        ('to = "somewhere"\n', "to must be"),
+        ("shift = [1.0, 2.0]\n", "needs derived_from"),
+        ("", "shift must be"),
+    ],
+)
+def test_a_block_placement_is_checked_on_load(tmp_path: Path, extra: str, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        load_maps_config(write(tmp_path, GOOD + BLOCK + extra))
