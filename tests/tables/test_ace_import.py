@@ -79,9 +79,47 @@ def test_a_workbook_for_the_same_test_retires_the_import(tmp_path):
     _add_ace(AceInputs(lab="LABN", dir=folder), rules, tables, report, errors)
     workbook = tables[0]
     workbook.source_key = "LABN xlsx labn-20300102.xlsx [S]"
+    workbook.meta["file"] = "labn-20300102.xlsx"
     errors2: list[str] = []
     _add_ace(AceInputs(lab="LABN", dir=folder), rules, [workbook], [], errors2)
     (error,) = errors2
+    assert "now reads this test from a workbook" in error
+
+
+def test_a_second_plate_of_the_day_is_not_retired_by_the_first(tmp_path):
+    """The import is the lab's second plate (labn-20300102_002.ace, no workbook); the first
+    plate's workbook (labn-20300102.xlsx) has the same group and date but is another test."""
+    folder, rules = setup(tmp_path)
+    (folder / "labn-20300102.ace").rename(folder / "labn-20300102_002.ace")
+    (rules.directory / "ace_imports.tsv").write_text(
+        f"{HEADER}\nLABN\texact\tlabn-20300102_002.ace\tno workbook\ttest\t2030-01-01\t\n"
+    )
+    rules = Rules(rules.directory)
+    tables: list = []
+    _add_ace(AceInputs(lab="LABN", dir=folder), rules, tables, [], [])
+    plate1 = tables[0]
+    plate1.source_key = "LABN xlsx labn-20300102.xlsx [S]"
+    plate1.meta["file"] = "labn-20300102.xlsx"
+    errors: list[str] = []
+    _add_ace(AceInputs(lab="LABN", dir=folder), rules, [plate1], [], errors)
+    assert errors == []
+
+
+@pytest.mark.parametrize("file", [None, "LABN_season_2030.tsv"])
+def test_a_test_from_an_export_retires_by_group_and_date(tmp_path, file):
+    """A TSV export (no file of its own, or one file of many tests) pairs as before."""
+    folder, rules = setup(tmp_path)
+    tables: list = []
+    _add_ace(AceInputs(lab="LABN", dir=folder), rules, tables, [], [])
+    exported = tables[0]
+    exported.source_key = "LABN test_id 1"
+    if file is None:
+        del exported.meta["file"]
+    else:
+        exported.meta["file"] = file
+    errors: list[str] = []
+    _add_ace(AceInputs(lab="LABN", dir=folder), rules, [exported], [], errors)
+    (error,) = errors
     assert "now reads this test from a workbook" in error
 
 
