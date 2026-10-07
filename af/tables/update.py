@@ -255,14 +255,20 @@ def _read_all(settings: TablesSettings, rules: Rules) -> tuple[list[Table], list
 def _add_ace(
     inputs: AceInputs, rules: Rules, tables: list[Table], report: list[str], errors: list[str]
 ) -> None:
-    """The .ace files an ace_imports rule names, each reported as such in every run. A
-    workbook table with the same group and date means the workbook has arrived: the import
-    must then be retired, so that is an error."""
+    """The .ace files an ace_imports rule names, each reported as such in every run. The
+    workbook arriving means the import must be retired, so that is an error. A workbook arrives
+    under the .ace's own file name with its own extension, so the two pair by file stem: a lab's
+    second plate of the day ("…_002") is a different test that shares the first's group and date.
+    A table read from a many-test export (a TSV) pairs by group and date."""
     from . import ace_import
 
     if not inputs.dir.is_dir():
         raise FileNotFoundError(f"ace folder missing: {inputs.dir}")
-    read_from_workbooks = {(t.group, t.date): t.source_key for t in tables}
+    arrived: dict[tuple[str, str], str] = {}
+    for t in tables:
+        name = Path(str(t.meta.get("file", "")))
+        one_test = name.suffix.lower() in (".xlsx", ".ace")  # not a many-test export (TSV)
+        arrived[(t.group, name.stem if one_test else t.date)] = t.source_key
     for path in sorted(inputs.dir.glob("*.ace")):
         rule = rules.ace_imports.find(path.name, lab=inputs.lab)
         if rule is None:
@@ -274,7 +280,8 @@ def _add_ace(
                 f"  ACE IMPORT {path.name} ({ace_import.SOURCE}) by {rule.where}: "
                 f"{rule['evidence']}"
             )
-            if (other := read_from_workbooks.get((table.group, table.date))) is not None:
+            other = arrived.get((table.group, path.stem)) or arrived.get((table.group, table.date))
+            if other is not None:
                 errors.append(
                     f"{path.name}: {other} now reads this test from a workbook; retire {rule.where}"
                 )
