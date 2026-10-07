@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -268,6 +269,67 @@ def test_snapshots_and_report_manifests(store: Store, tmp_path: Path) -> None:
         write_snapshot(store, [missing], "broken")
     with pytest.raises(StoreError, match="only once"):
         write_manifest(tmp_path / "m.json", [tree, tree], "dup")
+
+
+def pinned_manifest(path: Path, refs: list[StoreRef], pinned: list[dict[str, Any]]) -> Path:
+    """A report manifest in af.report.provenance.write_report_manifest's shape."""
+    write_manifest(path, refs, "report")
+    document = json.loads(path.read_text())
+    document["pinned"] = pinned
+    path.write_text(json.dumps(document))
+    return path
+
+
+def test_a_report_manifest_with_pinned_versions_lists_every_version_it_rests_on(
+    store: Store, tmp_path: Path
+) -> None:
+    """A map pinned to older tables (a ruling) rests on two versions of one dataset: the
+    report's own, in refs, and the older one beside it in "pinned"."""
+    old = publish(store, "tables", "labx/m", {"t.json": "old"})
+    new = publish(store, "tables", "labx/m", {"t.json": "new"})
+    chain = publish(store, "chains", "labx/h3-hi", {"chain.json": "1"})
+    slots: dict[str, Any] = {"store": old.to_json(), "slots": ["map/m2/all"]}
+    manifest = pinned_manifest(tmp_path / "manifest.json", [new, chain], [slots])
+    assert set(read_manifest(manifest)) == {new, chain}  # the snapshot part, as before
+    every = read_manifest(manifest, include_pinned=True)
+    assert set(every) == {new, chain, old} and every[-1] == old
+    assert check_refs(store, every, deep=True) == []
+
+    gone = StoreRef("tables", "labx/m", "f" * 16, "f" * 64)  # a pinned version not here
+    broken = pinned_manifest(
+        tmp_path / "broken.json", [new, chain], [{"store": gone.to_json(), "slots": ["s"]}]
+    )
+    problems = check_refs(store, read_manifest(broken, include_pinned=True), deep=False)
+    assert len(problems) == 1 and "labx/m" in problems[0]
+
+    snapshot = write_manifest(tmp_path / "snapshot.json", [new, chain], "no pins")
+    assert read_manifest(snapshot, include_pinned=True) == read_manifest(snapshot)
+
+
+@pytest.mark.parametrize(
+    ("entry", "problem"),
+    [
+        ("no slots", "names no slots"),
+        ("other dataset", "not among the manifest's refs"),
+        ("same version", "the refs' own version"),
+        ("twice", "listed twice"),
+    ],
+)
+def test_a_malformed_pinned_list_is_refused(
+    store: Store, tmp_path: Path, entry: str, problem: str
+) -> None:
+    old = publish(store, "tables", "labx/m", {"t.json": "old"})
+    new = publish(store, "tables", "labx/m", {"t.json": "new"})
+    other = publish(store, "tables", "laby/m", {"t.json": "y"})
+    pinned: list[dict[str, Any]] = {
+        "no slots": [{"store": old.to_json(), "slots": []}],
+        "other dataset": [{"store": other.to_json(), "slots": ["s"]}],
+        "same version": [{"store": new.to_json(), "slots": ["s"]}],
+        "twice": [{"store": old.to_json(), "slots": ["s"]}] * 2,
+    }[entry]
+    manifest = pinned_manifest(tmp_path / "manifest.json", [new], pinned)
+    with pytest.raises(StoreError, match=f"malformed 'pinned' list:\\n.*{problem}"):
+        read_manifest(manifest, include_pinned=True)
 
 
 def test_store_ref_validation() -> None:
