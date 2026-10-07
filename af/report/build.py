@@ -33,9 +33,15 @@ from typing import Any
 from af.report import text
 from af.report.config import Meeting, ReportConfig, Section, load, period_first, period_last
 from af.report.figures import FigureError, Resolved, resolve
-from af.report.provenance import ProvenanceError, StoreUse, check_against_store, collect
+from af.report.provenance import (
+    ProvenanceError,
+    StoreUse,
+    check_against_store,
+    collect,
+    write_report_manifest,
+)
 from af.run import Job, JobFailed, LocalRunner
-from af.store import Store, StoreError, write_manifest
+from af.store import Store, StoreError
 from af.util.artefacts import Artefact, sha256_path
 from af.util.config import ConfigError
 
@@ -481,7 +487,7 @@ def build(
     shutil.copyfile(tex.with_suffix(".pdf"), final)
     if manifest_path is not None:
         description = f"report {cfg.report.id}: {final.name} sha256 {sha256_path(final)}"
-        write_manifest(manifest_path, use.refs, description)
+        write_report_manifest(manifest_path, use, description)
     record = build_record(
         cfg, config_path, figs, use, final, pages, passes, built_at, manifest_path
     )

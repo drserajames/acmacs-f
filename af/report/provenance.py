@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from af.clades.coverage import clades_behind_in_content
@@ -33,6 +34,7 @@ from af.clades.store import CladeStoreError
 from af.report.figures import Resolved
 from af.store import Store, StoreError, StoreRef, check_refs
 from af.store.manifest import PROVENANCE
+from af.store.snapshot import refs_document
 
 
 class ProvenanceError(RuntimeError):
@@ -61,10 +63,21 @@ class StoreUse:
     # read), for clade tables labelled from another version whose clade calls' inputs are
     # identical: not behind, the versions only differ (af.serology.joins uses the same name)
     clades_same_content: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # Older versions of a dataset reached only through PINNED slots (the report's own version of
+    # it is in refs): kept on purpose, so recorded and listed in the manifest to reproduce it.
+    pinned_versions: dict[StoreRef, list[str]] = field(default_factory=dict)
+
+    def all_refs(self) -> list[StoreRef]:
+        """Every version the report rests on: its own, then the pinned-only older ones."""
+        return [*self.refs, *sorted(self.pinned_versions, key=str)]
 
     def to_json(self) -> dict[str, Any]:
         return {
             "refs": [ref.to_json() for ref in self.refs],
+            "pinned_versions": {
+                f"{ref.kind}/{ref.dataset}@{ref.version}": slots
+                for ref, slots in sorted(self.pinned_versions.items(), key=lambda kv: str(kv[0]))
+            },
             "used_by": {f"{k}/{d}": slots for (k, d), slots in sorted(self.used_by.items())},
             "not_from_store": self.not_from_store,
             "clades_same_content": {
@@ -73,10 +86,69 @@ class StoreUse:
         }
 
 
+Versions = dict[tuple[str, str], dict[StoreRef, set[str]]]  # (kind, dataset) -> version -> slots
+Chosen = dict[tuple[str, str], tuple[StoreRef, set[str]]]
+
+
+def write_report_manifest(path: Path, use: StoreUse, description: str) -> Path:
+    """The report manifest: the store's snapshot document of the report's own versions, plus
+    ``pinned``: each older version reached only through pinned slots, with those slots.
+
+    A snapshot names one version per dataset (af.store refuses repeats), so the pinned older
+    versions sit beside ``refs``, not in it; together they are every version the report rests
+    on. With no pins the document is exactly the snapshot format.
+    """
+    document = refs_document(use.refs, description)
+    if use.pinned_versions:
+        document["pinned"] = [
+            {"store": ref.to_json(), "slots": slots}
+            for ref, slots in sorted(use.pinned_versions.items(), key=lambda kv: str(kv[0]))
+        ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+def one_version_each(
+    by_dataset: Versions, pinned: set[str], verb: str
+) -> tuple[Chosen, dict[StoreRef, list[str]]]:
+    """The report's one version of each dataset, and the older ones only pinned slots reach.
+
+    A report rests on one version of each dataset (two maps on two versions of a chain would
+    put two analyses side by side). The exception is a pin: a slot pinned to keep an older
+    figure may rest on an older version. So a dataset may appear in more than one version only
+    if every version but one is reached solely through pinned slots; two versions under
+    unpinned slots are refused, naming every version and its slots.
+    """
+    chosen: Chosen = {}
+    extra: dict[StoreRef, list[str]] = {}
+    conflicts = []
+    for (kind, dataset), versions in sorted(by_dataset.items()):
+        unpinned = [ref for ref, slots in versions.items() if slots - pinned]
+        if len(unpinned) > 1:
+            conflicts.append(
+                f"{kind}/{dataset}: "
+                + "; ".join(
+                    f"{ref.version} {verb} {', '.join(sorted(s))}" for ref, s in versions.items()
+                )  # fmt: skip
+            )
+            continue
+        main = unpinned[0] if unpinned else min(versions, key=str)
+        chosen[(kind, dataset)] = (main, versions[main])
+        extra.update({ref: sorted(s) for ref, s in versions.items() if ref != main})
+    if conflicts:
+        raise ProvenanceError(
+            f"figures {'drawn from' if verb == 'in' else 'rest on'} different versions of the "
+            "same dataset (pin the slots that should keep an older version):\n  "
+            + "\n  ".join(conflicts)
+        )
+    return chosen, extra
+
+
 def collect(figs: dict[str, Resolved]) -> StoreUse:
-    """Gather refs across figures; two versions of one dataset is an error listing the slots."""
+    """Gather refs across figures, one version of each dataset unless pinned slots keep another."""
     use = StoreUse()
-    by_dataset: dict[tuple[str, str], dict[StoreRef, list[str]]] = {}
+    by_dataset: dict[tuple[str, str], dict[StoreRef, set[str]]] = {}
     for slot, r in figs.items():
         if r.figure.placeholder:
             continue
@@ -84,20 +156,10 @@ def collect(figs: dict[str, Resolved]) -> StoreUse:
         if not refs:
             use.not_from_store.append(slot)
         for ref in refs:
-            by_dataset.setdefault((ref.kind, ref.dataset), {}).setdefault(ref, []).append(slot)
-    conflicts = [
-        f"{kind}/{dataset}: "
-        + "; ".join(f"{ref.version} in {', '.join(slots)}" for ref, slots in versions.items())
-        for (kind, dataset), versions in sorted(by_dataset.items())
-        if len(versions) > 1
-    ]
-    if conflicts:
-        raise ProvenanceError(
-            "figures drawn from different versions of the same dataset:\n  "
-            + "\n  ".join(conflicts)
-        )
-    for key, versions in sorted(by_dataset.items()):
-        ((ref, slots),) = versions.items()
+            by_dataset.setdefault((ref.kind, ref.dataset), {}).setdefault(ref, set()).add(slot)
+    pinned = {slot for slot, r in figs.items() if r.pinned}
+    chosen, use.pinned_versions = one_version_each(by_dataset, pinned, "in")
+    for key, (ref, slots) in chosen.items():
         use.refs.append(ref)
         use.used_by[key] = sorted(slots)
     return use
@@ -140,7 +202,7 @@ def clades_label_only(
     return result.labelled
 
 
-def expand_upstream(use: StoreUse, store: Store) -> None:
+def expand_upstream(use: StoreUse, store: Store, pinned: set[str] | None = None) -> None:
     """Add every version the figures' versions were built from, transitively (in place).
 
     A chain that is CURRENT but built from tables that are not shows old data just the same;
@@ -149,6 +211,7 @@ def expand_upstream(use: StoreUse, store: Store) -> None:
     """
     by_dataset: dict[tuple[str, str], dict[StoreRef, set[str]]] = {}
     queue = [(ref, slot) for ref in use.refs for slot in use.used_by[(ref.kind, ref.dataset)]]
+    queue += [(ref, slot) for ref, slots in use.pinned_versions.items() for slot in slots]
     read = {ref.dataset: ref for ref in use.refs if ref.kind == "sequences"}
     labels: dict[StoreRef, StoreRef | None] = {}
     seen: set[tuple[StoreRef, str]] = set()
@@ -162,20 +225,10 @@ def expand_upstream(use: StoreUse, store: Store) -> None:
             labels[ref] = clades_label_only(store, ref, read, use)
         label_only = labels.get(ref)
         queue.extend((up, slot) for up in upstream_refs(store, ref) if up != label_only)
-    conflicts = [
-        f"{kind}/{dataset}: "
-        + "; ".join(f"{ref.version} under {', '.join(sorted(s))}" for ref, s in versions.items())
-        for (kind, dataset), versions in sorted(by_dataset.items())
-        if len(versions) > 1
-    ]
-    if conflicts:
-        raise ProvenanceError(
-            "figures rest on different versions of the same dataset:\n  " + "\n  ".join(conflicts)
-        )
+    chosen, use.pinned_versions = one_version_each(by_dataset, pinned or set(), "under")
     use.refs = []
     use.used_by = {}
-    for key, versions in sorted(by_dataset.items()):
-        ((ref, slots),) = versions.items()
+    for key, (ref, slots) in chosen.items():
         use.refs.append(ref)
         use.used_by[key] = sorted(slots)
 
@@ -188,12 +241,12 @@ def check_against_store(
     A ref used only by pinned slots may be old: pinning is how a report keeps an older figure
     on purpose.
     """
-    problems = check_refs(store, use.refs, deep=deep)
+    problems = check_refs(store, use.all_refs(), deep=deep)
     if problems:
         raise ProvenanceError(f"{len(problems)} store problem(s):\n  " + "\n  ".join(problems))
-    expand_upstream(use, store)
-    problems = check_refs(store, use.refs, deep=deep)
     pinned = {slot for slot, r in figs.items() if r.pinned}
+    expand_upstream(use, store, pinned)
+    problems = check_refs(store, use.all_refs(), deep=deep)
     for ref in use.refs:
         try:
             current = store.current(ref.kind, ref.dataset)
