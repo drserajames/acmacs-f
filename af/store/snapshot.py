@@ -77,7 +77,7 @@ def read_manifest(path: Path, *, include_pinned: bool = False) -> list[StoreRef]
     """Read a snapshot or report manifest. A missing file is fatal.
 
     ``refs`` names one version per dataset. A report manifest may also list ``pinned``:
-    older versions of those datasets that only pinned report slots reach (a map kept on its
+    other versions of those datasets that only pinned report slots reach (a map kept on its
     older tables by a ruling), as ``[{"store": <ref>, "slots": [...]}]``. With
     ``include_pinned`` they follow the refs, so "reproduce this report"
     (:func:`check_refs` over the result) resolves every version the report rests on.
@@ -93,9 +93,12 @@ def read_manifest(path: Path, *, include_pinned: bool = False) -> list[StoreRef]
 def pinned_refs(document: dict[str, Any], refs: Sequence[StoreRef], path: Path) -> list[StoreRef]:
     """The manifest's pinned versions, checked against its refs.
 
-    Each is an OLDER version of a dataset the refs name (so a different version of it), named
-    once, with the slots that reach it. Anything else is a malformed manifest, refused rather
-    than read past: reproducing a report must not quietly skip a version it rests on.
+    Each is ANOTHER version of a dataset the refs name, named once, with the slots that reach
+    it. Anything else is a malformed manifest, refused rather than read past: reproducing a
+    report must not quietly skip a version it rests on. "Another", not "older": when every
+    version of a dataset sits under pinned slots, the writer
+    (af.report.provenance.write_report_manifest) picks which one is the report's own, so a
+    pinned version need not be the earlier one.
     """
     entries = document.get("pinned", [])
     current = {(ref.kind, ref.dataset): ref for ref in refs}
@@ -108,7 +111,7 @@ def pinned_refs(document: dict[str, Any], refs: Sequence[StoreRef], path: Path) 
         if key not in current:
             problems.append(f"{ref}: its dataset is not among the manifest's refs")
         elif current[key].version == ref.version:
-            problems.append(f"{ref}: is the refs' own version, not an older pinned one")
+            problems.append(f"{ref}: is the refs' own version, not another pinned one")
         if ref in pinned:
             problems.append(f"{ref}: listed twice")
         pinned.append(ref)
