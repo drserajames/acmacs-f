@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime
+import json
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
@@ -51,6 +52,7 @@ from af.tree.io.fasta import read_alignment
 from af.tree.placement import PlacementError, check_placement, limit_for, load_placement_limits
 from af.tree.populate import CONTINENTS, LeafRecord, PopulatedTree
 from af.tree.report_filter import TitratedIndex, report_tree
+from af.tree.stages import build_record
 
 KIND = "trees"
 STEP = "trees.report"
@@ -228,6 +230,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--locations", required=True, type=Path, help="acmacs-f-data rules/locations"
     )
     parser.add_argument("--placement-limits", required=True, type=Path)
+    parser.add_argument(
+        "--build-record",
+        type=Path,
+        help="the source's build.json, for a source published before tree.json recorded its build;"
+        " fills tree.json 'build' and is recorded as a hashed input",
+    )
     parser.add_argument("--dry-run", action="store_true", help="derive and check; do not publish")
     args = parser.parse_args(argv)
 
@@ -251,6 +259,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     continent_of, missing = continent_lookup(LocationTables.read(args.locations))
     result = derive(populated, args.cutoff, titrated, continent_of, missing, args.placement_limits)
     result.counts.update({f"report_{k}": v for k, v in table_counts.items()})
+    extra_inputs: list[StoreRef | ExternalInput] = []
+    if args.build_record is not None:
+        if populated.build is not None:
+            raise ReportStageError(
+                f"{source_ref} already records its build; --build-record would replace a fact"
+            )
+        result.build = build_record(json.loads(args.build_record.read_text()))
+        extra_inputs.append(ExternalInput.of(args.build_record))
+    print(f"  build                        {result.build}")
 
     parameters = {
         "source": source_ref.to_json(),
@@ -302,6 +319,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ExternalInput.of(alignment_path),
             ExternalInput.of(args.locations / "countries.tsv"),
             ExternalInput.of(args.locations / "regions.tsv"),
+            *extra_inputs,
             *table_refs,
         ],
         parameters,

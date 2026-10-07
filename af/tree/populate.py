@@ -163,6 +163,9 @@ class PopulatedTree:
     titrated_by: dict[str, list[str]] = field(default_factory=dict)
     counts: dict[str, Any] = field(default_factory=dict)
     gaps_reconstructed: bool = True
+    build: dict[str, Any] | None = None
+    """How the topology was built (af.tree.stages.build_record), written to tree.json as
+    ``build``. None: not recorded, and tree.json then has no ``build`` key."""
 
 
 def nucleotide_changes(above: str, below: str) -> list[tuple[int, str, str]]:

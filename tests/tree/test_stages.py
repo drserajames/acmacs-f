@@ -557,3 +557,37 @@ def test_the_stage_assigns_no_continent_and_says_why(tmp_path: Path) -> None:
     assert i6.read_metadata(version)["counts"]["continent_not_assigned"].startswith("no country")
     nodes = i6.read_nodes(version, columns=["is_leaf", "continent"]).to_pylist()
     assert {n["continent"] for n in nodes if n["is_leaf"]} == {None}
+
+
+def test_the_published_tree_records_how_it_was_built_and_what_was_aligned(tmp_path: Path) -> None:
+    """The report states the method from these fields, never from a sentence in config."""
+    config = make_project(tmp_path / "p")
+    statuses(config)
+    store = Store.open(tmp_path / "p" / "store")
+    meta = i6.read_metadata(store.version_dir(store.current("trees", f"h3/{FIXTURE_PURPOSE}")))
+    build = meta["build"]
+    assert build["backend"] == "cmaple" and build["version"].startswith("cmaple/")
+    assert build["parameters"]["model"] == "GTR" and build["parameters"]["from_scratch"] is True
+    assert build["zero_length_collapsed"] is True and build["starting_tree"] is None
+    assert meta["aligned"] == {
+        "region": i6.ALIGNED_REGION,
+        "length_nt": meta["alignment_length"],
+        "numbering": "mature HA",
+    }
+
+
+def test_an_old_build_record_leaves_unrecorded_settings_out() -> None:
+    old = {
+        "counts": {
+            "builder": "cmaple/9.9",
+            "search": "EXHAUSTIVE",
+            "seed": 1,
+            "from_scratch": "no",
+            "collapse_tolerance": 0.0,
+            "branches_collapsed": 7,
+        },
+        "starting_tree": {"leaves": 3},
+    }
+    record = stages.build_record(old)
+    assert "model" not in record["parameters"] and "min_branch_length" not in record["parameters"]
+    assert record["parameters"]["from_scratch"] is False and record["starting_tree"] == "previous"

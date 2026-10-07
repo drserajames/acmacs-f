@@ -89,3 +89,18 @@ def test_an_internal_label_that_is_not_its_id_is_an_error(tmp_path: Path) -> Non
     path.write_text(path.read_text().replace(node.id_hex, "0" * 16, 1))
     with pytest.raises(i6.I6Error, match="is not its id"):
         i6.read(tmp_path, ALIGNMENT)
+
+
+def test_the_build_record_survives_reading_and_the_report_filter(tmp_path: Path) -> None:
+    populated = labelled("ml")
+    populated.build = {"backend": "cmaple", "version": "cmaple/9.9", "parameters": {}}
+    (tmp_path / "w").mkdir()
+    i6.write(populated, tmp_path / "w", "weekly")
+    reread = i6.read(tmp_path / "w", ALIGNMENT)
+    assert reread.build == populated.build
+    assert report_tree(reread, CUTOFF, index()).build == populated.build
+
+
+def test_no_build_record_writes_no_build_key(tmp_path: Path) -> None:
+    i6.write(labelled(), tmp_path, "weekly")
+    assert "build" not in i6.read_metadata(tmp_path)
