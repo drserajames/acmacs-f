@@ -33,7 +33,7 @@ import socket
 import stat
 import tomllib
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -172,7 +172,7 @@ class Store:
         return busy.batch(self.root, name, datasets, max_age_hours=max_age_hours)
 
     def reading(
-        self, name: str, *, override: bool = False
+        self, name: str, *, kinds: Collection[str] | None = None, override: bool = False
     ) -> AbstractContextManager[busy.ReadGuard]:
         """Guard a build that reads the store (a map, a report).
 
@@ -180,8 +180,20 @@ class Store:
         whose CURRENT it read (through any :class:`Store` on this root in this process) has
         moved since. ``override`` reads anyway, for diagnosis: pass it only from an explicit
         command-line flag, and put ``guard.to_json()`` in the build's provenance.
+
+        ``kinds`` (e.g. ``{"tables", "serology"}``) declares the store kinds the read uses:
+        then only a batch naming a dataset of one of those kinds holds it off, and a read of
+        any other kind fails at once. A guard that wraps another sees its reads too, so it
+        declares their kinds as well. Without ``kinds`` every batch holds it off.
         """
-        return busy.reading(self.root, name, override=override, current=self._current_id)
+        declared = None
+        if kinds is not None:
+            declared = frozenset(check_kind(kind) for kind in kinds)
+            if not declared:
+                raise StoreError(f"{name}: kinds is empty; name the kinds this read uses")
+        return busy.reading(
+            self.root, name, override=override, kinds=declared, current=self._current_id
+        )
 
     def list_datasets(self, kind: str) -> list[StoreRef]:
         """Every dataset of ``kind`` with its CURRENT ref, sorted by dataset key."""
@@ -351,6 +363,10 @@ class VersionBuilder:
         if not manifest.files:
             raise StoreError(f"{self.kind}/{self.dataset}: refusing to publish an empty version")
         ref = StoreRef(self.kind, self.dataset, manifest.version(), manifest.sha256())
+        busy.check_write(self.store.root, self.kind, self.dataset)
+        # Before, not after: a holder killed mid-publish must not leave a marker that says
+        # nothing was published (it would then count as stale, not partial).
+        busy.record_publish(self.store.root, self.kind, self.dataset)
         dataset_dir = self.store.dataset_dir(self.kind, self.dataset)
         with _locked(dataset_dir):
             self._publish_locked(ref, manifest, provenance, summary)
