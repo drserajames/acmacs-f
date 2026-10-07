@@ -234,11 +234,43 @@ def keyed_points(
         fallback[reason] += 1
         return point_key(point, "loose")
 
-    return (
-        [(key(p, k), p) for p, k in zip(ref, ids["ref"], strict=True)],
-        [(key(p, k), p) for p, k in zip(new, ids["new"], strict=True)],
-        fallback,
-    )
+    rk = [(key(p, k), p) for p, k in zip(ref, ids["ref"], strict=True)]
+    nk = [(key(p, k), p) for p, k in zip(new, ids["new"], strict=True)]
+    fallback["none_class_paired"] = _pair_none_class(rk, nk)
+    return rk, nk, fallback
+
+
+def _pair_none_class(rk: list[tuple[str, Point]], nk: list[tuple[str, Point]]) -> int:
+    """Pair what the keys left apart only because one side has no passage class (in place).
+
+    A lab table's passage column sometimes holds a specimen id, so that side's passage class is
+    none while the other side reads the real passage: the same virus, same name and isolation
+    date, never paired by a key that includes the class. A still-unpaired point with no class
+    pairs with the one unpaired point on the other side with the same spelling-normalised name
+    and date, when that (name, date) is unique among the unpaired points on both sides. Counted.
+    """
+    rkeys, nkeys = Counter(k for k, _ in rk), Counter(k for k, _ in nk)
+
+    def open_by_identity(keyed: list[tuple[str, Point]], other: Counter[str]) -> dict:
+        found: dict[tuple[str, str], list[int]] = {}
+        for i, (k, point) in enumerate(keyed):
+            if k not in other and point.get("date"):
+                found.setdefault((spelling_key(point["name"]), point["date"]), []).append(i)
+        return found
+
+    ropen, nopen = open_by_identity(rk, nkeys), open_by_identity(nk, rkeys)
+    paired = 0
+    for ident, ri in ropen.items():
+        ni = nopen.get(ident, [])
+        if len(ri) != 1 or len(ni) != 1:
+            continue
+        r, n = rk[ri[0]][1], nk[ni[0]][1]
+        if bool(r.get("passage_class")) == bool(n.get("passage_class")):
+            continue  # both classed (or both not): the class difference is real, not missing
+        shared = f"~{ident[0]}|{ident[1]}"
+        rk[ri[0]], nk[ni[0]] = (shared, r), (shared, n)
+        paired += 1
+    return paired
 
 
 @dataclass(frozen=True)
@@ -290,18 +322,50 @@ IDENTICAL_MAX = 1e-3
 BULK_MOVE_MAX = 1.0  # units: points moved further than this are left out of the orientation fit
 
 
-def bulk_orientation(a: Sequence[XY], b: Sequence[XY], fit: Fit) -> Fit:
+def bulk_orientation(a: Sequence[XY], b: Sequence[XY], fit: Fit) -> tuple[Fit, float]:
     """Orientation of the bulk of the map: refit without the points the full fit moved > 1 unit.
 
     A least-squares fit over every point rotates to compromise with the points that genuinely
     moved (a refused guard, a dropped hand move), so a map with 9% of its points moved can read as
-    turned 4.7 degrees when its bulk is not turned at all. The reader sees the bulk. If fewer than
-    half the points are within the cut, the full fit is used (there is no stable bulk to orient by).
+    turned 4.7 degrees when its bulk is not turned at all. The reader sees the bulk. Also returns
+    the fraction of points within the cut: below half there is no stable bulk to orient by, the
+    full fit is returned, and its angle means nothing (a map rebuilt from scratch can read +20 or
+    -80 degrees depending on which points are fitted), so callers must not report it as a turn.
     """
     keep = [i for i, dist in enumerate(fit.distances) if dist <= BULK_MOVE_MAX]
+    within = len(keep) / max(1, len(a))
     if len(keep) < max(3, len(a) // 2):
-        return fit
-    return procrustes([a[i] for i in keep], [b[i] for i in keep])
+        return fit, within
+    return procrustes([a[i] for i in keep], [b[i] for i in keep]), within
+
+
+def orientation_text(p: dict[str, Any]) -> str:
+    """How the orientation was measured, for a reader; "" when the bulk gave a clear angle."""
+    o = p.get("orientation", {})
+    if o.get("bulk") is not False:
+        return ""
+    share = f"{100 * o['within_1u']:.0f}% of the {p['points']} {o['points']}"
+    text = (f"no bulk orientation: only {share} lie within 1 u of the full fit, so no rotation "
+            "is measured")  # fmt: skip
+    w = o.get("window_antigens", {})
+    if "rotation_deg" in w:
+        text += (f"; the antigens inside the window ({w['points']}) fit at "
+                 f"{w['rotation_deg']:.1f} deg, RMSD {w['rmsd']:.2f}")  # fmt: skip
+    return text
+
+
+def _window_orientation(pairs: list[tuple[str, Point, Point]]) -> dict[str, Any]:
+    """Orientation over the antigens inside the map's time window on both sides (not greyed).
+
+    Recent antigens are what a reader looks at, and they often keep a stable shape when a
+    from-scratch map as a whole does not. Reported beside the check, never gated.
+    """
+    inside = [(r, n) for _, r, n in pairs if not r.get("greyed") and not n.get("greyed")]
+    if len(inside) < 3:
+        return {"points": len(inside)}
+    fit = procrustes([tuple(r["xy"]) for r, _ in inside], [tuple(n["xy"]) for _, n in inside])
+    return {"points": len(inside), "rotation_deg": fit.rotation_deg, "rmsd": fit.rmsd,
+            "reflected": fit.reflected}  # fmt: skip
 
 
 def adjusted_rand(x: Sequence[str], y: Sequence[str]) -> float:
@@ -465,11 +529,17 @@ def compare(ref: dict[str, Any], new: dict[str, Any], how: str = "name") -> dict
         a_xy = [tuple(p[1]["xy"]) for p in pairs]
         b_xy = [tuple(p[2]["xy"]) for p in pairs]
         fit = procrustes(a_xy, b_xy)
-        bulk = bulk_orientation(a_xy, b_xy, fit)
+        bulk, within = bulk_orientation(a_xy, b_xy, fit)
+        has_bulk = within >= 0.5
         d, n_ag = fit.distances, len(ag_pairs)
         out["procrustes"] = {
             "points": len(d), "rmsd": fit.rmsd,
-            "rotation_deg": bulk.rotation_deg, "reflected": bulk.reflected,
+            # The angle a reader sees: of the bulk, over these points; none when there is no bulk.
+            "rotation_deg": bulk.rotation_deg if has_bulk else float("nan"),
+            "reflected": bulk.reflected,
+            "orientation": {"points": "antigens and sera drawn on both sides",
+                            "bulk": has_bulk, "within_1u": within,
+                            "window_antigens": _window_orientation(ag_pairs)},  # fmt: skip
             "rotation_deg_all_points": fit.rotation_deg,
             "median": _percentile(d, 50), "p95": _percentile(d, 95), "max": max(d),
             "frac_gt_1": sum(x > 1 for x in d) / len(d),

@@ -88,8 +88,9 @@ def _context(row: dict[str, Any], check: str) -> str:
     if check in ("p95 displacement", "frac moved > 1", "rotation deg"):
         p = d.get("procrustes", {})
         if p:
+            turn = maps.orientation_text(p) or f"rotation {_fmt(p['rotation_deg'])} deg"
             return (f"p95 {_fmt(p['p95'])} u, {_fmt(100 * p['frac_gt_1'])}% > 1 u, "
-                    f"rotation {_fmt(p['rotation_deg'])} deg, RMSD {_fmt(p['rmsd'])}")  # fmt: skip
+                    f"{turn}, RMSD {_fmt(p['rmsd'])}")  # fmt: skip
     if check == "clade ARI":
         c = d.get("antigens", {}).get("clade", {})
         return f"compared {c.get('compared')}, top changes {c.get('top_disagreements', [])[:3]}"
