@@ -61,6 +61,7 @@ class FigureConfig:
     marked_ids: frozenset[str] = frozenset()  # centre-marked variant (leaf ids)
     marked_name: str = ""
     geometry: Geometry = field(default_factory=Geometry)
+    leaf_names: bool = False  # searchable name layer, one per drawn leaf (render.FigureSpec)
 
 
 def make_figure(
@@ -129,6 +130,7 @@ def make_figure(
         colour_by=config.colour_by,
         clade_colours=config.clade_colours,
         geometry=geometry,
+        leaf_names=config.leaf_names,
     )
     drawn = render(spec, pdf)
     write_i7(
@@ -172,6 +174,7 @@ def make_figure(
         "aa_label_placement": drawn.label_metrics,
         "dash_bars": dash_bars,
         "strains": drawn.strains,
+        "leaf_names": drawn.leaf_names,
         "continents_not_in_legend": drawn.continents_not_in_legend,
         "flagged_drawn": _count_flags(
             flags or {}, [str(tree.leaf_id[i]) for i in layout.leaf_nodes]
