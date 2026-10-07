@@ -464,3 +464,67 @@ def test_the_build_record_says_what_the_store_read_saw(tmp_path: Path) -> None:
                     ignore_busy=True)  # fmt: skip
     seen = json.loads((tmp_path / "out2" / "test-report.build.json").read_text())["store_read"]
     assert [m["name"] for m in seen["overrode_batches"]] == ["a-sweep"]
+
+
+def _two_chains_on_two_tables(
+    tmp: Path, pin_m2: bool
+) -> tuple[Path, Path, Store, StoreRef, StoreRef]:
+    """m1 on a chain over tables v2 (CURRENT); m2 on a chain over tables v1, optionally pinned."""
+    cfg, root = _setup(tmp, allow=False)
+    store = Store.create(tmp / "store")
+    tree = _publish(store, "trees", "a/report", "tree v1")
+    old = _publish(store, "tables", "labx/m", "tables v1")
+    kept = _publish(store, "chains", "labx/m/kept", "chain on v1", (old,))
+    new = _publish(store, "tables", "labx/m", "tables v2")  # CURRENT moves on
+    redrawn = _publish(store, "chains", "labx/m/main", "chain on v2", (new,))
+    later = T0 + dt.timedelta(hours=1)
+    _real_figure(root, "tree/a/x", [tree], later, "v1")
+    _real_figure(root, "map/m1/all", [redrawn], later, "v1")
+    _real_figure(root, "map/m2/all", [kept], later, "v1")
+    if pin_m2:
+        cfg.write_text(cfg.read_text().replace(
+            "[figures]", '[figures]\npins = { "map/m2/all" = "v1" }'))  # fmt: skip
+    return cfg, root, store, old, new
+
+
+def test_a_pinned_slot_may_rest_on_an_older_version_and_it_is_recorded(tmp_path: Path) -> None:
+    cfg, root, store, old, new = _two_chains_on_two_tables(tmp_path, pin_m2=True)
+    use = build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                                 tmp_path / "m.json", deep=False)  # fmt: skip
+    assert new in use.refs and old not in use.refs  # the report's own version is CURRENT
+    assert use.pinned_versions == {old: ["map/m2/all"]}
+    assert old in use.all_refs() and new in use.all_refs()
+    assert use.to_json()["pinned_versions"] == {f"tables/labx/m@{old.version}": ["map/m2/all"]}
+
+
+def test_two_versions_under_unpinned_slots_are_still_refused(tmp_path: Path) -> None:
+    cfg, root, store, _, _ = _two_chains_on_two_tables(tmp_path, pin_m2=False)
+    with pytest.raises(ProvenanceError, match="rest on different versions of the same dataset"):
+        build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                               tmp_path / "m.json", deep=False)  # fmt: skip
+
+
+def test_a_pinned_slot_may_be_drawn_from_an_older_version_of_a_shared_dataset(
+    tmp_path: Path,
+) -> None:
+    """The direct refs too: two maps on two versions of one chain, the older one pinned."""
+    cfg, root, store, tree, chain = _store_setup(tmp_path)
+    newer = _publish(store, "chains", "labx/m", "chain v2")
+    _real_figure(root, "map/m1/all", [newer, tree], T0 + dt.timedelta(hours=2), "v2")
+    cfg.write_text(cfg.read_text().replace(
+        "[figures]", '[figures]\npins = { "map/m2/all" = "v1" }'))  # fmt: skip
+    use = build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                                 tmp_path / "m.json", deep=False)  # fmt: skip
+    assert newer in use.refs and use.pinned_versions == {chain: ["map/m2/all"]}
+
+
+@needs_latex
+def test_the_manifest_lists_every_version_a_pinned_report_rests_on(tmp_path: Path) -> None:
+    cfg, root, store, old, new = _two_chains_on_two_tables(tmp_path, pin_m2=True)
+    manifest = tmp_path / "manifest.json"
+    build.build(cfg, root, tmp_path / "out", store_root=store.root, manifest_path=manifest)
+    assert new in read_manifest(manifest) and old not in read_manifest(manifest)  # a snapshot
+    document = json.loads(manifest.read_text())
+    assert document["pinned"] == [{"store": old.to_json(), "slots": ["map/m2/all"]}]
+    record = json.loads((tmp_path / "out" / "test-report.build.json").read_text())
+    assert record["store"]["pinned_versions"] == {f"tables/labx/m@{old.version}": ["map/m2/all"]}
