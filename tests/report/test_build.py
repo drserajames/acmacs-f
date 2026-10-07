@@ -12,7 +12,7 @@ import pytest
 from af.report import build, placeholder
 from af.report.config import load
 from af.report.provenance import ProvenanceError
-from af.store import Provenance, Store, StoreError, StoreRef, read_manifest
+from af.store import Provenance, Store, StoreError, StoreRef, check_refs, read_manifest
 from af.util.artefacts import sha256_path
 from af.util.config import ConfigError
 
@@ -528,3 +528,6 @@ def test_the_manifest_lists_every_version_a_pinned_report_rests_on(tmp_path: Pat
     assert document["pinned"] == [{"store": old.to_json(), "slots": ["map/m2/all"]}]
     record = json.loads((tmp_path / "out" / "test-report.build.json").read_text())
     assert record["store"]["pinned_versions"] == {f"tables/labx/m@{old.version}": ["map/m2/all"]}
+    # and af.store reads back every version the report rests on, which all resolve
+    every = read_manifest(manifest, include_pinned=True)
+    assert old in every and new in every and check_refs(store, every, deep=True) == []

@@ -73,10 +73,51 @@ def write_manifest(path: Path, refs: Sequence[StoreRef], description: str) -> Pa
     return path
 
 
-def read_manifest(path: Path) -> list[StoreRef]:
-    """Read a snapshot or report manifest. A missing file is fatal."""
+def read_manifest(path: Path, *, include_pinned: bool = False) -> list[StoreRef]:
+    """Read a snapshot or report manifest. A missing file is fatal.
+
+    ``refs`` names one version per dataset. A report manifest may also list ``pinned``:
+    other versions of those datasets that only pinned report slots reach (a map kept on its
+    older tables by a ruling), as ``[{"store": <ref>, "slots": [...]}]``. With
+    ``include_pinned`` they follow the refs, so "reproduce this report"
+    (:func:`check_refs` over the result) resolves every version the report rests on.
+    A snapshot has no ``pinned``, and reads the same either way.
+    """
     document = json.loads(Path(path).read_text())
-    return [StoreRef.from_json(entry) for entry in document["refs"]]
+    refs = [StoreRef.from_json(entry) for entry in document["refs"]]
+    if not include_pinned:
+        return refs
+    return refs + pinned_refs(document, refs, Path(path))
+
+
+def pinned_refs(document: dict[str, Any], refs: Sequence[StoreRef], path: Path) -> list[StoreRef]:
+    """The manifest's pinned versions, checked against its refs.
+
+    Each is ANOTHER version of a dataset the refs name, named once, with the slots that reach
+    it. Anything else is a malformed manifest, refused rather than read past: reproducing a
+    report must not quietly skip a version it rests on. "Another", not "older": when every
+    version of a dataset sits under pinned slots, the writer
+    (af.report.provenance.write_report_manifest) picks which one is the report's own, so a
+    pinned version need not be the earlier one.
+    """
+    entries = document.get("pinned", [])
+    current = {(ref.kind, ref.dataset): ref for ref in refs}
+    pinned, problems = [], []
+    for entry in entries:
+        ref = StoreRef.from_json(entry["store"])
+        key = (ref.kind, ref.dataset)
+        if not entry.get("slots"):
+            problems.append(f"{ref}: names no slots")
+        if key not in current:
+            problems.append(f"{ref}: its dataset is not among the manifest's refs")
+        elif current[key].version == ref.version:
+            problems.append(f"{ref}: is the refs' own version, not another pinned one")
+        if ref in pinned:
+            problems.append(f"{ref}: listed twice")
+        pinned.append(ref)
+    if problems:
+        raise StoreError(f"{path}: malformed 'pinned' list:\n  " + "\n  ".join(problems))
+    return pinned
 
 
 def check_refs(store: Store, refs: Sequence[StoreRef], *, deep: bool) -> list[str]:
