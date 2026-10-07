@@ -410,11 +410,26 @@ class ReadGuard:
     name: str
     root: Path
     started: str
+    # the store kinds this read declared, or None (it is held off by every batch)
+    kinds: frozenset[str] | None = None
     overridden: list[Marker] = field(default_factory=list)
+    not_blocking: list[Marker] = field(default_factory=list)  # batches of other kinds only
     reads: dict[tuple[str, str], set[str]] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def record(self, kind: str, dataset: str, version: str) -> None:
+        """Note a read; one of a kind this guard did not declare fails here, at the read.
+
+        Failing at the read, not at the end, costs no wasted build, and an under-declared
+        guard can never quietly get the weaker check (design rule 1).
+        """
+        if self.kinds is not None and kind not in self.kinds:
+            raise StoreError(
+                f"{self.name}: read {kind}/{dataset}, but this read declared only kinds "
+                f"{sorted(self.kinds)}. Declare {kind!r} too: batches over {kind} must hold "
+                "it off. (An enclosing guard sees the reads of every guard inside it, so it "
+                "declares their kinds as well.)"
+            )
         with self._lock:
             self.reads.setdefault((kind, dataset), set()).add(version)
 
@@ -425,7 +440,9 @@ class ReadGuard:
         return {
             "read": self.name,
             "started": self.started,
+            "kinds": sorted(self.kinds) if self.kinds is not None else None,
             "overrode_batches": [m.to_json() for m in self.overridden],
+            "batches_of_other_kinds": [m.to_json() for m in self.not_blocking],
             "currents_read": reads,
         }
 
@@ -443,12 +460,21 @@ def record_current(root: Path, kind: str, dataset: str, version: str) -> None:
         guard.record(kind, dataset, version)
 
 
+def blocks(marker: Marker, kinds: frozenset[str] | None) -> bool:
+    """Does ``marker`` hold off a read of ``kinds``? Every marker does when kinds is None,
+    and so does any marker entry that names no kind (none should)."""
+    if kinds is None:
+        return True
+    return any("/" not in entry or entry.split("/", 1)[0] in kinds for entry in marker.datasets)
+
+
 @contextmanager
 def reading(
     root: Path,
     name: str,
     *,
     override: bool = False,
+    kinds: frozenset[str] | None = None,
     current: Callable[[str, str], str | None],
 ) -> Iterator[ReadGuard]:
     """Guard a read of the store; see :meth:`Store.reading`. ``current(kind, dataset)``
@@ -457,8 +483,13 @@ def reading(
         name=name,
         root=Path(root),
         started=datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+        kinds=kinds,
     )
-    held = live_markers(root)
+    held: list[Marker] = []
+    for marker in live_markers(root):
+        (held if blocks(marker, kinds) else guard.not_blocking).append(marker)
+    for marker in guard.not_blocking:
+        log.info("%s: not held off by %s (no kind this read uses)", name, marker.describe())
     if held:
         if not override:
             raise StoreBusy(

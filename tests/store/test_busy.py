@@ -303,6 +303,66 @@ def test_no_reads_recorded_outside_a_guard(store: Store) -> None:
     assert guard.reads == {}
 
 
+# ---- readers that declare their kinds -----------------------------------------------------
+
+
+def test_a_batch_of_kinds_a_read_does_not_use_does_not_hold_it_off(store: Store) -> None:
+    """A sequences sweep ran for hours while serology's update, which reads only tables and
+    serology, could get in only by overriding: that trains people to override (7 Oct 2026)."""
+    publish(store, "tables", "cdc-h3", "one")
+    with store.batch("sweep", ["sequences/h3", "sequences/h1"]):
+        with store.reading("serology-update", kinds={"tables", "serology"}) as guard:
+            store.current("tables", "cdc-h3")
+        assert guard.to_json()["kinds"] == ["serology", "tables"]
+        assert [m["name"] for m in guard.to_json()["batches_of_other_kinds"]] == ["sweep"]
+        assert guard.overridden == []
+        with pytest.raises(StoreBusy, match="'sweep'"), store.reading("seq", kinds={"sequences"}):
+            pass
+        with pytest.raises(StoreBusy, match="'sweep'"), store.reading("any"):
+            pass  # no kinds declared: every batch holds it off, as before
+
+
+def test_a_read_of_an_undeclared_kind_fails_at_the_read(store: Store) -> None:
+    reached = []
+    with (
+        pytest.raises(StoreError, match=r"read sequences/h3, but this read declared only"),
+        store.reading("serology-update", kinds={"tables", "serology"}),
+    ):
+        store.current("sequences", "h3")
+        reached.append("after the read")
+    assert reached == []
+
+
+def test_an_enclosing_guard_declares_the_kinds_of_the_guards_inside_it(store: Store) -> None:
+    with (
+        pytest.raises(StoreError, match=r"map-build: read sequences/h3"),
+        store.reading("map-build", kinds={"clades"}),
+        store.reading("colouring", kinds={"clades", "sequences"}),
+    ):
+        store.current("sequences", "h3")
+    with (
+        store.reading("map-build", kinds={"clades", "sequences"}),
+        store.reading("colouring", kinds={"clades", "sequences"}),
+    ):
+        store.current("sequences", "h3")
+
+
+def test_declared_kinds_are_checked(store: Store) -> None:
+    with (
+        pytest.raises(StoreError, match="unknown store kind"),
+        store.reading("r", kinds={"tabels"}),
+    ):
+        pass
+    with pytest.raises(StoreError, match="kinds is empty"), store.reading("r", kinds=set()):
+        pass
+
+
+def test_a_marker_entry_with_no_kind_holds_off_every_read(store: Store) -> None:
+    write_marker(store, datasets=["h3"])
+    with pytest.raises(StoreBusy), store.reading("r", kinds={"tables"}):
+        pass
+
+
 # ---- stale markers: a crashed writer never holds the store for ever ---------------------
 
 
