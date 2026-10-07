@@ -830,7 +830,8 @@ def test_identity_matches_one_virus_spelled_two_ways() -> None:
     res = maps.compare(ref, new, "identity")
     assert res["antigens"]["jaccard"] == 1.0 and res["sera"]["jaccard"] == 1.0
     assert res["antigens"]["identity_fallback"] == {
-        "no_identity": 0, "shared_identity": 0, "unpaired_identity": 0}  # fmt: skip
+        "no_identity": 0, "shared_identity": 0, "unpaired_identity": 0,
+        "none_class_paired": 0}  # fmt: skip
 
 
 def test_identity_keeps_two_preparations_of_one_isolate_apart() -> None:
@@ -995,3 +996,45 @@ def test_serum_ids_match_ignoring_case_bleed_day_and_unknown_but_not_qualifiers(
         "ignoring letter case (0 af, 1 reference), a bleed-day suffix (1 af, 1 reference), "
         "an UNKNOWN id (0 af, 1 reference)"
     )
+
+
+def _dated(points: list[tuple[float, float]], classes: list[str | None]) -> dict[str, Any]:
+    doc = _map(points, ["X"] * len(points))
+    for i, (antigen, cls) in enumerate(zip(doc["map"]["antigens"], classes, strict=True)):
+        antigen["date"], antigen["passage_class"] = f"2025-01-{10 + i:02d}", cls
+    return doc
+
+
+def test_a_missing_passage_class_pairs_with_the_one_same_name_same_date_point() -> None:
+    """A specimen id in the passage column leaves one side classless: same virus, still paired."""
+    pts = [(float(i), float(i % 3)) for i in range(6)]
+    ref = _dated(pts, [None, "cell", "cell", "cell", "cell", "egg"])
+    new = _dated(pts, ["cell", "cell", "cell", "cell", "cell", "cell"])
+    res = maps.compare(ref, new, "identity")["antigens"]
+    assert res["identity_fallback"]["none_class_paired"] == 1
+    assert res["only_ref"] == 1 and res["only_new"] == 1  # egg vs cell: a real difference, kept
+
+
+def test_a_map_with_no_bulk_reports_no_rotation_but_the_window_angle() -> None:
+    from af.report.compare.run import MapLimits, map_checks
+
+    ref_pts = _cloud(40, 3)
+    new_pts = list(ref_pts)
+    for i in range(30):  # most points land far from where they were: there is no bulk
+        new_pts[i] = (ref_pts[i][0] + 6.0 * ((i % 5) - 2), ref_pts[i][1] - 5.0 * ((i % 3) - 1))
+    ref, new = _map(ref_pts, ["X"] * 40), _map(new_pts, ["X"] * 40)
+    for doc in (ref, new):  # only the last 10 are inside the window, and they are turned 30 deg
+        for i, antigen in enumerate(doc["map"]["antigens"]):
+            antigen["greyed"] = i < 30
+    turned = _rotate([tuple(a["xy"]) for a in new["map"]["antigens"][30:]], 30)
+    for antigen, xy in zip(new["map"]["antigens"][30:], turned, strict=True):
+        antigen["xy"] = list(xy)
+    p = maps.compare(ref, new, "identity")["procrustes"]
+    assert p["orientation"]["bulk"] is False and math.isnan(p["rotation_deg"])
+    assert p["orientation"]["window_antigens"]["points"] == 10
+    assert abs(abs(p["orientation"]["window_antigens"]["rotation_deg"]) - 30) < 1e-6
+    rotation = next(c for c in map_checks({"antigens": {"jaccard": 1, "clade": {
+        "adjusted_rand": 1}}, "sera": {"jaccard": 1}, "procrustes": p}, MapLimits(
+        rotation_deg_max=1.0)) if c["check"] == "rotation deg")  # fmt: skip
+    assert rotation["no_bulk"] and rotation["ok"] is None
+    assert maps.orientation_text(p).startswith("no bulk orientation: only ")

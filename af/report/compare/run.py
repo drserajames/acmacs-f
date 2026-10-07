@@ -223,6 +223,14 @@ def _check(name: str, value: float, op: str, limit: float | None) -> dict[str, A
     return {"check": name, "value": value, "limit": limit, "ok": ok}
 
 
+def _rotation_check(p: dict[str, Any], rotation: float, limit: float | None) -> dict[str, Any]:
+    """The rotation check, or "no bulk": a map with no stable bulk has no orientation to test."""
+    if p.get("orientation", {}).get("bulk") is False:
+        return {"check": "rotation deg", "value": float("nan"), "limit": limit, "ok": None,
+                "no_bulk": True}  # fmt: skip
+    return _check("rotation deg", rotation, "<=", limit)
+
+
 def map_checks(res: dict[str, Any], lim: MapLimits) -> list[dict[str, Any]]:
     nan = float("nan")
     a, s = res["antigens"], res["sera"]
@@ -236,7 +244,7 @@ def map_checks(res: dict[str, Any], lim: MapLimits) -> list[dict[str, Any]]:
         _check("p95 displacement", p.get("p95", nan), "<=", lim.p95_displacement_max),
         _check("frac moved > 1", p.get("frac_gt_1", nan), "<=", lim.frac_moved_gt_1_max),
         _check("clade centroid max diff", c.get("max_abs_diff", nan), "<=", lim.centroid_diff_max),
-        _check("rotation deg", rotation, "<=", lim.rotation_deg_max),
+        _rotation_check(p, rotation, lim.rotation_deg_max),
         # A mirrored map is always a difference when orientation is gated at all.
         _check("reflected", reflected, "<=", 0.0 if lim.rotation_deg_max is not None else None),
         _check(
@@ -546,6 +554,8 @@ def _depth_notes(slot: str, dep: dict[str, Any]) -> list[str]:
 def _cell(check: dict[str, Any]) -> str:
     if check.get("not_tested"):
         return "n/t"
+    if check.get("no_bulk"):
+        return "no bulk"
     mark = {False: " ✗", "expected": " (expected)", "stale": " STALE"}.get(check["ok"], "")
     return f"{check['value']:.3f}{mark}"
 
@@ -604,6 +614,8 @@ def markdown(
                       for c in row["checks"] if "expected" in c]  # fmt: skip
             notes += [f"- {row['slot']}: {n['note']}" for n in row.get("excused", [])]
             flagged += [f"- {row['slot']}: {flag}" for flag in row.get("flags", [])]
+            if orientation := maps.orientation_text(row["detail"].get("procrustes", {})):
+                notes.append(f"- {row['slot']}: {orientation}")
         else:
             lines.append(f"| {row['slot']} | {row['status']} | | | |" + " |" * len(MAP_CHECKS))
     if tree_rows:
