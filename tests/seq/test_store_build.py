@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime
 import json
 import random
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -679,3 +680,108 @@ def test_the_command_line_joins_repeated_pulls_and_a_pulls_file(
     }
     build.main(argv[:4])
     assert got["batch"] == build.DEFAULT_BATCH
+
+
+# ---- reference_check: keeping a dataset to its reference's lineage ----------------------
+
+
+def _ref_check(**over: object) -> processed.ReferenceCheck:
+    fields: dict[str, object] = dict(
+        dataset="h1", max_substitutions=200, expect_lineages=("pdm09",),
+        reason="example: this dataset's reference is a pdm09 virus",
+    )  # fmt: skip
+    fields.update(over)
+    return processed.ReferenceCheck(**fields)  # type: ignore[arg-type]
+
+
+def _at(rec: SequenceRecord, substitutions: int | None, **over: object) -> Aligned:
+    return aligned(rec, substitutions=substitutions, **over)
+
+
+def test_a_record_far_from_the_reference_is_held_not_placed() -> None:
+    near, far = record(1, lineage="pdm09"), record(2, lineage="pdm09")
+    kept, held, flags = processed.hold_far_from_reference(
+        [near, far],
+        {processed.seq_id(near): _at(near, 30), processed.seq_id(far): _at(far, 300)},
+        _ref_check(),
+    )
+    assert [r.epi_isl for r in kept] == [near.epi_isl]
+    assert [r.epi_isl for r in held] == [far.epi_isl]
+    assert flags == Counter({processed.FAR_FROM_REFERENCE: 1})
+
+
+def test_a_record_exactly_at_the_threshold_is_kept() -> None:
+    rec = record(1, lineage="pdm09")
+    kept, held, _ = processed.hold_far_from_reference(
+        [rec], {processed.seq_id(rec): _at(rec, 200)}, _ref_check(max_substitutions=200)
+    )
+    assert (len(kept), len(held)) == (1, 0)
+
+
+def test_a_record_that_did_not_align_is_kept_because_distance_says_nothing() -> None:
+    # failing to align is a length problem, not lineage evidence: holding it would evict
+    # a record on no evidence at all
+    short, failed = record(1, lineage="pdm09"), record(2, lineage="pdm09")
+    kept, held, flags = processed.hold_far_from_reference(
+        [short, failed],
+        {processed.seq_id(short): _at(short, None),
+         processed.seq_id(failed): _at(failed, None, error="too short to align")},
+        _ref_check(),
+    )  # fmt: skip
+    assert len(held) == 0
+    assert flags == Counter({processed.NO_DISTANCE: 2})
+    assert all(processed.NO_DISTANCE in r.problems for r in kept)
+
+
+def test_a_record_with_no_alignment_result_at_all_is_kept_and_flagged() -> None:
+    rec = record(1, lineage="pdm09")
+    kept, held, flags = processed.hold_far_from_reference([rec], {}, _ref_check())
+    assert (len(kept), len(held)) == (1, 0)
+    assert flags == Counter({processed.NO_DISTANCE: 1})
+
+
+def test_a_near_record_whose_label_is_unexpected_is_kept_and_flagged() -> None:
+    # the label never decides: it is blank or disagrees too often to be trusted
+    rec = record(1, lineage="seasonal")
+    kept, held, flags = processed.hold_far_from_reference(
+        [rec], {processed.seq_id(rec): _at(rec, 25)}, _ref_check()
+    )
+    assert (len(held), flags) == (0, Counter({processed.LABEL_UNEXPECTED: 1}))
+    assert processed.LABEL_UNEXPECTED in kept[0].problems
+
+
+def test_a_far_record_is_held_whatever_its_label_claims() -> None:
+    rec = record(1, lineage="pdm09")
+    _, held, flags = processed.hold_far_from_reference(
+        [rec], {processed.seq_id(rec): _at(rec, 400)}, _ref_check()
+    )
+    assert [r.epi_isl for r in held] == [rec.epi_isl]
+    assert flags == Counter({processed.FAR_FROM_REFERENCE: 1})
+
+
+def test_a_held_record_keeps_its_problems_for_the_raw_pull() -> None:
+    rec = record(1, lineage="pdm09", problems=("name.fields",))
+    _, held, _ = processed.hold_far_from_reference(
+        [rec], {processed.seq_id(rec): _at(rec, 400)}, _ref_check()
+    )
+    assert held[0].problems == ("name.fields",)
+
+
+def test_two_reference_check_rows_for_one_dataset_are_refused(tmp_path: Path) -> None:
+    rows = [build.ReferenceCheckConfig("h3", 200, ["pdm09"], "why") for _ in range(2)]
+    config = b_config(tmp_path, tmp_path, reference_check=rows)
+    with pytest.raises(build.ConfigError, match="named twice"):
+        build._hold_far_records(config, {"h3": []}, {})
+
+
+def test_holding_every_record_of_a_dataset_stops_the_run(tmp_path: Path) -> None:
+    # a pull entirely of another lineage would otherwise look stored while storing nothing
+    rec = record(1, lineage="pdm09")
+    config = b_config(
+        tmp_path, tmp_path,
+        reference_check=[build.ReferenceCheckConfig("h3", 200, ["pdm09"], "why")],
+    )  # fmt: skip
+    with pytest.raises(processed.StoreBuildError, match="held every record"):
+        build._hold_far_records(
+            config, {"h3": [rec]}, {"h3": {processed.seq_id(rec): _at(rec, 400)}}
+        )

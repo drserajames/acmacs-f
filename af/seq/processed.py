@@ -233,6 +233,71 @@ def seq_id(record: SequenceRecord) -> str:
     return f"{record.epi_isl}.{record.accession}"
 
 
+# ---- holding records that are not the dataset's lineage ------------------------------
+
+
+@dataclass(frozen=True)
+class ReferenceCheck:
+    """Keep a dataset to records its reference can speak for, by distance to it.
+
+    A dataset pinned to one reference (say a pandemic H1 virus) cannot describe a record
+    from another lineage of the same subtype: the alignment succeeds, the clade engine
+    names a clade from the wrong tree, and nothing says it is wrong. Records further than
+    ``max_substitutions`` from the reference are **held** — placed into no dataset, so
+    they stay in the raw pull and out of every tree, clade table and map.
+
+    ``expect_lineages`` are the GISAID lineage labels that should be within the threshold.
+    The label never decides (it is blank or wrong too often); it is compared with the
+    distance so a disagreement is flagged and counted.
+    """
+
+    dataset: str
+    max_substitutions: int
+    expect_lineages: tuple[str, ...]
+    reason: str
+
+
+#: Held: too far from the dataset's reference to be its lineage.
+FAR_FROM_REFERENCE = "lineage.far-from-reference"
+#: Kept, but GISAID's label is not one the dataset expects.
+LABEL_UNEXPECTED = "lineage.label-unexpected"
+#: Kept: no alignment, so distance says nothing (see :func:`hold_far_from_reference`).
+NO_DISTANCE = "lineage.no-distance"
+
+
+def hold_far_from_reference(
+    records: Iterable[SequenceRecord],
+    aligned: Mapping[str, Aligned],
+    check: ReferenceCheck,
+) -> tuple[list[SequenceRecord], list[SequenceRecord], Counter[str]]:
+    """``(kept, held, flags)`` for one dataset's records, by distance to its reference.
+
+    **A record that did not align is kept, not held.** Failing to align is a length
+    problem — a short fragment cannot reach the reference — and says nothing about which
+    lineage the virus belongs to. Holding those would evict records on no evidence; they
+    carry :data:`NO_DISTANCE` instead, and the alignment and qc rules already keep them
+    out of trees.
+    """
+    kept: list[SequenceRecord] = []
+    held: list[SequenceRecord] = []
+    flags: Counter[str] = Counter()
+    for record in records:
+        result = aligned.get(seq_id(record))
+        distance = None if result is None or result.error is not None else result.substitutions
+        if distance is None:
+            flags[NO_DISTANCE] += 1
+            kept.append(replace(record, problems=(*record.problems, NO_DISTANCE)))
+        elif distance > check.max_substitutions:
+            flags[FAR_FROM_REFERENCE] += 1
+            held.append(record)
+        elif record.lineage not in check.expect_lineages:
+            flags[LABEL_UNEXPECTED] += 1
+            kept.append(replace(record, problems=(*record.problems, LABEL_UNEXPECTED)))
+        else:
+            kept.append(record)
+    return kept, held, flags
+
+
 # ---- rows --------------------------------------------------------------------------
 
 
