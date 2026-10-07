@@ -47,6 +47,7 @@ class Report:
     centre: str = ""
     subtitle: str = ""  # e.g. "Southern Hemisphere 2027": config, not derived from dates
     meeting: Meeting | None = None
+    end_page: bool = False  # a closing "Report generated <time>" page, as the delivered report has
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,9 @@ class Section:
     grid: list[int] = field(default_factory=lambda: [2, 2])  # columns, rows per page
     landscape: bool = False
     group: str = ""  # e.g. a subtype: consecutive sections of one group sit under its heading
+    # An intro page before the figures (geo and trees): the report's words; facts are
+    # placeholders filled from recorded artefacts (af.report.text). Paragraphs: blank lines.
+    intro: str = ""
 
     def pages(self, months: list[str]) -> list[tuple[str, list[str | None]]]:
         """(heading, cells) per page for a grid section; a blank cell is None.
@@ -127,6 +131,23 @@ class ReportConfig:
         return out
 
 
+def _intro_problems(where: str, section: Section) -> list[str]:
+    from af.report.text import PLACEHOLDERS, placeholders
+
+    if section.kind not in ("geo", "trees"):
+        return [f"{where}.intro: only for geo and trees sections"]
+    try:
+        names = placeholders(section.intro)
+    except ValueError as err:
+        return [f"{where}.intro: {err}"]
+    return [
+        f"{where}.intro: {{{name}}} is not a placeholder for a {section.kind} section "
+        f"(known: {sorted(k for k, kinds in PLACEHOLDERS.items() if section.kind in kinds)})"
+        for name in names
+        if section.kind not in PLACEHOLDERS.get(name, ())
+    ]
+
+
 def parse_month(value: str) -> dt.date:
     """``"YYYY-MM"`` -> the first day of that month. Anything else is an error."""
     parts = value.split("-")
@@ -170,6 +191,8 @@ def load(path: Path) -> ReportConfig:
             problems.append(f"{where}.slots: blank cells ('{BLANK}') only in map grids")
         if len(section.grid) != 2 or min(section.grid) < 1:
             problems.append(f"{where}.grid: expected [columns, rows], both >= 1")
+        if section.intro:
+            problems += _intro_problems(where, section)
     slots = cfg.all_slots()
     duplicates = sorted({s for s in slots if slots.count(s) > 1})
     if duplicates:

@@ -30,6 +30,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from af.report import text
 from af.report.config import Meeting, ReportConfig, Section, load, period_first, period_last
 from af.report.figures import FigureError, Resolved, resolve
 from af.report.provenance import ProvenanceError, StoreUse, check_against_store, collect
@@ -130,14 +131,57 @@ def _cover(
     return [*lines, r"\end{titlepage}", r"\tableofcontents", r"\newpage"]
 
 
-def _tree_pages(section: Section, figs: dict[str, Resolved], rel: dict[str, str]) -> list[str]:
+Intro = tuple[list[str], list[str]]  # (paragraphs, gaps: facts no artefact records)
+
+
+def intro_texts(
+    cfg: ReportConfig, figs: dict[str, Resolved], store: Store | None
+) -> dict[int, Intro]:
+    """Each section's intro, placeholders filled from recorded artefacts (af.report.text)."""
+    out: dict[int, Intro] = {}
+    for i, section in enumerate(cfg.sections):
+        if not section.intro:
+            continue
+        values = {"period": text.period_text(cfg.months())}
+        gaps: list[str] = []
+        if "tree_method" in text.placeholders(section.intro):
+            methods = []
+            for slot in section.slots:
+                if store is None:
+                    gaps.append(f"{slot}: the tree's method (no --store to read it from)")
+                    continue
+                ref, tree = text.tree_json(store, figs[slot].figure.doc)
+                method, missing = text.tree_method(tree)
+                if missing:  # one line per tree: the version, then every field it lacks
+                    gaps.append(f"{slot} ({ref}): " + ", ".join(missing))
+                methods.append(method)
+            values["tree_method"] = " ".join(m for m in methods if m)
+        filled = text.fill(section.intro, values)
+        out[i] = ([p.strip() for p in filled.split("\n\n") if p.strip()], gaps)
+    return out
+
+
+def _intro_page(section: Section, intro: Intro) -> list[str]:
+    """The section heading, its paragraphs, and any unrecorded fact in red; then a new page."""
+    paragraphs, gaps = intro
+    lines = [rf"\{_level(section)}{{{tex_escape(section.title)}}}"]
+    lines += [tex_escape(p) + r"\par\medskip" for p in paragraphs]
+    lines += [rf"{{\small\raggedright\textcolor{{red}}{{NOT RECORDED: {tex_escape(g)}}}\par}}"
+              for g in gaps]  # fmt: skip
+    return [*lines, r"\newpage"]
+
+
+def _tree_pages(
+    section: Section, figs: dict[str, Resolved], rel: dict[str, str], headed: bool = True
+) -> list[str]:
     lines: list[str] = []
     for slot in section.slots:
         r = figs[slot]
         # One tree: the section title is its heading. Several: say which tree each page is.
         title = section.title if len(section.slots) == 1 else f"{section.title}: {r.figure.title}"
+        if headed or len(section.slots) > 1:
+            lines.append(rf"\{_level(section)}{{{tex_escape(title)}}}")
         lines += [
-            rf"\{_level(section)}{{{tex_escape(title)}}}",
             r"\begin{center}",
             r"\includegraphics[width=\textwidth,height=0.88\textheight,keepaspectratio]"
             rf"{{{rel[slot]}}}",
@@ -154,8 +198,9 @@ def _level(section: Section) -> str:
 
 
 def _grid_pages(
-    section: Section, months: list[str], figs: dict[str, Resolved], rel: dict[str, str]
-) -> list[str]:
+    section: Section, months: list[str], figs: dict[str, Resolved], rel: dict[str, str],
+    headed: bool = True,
+) -> list[str]:  # fmt: skip
     """Map and geo pages: a columns x rows grid per page, blank cells left empty.
 
     Landscape sections turn the page (pdflscape): the report's map grids are 3 x 2 across.
@@ -170,7 +215,8 @@ def _grid_pages(
     for n, (heading, cells) in enumerate(section.pages(months)):
         if section.landscape:
             lines.append(r"\begin{landscape}")
-        if n == 0 or heading:  # the section's first page, and the first page of each map window
+        if (n == 0 and headed) or heading:  # the first page (unless an intro page has the
+            # heading), and the first page of each map window
             lines.append(
                 rf"\{_level(section)}{{{tex_escape(f'{section.title} {heading}'.strip())}}}"
             )
@@ -196,7 +242,7 @@ def _grid_pages(
 
 def write_tex(
     cfg: ReportConfig, figs: dict[str, Resolved], build: Path, built_at: dt.datetime,
-    n_not_from_store: int = 0,
+    n_not_from_store: int = 0, intros: dict[int, Intro] | None = None,
 ) -> Path:  # fmt: skip
     """Copy figures in by content hash and write ``report.tex`` (relative paths only)."""
     fig_dir = build / "figures"
@@ -220,15 +266,20 @@ def write_tex(
         *_cover(cfg, sum(r.figure.placeholder for r in figs.values()), n_not_from_store, built_at),
     ]
     group = None
-    for section in cfg.sections:
+    intros = intros or {}
+    for i, section in enumerate(cfg.sections):
         if section.group and section.group != group:
             lines.append(rf"\section*{{{tex_escape(section.group)}}}")
             lines.append(rf"\addcontentsline{{toc}}{{section}}{{{tex_escape(section.group)}}}")
         group = section.group
+        if i in intros:
+            lines += _intro_page(section, intros[i])
         if section.kind == "trees":
-            lines += _tree_pages(section, figs, rel)
+            lines += _tree_pages(section, figs, rel, headed=i not in intros)
         else:
-            lines += _grid_pages(section, cfg.months(), figs, rel)
+            lines += _grid_pages(section, cfg.months(), figs, rel, headed=i not in intros)
+    if cfg.report.end_page:
+        lines.append(rf"Report generated: {built_at.strftime('%Y-%m-%d %H:%M %Z')}")
     lines.append(r"\end{document}")
     tex = build / "report.tex"
     tex.write_text("\n".join(lines) + "\n")
@@ -413,11 +464,17 @@ def build(
     )
     with guarded as guard:
         use = check_provenance(cfg, figs, store_root, manifest_path, deep=deep)
+        intros = intro_texts(cfg, figs, Store.open(store_root) if store_root else None)
+        gaps = [g for _, section_gaps in intros.values() for g in section_gaps]
+        if gaps and not cfg.figures.allow_placeholders:
+            raise BuildError(
+                f"{len(gaps)} fact(s) in intro text no artefact records:\n  " + "\n  ".join(gaps)
+            )
         build_dir = out_dir / "build"
         if build_dir.exists():
             shutil.rmtree(build_dir)  # never reuse a stale .aux/.toc or an old figure
         build_dir.mkdir(parents=True)
-        tex = write_tex(cfg, figs, build_dir, built_at, len(use.not_from_store))
+        tex = write_tex(cfg, figs, build_dir, built_at, len(use.not_from_store), intros)
         passes = run_latex(tex, LocalRunner())
         pages = check_output(tex, cfg.all_slots())
     final = out_dir / f"{cfg.report.id}.pdf"
@@ -429,6 +486,7 @@ def build(
         cfg, config_path, figs, use, final, pages, passes, built_at, manifest_path
     )
     record["store_read"] = guard.to_json() if guard is not None else None
+    record["text_gaps"] = gaps
     (out_dir / f"{cfg.report.id}.build.json").write_text(json.dumps(record, indent=1))
     return final
 
