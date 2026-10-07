@@ -35,6 +35,9 @@ STEP = "serology"
 INPUTS = "inputs.json"
 FIX = "run af.serology.update"
 READ = "serology-update"  # the guarded read's name, in provenance and refusals
+# what it reads: tables CURRENTs and serology/all; a batch over other kinds (a sequences
+# sweep) does not hold it off, and a read of any other kind fails at once (af.store.busy)
+KINDS_READ = frozenset({"tables", "serology"})
 
 
 @dataclass
@@ -52,7 +55,8 @@ def update(
     """Bring ``serology/all`` up to date with the current tables store.
 
     Everything it reads runs under ``Store.reading`` (as map-build and report-build do): it
-    refuses to start while a batch is publishing tables, and fails if a CURRENT it read moved
+    refuses to start while a batch is publishing tables or serology (other kinds' batches do
+    not hold it off: it reads neither), and fails if a CURRENT it read moved
     before it finished, naming the dataset. Without that, a start in the middle of a
     several-dataset tables publish builds from a half-published set, and since this is itself
     a publish, :func:`require_current` downstream cannot catch it: the half-published set is
@@ -61,7 +65,7 @@ def update(
     for diagnosis only; the provenance then names the batches it overrode.
     """
     with store.build(KIND, DATASET) as builder:
-        with store.reading(READ, override=ignore_busy) as guard:
+        with store.reading(READ, kinds=KINDS_READ, override=ignore_busy) as guard:
             inputs = store.list_datasets("tables")
             if not inputs:
                 raise StoreError("no tables datasets in the store: nothing to build serology from")
