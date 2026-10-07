@@ -53,29 +53,34 @@ def tree_method(tree: dict[str, Any]) -> tuple[str, list[str]]:
     """The method sentences from a ``tree.json``, and the fields it lacks (empty when complete).
 
     Only what the version records: the aligned region, the build tool as it reports its
-    version, its substitution model, and whether zero-length branches were collapsed.
+    version, its substitution model, and whether zero-length branches were collapsed. What is
+    recorded is said even when something else is not; each missing field is a gap.
     """
     aligned, build = tree.get("aligned") or {}, tree.get("build") or {}
+    region, version = aligned.get("region"), build.get("version")
     model = (build.get("parameters") or {}).get("model")
+    collapsed = build.get("zero_length_collapsed")
     missing = [
         f"tree.json {name}"
         for name, value in (
-            ("aligned.region", aligned.get("region")),
-            ("build.version", build.get("version")),
+            ("aligned.region", region),
+            ("build.version", version),
             ("build.parameters.model", model),
-            ("build.zero_length_collapsed", build.get("zero_length_collapsed")),
+            ("build.zero_length_collapsed", collapsed),
         )
         if value is None
     ]
-    if missing:
-        return "", missing
-    text = (
-        f"Nucleotide sequences of the {aligned['region']} were aligned. The phylogenetic tree "
-        f"was constructed using {build['version']} under the {model} substitution model"
-    )
-    if build["zero_length_collapsed"]:
-        text += ", and zero-length branches were collapsed into multifurcations"
-    return text + ".", []
+    parts = []
+    if region is not None:
+        parts.append(f"Nucleotide sequences of the {region} were aligned.")
+    if version is not None:
+        sentence = f"The phylogenetic tree was constructed using {version}"
+        if model is not None:
+            sentence += f" under the {model} substitution model"
+        if collapsed:
+            sentence += ", and zero-length branches were collapsed into multifurcations"
+        parts.append(sentence + ".")
+    return " ".join(parts), missing
 
 
 def fill(text: str, values: dict[str, str]) -> str:
