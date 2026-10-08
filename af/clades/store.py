@@ -10,11 +10,13 @@ segment's own ``accession``, because EPI_ISL alone is not unique — then the cl
 was decided, and how much of the clade's signature the sequence actually showed:
 
     epi_isl, accession, subtype, clade, method, support, unobservable, tree_node,
-    ancestry_only, ancestry_reason
+    clade_evidence, supported_clade, clade_evidence_reason
 
-``ancestry_only`` marks a tree call the virus's own sequence does not show (af.clades.ancestry):
-recorded and reported only; it changes neither the clade nor any colouring (Sarah, 8 Oct 2026). Versions written before
-the column existed lack it; readers treat that as false for every row, and count it.
+For a tree row, ``clade_evidence`` says what the virus's own sequence shows of its clade
+(``supported``, ``unobserved`` or ``contradicted``; af.clades.evidence), and a figure colours by
+it: ``unobserved`` draws as unsequenced, ``contradicted`` takes ``supported_clade``'s colour
+(Sarah, 8 Oct 2026). ``clade`` stays the tree's call. Fallback rows leave all three empty.
+Versions written before these columns lack them: readers count that, never guess.
 
 ``clade`` is a single name; ancestry is derived from the clade set, so "is this virus in
 D?" is answered with :meth:`CladeSet.is_within` and never by matching name prefixes. An
@@ -60,8 +62,9 @@ COLUMNS: dict[str, str] = {
     "support": "INTEGER",
     "unobservable": "INTEGER",
     "tree_node": "VARCHAR",
-    "ancestry_only": "BOOLEAN",
-    "ancestry_reason": "VARCHAR",
+    "clade_evidence": "VARCHAR",
+    "supported_clade": "VARCHAR",
+    "clade_evidence_reason": "VARCHAR",
 }
 
 #: How a clade was decided. Recorded per row because the two are not equally strong: a
@@ -85,8 +88,9 @@ class CladeRow:
     support: int = 0
     unobservable: int = 0
     tree_node: str | None = None
-    ancestry_only: bool = False
-    ancestry_reason: str | None = None
+    clade_evidence: str | None = None
+    supported_clade: str | None = None
+    clade_evidence_reason: str | None = None
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -98,8 +102,9 @@ class CladeRow:
             "support": self.support,
             "unobservable": self.unobservable,
             "tree_node": self.tree_node,
-            "ancestry_only": self.ancestry_only,
-            "ancestry_reason": self.ancestry_reason,
+            "clade_evidence": self.clade_evidence,
+            "supported_clade": self.supported_clade,
+            "clade_evidence_reason": self.clade_evidence_reason,
         }
 
 
@@ -180,7 +185,6 @@ def build_report(rows: Sequence[CladeRow], clade_set: CladeSet) -> dict[str, Any
         "counts": dict(sorted(counts.items())),
         "clades_without_sequences": sorted(set(clade_set.names) - set(counts)),
         "methods": dict(sorted(_count(row.method for row in rows).items())),
-        "ancestry_only": sum(row.ancestry_only for row in rows),
     }
 
 

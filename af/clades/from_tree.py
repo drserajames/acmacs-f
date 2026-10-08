@@ -29,7 +29,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from af.clades import ancestry
+from af.clades import evidence
 from af.clades.agreement import AgreementCheck, AgreementLimit, check_agreement
 from af.clades.assign import Assignment
 from af.clades.conflicts import ConflictLimit, check_conflicts
@@ -191,9 +191,14 @@ def publish_clades(
             raise CladeStoreError(f"{tree}: expected a tree-store version, got kind {tree.kind!r}")
         directory = store.resolve(tree, verify=True)
         rows = rows_from_tree(directory, subtype, clade_set)
-        check_tree_identities(store, tree, rows)
+        built_from = check_tree_identities(store, tree, rows)
+        # judged against the sequences the tree was built from: what its leaves actually carried
+        rows = evidence.judge(
+            rows, _aligned(store, built_from, evidence.tree_keys(rows)), clade_set
+        )
         meta = i6.read_metadata(directory)
         report = _tree_report(tree, meta, i6.read_excluded(directory))
+        report["clade_evidence"] = evidence.summary(rows)
         assert conflicts is not None  # required above
         review = meta.get("counts", {}).get("clade_review")
         conflict_check = check_conflicts(
@@ -213,16 +218,9 @@ def publish_clades(
         report["fallback"] = fallback_report
         if check is not None:
             report["agreement"] = check.to_json()
-        if tree is not None:
-            calls = {key: assignment.clade for key, assignment in fallback.assignments.items()}
-            wanted = ancestry.candidates(rows, calls)
-            rows = ancestry.mark(rows, calls, _aligned(store, sequences, wanted), clade_set)
-            report["ancestry_only_marks"] = ancestry.summary(rows)
+
         report.setdefault("not_on_tree", {})["labelled_by"] = "fallback, in this table"
         inputs += [sequences, fallback.dataset]
-    elif tree is not None:
-        # with nothing to compare against, no row can be judged; say so rather than imply none
-        report["ancestry_only_marks"] = {"evaluated": False, "why": "no fallback to compare with"}
     # the limits, their reasons and any override decided whether this version could exist
     parameters: dict[str, Any] = {}
     if check is not None:
@@ -249,7 +247,7 @@ def publish_clades(
 def _aligned(
     store: Store, sequences: StoreRef, keys: set[tuple[str, str]]
 ) -> dict[tuple[str, str], AlignedSequence]:
-    """The aligned sequences of ``keys`` only: reading every one would be ~0.3 GB for H1.
+    """The aligned sequences of ``keys`` only: the tree's leaves, not every record of the version.
 
     ``union_by_name``: partitions can differ in columns, and a reader that takes its schema
     from the first file can lose ``nuc_aligned`` depending on file order (COMMON, 2 Oct).
