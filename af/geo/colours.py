@@ -219,3 +219,39 @@ def dot_styles(
         return DotStyle(entry.legend, entry.colour, basis), ""
 
     return style, counts
+
+
+def unpainted_warning(
+    count: int,
+    clade: str | None,
+    tree_clades: Mapping[str, int],
+    scheme: str,
+    *,
+    reference: int | None = None,
+    unit: tuple[str, str] = ("antigen", "antigens"),
+) -> str:
+    """The one sentence for points left unpainted by tree-clade evidence (Sarah, 8 Oct 2026:
+    "Please give a warning when antigens are unpainted because the scheme does not have a
+    color for them"). Composed here only; maps, geo and the report copy it verbatim.
+
+    ``clade`` is the supported clade the scheme has no row for, or None when the sequences
+    support no clade on their lineage. ``tree_clades`` counts the tree's labels of those points.
+    ``reference`` (maps) is how many are reference antigens; geo, whose dots are viruses, passes
+    none and its own ``unit``.
+    """
+    noun = unit[0] if count == 1 else unit[1]
+    verb = "is" if count == 1 else "are"
+    refs = f", {reference} of them reference antigens," if reference is not None else ""
+    labels = ", ".join(
+        f"{t} {n}" for t, n in sorted(tree_clades.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
+    if clade is None:
+        return (
+            f"WARNING: {count} {noun}{refs} {verb} not painted: no clade on their lineage is "
+            f"supported by their own sequence (tree labels: {labels}; own loci contradicted)."
+        )
+    return (
+        f"WARNING: {count} {noun}{refs} {verb} not painted: their sequences support clade "
+        f"{clade} (tree labels: {labels}; own loci contradicted), and colour scheme {scheme} "
+        f"has no row for {clade}."
+    )

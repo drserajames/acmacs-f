@@ -286,3 +286,19 @@ def test_a_tie_with_an_unobserved_candidate_follows_the_tie_rule(tmp_path: Path)
     style, _ = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), SCHEME, clade_set)
     assert style(preps["ranked-seen"]).label == "Clade P.1"
     assert style(preps["ranked-unseen"]).state == STATE_UNOBSERVED
+
+
+def test_the_unpainted_warning_is_one_sentence_composed_once() -> None:
+    from af.geo.colours import unpainted_warning
+
+    assert unpainted_warning(43, "A", {"C.1": 3, "C.1.9": 40}, "clades", reference=11) == (
+        "WARNING: 43 antigens, 11 of them reference antigens, are not painted: their sequences "
+        "support clade A (tree labels: C.1.9 40, C.1 3; own loci contradicted), and colour "
+        "scheme clades has no row for A."
+    )
+    assert unpainted_warning(2, None, {"C.1.9": 2}, "clades", reference=0) == (
+        "WARNING: 2 antigens, 0 of them reference antigens, are not painted: no clade on their "
+        "lineage is supported by their own sequence (tree labels: C.1.9 2; own loci contradicted)."
+    )
+    geo = unpainted_warning(1, "A", {"B": 1}, "clades", unit=("virus", "viruses"))
+    assert geo.startswith("WARNING: 1 virus is not painted: their sequences support clade A")
