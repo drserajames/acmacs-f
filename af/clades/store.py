@@ -9,7 +9,14 @@ Columns (:data:`COLUMNS`) are the key the sequence store uses — ``epi_isl`` pl
 segment's own ``accession``, because EPI_ISL alone is not unique — then the clade, how it
 was decided, and how much of the clade's signature the sequence actually showed:
 
-    epi_isl, accession, subtype, clade, method, support, unobservable, tree_node
+    epi_isl, accession, subtype, clade, method, support, unobservable, tree_node,
+    clade_evidence, supported_clade, clade_evidence_reason
+
+For a tree row, ``clade_evidence`` says what the virus's own sequence shows of its clade
+(``supported``, ``unobserved`` or ``contradicted``; af.clades.evidence), and a figure colours by
+it: ``unobserved`` draws as unsequenced, ``contradicted`` takes ``supported_clade``'s colour
+(Sarah, 8 Oct 2026). ``clade`` stays the tree's call. Fallback rows leave all three empty.
+Versions written before these columns lack them: readers count that, never guess.
 
 ``clade`` is a single name; ancestry is derived from the clade set, so "is this virus in
 D?" is answered with :meth:`CladeSet.is_within` and never by matching name prefixes. An
@@ -55,6 +62,9 @@ COLUMNS: dict[str, str] = {
     "support": "INTEGER",
     "unobservable": "INTEGER",
     "tree_node": "VARCHAR",
+    "clade_evidence": "VARCHAR",
+    "supported_clade": "VARCHAR",
+    "clade_evidence_reason": "VARCHAR",
 }
 
 #: How a clade was decided. Recorded per row because the two are not equally strong: a
@@ -78,6 +88,9 @@ class CladeRow:
     support: int = 0
     unobservable: int = 0
     tree_node: str | None = None
+    clade_evidence: str | None = None
+    supported_clade: str | None = None
+    clade_evidence_reason: str | None = None
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -89,6 +102,9 @@ class CladeRow:
             "support": self.support,
             "unobservable": self.unobservable,
             "tree_node": self.tree_node,
+            "clade_evidence": self.clade_evidence,
+            "supported_clade": self.supported_clade,
+            "clade_evidence_reason": self.clade_evidence_reason,
         }
 
 
