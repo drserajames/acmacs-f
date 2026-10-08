@@ -32,7 +32,8 @@ labels = true
 repository = "seasonal_A-H1N1pdm_HA"   # upstream nomenclature clone (influenza-clade-nomenclature)
 ha1_length = 327
 nuc_offset = 71
-source = "HA1 length (= offset added to an upstream HA2 position) and nucleotide offset (subtracted from an upstream nuc position) for af's mature-HA sequences, as the WHO CC trees and seqdb use them; derived empirically and re-checked Sep 2026 against the WHO CC trees and Nextclade's placements (notes/clades/ENGINE-COMPARISON.md)"
+mature_nt = 1647   # mature-HA length in af's nucleotide strings (no stop codon), as af.seq's pin
+source = "HA1 length (= offset added to an upstream HA2 position) and nucleotide offset (subtracted from an upstream nuc position) for af's mature-HA sequences, as the WHO CC trees and seqdb use them; derived empirically and re-checked Sep 2026 against the WHO CC trees and Nextclade's placements (notes/clades/ENGINE-COMPARISON.md); mature_nt: the mature HA without its stop codon, the length af.seq checks each Nextclade dataset against (expected_mature_nt), so a locus past it (B/Vic A's nuc 1843, in the 3' untranslated region) is unexpressible"
 
 [subtype.h3]
 name = "A(H3N2)"
@@ -46,7 +47,8 @@ labels = true
 repository = "seasonal_A-H3N2_HA"   # upstream nomenclature clone (influenza-clade-nomenclature)
 ha1_length = 329
 nuc_offset = 65
-source = "HA1 length (= offset added to an upstream HA2 position) and nucleotide offset (subtracted from an upstream nuc position) for af's mature-HA sequences, as the WHO CC trees and seqdb use them; derived empirically and re-checked Sep 2026 against the WHO CC trees and Nextclade's placements (notes/clades/ENGINE-COMPARISON.md)"
+mature_nt = 1650   # mature-HA length in af's nucleotide strings (no stop codon), as af.seq's pin
+source = "HA1 length (= offset added to an upstream HA2 position) and nucleotide offset (subtracted from an upstream nuc position) for af's mature-HA sequences, as the WHO CC trees and seqdb use them; derived empirically and re-checked Sep 2026 against the WHO CC trees and Nextclade's placements (notes/clades/ENGINE-COMPARISON.md); mature_nt: the mature HA without its stop codon, the length af.seq checks each Nextclade dataset against (expected_mature_nt), so a locus past it (B/Vic A's nuc 1843, in the 3' untranslated region) is unexpressible"
 
 [subtype.bvic]
 name = "B/Vic"
@@ -60,7 +62,8 @@ labels = true
 repository = "seasonal_B-Vic_HA"   # upstream nomenclature clone (influenza-clade-nomenclature)
 ha1_length = 347
 nuc_offset = 78
-source = "HA1 length (= offset added to an upstream HA2 position) and nucleotide offset (subtracted from an upstream nuc position) for af's mature-HA sequences, as the WHO CC trees and seqdb use them; derived empirically and re-checked Sep 2026 against the WHO CC trees and Nextclade's placements (notes/clades/ENGINE-COMPARISON.md); B/Vic is 347, not the 346 in earlier notes: of 1,242 sequences Nextclade places in B/Vic A.1, 1,157 carry that clade's defining HA2 151K at mature position 347+151 and none at 346+151"
+mature_nt = 1710   # mature-HA length in af's nucleotide strings (no stop codon), as af.seq's pin
+source = "HA1 length (= offset added to an upstream HA2 position) and nucleotide offset (subtracted from an upstream nuc position) for af's mature-HA sequences, as the WHO CC trees and seqdb use them; derived empirically and re-checked Sep 2026 against the WHO CC trees and Nextclade's placements (notes/clades/ENGINE-COMPARISON.md); B/Vic is 347, not the 346 in earlier notes: of 1,242 sequences Nextclade places in B/Vic A.1, 1,157 carry that clade's defining HA2 151K at mature position 347+151 and none at 346+151; mature_nt: the mature HA without its stop codon, the length af.seq checks each Nextclade dataset against (expected_mature_nt), so a locus past it (B/Vic A's nuc 1843, in the 3' untranslated region) is unexpressible"
 
 [subtype.byam]
 name = "B/Yam"

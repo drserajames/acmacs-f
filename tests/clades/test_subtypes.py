@@ -40,7 +40,7 @@ def table(**changes: Any) -> Subtypes:
 
 def test_the_packaged_table_carries_every_subtypes_clade_facts() -> None:
     assert clade_subtypes() == ("A(H1N1)", "A(H3N2)", "B/Vic")
-    assert coordinates_for("B/Vic") == Coordinates(ha1_length=347, nuc_offset=78)
+    assert coordinates_for("B/Vic") == Coordinates(ha1_length=347, nuc_offset=78, mature_nt=1710)
     assert nomenclature_repository("A(H3N2)").endswith("H3N2_HA")
     assert clade_dataset("A(H1N1)") == "h1" and subtype_for_dataset("bvic") == "B/Vic"
 
@@ -61,7 +61,14 @@ def test_an_unlisted_subtype_is_refused() -> None:
         clade_facts("A(H5N1)")
 
 
-LABELLED = {"labels": True, "repository": "r", "ha1_length": 329, "nuc_offset": 65, "source": "s"}
+LABELLED = {
+    "labels": True,
+    "repository": "r",
+    "ha1_length": 329,
+    "nuc_offset": 65,
+    "mature_nt": 1650,
+    "source": "s",
+}
 
 
 @pytest.mark.parametrize(
@@ -72,6 +79,7 @@ LABELLED = {"labels": True, "repository": "r", "ha1_length": 329, "nuc_offset": 
         ({k: v for k, v in LABELLED.items() if k != "source"}, "no source"),
         ({k: v for k, v in LABELLED.items() if k != "labels"}, "labels must be true or false"),
         ({k: v for k, v in LABELLED.items() if k != "nuc_offset"}, "needs nuc_offset"),
+        ({k: v for k, v in LABELLED.items() if k != "mature_nt"}, "needs mature_nt"),
         ({**LABELLED, "ha1_length": 0}, "ha1_length must be a positive whole number"),
         ({**LABELLED, "ha1_length": "329"}, "ha1_length must be a positive whole number"),
         ({"labels": False, "repository": "r", "source": "s"}, "labels = false, but repository"),

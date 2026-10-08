@@ -10,9 +10,9 @@ The loader passes sections through unchecked; this module validates them, every 
 on first use, so a malformed table fails whichever subtype is asked for:
 
 * a row with no ``clades`` section is an error: no clade facts is not the same as "no labels";
-* ``labels`` is required. With ``true``: ``repository``, ``ha1_length`` and ``nuc_offset``
-  are required. With ``false`` they must be absent, and asking for that subtype's clades
-  fails with the row's source as the reason (B/Yam: Sarah, 25 Sep 2026);
+* ``labels`` is required. With ``true``: ``repository``, ``ha1_length``, ``nuc_offset`` and
+  ``mature_nt`` are required. With ``false`` they must be absent, and asking for that
+  subtype's clades fails with the row's source as the reason (B/Yam: Sarah, 25 Sep 2026);
 * ``source`` is required on every row, and an unknown key is refused.
 """
 
@@ -27,8 +27,8 @@ from af.clades.coordinates import Coordinates
 from af.util.subtypes import Subtype, Subtypes, subtypes
 
 SECTION = "clades"
-_KEYS = frozenset({"labels", "repository", "ha1_length", "nuc_offset", "source"})
-_LABELLED = ("repository", "ha1_length", "nuc_offset")
+_KEYS = frozenset({"labels", "repository", "ha1_length", "nuc_offset", "mature_nt", "source"})
+_LABELLED = ("repository", "ha1_length", "nuc_offset", "mature_nt")
 
 
 class CladeSubtypeError(LookupError):
@@ -138,13 +138,19 @@ def _facts(row: Subtype, problems: list[str]) -> CladeFacts | None:
         problems.append(f"{where}: labels = true needs {', '.join(missing)}")
         return None
     repository, ha1, nuc = section["repository"], section["ha1_length"], section["nuc_offset"]
+    mature = section["mature_nt"]
     if not isinstance(repository, str) or not repository:
         problems.append(f"{where}: repository must be a directory name")
-    for key, value in (("ha1_length", ha1), ("nuc_offset", nuc)):
+    for key, value in (("ha1_length", ha1), ("nuc_offset", nuc), ("mature_nt", mature)):
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             problems.append(f"{where}: {key} must be a positive whole number, got {value!r}")
     return CladeFacts(
-        row.name, row.key, True, str(repository), Coordinates(int(ha1), int(nuc)), str(source)
+        row.name,
+        row.key,
+        True,
+        str(repository),
+        Coordinates(int(ha1), int(nuc), int(mature)),
+        str(source),
     )
 
 
