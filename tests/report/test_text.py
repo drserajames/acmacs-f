@@ -14,6 +14,8 @@ from af.report.config import load
 from af.store import Provenance, Store
 from af.util.config import ConfigError
 
+build_needs_latex = pytest.mark.tool(build.LATEX)
+
 T0 = dt.datetime(2026, 9, 1, 12, tzinfo=dt.UTC)
 CONFIG = """
 [report]
@@ -131,3 +133,13 @@ def test_intro_config_is_checked(tmp_path: Path) -> None:
     cfg.write_text(bad)
     with pytest.raises(ConfigError, match="tree_method.* is not a placeholder for a geo section"):
         load(cfg)
+
+
+@build_needs_latex
+def test_a_report_with_an_end_page_builds(tmp_path: Path) -> None:
+    """The closing page follows the last figure: the page check must allow it (it did not)."""
+    cfg_path, root, _ = _setup(tmp_path, FULL, allow=True)
+    pdf = build.build(cfg_path, root, tmp_path / "out")
+    record = json.loads((tmp_path / "out" / "r.build.json").read_text())
+    assert pdf.is_file() and record["output"]["pages"] >= 4
+    assert record["text_gaps"]  # no --store: the tree's method cannot be read, so it is a gap

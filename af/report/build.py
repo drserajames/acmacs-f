@@ -328,16 +328,20 @@ def pdf_pages(log: Path) -> int:
     return int(match.group(1))
 
 
-def check_output(tex: Path, slots: list[str]) -> int:
-    """Every figure typeset, and the PDF ends on the last figure's page. Returns page count."""
+def check_output(tex: Path, slots: list[str], after_last_figure: int = 0) -> int:
+    """Every figure typeset, and the PDF ends ``after_last_figure`` pages after the last figure's
+    page (the closing page, when the report has one). Returns the page count."""
     pages = figure_pages(tex.with_suffix(".aux"))
     missing = [slot for slot in slots if _label(slot) not in pages]
     if missing:
         raise BuildError(f"{len(missing)} figure(s) not typeset: {missing[:5]}")
     n = pdf_pages(tex.with_suffix(".log"))
     last = max(pages.values())
-    if n != last:
-        raise BuildError(f"{tex.stem}.pdf: {n} pages but the last figure is on page {last}")
+    if n != last + after_last_figure:
+        raise BuildError(
+            f"{tex.stem}.pdf: {n} pages but the last figure is on page {last}"
+            + (f" and {after_last_figure} page(s) should follow it" if after_last_figure else "")
+        )
     return n
 
 
@@ -482,7 +486,7 @@ def build(
         build_dir.mkdir(parents=True)
         tex = write_tex(cfg, figs, build_dir, built_at, len(use.not_from_store), intros)
         passes = run_latex(tex, LocalRunner())
-        pages = check_output(tex, cfg.all_slots())
+        pages = check_output(tex, cfg.all_slots(), 1 if cfg.report.end_page else 0)
     final = out_dir / f"{cfg.report.id}.pdf"
     shutil.copyfile(tex.with_suffix(".pdf"), final)
     if manifest_path is not None:
