@@ -402,12 +402,12 @@ def figure_warnings(doc: dict[str, Any]) -> list[str]:
 
 def _warnings(note: Note, figures: list[dict[str, Any]]) -> None:
     """Every window's recorded warnings, in the map step's own words; counted apart from MISSING."""
-    lines = [
-        f"**WARNING** ({fig.get('map', {}).get('window', {}).get('name', '?')}): "
-        + warning.removeprefix("WARNING: ")
-        for fig in figures
-        for warning in figure_warnings(fig)
-    ]
+    lines = []
+    for fig in figures:
+        window = ((fig.get("map") or {}).get("window") or {}).get("name")
+        for warning in figure_warnings(fig):
+            where = window or note.gap("the warned figure's window", "figure map.window.name")
+            lines.append(f"**WARNING** ({where}): " + warning.removeprefix("WARNING: "))
     if lines:
         note.section("Warnings")
         for line in lines:

@@ -397,3 +397,7 @@ def test_the_map_steps_warnings_are_listed_verbatim_per_window_and_counted(tmp_p
     assert "## Warnings" in note.lines and not any("clade X" in m for m in note.missing)
     assert howmade.figure_warnings(figures[0]) == [WARNING]
     assert howmade.figure_warnings(_figure(ref, full=True)) == []  # none recorded: none shown
+    del figures[1]["map"]["window"]  # a window the figure doesn't name is counted, never "?"
+    note = howmade.map_note("labx-hi", figures, store, None, [])
+    assert "the warned figure's window" in note.missing
+    assert not any("(?)" in w for w in note.warnings)
