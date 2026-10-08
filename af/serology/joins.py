@@ -49,6 +49,11 @@ from af.util.subtypes import SubtypeError, subtypes
 STATUSES = ("matched", "doubtful", "unmatched")
 SEVERAL_DATASETS = "serology.matched-in-several-datasets"
 NO_DATASET = "serology.no-sequence-dataset"
+# 04-clades' evidence for a tree-derived clade (Sarah, 8 Oct): whether the sequence observes
+# its clade's defining loci ("supported" / "unobserved" / "contradicted"), the deepest clade
+# its residues support when contradicted, and the loci. Null on fallback rows.
+EVIDENCE_COLUMNS = ("clade_evidence", "supported_clade", "clade_evidence_reason")
+SUPPORTED = "supported"
 # a chain's mark on a repeated sample (af.chart.identity): the chart's, not the preparation's
 DISTINCT = "DISTINCT"
 # an antigen matched by its name as the sequence store spells it (_match_name)
@@ -71,6 +76,11 @@ class LinkCounts:
     by_status_and_pairing: dict[tuple[str, str], int] = field(default_factory=dict)
     matched_without_clade_row: int = 0
     matched_with_empty_clade: int = 0
+    # matched rows by their clade's evidence (tree-derived clades only; fallback rows have none)
+    matched_by_evidence: dict[str, int] = field(default_factory=dict)
+    # clade datasets read without the evidence columns (older versions): their tree rows read
+    # as "supported", as every tree call was before the evidence was recorded
+    clades_without_evidence_columns: list[str] = field(default_factory=list)
     # clade dataset -> (sequences version it labelled, or None if its provenance names none
     # or several, sequences version the join read), for every clade table behind in content:
     # one whose calls would change if it were relabelled from the sequences read
@@ -106,11 +116,12 @@ def link_sequences(
     if clades is None:
         con.execute(
             "CREATE OR REPLACE VIEW clade_rows AS SELECT NULL::VARCHAR AS epi_isl, "
-            "NULL::VARCHAR AS accession, NULL::VARCHAR AS clade, NULL::VARCHAR AS method "
-            "WHERE false"
+            "NULL::VARCHAR AS accession, NULL::VARCHAR AS clade, NULL::VARCHAR AS method, "
+            + ", ".join(f"NULL::VARCHAR AS {c}" for c in EVIDENCE_COLUMNS)
+            + " WHERE false"
         )
     else:
-        con.execute(f"CREATE OR REPLACE VIEW clade_rows AS SELECT * FROM {_parquet(clades)}")
+        con.execute(f"CREATE OR REPLACE VIEW clade_rows AS {_clade_rows(clades)}")
     _refuse_duplicates(con, "isolates", "sequence isolates")
     _refuse_duplicates(con, "clade_rows", "clade assignments")
     con.execute(
@@ -128,7 +139,8 @@ def link_sequences(
                -- is '' so NULL keeps one meaning downstream: no assignment row at all
                CASE WHEN k.epi_isl IS NOT NULL THEN coalesce(k.clade, '') END AS clade,
                k.method AS clade_method,
-               k.epi_isl IS NOT NULL AS has_clade_row
+               k.epi_isl IS NOT NULL AS has_clade_row,
+               k.clade_evidence, k.supported_clade, k.clade_evidence_reason
         FROM antigen_matches m
         JOIN antigens a ON a.table_id = m.table_id AND a.position = m.position
         LEFT JOIN isolates i ON i.epi_isl = m.epi_isl AND i.accession = m.accession
@@ -289,6 +301,37 @@ def _count(con: Any, counts: LinkCounts) -> None:
     ).fetchone()
     assert row is not None
     counts.matched_without_clade_row, counts.matched_with_empty_clade = int(row[0]), int(row[1])
+    counts.matched_by_evidence = dict(
+        con.execute(
+            "SELECT clade_evidence, count(*) FROM antigen_sequences "
+            "WHERE status = 'matched' AND clade_evidence IS NOT NULL GROUP BY ALL ORDER BY ALL"
+        ).fetchall()
+    )
+
+
+def has_evidence_columns(path: Path) -> bool:
+    """Whether a clades file records 04-clades' evidence (versions before 8 Oct 2026 do not)."""
+    import duckdb
+
+    columns = duckdb.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(path)]).fetchall()
+    return {name for name, *_ in columns} >= set(EVIDENCE_COLUMNS)
+
+
+def _clade_rows(paths: Sequence[Path]) -> str:
+    """Every clades file, with the evidence columns: as written, or, for a file written before
+    them, "supported" on its tree rows (every tree call was taken as supported then) and null
+    on the rest. Decided per file, so a join reading old and new versions reads each right."""
+    old = (
+        f"*, CASE WHEN method = 'tree' AND clade IS NOT NULL THEN '{SUPPORTED}' END "
+        "AS clade_evidence, NULL::VARCHAR AS supported_clade, "
+        "NULL::VARCHAR AS clade_evidence_reason"
+    )
+    parts = [
+        f"SELECT {'*' if has_evidence_columns(p) else old} "
+        f"FROM read_parquet('{Path(p).as_posix()}')"
+        for p in paths
+    ]
+    return " UNION ALL BY NAME ".join(parts)
 
 
 def _parquet(paths: Sequence[Path]) -> str:
@@ -303,6 +346,10 @@ class TiedSequence:
     epi_isl: str
     accession: str
     clade: str | None  # None: no clade row; "": the nomenclature names none
+    # 04-clades' evidence for a tree-derived clade (EVIDENCE_COLUMNS); None on fallback rows
+    clade_evidence: str | None = None
+    supported_clade: str | None = None
+    clade_evidence_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -331,6 +378,11 @@ class PreparationSequence:
     # the sequence datasets (subtype rows: "bvic", ...) its matched rows found sequences in;
     # tells a B preparation of unknown lineage which lineage it is. Empty for ties.
     datasets: frozenset[str] = frozenset()
+    # the chosen sequence's clade evidence (EVIDENCE_COLUMNS: recorded, not acted on here);
+    # for ties and unresolved conflicts, each candidate carries its own
+    clade_evidence: str | None = None
+    supported_clade: str | None = None
+    clade_evidence_reason: str | None = None
 
 
 #: How a preparation whose rows name different records was resolved (Sarah, Q81, 30 Sep:
@@ -467,7 +519,9 @@ def _single_sequences(
         f"""
         SELECT {_PREP},
                list(DISTINCT struct_pack(epi := s.epi_isl, acc := s.accession, clade := s.clade,
-                                         passage := coalesce(s.sequence_passage, ''))) AS sequences,
+                                         passage := coalesce(s.sequence_passage, ''),
+                                         ev := s.clade_evidence, sup := s.supported_clade,
+                                         why := s.clade_evidence_reason)) AS sequences,
                any_value(s.epi_isl), any_value(s.accession), any_value(s.clade),
                bool_or(s.pairing = 'exact'), bool_or(s.pairing = 'proxy'), {doubts},
                list(DISTINCT s.dataset) FILTER (WHERE s.dataset IS NOT NULL)
@@ -485,9 +539,11 @@ def _single_sequences(
             found = _resolve(key[4], seqs, passages, pairing, tuple(dts))
             out[key] = replace(found, datasets=datasets)
         else:
+            only = seqs[0]  # one record (listed once per passage it was deposited with)
             out[key] = PreparationSequence(
-                epi, acc, clade, pairing, conflict=False, doubts=tuple(dts), datasets=datasets
-            )
+                epi, acc, clade, pairing, conflict=False, doubts=tuple(dts), datasets=datasets,
+                **_evidence(only["ev"], only["sup"], only["why"]),
+            )  # fmt: skip
     return out
 
 
@@ -502,7 +558,7 @@ def _resolve(
     from af.seq.matching import epi_order
 
     alternatives = tuple(
-        TiedSequence(r["epi"], r["acc"], r["clade"])
+        TiedSequence(r["epi"], r["acc"], r["clade"], **_evidence(r["ev"], r["sup"], r["why"]))
         for r in sorted(records, key=lambda r: (epi_order(r["epi"]), r["acc"]))
     )
     scores = {(r["epi"], r["acc"]): passages.score(passage, r["passage"]) for r in records}
@@ -513,6 +569,8 @@ def _resolve(
         return PreparationSequence(
             chosen.epi_isl, chosen.accession, chosen.clade, pairing, conflict=True,
             doubts=doubts, alternatives=alternatives, resolution=ROWS_PASSAGE_MATCHED,
+            clade_evidence=chosen.clade_evidence, supported_clade=chosen.supported_clade,
+            clade_evidence_reason=chosen.clade_evidence_reason,
         )  # fmt: skip
     return PreparationSequence(
         None, None, None, pairing, conflict=True, doubts=doubts, alternatives=alternatives,
@@ -535,11 +593,12 @@ def _tied_preparations(
         """
     ).fetchall()
     clade_of = {
-        (epi, acc): clade
-        for epi, acc, clade in con.execute(
+        (epi, acc): (clade, _evidence(ev, sup, why))
+        for epi, acc, clade, ev, sup, why in con.execute(
             f"""
             SELECT c.epi_isl, c.accession,
-                   CASE WHEN k.epi_isl IS NOT NULL THEN coalesce(k.clade, '') END
+                   CASE WHEN k.epi_isl IS NOT NULL THEN coalesce(k.clade, '') END,
+                   k.clade_evidence, k.supported_clade, k.clade_evidence_reason
             FROM (SELECT DISTINCT unnest(s.tied, recursive := true)
                   FROM antigen_sequences s WHERE {where}) c
             LEFT JOIN clade_rows k ON k.epi_isl = c.epi_isl AND k.accession = c.accession
@@ -562,7 +621,9 @@ def _tied_preparations(
         if not pairs:  # a refused tie must name its candidates; none to colour from otherwise
             continue
         order = sorted(pairs, key=lambda ea: (epi_order(ea[0]), ea[1]))
-        seqs = tuple(TiedSequence(epi, acc, clade_of.get((epi, acc))) for epi, acc in order)
+        seqs = tuple(
+            TiedSequence(epi, acc, *_tied_clade(clade_of.get((epi, acc)))) for epi, acc in order
+        )
         pick = min(ranked.get(key, ()), key=lambda ea: (epi_order(ea[0]), ea[1]), default=None)
         pairing = next((p for p in ("exact", "proxy") if p in pairings[key]), "")
         out[key] = PreparationSequence(
@@ -571,6 +632,22 @@ def _tied_preparations(
             doubts=tuple(sorted(doubts[key])),
         )  # fmt: skip
     return out
+
+
+def _evidence(evidence: str | None, supported: str | None, reason: str | None) -> dict[str, Any]:
+    return {
+        "clade_evidence": evidence,
+        "supported_clade": supported,
+        "clade_evidence_reason": reason,
+    }
+
+
+def _tied_clade(found: tuple[str | None, dict[str, Any]] | None) -> tuple[Any, ...]:
+    """A tie candidate's clade and evidence; (None, no evidence) without a clade row."""
+    if found is None:
+        return (None,)
+    clade, evidence = found
+    return (clade, *evidence.values())
 
 
 def link_from_store(
@@ -646,6 +723,11 @@ def link_from_store(
     elif clades is not None:
         raise StoreError("clades pinned for a sequences-only join (with_clades=False)")
     counts = link_sequences(con, indexes, isolates, clade_paths, class_of)
+    counts.clades_without_evidence_columns = sorted(
+        ref.dataset
+        for ref in clade_refs
+        if not all(has_evidence_columns(p) for p in store.resolve(ref).glob("*.parquet"))
+    )
     counts.clades_behind = behind
     counts.clades_same_content = same
     counts.refs = {
