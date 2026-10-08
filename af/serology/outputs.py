@@ -36,7 +36,7 @@ from af.clades.importer import UserClades
 from af.clades.nomenclature import CladeSet
 from af.clades.sequence import AlignedSequence, GapSupport
 from af.geo.colours import UNCOLOURED, ColourCounts, DotStyle, dot_styles
-from af.geo.records import Month, geo_counts, to_i7
+from af.geo.records import DotRule, Month, geo_counts, to_i7
 from af.geo.render import render_geo
 from af.seq import locations
 from af.seq.matching_rules import MatchingRules
@@ -75,6 +75,10 @@ class OutputsReport:
     # table subtype -> its I7 geo document (af.geo.records.to_i7): what the PDFs drew, for a
     # caller that files each month as a report figure (af.geo.figures)
     geo_docs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    geo_rule: str = ""  # af.geo.records.DotRule value the dots were counted under
+    # DotRule.VIRUS: subtype -> how each drawn virus's colour was decided -> viruses
+    geo_merges: dict[str, dict[str, int]] = field(default_factory=dict)
+    geo_merged_preparations: dict[str, int] = field(default_factory=dict)  # subtype -> preps
     # where each location was drawn (the sequence workstream's lookup), for the same caller
     coordinates: Callable[[str], tuple[float, float] | None] | None = None
     geo_unplaced: dict[str, int] = field(default_factory=dict)  # location -> dots not drawn
@@ -109,6 +113,7 @@ def make_geo_and_stat(
     matching: MatchingRules | None = None,
     split_by_lineage: tuple[str, ...] | None = None,
     identity_rules: IdentityRules | None = None,
+    dot_rule: DotRule = DotRule.PREPARATION,
 ) -> OutputsReport:
     """Write ``geo/<st>-records.json``, ``geo/<st>-YYYY-MM.pdf`` and ``stat/`` for a window.
 
@@ -135,7 +140,13 @@ def make_geo_and_stat(
         if matching is None:
             raise ValueError("colouring needs matching rules (af.seq.matching_rules)")
         style_of = _styles(store, con, preps, colouring, matching, report)
-    geo = geo_counts(preps, first, last, locations.name_location, style_of=style_of)
+    geo = geo_counts(
+        preps, first, last, locations.name_location, dot_rule, style_of=style_of,
+        class_of=_passage_classes(con) if dot_rule is DotRule.VIRUS else None,
+    )  # fmt: skip
+    report.geo_rule = dot_rule.value
+    report.geo_merges = {s: dict(c) for s, c in sorted(geo.merges.items())}
+    report.geo_merged_preparations = dict(geo.merged_preparations)
     geo_dir = out_dir / "geo"
     geo_dir.mkdir(parents=True, exist_ok=True)
     for subtype in sorted({s for s, _, _, _ in geo.dots}):
@@ -168,6 +179,24 @@ def make_geo_and_stat(
     report.files += write_stat(counts, first, last, out_dir / "stat", previous_stat)
     report.stat_unknown_region = dict(counts.unknown_continent)
     return report
+
+
+def _passage_classes(con: Any) -> Any:
+    """Each preparation's passage class, as the tables store gives its rows; a preparation's
+    rows share one passage, so they share one class."""
+    classes = {
+        (subtype, name, reassortant or "", tuple(annotations or ()), passage): kind
+        for subtype, name, reassortant, annotations, passage, kind in con.execute(
+            "SELECT t.subtype, a.name, a.reassortant, a.annotations, a.identity_passage, "
+            "min(coalesce(a.passage_class, 'unknown')) FROM antigens a "
+            "JOIN tables t USING (table_id) GROUP BY ALL"
+        ).fetchall()
+    }
+
+    def class_of(prep: Preparation) -> str:
+        return classes.get(prep.key(), "unknown")
+
+    return class_of
 
 
 def _styles(

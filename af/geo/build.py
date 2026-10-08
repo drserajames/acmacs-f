@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from af.geo.figures import clade_key, write_geo_figures
-from af.geo.records import Month
+from af.geo.records import DotRule, Month
 from af.seq.matching_rules import matching_rules
 from af.serology.outputs import clade_colouring, make_geo_and_stat
 from af.store import Store
@@ -54,7 +54,7 @@ def build_geo(
         colouring = clade_colouring(store, clones, acmacs_data, schemes)
         report = make_geo_and_stat(
             store, af_data / "rules" / "locations", coastline, first, last, work,
-            colouring=colouring, matching=matching_rules(af_data),
+            colouring=colouring, matching=matching_rules(af_data), dot_rule=DotRule.VIRUS,
         )  # fmt: skip
     drawn = set(report.geo_docs)
     if missing := sorted(drawn - set(slots)):
@@ -76,7 +76,9 @@ def build_geo(
         "matching_inputs": report.matching_inputs,
         "location_tables": report.location_tables,
         "coastline": {"path": str(coastline), "sha256": sha256_path(coastline)},
-        "dot_rule": "preparation",
+        "dot_rule": report.geo_rule,
+        "merges": report.geo_merges,
+        "merged_preparations": report.geo_merged_preparations,
     }
     files: list[Path] = []
     key: dict[str, Any] = {}

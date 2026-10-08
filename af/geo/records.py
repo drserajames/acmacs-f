@@ -1,13 +1,15 @@
 """Geo records: how many dots each location gets in each month.
 
-Production rule (Sarah, 25 Sep 2026, and today's report): **one dot per antigen
-preparation** (name, reassortant, annotations, passage) tested in any table, placed in the
-month of its earliest reported collection date, at the location of its name. So one virus
-titrated as an egg and a cell isolate is two dots.
+Production rule (Sarah, 7 Oct 2026: "One dot per virus name - as it is meant to show the number
+of isolates (i.e. merge egg & cell)"): **one dot per virus**, :data:`DotRule.VIRUS`. A virus is
+its table subtype, name, reassortant and annotations; its preparations (passages, egg or cell)
+are one dot, in the month of the earliest collection date any of them reports, at the location
+of its name. Its colour (Sarah, 7 Oct): the colour its coloured preparations agree on; where
+they disagree, the colour of its cell or original preparations; where those disagree too (or
+it has none), uncoloured. Every case is counted, per subtype (:attr:`GeoCounts.merges`).
 
-Other dot rules Sarah asked for as options (one dot per virus with egg and cell kept
-apart; merging genetically identical preparations; QC before any merge) come later, as
-further values of ``DotRule``.
+:data:`DotRule.PREPARATION`, one dot per preparation (name, reassortant, annotations,
+passage), is what the shipped round drew (ae), and stays for comparison with it.
 
 Where a location comes from is the caller's business (workstream 2's lookup), passed in as
 a function, so this module holds no location data. A preparation with no collection date
@@ -31,6 +33,18 @@ from af.serology.query import Preparation
 
 class DotRule(Enum):
     PREPARATION = "preparation"
+    VIRUS = "virus"
+
+
+# How a virus's dot got its colour from its preparations' (GeoCounts.merges keys)
+SINGLE = "one preparation"
+AGREE = "preparations agree"
+COLOURED_OVER_UNCOLOURED = "coloured preparations agree, others uncoloured"
+CELL_CHOSEN = "preparations disagree: cell or original preparation's colour"
+DISAGREE = "preparations disagree"  # uncoloured
+CELL_CLASSES = frozenset({"cell", "original"})
+
+VirusKey = tuple[str, str, str, tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -65,8 +79,11 @@ class GeoCounts:
 
     dots: Counter[tuple[str, Month, str, DotStyle]] = field(default_factory=Counter)
     months: list[Month] = field(default_factory=list)
-    undated: Counter[str] = field(default_factory=Counter)  # subtype -> preparations
+    undated: Counter[str] = field(default_factory=Counter)  # subtype -> preparations (or viruses)
     no_location: Counter[tuple[str, str]] = field(default_factory=Counter)  # (subtype, name)
+    # DotRule.VIRUS: subtype -> how each drawn virus's colour was decided -> viruses
+    merges: dict[str, Counter[str]] = field(default_factory=dict)
+    merged_preparations: Counter[str] = field(default_factory=Counter)  # subtype -> drawn preps
 
 
 def geo_counts(
@@ -76,31 +93,81 @@ def geo_counts(
     location_of: Callable[[str], str | None],
     rule: DotRule = DotRule.PREPARATION,
     style_of: Callable[[Preparation], DotStyle] | None = None,
+    class_of: Callable[[Preparation], str] | None = None,
 ) -> GeoCounts:
     """Count dots for each month in ``first..last`` under ``rule``.
 
-    ``style_of`` colours each dot (:func:`af.geo.colours.dot_styles`); without it every
-    dot is drawn uncoloured.
+    ``style_of`` colours each preparation (:func:`af.geo.colours.dot_styles`); without it
+    every dot is drawn uncoloured. ``class_of`` gives a preparation's passage class ("egg",
+    "cell", "original", ...); :data:`DotRule.VIRUS` needs it to settle a disagreement.
     """
-    if rule is not DotRule.PREPARATION:
-        raise NotImplementedError(rule)
     window = months(first, last)
-    wanted = set(window)
     result = GeoCounts(months=window)
+    style = style_of if style_of is not None else (lambda _: UNCOLOURED)
+    if rule is DotRule.PREPARATION:
+        for prep in preparations:
+            _place(result, prep.subtype, prep.name, prep.collection_date, style(prep), location_of)
+        return result
+    if rule is not DotRule.VIRUS:
+        raise NotImplementedError(rule)
+    if class_of is None:
+        raise ValueError("DotRule.VIRUS needs class_of (each preparation's passage class)")
+    viruses: dict[VirusKey, list[Preparation]] = {}
     for prep in preparations:
-        if prep.collection_date is None:
-            result.undated[prep.subtype] += 1
-            continue
-        month = Month.of(prep.collection_date)
-        if month not in wanted:
-            continue
-        location = location_of(prep.name)
-        if location is None:
-            result.no_location[prep.subtype, prep.name] += 1
-            continue
-        style = style_of(prep) if style_of is not None else UNCOLOURED
-        result.dots[prep.subtype, month, location, style] += 1
+        viruses.setdefault(virus_key(prep), []).append(prep)
+    for (subtype, name, _, _), preps in viruses.items():
+        dates = [p.collection_date for p in preps if p.collection_date is not None]
+        first_date = min(dates) if dates else None
+        dot, case = merged_style([(style(p), class_of(p)) for p in preps])
+        if _place(result, subtype, name, first_date, dot, location_of):
+            result.merges.setdefault(subtype, Counter())[case] += 1
+            result.merged_preparations[subtype] += len(preps)
     return result
+
+
+def virus_key(prep: Preparation) -> VirusKey:
+    """A virus: its preparations without their passage (Sarah, 7 Oct: egg and cell merge)."""
+    return (prep.subtype, prep.name, prep.reassortant, prep.annotations)
+
+
+def merged_style(styles: list[tuple[DotStyle, str]]) -> tuple[DotStyle, str]:
+    """One virus's dot from its preparations' (style, passage class), and how it was decided."""
+    if len(styles) == 1:
+        return styles[0][0], SINGLE
+    coloured = {s for s, _ in styles if s.colour is not None}
+    if len(coloured) == 1:
+        (only,) = coloured
+        agree = all(s.colour is not None for s, _ in styles)
+        return only, AGREE if agree else COLOURED_OVER_UNCOLOURED
+    if not coloured:
+        return UNCOLOURED, AGREE
+    cell = {s for s, kind in styles if s.colour is not None and kind in CELL_CLASSES}
+    if len(cell) == 1:
+        return next(iter(cell)), CELL_CHOSEN
+    return UNCOLOURED, DISAGREE
+
+
+def _place(
+    result: GeoCounts,
+    subtype: str,
+    name: str,
+    date: datetime.date | None,
+    style: DotStyle,
+    location_of: Callable[[str], str | None],
+) -> bool:
+    """Add one dot if it falls in the window and can be placed; whether it was drawn."""
+    if date is None:
+        result.undated[subtype] += 1
+        return False
+    month = Month.of(date)
+    if month not in result.months:
+        return False
+    location = location_of(name)
+    if location is None:
+        result.no_location[subtype, name] += 1
+        return False
+    result.dots[subtype, month, location, style] += 1
+    return True
 
 
 def to_i7(counts: GeoCounts, subtype: str) -> dict[str, Any]:
