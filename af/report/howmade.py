@@ -49,6 +49,7 @@ class Note:
     lines: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
     undated: dict[str, int] = field(default_factory=dict)  # kind of entry -> how many undated
+    warnings: list[str] = field(default_factory=list)  # recorded by the map step, verbatim
 
     def gap(self, what: str, where: str) -> str:
         """A fact no artefact records: counted, and said in place."""
@@ -393,6 +394,27 @@ def _vaccines(
         )
 
 
+def figure_warnings(doc: dict[str, Any]) -> list[str]:
+    """The warnings the map step recorded in a figure, verbatim (Sarah: unpainted points)."""
+    records = doc.get("provenance", {}).get("decisions", {}).get("unpainted_clades") or []
+    return [str(r["warning"]) for r in records if r.get("warning")]
+
+
+def _warnings(note: Note, figures: list[dict[str, Any]]) -> None:
+    """Every window's recorded warnings, in the map step's own words; counted apart from MISSING."""
+    lines = [
+        f"**WARNING** ({fig.get('map', {}).get('window', {}).get('name', '?')}): "
+        + warning.removeprefix("WARNING: ")
+        for fig in figures
+        for warning in figure_warnings(fig)
+    ]
+    if lines:
+        note.section("Warnings")
+        for line in lines:
+            note.item(line)
+        note.warnings += lines
+
+
 def _orientation(note: Note, ori: dict[str, Any] | None) -> None:
     if not ori:
         return
@@ -597,6 +619,7 @@ def map_note(
     note.section("Against the ae round")
     _references(note, files, reference_records)
     _comparison(note, rows)
+    _warnings(note, figures)
     note.lines += ["", f"_{len(note.missing)} fact(s) MISSING"
                    + (f": {'; '.join(note.missing)}._" if note.missing else "._")]  # fmt: skip
     return note
@@ -651,8 +674,9 @@ def write_notes(
         index += [f"Store read {seen['started']}: {len(seen['currents_read'])} CURRENT(s) read"
                   + (f"; READ DESPITE batch(es) publishing: {', '.join(overrode)}"
                      if overrode else "") + ".", ""]  # fmt: skip
-    index += ["| Map | Source | Mode | MISSING |", "|---|---|---|---|"]
-    index += [f"| [{n.folder}]({n.folder}.md) | {n.source} | {n.mode or '?'} | {len(n.missing)} |"
+    index += ["| Map | Source | Mode | MISSING | WARNINGS |", "|---|---|---|---|---|"]
+    index += [f"| [{n.folder}]({n.folder}.md) | {n.source} | {n.mode or '?'} | {len(n.missing)} "
+              f"| {len(n.warnings)} |"
               for n in notes]  # fmt: skip
     (out / "README.md").write_text("\n".join(index) + "\n")
     return notes
