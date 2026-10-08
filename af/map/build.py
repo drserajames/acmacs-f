@@ -40,6 +40,7 @@ from af.chart.column_bases import (
 )
 from af.chart.model import Chart
 from af.chart.sera import FERRET_ONLY, Marker, non_ferret, read_markers
+from af.geo.colours import DotStyle
 from af.map.colouring import MapColouringError, StoreColours
 from af.map.config import MapConfig, MapsConfig
 from af.map.curate import (
@@ -53,7 +54,7 @@ from af.map.figure import chart_points
 from af.map.finish import finish_map
 from af.map.labels import label_text
 from af.map.orient import Orientation, RotationOverride, drawn_pairs, orient
-from af.map.style import ColourRow, ColourScheme, Window
+from af.map.style import ColourRow, ColourScheme, PointIn, Window
 from af.map.vaccines import (
     MapAntigen,
     VaccineChoice,
@@ -420,6 +421,9 @@ class MapResult:
     lineage_minority: dict[str, int] = field(default_factory=dict)
     # Sera on the chart that are not ferret (species or marker): drawn, reported, counted here.
     non_ferret_sera: int = 0
+    # Sentences for antigens left unpainted by clade evidence (af.geo.colours.unpainted_warning),
+    # also in each figure's decisions.unpainted_clades; printed in the build log.
+    warnings: tuple[str, ...] = ()
 
 
 def build_map(
@@ -476,10 +480,12 @@ def build_map(
             raise BuildError(f"{cfg.folder}: {exc}") from exc
         scheme = coloured.scheme
         labels = list(coloured.labels)
+        dots: Sequence[DotStyle] = coloured.styles
         sequenced = list(coloured.sequenced)
         store_refs.extend(colours.store_refs(coloured.provenance["datasets"]))
         colour_note: dict[str, Any] = coloured.provenance
     else:
+        dots = ()
         scheme, labels = _stand_in_colours(chart, cfg, inputs)
         sequenced = [bool(a.extra.get("A")) for a in chart.antigens]
         colour_note = {
@@ -642,6 +648,9 @@ def build_map(
         decisions["vaccines"] = vaccine_rule_records(disable, choose, n_defaults, vrep.used_rules)
 
     points = chart_points(chart, xy, labels=labels, sequenced=sequenced, hidden=hidden)
+    unpainted = unpainted_clades(chart, points, dots, scheme.name)
+    if unpainted:
+        decisions["unpainted_clades"] = unpainted
 
     size = config.frame_size(chart.info.get("V", ""), chart.info.get("A", ""))
     title_base = map_title(chart, cfg.title)
@@ -681,7 +690,44 @@ def build_map(
         time.monotonic() - started,
         dict(decisions.get("lineage_minority", {}).get("other", {})),
         non_ferret_count,
+        tuple(u["warning"] for u in unpainted),
     )
+
+
+def unpainted_clades(
+    chart: Chart, points: Sequence[PointIn], styles: Sequence[DotStyle], scheme: str
+) -> list[dict[str, Any]]:
+    """One record per supported clade the scheme cannot paint (and one for antigens whose
+    sequences support no clade), over the antigens this map draws: Sarah, 8 Oct 2026, a warning,
+    never a silent count. The sentence is af.geo.colours.unpainted_warning's, copied verbatim
+    downstream (11-reports). Drawn = has coordinates and no hide rule; every window draws the
+    same antigens (windows only grey), so one record serves all of them."""
+    from af.geo.colours import STATE_NO_SCHEME_ROW, STATE_NO_SUPPORTED, unpainted_warning
+
+    groups: dict[str | None, dict[str, Any]] = {}
+    for p, dot in zip(points[: chart.n_antigens], styles, strict=False):
+        if dot.state not in (STATE_NO_SCHEME_ROW, STATE_NO_SUPPORTED) or p.xy is None or p.hide:
+            continue
+        clade = dot.clade if dot.state == STATE_NO_SCHEME_ROW else None
+        g = groups.setdefault(clade, {"points": 0, "reference": 0, "tree": Counter()})
+        g["points"] += 1
+        g["reference"] += bool(p.reference)
+        g["tree"][dot.tree_clade] += 1
+    out = []
+    for clade, g in sorted(groups.items(), key=lambda kv: (kv[0] is None, kv[0] or "")):
+        out.append(
+            {
+                "clade": clade,
+                "tree_clades": dict(sorted(g["tree"].items())),
+                "points": g["points"],
+                "reference_antigens": g["reference"],
+                "scheme": scheme,
+                "warning": unpainted_warning(
+                    g["points"], clade, g["tree"], scheme, reference=g["reference"]
+                ),
+            }
+        )
+    return out
 
 
 # ---------------------------------------------------------------- the command
@@ -835,6 +881,8 @@ def build(
             log(f"{cfg.folder:24s} {result.seconds:5.1f}s  {n} figures{flags}{lineage}")
             for f in result.flags:
                 log(f"    flag: {f}")
+            for w in result.warnings:
+                log(f"    {w}")
         return results
 
 
