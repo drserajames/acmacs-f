@@ -162,6 +162,28 @@ def test_a_callers_scheme_colours_as_a_named_one_would(tmp_path: Path) -> None:
     assert colours.for_chart(chart, recoloured).provenance["scheme_sha256"] != p["scheme_sha256"]
 
 
+def test_preparations_colour_as_the_same_antigens_on_a_chart(tmp_path: Path) -> None:
+    """for_preparations is the rule for_chart calls: the chart's antigens, keyed, get the same
+    labels, styles and provenance (less the chart-only lineage count), in the order given."""
+    from af.serology.joins import preparation_key
+
+    colours, chart, clade_subtype = caller_setup(tmp_path)
+    own = CladeColourScheme(
+        clade_subtype, "caller",
+        (ColourEntry(1, "P", "Clade P", "#AA0000", False),
+         ColourEntry(2, "P.1", "Clade P.1", "#0000aa", False)),
+    )  # fmt: skip
+    keys = [preparation_key(chart, "antigen", i) for i in range(chart.n_antigens)]
+    on_chart = colours.for_chart(chart, own)
+    found = colours.for_preparations(list(reversed(keys)), "h3", own)
+    assert found.labels == tuple(reversed(on_chart.labels))
+    assert found.sequenced == tuple(reversed(on_chart.sequenced))
+    assert [d.colour for d in found.styles] == [None, "#aa0000", "#0000aa"]
+    assert found.datasets == frozenset({"h3"})
+    expected = {k: v for k, v in on_chart.provenance.items() if k != "lineage_minority"}
+    assert found.provenance == expected
+
+
 def test_a_callers_row_naming_no_clade_is_an_error(tmp_path: Path) -> None:
     colours, chart, clade_subtype = caller_setup(tmp_path)
     own = CladeColourScheme(
