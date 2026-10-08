@@ -29,11 +29,13 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from af.clades import ancestry
 from af.clades.agreement import AgreementCheck, AgreementLimit, check_agreement
 from af.clades.assign import Assignment
 from af.clades.conflicts import ConflictLimit, check_conflicts
 from af.clades.fallback import StoreFallback, assign_from_store, disagreements
 from af.clades.nomenclature import CladeSet
+from af.clades.sequence import AlignedSequence
 from af.clades.store import CladeRow, CladeStoreError, dataset_for, publish, rows_from_assignments
 from af.seq.processed import read_table
 from af.store import ExternalInput, Store, StoreRef
@@ -211,8 +213,16 @@ def publish_clades(
         report["fallback"] = fallback_report
         if check is not None:
             report["agreement"] = check.to_json()
+        if tree is not None:
+            calls = {key: assignment.clade for key, assignment in fallback.assignments.items()}
+            wanted = ancestry.candidates(rows, calls)
+            rows = ancestry.mark(rows, calls, _aligned(store, sequences, wanted), clade_set)
+            report["ancestry_only_marks"] = ancestry.summary(rows)
         report.setdefault("not_on_tree", {})["labelled_by"] = "fallback, in this table"
         inputs += [sequences, fallback.dataset]
+    elif tree is not None:
+        # with nothing to compare against, no row can be judged; say so rather than imply none
+        report["ancestry_only_marks"] = {"evaluated": False, "why": "no fallback to compare with"}
     # the limits, their reasons and any override decided whether this version could exist
     parameters: dict[str, Any] = {}
     if check is not None:
@@ -234,6 +244,32 @@ def publish_clades(
         extra_report=report,
         extra_parameters=parameters or None,
     )
+
+
+def _aligned(
+    store: Store, sequences: StoreRef, keys: set[tuple[str, str]]
+) -> dict[tuple[str, str], AlignedSequence]:
+    """The aligned sequences of ``keys`` only: reading every one would be ~0.3 GB for H1.
+
+    ``union_by_name``: partitions can differ in columns, and a reader that takes its schema
+    from the first file can lose ``nuc_aligned`` depending on file order (COMMON, 2 Oct).
+    """
+    if not keys:
+        return {}
+    import duckdb
+
+    pattern = (store.resolve(sequences) / "sequences" / "**" / "*.parquet").as_posix()
+    connection = duckdb.connect()
+    connection.execute("CREATE TEMP TABLE wanted (epi_isl VARCHAR, accession VARCHAR)")
+    connection.executemany("INSERT INTO wanted VALUES (?, ?)", sorted(keys))
+    found = connection.execute(
+        "SELECT s.epi_isl, s.accession, s.nuc_aligned FROM read_parquet(?, union_by_name=true, "
+        "hive_partitioning=false) s JOIN wanted USING (epi_isl, accession) "
+        "WHERE s.nuc_aligned IS NOT NULL",
+        [pattern],
+    ).fetchall()
+    connection.close()
+    return {(e, a): AlignedSequence.from_nucleotides(n) for e, a, n in found}
 
 
 def check_tree_identities(store: Store, tree: StoreRef, rows: Sequence[CladeRow]) -> StoreRef:

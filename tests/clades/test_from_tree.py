@@ -24,8 +24,8 @@ from af.clades.nomenclature import CladeSet
 from af.clades.store import ASSIGNMENTS_FILE, CladeStoreError, publish, read_report
 from af.store import ExternalInput, Provenance, Store, StoreRef
 from af.tree.io import i6
-from af.tree.populate import CladeCall, CladeInput, CladeResult, populate
-from tests.tree.tree_fixtures import KEYS, built, records, states_for
+from af.tree.populate import CladeCall, CladeInput, CladeResult, leaf_key, populate
+from tests.tree.tree_fixtures import KEYS, LEAF_SEQ, built, records, states_for
 
 from .synthetic import build_clone, load_synthetic
 
@@ -64,9 +64,15 @@ def stub_engine(version: str, *, deeper: str = "P.1", review: dict[str, Any] | N
 def sequence_version(
     store: Store, rows: list[tuple[str, str, str | None, str | None]], *inputs: StoreRef
 ) -> StoreRef:
-    """A sequence-store version: (epi_isl, accession, nextclade_subclade, qc) per row."""
+    """A sequence-store version: (epi_isl, accession, nextclade_subclade, qc) per row.
+
+    The fixture tree's leaves carry their aligned sequence (``LEAF_SEQ``), as real records do:
+    publish reads it to judge tree calls the fallback does not share (af.clades.ancestry).
+    """
     names = ["epi_isl", "accession", "nextclade_subclade", "nextclade_qc_status"]
     columns = {name: [row[index] for row in rows] for index, name in enumerate(names)}
+    by_key = {key: LEAF_SEQ[name] for name, key in KEYS.items()}
+    columns["nuc_aligned"] = [by_key.get(leaf_key(row[0], row[1])) for row in rows]
     with store.build("sequences", "h3") as builder:
         part = builder.path / "sequences" / "pull=test"
         part.mkdir(parents=True)

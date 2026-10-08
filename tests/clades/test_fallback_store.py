@@ -168,6 +168,16 @@ def test_one_table_tree_calls_for_leaves_fallback_for_the_rest(tmp_path: Path) -
     assert report["fallback"]["tree_vs_fallback_disagree"] == 1
     assert report["fallback"]["tree_vs_fallback_compared"] == 5
     assert report["not_on_tree"]["labelled_by"] == "fallback, in this table"
+    # leaves 1 and 2: the tree says P.1, Nextclade does not, and the fixture's short sequences
+    # cannot show P.1's own loci, so both are published as ancestry only (Q124b)
+    marks = duckdb.sql(
+        f"select epi_isl, ancestry_only, ancestry_reason from "
+        f"read_parquet('{store.resolve(ref) / ASSIGNMENTS_FILE}') where ancestry_only"
+    ).fetchall()
+    assert sorted(m[0] for m in marks) == [TREE_LEAVES[1][0], TREE_LEAVES[2][0]]
+    assert all(m[2].startswith("own loci unobservable") for m in marks)
+    assert report["ancestry_only"] == 2
+    assert report["ancestry_only_marks"]["unobservable_loci_only"] == 2
     engine = json.loads((store.resolve(ref) / "PROVENANCE.json").read_text())["parameters"]
     assert engine["engine"] == "tree+fallback"
 

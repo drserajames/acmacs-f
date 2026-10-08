@@ -9,7 +9,12 @@ Columns (:data:`COLUMNS`) are the key the sequence store uses — ``epi_isl`` pl
 segment's own ``accession``, because EPI_ISL alone is not unique — then the clade, how it
 was decided, and how much of the clade's signature the sequence actually showed:
 
-    epi_isl, accession, subtype, clade, method, support, unobservable, tree_node
+    epi_isl, accession, subtype, clade, method, support, unobservable, tree_node,
+    ancestry_only, ancestry_reason
+
+``ancestry_only`` marks a tree call the virus's own sequence does not show (af.clades.ancestry):
+it is published, and must not colour a map point (Sarah, 8 Oct 2026). Versions written before
+the column existed lack it; readers treat that as false for every row, and count it.
 
 ``clade`` is a single name; ancestry is derived from the clade set, so "is this virus in
 D?" is answered with :meth:`CladeSet.is_within` and never by matching name prefixes. An
@@ -55,6 +60,8 @@ COLUMNS: dict[str, str] = {
     "support": "INTEGER",
     "unobservable": "INTEGER",
     "tree_node": "VARCHAR",
+    "ancestry_only": "BOOLEAN",
+    "ancestry_reason": "VARCHAR",
 }
 
 #: How a clade was decided. Recorded per row because the two are not equally strong: a
@@ -78,6 +85,8 @@ class CladeRow:
     support: int = 0
     unobservable: int = 0
     tree_node: str | None = None
+    ancestry_only: bool = False
+    ancestry_reason: str | None = None
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -89,6 +98,8 @@ class CladeRow:
             "support": self.support,
             "unobservable": self.unobservable,
             "tree_node": self.tree_node,
+            "ancestry_only": self.ancestry_only,
+            "ancestry_reason": self.ancestry_reason,
         }
 
 
@@ -169,6 +180,7 @@ def build_report(rows: Sequence[CladeRow], clade_set: CladeSet) -> dict[str, Any
         "counts": dict(sorted(counts.items())),
         "clades_without_sequences": sorted(set(clade_set.names) - set(counts)),
         "methods": dict(sorted(_count(row.method for row in rows).items())),
+        "ancestry_only": sum(row.ancestry_only for row in rows),
     }
 
 
