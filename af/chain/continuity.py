@@ -283,7 +283,8 @@ def sentences(rec: dict[str, Any], *, movers: int = 8) -> list[str]:
             else ""
         )
         + (
-            f", {p['ambiguous']['count']} designations repeated (not paired)"
+            f", {p['ambiguous']['count']} designation"
+            f"{'s' if p['ambiguous']['count'] != 1 else ''} repeated (not paired)"
             if p["ambiguous"]["count"]
             else ""
         )
@@ -307,10 +308,12 @@ def sentences(rec: dict[str, Any], *, movers: int = 8) -> list[str]:
         )
     apart = ", ".join(f"{a['count']} more than {a['distance']:g}" for a in f["apart"])
     listed = ", ".join(f"{m['point']} {m['distance']:.2f}" for m in rec["movers"][:movers])
+    cut = rec["thresholds"]["movers"]["distance"]
+    if all(a["distance"] != cut for a in f["apart"]):  # else that count already says it
+        apart += f"; {len(rec['movers'])} more than {cut:g}"
     out.append(
-        f"Procrustes over {f['compared']} points: RMSD {f['rmsd']:.2f}; {apart};"
-        f" {len(rec['movers'])} beyond {rec['thresholds']['movers']['distance']:g}"
-        + (f", furthest: {listed}." if listed else ".")
+        f"Procrustes over {f['compared']} points: RMSD {f['rmsd']:.2f}; {apart}"
+        + (f"; furthest: {listed}." if listed else ".")
     )
     if rec["retires"]:
         out.append(f"This rebuild retires the drift record {rec['retires']}.")
