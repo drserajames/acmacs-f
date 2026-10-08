@@ -148,6 +148,7 @@ def test_record_names_its_parent_and_whether_stresses_compare(store):
     assert len(rec["map_sha256"]) == 64 and rec["measured_by"]["script"] == "af.chain.continuity"
     text = sentences(rec)
     assert "stress 20.000 -> 19.000 (-5.00%)" in text[1]
+    assert text[2].endswith("0 more than 0.5, 0 more than 1.")  # movers cut-off not repeated
     assert "retires" in text[-1]
 
     rec3 = _run(store, "v3")
@@ -176,6 +177,11 @@ def test_a_filled_passage_or_serum_id_is_the_same_point():
     c = continuity(new, prev, THRESHOLDS)
     p = c["points"]
     assert p["filled"]["count"] == 2
+    rec = {"previous": {"version": "v0"}, "points": p, "same_problem": True, "retires": None,
+           "thresholds": {"movers": {"distance": 2.0}}, **c}  # fmt: skip
+    text = sentences(rec)
+    assert "2 the same point" in text[0] and "designation" not in text[0]
+    assert text[2].endswith("0 more than 1; 0 more than 2.")
     assert p["filled"]["listed"] == [
         "A(H3N2)/EXAMPLETOWN/1/2021 -> A(H3N2)/EXAMPLETOWN/1/2021 MDCK1",
         "A(H3N2)/EXAMPLETOWN/1/2021 -> A(H3N2)/EXAMPLETOWN/1/2021 LABX F1/21",
