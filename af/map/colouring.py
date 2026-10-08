@@ -21,18 +21,18 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from af.chart.model import Chart
 from af.clades.colours import ColourScheme as CladeColourScheme
 from af.clades.colours import ColourSchemeError, scheme_from_rows, shadowed_entries
-from af.geo.colours import BASIS_GROUP_NO_CLADE
+from af.geo.colours import BASIS_GROUP_NO_CLADE, DotStyle
 from af.map.config import ColouringConfig
 from af.map.style import ColourRow, ColourScheme
 from af.seq.matching_rules import MatchingRules
-from af.serology.joins import preparation_key
+from af.serology.joins import PreparationKey, preparation_key
 from af.store.ref import StoreRef
 from af.store.store import Store
 from af.util.subtypes import Subtype
@@ -109,6 +109,23 @@ class ChartColours:
     provenance: dict[str, Any]
     # per antigen: how it got its colour (af.geo.colours.BASIS_*), "" when uncoloured
     basis: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PreparationColours:
+    """Colours for a list of preparations (:data:`af.serology.joins.PreparationKey`), in order.
+
+    The shared rule behind :meth:`StoreColours.for_chart`, for callers whose points are
+    preparations rather than chart antigens (geo: one dot per virus, from its preparations).
+    """
+
+    scheme: ColourScheme
+    labels: tuple[frozenset[str], ...]  # per preparation: the chosen entry's key, or nothing
+    sequenced: tuple[bool, ...]  # per preparation: matched to a sequence
+    provenance: dict[str, Any]
+    basis: tuple[str, ...]  # per preparation: af.geo.colours.BASIS_*, "" when uncoloured
+    styles: tuple[DotStyle, ...]  # per preparation: legend text and colour, as geo draws them
+    datasets: frozenset[str]  # the sequence datasets these colours can come from
 
 
 @dataclass(frozen=True)
@@ -363,17 +380,42 @@ class StoreColours:
         Each antigen's ``basis`` says how it got its colour: by its clade, or by a group needing
         no clade where the nomenclature names none (:mod:`af.geo.colours`).
         """
-        from af.geo.colours import dot_styles
-
         row = chart_subtype(chart)
         minority = Counter(
             str(a.extra.get("L", "")) or "none"
             for a in chart.antigens
             if str(a.extra.get("L", "")) != row.ace_lineage
         )
-        row_key = row.key
-        datasets = self.chart_datasets(chart, row_key)
-        # A pinned clades table behind its sequences refuses only the charts that colour from it.
+        keys = [preparation_key(chart, "antigen", i) for i in range(chart.n_antigens)]
+        found = self.for_preparations(
+            keys, row.key, scheme, groups=groups, lineage_minority=dict(sorted(minority.items()))
+        )
+        return ChartColours(
+            found.scheme, found.labels, found.sequenced, found.provenance, found.basis
+        )
+
+    def for_preparations(
+        self,
+        keys: Sequence[PreparationKey],
+        row_key: str,
+        scheme: str | CladeColourScheme,
+        *,
+        groups: GroupSet | None = None,
+        lineage_minority: Mapping[str, int] | None = None,
+    ) -> PreparationColours:
+        """Colour preparations of one subtype row (``"h3"``, ``"bvic"``) with a scheme.
+
+        The one copy of the rule: :meth:`for_chart` keys a chart's antigens and calls this.
+        Scheme and groups as for :meth:`for_chart`. A pinned clades table behind its sequences
+        refuses the call only if these preparations' datasets read it. ``lineage_minority``
+        (antigens of another lineage than a chart's, by code) is a chart's, recorded as given;
+        ``coloured_without_clade`` names preparations by their index in ``keys`` (``ag<i>``,
+        the chart's antigen index when a chart called).
+        """
+        from af.geo.colours import dot_styles
+
+        datasets = self.preparation_datasets(keys, row_key)
+        # A pinned clades table behind its sequences refuses only the calls that colour from it.
         self.pins.check_clades_labelled(self.links.clades_behind, datasets)
         if isinstance(scheme, str):
             if groups is not None:
@@ -391,14 +433,14 @@ class StoreColours:
             colouring.clade_set,
             colouring.group_set,
         )
-        keys = key_for_legend(colouring.scheme)
-        labels, sequenced, basis = [], [], []
-        for i in range(chart.n_antigens):
-            key = preparation_key(chart, "antigen", i)  # serology's one copy of the key (rule 6)
+        legend_keys = key_for_legend(colouring.scheme)
+        labels, sequenced, basis, styles = [], [], [], []
+        for key in keys:
             dot = style(key)
-            labels.append(labels_for(dot.label, keys))
+            labels.append(labels_for(dot.label, legend_keys))
             sequenced.append(key in self._sequences)
             basis.append(dot.basis)
+            styles.append(dot)
         rows = map_scheme(colouring.scheme)
         # Rows a later row always overrides can never colour anything (trap T9). Not an error:
         # row order is the user's (Q80). Listed so a dead legend row is visible, not silent.
@@ -433,7 +475,9 @@ class StoreColours:
             # its antigens matched in): the only ones its figure cites (store_refs(datasets))
             "datasets": sorted(datasets),
             # antigens of another lineage than the map's (coloured by the map's row), by code
-            "lineage_minority": dict(sorted(minority.items())),
+            **(
+                {"lineage_minority": dict(lineage_minority)} if lineage_minority is not None else {}
+            ),
             # how the coloured antigens got their colour, and which had no clade to go by
             "basis": dict(sorted(counts.basis.items())),
             "coloured_without_clade": [
@@ -453,7 +497,10 @@ class StoreColours:
         if groups is not None:
             provenance["groups_origin"] = "caller-supplied"
             provenance["groups_sha256"] = groups_sha256(groups)
-        return ChartColours(rows, tuple(labels), tuple(sequenced), provenance, tuple(basis))
+        return PreparationColours(
+            rows, tuple(labels), tuple(sequenced), provenance, tuple(basis), tuple(styles),
+            datasets,
+        )  # fmt: skip
 
     def store_refs(self, datasets: Collection[str] | None = None) -> list[dict[str, str]]:
         """The store versions a store-coloured figure was drawn from: exactly the ones READ
@@ -482,9 +529,15 @@ class StoreColours:
         (:mod:`af.serology.joins`), so this is the chart's row today; a Yamagata-lineage antigen
         on a B/Victoria chart would add byam. The row is always in, so a chart with no
         sequenced antigen still names what it was coloured against."""
+        keys = [preparation_key(chart, "antigen", i) for i in range(chart.n_antigens)]
+        return self.preparation_datasets(keys, row)
+
+    def preparation_datasets(self, keys: Sequence[PreparationKey], row: str) -> frozenset[str]:
+        """:meth:`chart_datasets` for a list of preparations: the row, plus every dataset they
+        matched a sequence in."""
         found: set[str] = {row}
-        for i in range(chart.n_antigens):
-            prep = self._sequences.get(preparation_key(chart, "antigen", i))
+        for key in keys:
+            prep = self._sequences.get(key)
             if prep is not None:
                 found |= prep.datasets
         return frozenset(found)
