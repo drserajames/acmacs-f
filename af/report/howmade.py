@@ -524,6 +524,63 @@ def _references(note: Note, files: ChainFiles | None, records: Path | None) -> N
             note.item(sentence)
 
 
+def _continuity(
+    note: Note, store: Store | None, files: ChainFiles | None, records: Path | None
+) -> None:
+    """The rebuilt map against the version it replaces (HISTORY.jsonl's parent), from the
+    continuity record written beside the store, ``<records>/<dataset>/<version>.continuity.json``,
+    checked against both maps. A first version has nothing to compare with, and says so."""
+    from af.chain.continuity import sentences
+
+    if store is None or files is None:
+        note.item(note.gap("the chain version's history", "the store's HISTORY.jsonl"))
+        return
+    ref = files.ref
+    published = [e for e in store.history(ref.kind, ref.dataset)
+                 if e.get("version") == ref.version and e.get("event") == "published"]  # fmt: skip
+    if len(published) != 1:
+        what = f"{ref.dataset} {ref.version} published once in HISTORY.jsonl"
+        note.item(note.gap(what, f"the store ({len(published)} publish entries)"))
+        return
+    parent = published[0].get("parent")
+    if parent is None:
+        note.item(f"First version of {ref.dataset}: no earlier version to compare with "
+                  "(HISTORY.jsonl parent is none)")  # fmt: skip
+        return
+    what = f"the continuity record against {parent}"
+    if records is None:
+        note.item(note.gap(what, "a continuity record beside the store (no --reference-records)"))
+        return
+    path = records / ref.dataset / f"{ref.version}.continuity.json"
+    if not path.is_file():
+        note.item(note.gap(what, str(path)))
+        return
+    record = json.loads(path.read_text())
+    if record.get("map_sha256") != files.chosen_sha256:
+        note.item(note.gap(what, f"{path} (its map_sha256 is not this version's map)"))
+        return
+    if (record.get("previous") or {}).get("version") != parent:
+        note.item(note.gap(what, f"{path} (it compares another version, not {parent})"))
+        return
+    by = record.get("measured_by") or {}
+    by = by if isinstance(by, dict) else {}
+
+    def field(value: Any, name: str) -> str:
+        if value in (None, ""):
+            return note.gap(f"the continuity record's {name}", str(path))
+        return str(value)
+
+    method = str(record.get("method_note") or "").rstrip(".")
+    note.item(
+        f"{method or field(None, 'method_note')}. Measured "
+        f"{field(record.get('measured'), 'measured')} by "
+        f"{field(by.get('script'), 'measured_by.script')} on "
+        f"{field(by.get('release'), 'measured_by.release')} ({path.name})"
+    )
+    for sentence in sentences(record):
+        note.item(sentence)
+
+
 def _comparison(note: Note, rows: list[dict[str, Any]]) -> None:
     if not rows:
         where = "report/comparison/COMPARISON.json"
@@ -619,6 +676,8 @@ def map_note(
     note.section("Against the ae round")
     _references(note, files, reference_records)
     _comparison(note, rows)
+    note.section("Against the previous version")
+    _continuity(note, store, files, reference_records)
     _warnings(note, figures)
     note.lines += ["", f"_{len(note.missing)} fact(s) MISSING"
                    + (f": {'; '.join(note.missing)}._" if note.missing else "._")]  # fmt: skip
