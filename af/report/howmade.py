@@ -473,11 +473,23 @@ def _references(note: Note, files: ChainFiles | None, records: Path | None) -> N
                 what = "the reference record for this version"
                 note.item(note.gap(what, f"{path} (its map_sha256 is not this version's map)"))
                 return
-            by = record.get("measured_by", {})
+            by = record.get("measured_by") or {}
+            by = by if isinstance(by, dict) else {}
+
+            def field(value: Any, name: str) -> str:
+                if value in (None, ""):
+                    return note.gap(f"the reference record's {name}", str(path))
+                return str(value)
+
+            method = str(record.get("method_note") or "").rstrip(".")
+            release = field(by.get("release"), "measured_by.release")
+            release = release if release.startswith("**MISSING**") else release[:12]
             note.item(
-                f"{str(record.get('method_note', '')).rstrip('.')}. Measured "
-                f"{record.get('measured', '?')} by "
-                f"{by.get('script', '?')} on af {str(by.get('release', '?'))[:12]} ({path.name})"
+                f"{method or field(None, 'method_note')}. Measured "
+                f"{field(record.get('measured'), 'measured')} by "
+                f"{field(by.get('script'), 'measured_by.script')} on af "
+                f"{release} "
+                f"({path.name})"
             )
             refs = record.get("references")
     if refs is None:
