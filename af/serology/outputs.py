@@ -25,10 +25,11 @@ purpose; a subtype missing from it is uncoloured too, and the report says so.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from af.clades.colours import ColourScheme
 from af.clades.groups import GroupSet
@@ -56,6 +57,9 @@ from af.store import ExternalInput, Store, StoreError, StoreRef
 from af.util.artefacts import sha256_path
 from af.util.subtypes import Subtype, SubtypeError, subtypes
 
+if TYPE_CHECKING:
+    from af.map.colouring import StoreColours
+
 
 @dataclass(frozen=True)
 class SubtypeColouring:
@@ -75,6 +79,9 @@ class OutputsReport:
     # table subtype -> its I7 geo document (af.geo.records.to_i7): what the PDFs drew, for a
     # caller that files each month as a report figure (af.geo.figures)
     geo_docs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # subtype row -> the provenance StoreColours.for_preparations gave (store colouring only)
+    colour_provenance: dict[str, dict[str, Any]] = field(default_factory=dict)
+    colour_schemes: dict[str, Any] = field(default_factory=dict)  # row -> af.map.style.ColourScheme
     geo_rule: str = ""  # af.geo.records.DotRule value the dots were counted under
     # DotRule.VIRUS: subtype -> how each drawn virus's colour was decided -> viruses
     geo_merges: dict[str, dict[str, int]] = field(default_factory=dict)
@@ -114,6 +121,8 @@ def make_geo_and_stat(
     split_by_lineage: tuple[str, ...] | None = None,
     identity_rules: IdentityRules | None = None,
     dot_rule: DotRule = DotRule.PREPARATION,
+    store_colours: StoreColours | None = None,
+    schemes: Mapping[str, str] | None = None,
 ) -> OutputsReport:
     """Write ``geo/<st>-records.json``, ``geo/<st>-YYYY-MM.pdf`` and ``stat/`` for a window.
 
@@ -136,7 +145,16 @@ def make_geo_and_stat(
     )
 
     style_of = None
-    if colouring is not None:
+    if store_colours is not None:
+        # the maps' one read of the join and the user's tables (design rule 6)
+        if colouring is not None or schemes is None:
+            raise ValueError("store_colours needs schemes (row -> scheme name), not colouring")
+        if store_colours.serology != serology:
+            raise StoreError(
+                f"store colours read serology {store_colours.serology}, geo reads {serology}"
+            )
+        style_of = _store_styles(store_colours, schemes, preps, report)
+    elif colouring is not None:
         if matching is None:
             raise ValueError("colouring needs matching rules (af.seq.matching_rules)")
         style_of = _styles(store, con, preps, colouring, matching, report)
@@ -197,6 +215,62 @@ def _passage_classes(con: Any) -> Any:
         return classes.get(prep.key(), "unknown")
 
     return class_of
+
+
+def _store_styles(
+    colours: StoreColours,
+    schemes: Mapping[str, str],
+    preps: list[Preparation],
+    report: OutputsReport,
+) -> Any:
+    """Each preparation's dot style from the maps' StoreColours: per subtype row, every
+    preparation of that row through :meth:`StoreColours.for_preparations`, so a virus is the
+    colour on a geo page that it is on a map (Sarah, Q46; one copy of the rule)."""
+    report.links = colours.links
+    report.matching_inputs = colours.rules.provenance()
+    report.matching_rules = colours.rules.counts()
+    links = colours.sequences
+    rows = {p.key(): _row_of(p, links) for p in preps}
+    by_row: dict[str, list[Any]] = {}
+    for key, row in rows.items():
+        if row is not None:
+            by_row.setdefault(row, []).append(key)
+    styles: dict[Any, DotStyle] = {}
+    for row, keys in sorted(by_row.items()):
+        if row not in schemes or row not in labelled_rows():
+            continue
+        found = colours.for_preparations(keys, row, schemes[row])
+        styles.update(zip(keys, found.styles, strict=True))
+        p = found.provenance
+        report.colours[row] = ColourCounts(Counter(p["coloured"]), Counter(p["uncoloured"]))
+        report.colour_provenance[row] = p
+        report.colour_schemes[row] = found.scheme
+    report.uncoloured_subtypes = sorted(set(by_row) - set(schemes))
+    counted: set[Any] = set()
+
+    def uncoloured(row: str, reason: str, key: Any) -> DotStyle:
+        if key not in counted:  # once per preparation, as for_preparations counts
+            counted.add(key)
+            report.colours.setdefault(row, ColourCounts()).uncoloured[reason] += 1
+        return UNCOLOURED
+
+    def style(prep: Preparation) -> DotStyle:
+        key = prep.key()
+        row = rows[key]
+        if row is None:
+            if key not in counted:
+                counted.add(key)
+                report.unknown_lineage[prep.subtype] = (
+                    report.unknown_lineage.get(prep.subtype, 0) + 1
+                )
+            return UNCOLOURED
+        if key in styles:
+            return styles[key]
+        if row not in labelled_rows():
+            return uncoloured(row, f"no clade labels for {subtypes().by_key(row).name}", key)
+        return uncoloured(row, "no colour scheme given", key)
+
+    return style
 
 
 def _styles(

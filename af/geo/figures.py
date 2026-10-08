@@ -20,8 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from af.clades.colours import ColourScheme
 from af.geo.render import Coordinates, Look, render_period
+from af.map.style import ColourScheme as MapColourScheme
 from af.report.i7 import I7_NAME, I7_VERSION, validate
 from af.util.artefacts import sha256_path
 
@@ -81,7 +81,7 @@ def write_geo_figures(
     return report
 
 
-def clade_key(doc: Mapping[str, Any], schemes: Sequence[ColourScheme]) -> dict[str, Any]:
+def clade_key(doc: Mapping[str, Any], schemes: Sequence[MapColourScheme]) -> dict[str, Any]:
     """One slot's key: each legend entry in scheme order with its dots per month and in total.
 
     Every entry of the scheme is listed, including ones with no dots in the window, so the
@@ -97,17 +97,16 @@ def clade_key(doc: Mapping[str, Any], schemes: Sequence[ColourScheme]) -> dict[s
                 per_label.setdefault(label, Counter())[period["period"]] += point["count"]
     entries = []
     known = {UNCOLOURED_KEY}
-    for entry in (e for scheme in schemes for e in scheme):
-        if entry.legend in known:
+    for row in (r for scheme in schemes for r in scheme.rows):
+        if row.legend in known:
             continue  # two rows with one legend draw as one key entry
-        known.add(entry.legend)
-        months = per_label.get(entry.legend, Counter())
+        known.add(row.legend)
+        months = per_label.get(row.legend, Counter())
         entries.append(
             {
-                "legend": entry.legend,
-                "key": entry.key,
-                "colour": entry.colour,
-                "is_group": entry.is_group,
+                "legend": row.legend,
+                "keys": sorted(row.labels),
+                "colour": row.colour,
                 "per_month": dict(sorted(months.items())),
                 "window": sum(months.values()),
             }

@@ -23,6 +23,7 @@ import re
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from af.chart.model import Chart
@@ -32,7 +33,7 @@ from af.geo.colours import BASIS_GROUP_NO_CLADE, STATE_UNOBSERVED, DotStyle
 from af.map.config import ColouringConfig
 from af.map.style import ColourRow, ColourScheme
 from af.seq.matching_rules import MatchingRules
-from af.serology.joins import PreparationKey, preparation_key
+from af.serology.joins import PreparationKey, PreparationSequence, preparation_key
 from af.store.ref import StoreRef
 from af.store.store import Store
 from af.util.subtypes import Subtype
@@ -510,6 +511,12 @@ class StoreColours:
             rows, tuple(labels), tuple(sequenced), provenance, tuple(basis), tuple(styles),
             datasets,
         )  # fmt: skip
+
+    @property
+    def sequences(self) -> Mapping[PreparationKey, PreparationSequence]:
+        """Each preparation's sequence as the run's one join found it (read-only): geo reads it to
+        tell which subtype row a B preparation of unknown lineage is, from the record it matched."""
+        return MappingProxyType(self._sequences)
 
     def store_refs(self, datasets: Collection[str] | None = None) -> list[dict[str, str]]:
         """The store versions a store-coloured figure was drawn from: exactly the ones READ

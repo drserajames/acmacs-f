@@ -19,8 +19,10 @@ from typing import Any
 
 from af.geo.figures import clade_key, write_geo_figures
 from af.geo.records import DotRule, Month
+from af.map.colouring import StoreColours
+from af.map.config import ColouringConfig
 from af.seq.matching_rules import matching_rules
-from af.serology.outputs import clade_colouring, make_geo_and_stat
+from af.serology.outputs import make_geo_and_stat
 from af.store import Store
 from af.util.artefacts import sha256_path
 from af.util.subtypes import subtypes
@@ -51,10 +53,15 @@ def build_geo(
     without a slot is an error, as is a slot for one that has no dots (design rule 1).
     """
     with store.reading("geo-build", kinds=KINDS_READ, override=ignore_busy) as guard:
-        colouring = clade_colouring(store, clones, acmacs_data, schemes)
+        # the maps' one read of the join and the user's tables (design rule 6): a virus is the
+        # colour on a geo page that it is on a map
+        colours = StoreColours(
+            store, ColouringConfig("store", acmacs_data, clones), matching_rules(af_data),
+            ignore_busy=ignore_busy,
+        )  # fmt: skip
         report = make_geo_and_stat(
             store, af_data / "rules" / "locations", coastline, first, last, work,
-            colouring=colouring, matching=matching_rules(af_data), dot_rule=DotRule.VIRUS,
+            dot_rule=DotRule.VIRUS, store_colours=colours, schemes=schemes,
         )  # fmt: skip
     drawn = set(report.geo_docs)
     if missing := sorted(drawn - set(slots)):
@@ -65,6 +72,7 @@ def build_geo(
     links = report.links
     provenance = {
         "store_read": guard.to_json(),
+        "colours_store_read": colours.store_read,
         "serology": report.serology.to_json(),
         "refs": links.refs if links is not None else {},
         "clades_behind": {d: list(v) for d, v in links.clades_behind.items()} if links else {},
@@ -87,8 +95,8 @@ def build_geo(
         slot = slots[subtype]
         written = write_geo_figures(doc, slot, report.coordinates, coastline, figures, provenance)
         files += written.files
-        rows = [r.key for r in subtypes().for_table(subtype, "") if r.key in colouring]
-        key[slot] = clade_key(doc, [colouring[r].scheme for r in rows])
+        rows = [r.key for r in subtypes().for_table(subtype, "") if r.key in report.colour_schemes]
+        key[slot] = clade_key(doc, [report.colour_schemes[r] for r in rows])
         record["slots"][slot] = {
             "subtype": subtype,
             "drawn": written.drawn,
@@ -100,6 +108,7 @@ def build_geo(
         row: {"coloured": dict(c.coloured), "uncoloured": dict(c.uncoloured)}
         for row, c in sorted(report.colours.items())
     }
+    record["colour_provenance"] = report.colour_provenance
     record["unknown_lineage"] = report.unknown_lineage
     record["coloured_from_partial"] = report.coloured_from_partial
     out = figures / "geo"
