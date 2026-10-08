@@ -162,3 +162,31 @@ def test_no_parent_and_no_overwrite(store):
     _run(store, "v2")
     with pytest.raises(FileExistsError):
         _run(store, "v2")
+
+
+def test_a_filled_passage_or_serum_id_is_the_same_point():
+    prev = _chart(["1", "2", "3", "4", "5"], ["1"], BASE, 1.0)
+    prev.antigens[0].passage = ""  # the rebuild's merge took a partner's passage (R2)
+    prev.sera[0].serum_id = ""  # the lab's blank serum id, filled in a later tables version
+    prev.antigens[1].passage = ""  # two candidates in the new map: stays removed + added
+    new = _chart(
+        ["1", "2", "3", "4", "5", "2"], ["1"], np.vstack([BASE[:5], [[8, 8]], BASE[5:]]), 1.0
+    )
+    new.antigens[5].passage = "SIAT1"
+    c = continuity(new, prev, THRESHOLDS)
+    p = c["points"]
+    assert p["filled"]["count"] == 2
+    assert p["filled"]["listed"] == [
+        "A(H3N2)/EXAMPLETOWN/1/2021 -> A(H3N2)/EXAMPLETOWN/1/2021 MDCK1",
+        "A(H3N2)/EXAMPLETOWN/1/2021 -> A(H3N2)/EXAMPLETOWN/1/2021 LABX F1/21",
+    ]
+    assert (p["paired"], p["added"]["antigens"], p["removed"]["antigens"]) == (3, 2, 1)
+    assert c["procrustes"]["compared"] == 5 and c["procrustes"]["rmsd"] == pytest.approx(0)
+
+
+def test_two_different_passages_are_not_a_fill():
+    prev = _chart(["1", "2", "3", "4", "5"], ["1"], BASE, 1.0)
+    prev.antigens[0].passage = "E5"
+    c = continuity(_chart(["1", "2", "3", "4", "5"], ["1"], BASE, 1.0), prev, THRESHOLDS)
+    assert c["points"]["filled"]["count"] == 0
+    assert (c["points"]["added"]["antigens"], c["points"]["removed"]["antigens"]) == (1, 1)

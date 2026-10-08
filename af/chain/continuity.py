@@ -46,11 +46,15 @@ from af.util.config import ConfigError, load_config
 
 FIELDS = (
     "stress: each map's own best stress; comparable only when same_problem is true. "
-    "points: paired = same kind and designation once on each side; added/removed = only in the "
-    "new/previous map; ambiguous = designations occurring more than once on a side (not paired). "
+    "points: paired = same kind and designation once on each side; filled = the same point "
+    "with its passage (antigen) or serum id (serum) filled in or emptied (same kind, name, "
+    "reassortant, annotations; one candidate a side; the field empty on one side), fitted like "
+    "paired points; added/removed = only in the new/previous map; ambiguous = designations "
+    "occurring more than once on a side (not paired). "
     "procrustes: the previous layout fitted onto the new one (rotation, reflection, translation, "
-    "no scaling) over paired points connected in both; apart = counts beyond each cut-off. "
-    "movers: every paired point further apart than thresholds.movers, furthest first."
+    "no scaling) over paired and filled points connected in both; apart = counts beyond each "
+    "cut-off. "
+    "movers: every paired or filled point further apart than thresholds.movers, furthest first."
 )
 
 
@@ -87,6 +91,34 @@ def _keys(chart: Chart) -> list[tuple[str, str]]:
     ]
 
 
+def _bases(chart: Chart) -> list[tuple[tuple[str, str, str, tuple[str, ...]], str]]:
+    """Each point without the field a later rebuild may fill (an antigen's passage, a serum's
+    id), and that field."""
+    return [
+        (("antigen", a.name, a.reassortant, a.annotations), a.passage) for a in chart.antigens
+    ] + [(("serum", s.name, s.reassortant, s.annotations), s.serum_id) for s in chart.sera]
+
+
+def _filled(
+    new: Chart, previous: Chart, left_new: list[int], left_prev: list[int]
+) -> list[tuple[int, int]]:
+    """Leftovers that are one point with its passage or serum id filled in (or emptied): same
+    kind, name, reassortant and annotations, exactly one candidate on each side, and the field
+    empty on at least one side. A merge that pairs a blank passage by name (STRICT_THEN_NAME) or a
+    table whose blank serum id was filled would otherwise show the point as removed plus added."""
+    bn, bp = _bases(new), _bases(previous)
+    on_new = Counter(bn[i][0] for i in left_new)
+    on_prev = {bp[j][0]: j for j in left_prev}
+    once_prev = Counter(bp[j][0] for j in left_prev)
+    return [
+        (i, on_prev[bn[i][0]])
+        for i in left_new
+        if on_new[bn[i][0]] == 1
+        and once_prev[bn[i][0]] == 1
+        and not (bn[i][1] and bp[on_prev[bn[i][0]]][1])
+    ]
+
+
 def _named(keys: list[tuple[str, str]], kind: str) -> list[str]:
     return sorted(name for k, name in keys if k == kind)
 
@@ -106,9 +138,17 @@ def continuity(new: Chart, previous: Chart, thresholds: Thresholds) -> dict[str,
     ambiguous = sorted({k for k, n in cn.items() if n > 1} | {k for k, n in cp.items() if n > 1})
     where = {k: i for i, k in enumerate(kp) if cp[k] == 1}
     pairs = [(i, where[k]) for i, k in enumerate(kn) if cn[k] == 1 and k in where]
-    paired = {kn[i] for i, _ in pairs}
-    added = [k for k in kn if k not in cp]
-    removed = [k for k in kp if k not in cn]
+    filled = _filled(
+        new,
+        previous,
+        [i for i, k in enumerate(kn) if k not in cp],
+        [j for j, k in enumerate(kp) if k not in cn],
+    )
+    gone_new, gone_prev = {i for i, _ in filled}, {j for _, j in filled}
+    added = [k for i, k in enumerate(kn) if k not in cp and i not in gone_new]
+    removed = [k for j, k in enumerate(kp) if k not in cn and j not in gone_prev]
+    n_paired = len(pairs)
+    pairs += filled
 
     pn, pp = new.best(), previous.best()
     a = np.asarray(pn.layout, dtype=float)[[i for i, _ in pairs]]
@@ -130,7 +170,11 @@ def continuity(new: Chart, previous: Chart, thresholds: Thresholds) -> dict[str,
         "points": {
             "new": len(kn),
             "previous": len(kp),
-            "paired": len(paired),
+            "paired": n_paired,
+            "filled": {
+                "count": len(filled),
+                "listed": [f"{kp[j][1]} -> {kn[i][1]}" for i, j in filled],
+            },
             "added": _side(added),
             "removed": _side(removed),
             "ambiguous": {"count": len(ambiguous), "listed": [f"{k}: {n}" for k, n in ambiguous]},
@@ -233,6 +277,11 @@ def sentences(rec: dict[str, Any], *, movers: int = 8) -> list[str]:
         f"Against the previous version {prev}: {p['paired']} points shared,"
         f" {p['added']['antigens']} antigens and {p['added']['sera']} sera added,"
         f" {p['removed']['antigens']} antigens and {p['removed']['sera']} sera gone"
+        + (
+            f", {p['filled']['count']} the same point with its passage or serum id filled in"
+            if p["filled"]["count"]
+            else ""
+        )
         + (
             f", {p['ambiguous']['count']} designations repeated (not paired)"
             if p["ambiguous"]["count"]
