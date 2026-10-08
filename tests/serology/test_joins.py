@@ -47,8 +47,8 @@ def _isolates_and_clades(tmp_path: Path) -> tuple[Path, Path]:
     clades = _parquet(
         tmp_path / "assignments.parquet",
         """SELECT * FROM (VALUES
-            ('EPI_ISL_1', 'ACC1', 'CLADE-X', 'tree'),
-            ('EPI_ISL_3', 'ACC3', NULL, 'tree')
+            ('EPI_ISL_1', 'ACC1', 'CLADE-X', 'fallback'),
+            ('EPI_ISL_3', 'ACC3', NULL, 'fallback')
         ) AS v(epi_isl, accession, clade, method)""",
     )
     return isolates, clades
@@ -293,7 +293,7 @@ def test_rows_naming_two_records_take_the_one_whose_passage_matches(
         f"SELECT * FROM (VALUES {rows}) AS v(epi_isl, accession, country, region, place, "
         "collection_date, passage)",
     )
-    clade_rows = ", ".join(f"('EPI_ISL_{n}', 'ACC{n}', 'CLADE-X', 'tree')" for n in records)
+    clade_rows = ", ".join(f"('EPI_ISL_{n}', 'ACC{n}', 'CLADE-X', 'fallback')" for n in records)
     clades = _parquet(
         tmp_path / "record-clades.parquet",
         f"SELECT * FROM (VALUES {clade_rows}) AS v(epi_isl, accession, clade, method)",
@@ -406,3 +406,53 @@ def test_a_distinct_repeat_is_keyed_as_its_preparation() -> None:
     )
     first, repeat = (preparation_key(chart, "antigen", i) for i in (0, 1))
     assert repeat == first and first[3] == ("CLONE-1",)
+
+
+def test_clade_evidence_reaches_each_preparation_and_candidate(tmp_path: Path, syn: Any) -> None:
+    """04-clades' evidence for a tree call reaches the chosen record and every tie candidate,
+    recorded only. A clades file written before the evidence existed reads as having none on
+    fallback rows; a tree row there was never checked, so it is refused."""
+    con = _store(tmp_path, syn)
+    isolates, _ = _isolates_and_clades(tmp_path)
+    new = _parquet(
+        tmp_path / "new.parquet",
+        """SELECT * FROM (VALUES
+            ('EPI_ISL_1', 'ACC1', 'CLADE-X', 'tree', 'contradicted', 'CLADE', '145'),
+            ('EPI_ISL_4', 'ACC4', 'CLADE-Z', 'tree', 'unobserved', NULL, '158'),
+            ('EPI_ISL_5', 'ACC5', 'CLADE-Z', 'tree', 'supported', NULL, NULL)
+        ) AS v(epi_isl, accession, clade, method, clade_evidence, supported_clade,
+               clade_evidence_reason)""",
+    )
+    old = _parquet(
+        tmp_path / "old.parquet",
+        """SELECT * FROM (VALUES ('EPI_ISL_3', 'ACC3', 'CLADE-Y', 'fallback'))
+           AS v(epi_isl, accession, clade, method)""",
+    )
+    counts = link_sequences(con, {"h3": _index()}, [isolates], [new, old], class_of=cell)
+    assert counts.matched_by_evidence == {"contradicted": 1}
+    preps = {k[1]: v for k, v in preparation_sequences(con, passage_matcher(tmp_path)).items()}
+    one = preps[gisaid("A(H3N2)", "SOMEWHERE", 1)]
+    assert (one.clade, one.clade_evidence, one.supported_clade, one.clade_evidence_reason) == (
+        "CLADE-X", "contradicted", "CLADE", "145",
+    )  # fmt: skip
+    assert preps[gisaid("A(H3N2)", "ELSEWHERE", 3)].clade_evidence is None  # a fallback row
+    tie = preps[gisaid("A(H3N2)", "ELSEWHERE", 4)]
+    assert {(t.epi_isl, t.clade_evidence) for t in tie.tied} == {
+        ("EPI_ISL_4", "unobserved"),
+        ("EPI_ISL_5", "supported"),
+    }
+
+    older = _parquet(
+        tmp_path / "older.parquet",
+        """SELECT * FROM (VALUES ('EPI_ISL_3', 'ACC3', 'CLADE-Y', 'fallback'))
+           AS v(epi_isl, accession, clade, method)""",
+    )
+    counts = link_sequences(con, {"h3": _index()}, [isolates], [older], class_of=cell)
+    assert counts.matched_by_evidence == {}
+    unchecked = _parquet(
+        tmp_path / "unchecked.parquet",
+        """SELECT * FROM (VALUES ('EPI_ISL_1', 'ACC1', 'CLADE-X', 'tree'))
+           AS v(epi_isl, accession, clade, method)""",
+    )
+    with pytest.raises(StoreError, match="tree-derived clade rows without clade_evidence"):
+        link_sequences(con, {"h3": _index()}, [isolates], [unchecked], class_of=cell)
