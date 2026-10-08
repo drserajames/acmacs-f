@@ -130,9 +130,9 @@ def store(tmp_path):
     return tmp_path
 
 
-def _run(store: Path, version: str) -> dict:
+def _run(store: Path, version: str, *extra: str) -> dict:
     args = [store / "chains", "labx/h3/merged", version, store / "t.toml", store / "records"]
-    assert main([str(a) for a in args]) == 0
+    assert main([*(str(a) for a in args), *extra]) == 0
     return json.loads((store / "records/labx/h3/merged" / f"{version}.continuity.json").read_text())
 
 
@@ -196,3 +196,20 @@ def test_two_different_passages_are_not_a_fill():
     c = continuity(_chart(["1", "2", "3", "4", "5"], ["1"], BASE, 1.0), prev, THRESHOLDS)
     assert c["points"]["filled"]["count"] == 0
     assert (c["points"]["added"]["antigens"], c["points"]["removed"]["antigens"]) == (1, 1)
+
+
+def test_a_note_says_why_the_record_exists_and_is_read_first(store):
+    plain = _run(store, "v2")
+    assert plain["context"] is None
+    note = "A one-off rebuild on the same tables, not a monthly record."
+    rec = _run(store, "v3", "--note", note)
+    assert rec["context"] == note
+    assert sentences(rec)[0] == note
+    assert sentences(rec)[1:] == sentences({**rec, "context": None})
+    old = {k: v for k, v in plain.items() if k != "context"}  # a record from before --note
+    assert sentences(old) == sentences(plain)
+
+
+def test_an_empty_note_is_refused(store):
+    with pytest.raises(ValueError, match="--note is empty"):
+        _run(store, "v2", "--note", "  ")
