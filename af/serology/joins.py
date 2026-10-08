@@ -78,8 +78,8 @@ class LinkCounts:
     matched_with_empty_clade: int = 0
     # matched rows by their clade's evidence (tree-derived clades only; fallback rows have none)
     matched_by_evidence: dict[str, int] = field(default_factory=dict)
-    # clade datasets read without the evidence columns (older versions): their tree rows read
-    # as "supported", as every tree call was before the evidence was recorded
+    # clade datasets read without the evidence columns (older, fallback-only versions; a tree
+    # row without them is refused)
     clades_without_evidence_columns: list[str] = field(default_factory=list)
     # clade dataset -> (sequences version it labelled, or None if its provenance names none
     # or several, sequences version the join read), for every clade table behind in content:
@@ -318,19 +318,29 @@ def has_evidence_columns(path: Path) -> bool:
 
 
 def _clade_rows(paths: Sequence[Path]) -> str:
-    """Every clades file, with the evidence columns: as written, or, for a file written before
-    them, "supported" on its tree rows (every tree call was taken as supported then) and null
-    on the rest. Decided per file, so a join reading old and new versions reads each right."""
-    old = (
-        f"*, CASE WHEN method = 'tree' AND clade IS NOT NULL THEN '{SUPPORTED}' END "
-        "AS clade_evidence, NULL::VARCHAR AS supported_clade, "
-        "NULL::VARCHAR AS clade_evidence_reason"
-    )
-    parts = [
-        f"SELECT {'*' if has_evidence_columns(p) else old} "
-        f"FROM read_parquet('{Path(p).as_posix()}')"
-        for p in paths
-    ]
+    """Every clades file, with the evidence columns. A file written before them has none to
+    give: its fallback rows read as having no evidence (none applies to them), but a tree row
+    there would be a tree call nobody checked, read as if it had been. That is refused, not
+    defaulted (design rule 4); no such file has been published.
+    """
+    import duckdb
+
+    parts = []
+    for path in paths:
+        source = f"read_parquet('{Path(path).as_posix()}')"
+        if has_evidence_columns(path):
+            parts.append(f"SELECT * FROM {source}")
+            continue
+        (tree_rows,) = duckdb.execute(
+            f"SELECT count(*) FROM {source} WHERE method = 'tree'"
+        ).fetchone() or (0,)
+        if tree_rows:
+            raise StoreError(
+                f"{path}: {tree_rows} tree-derived clade rows without clade_evidence: their "
+                "calls were never checked against the sequence; relabel the clades table"
+            )
+        nulls = ", ".join(f"NULL::VARCHAR AS {c}" for c in EVIDENCE_COLUMNS)
+        parts.append(f"SELECT *, {nulls} FROM {source}")
     return " UNION ALL BY NAME ".join(parts)
 
 
