@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 from af.chart.model import Chart
 from af.clades.colours import ColourScheme as CladeColourScheme
 from af.clades.colours import ColourSchemeError, scheme_from_rows, shadowed_entries
-from af.geo.colours import BASIS_GROUP_NO_CLADE, DotStyle
+from af.geo.colours import BASIS_GROUP_NO_CLADE, STATE_UNOBSERVED, DotStyle
 from af.map.config import ColouringConfig
 from af.map.style import ColourRow, ColourScheme
 from af.seq.matching_rules import MatchingRules
@@ -109,6 +109,8 @@ class ChartColours:
     provenance: dict[str, Any]
     # per antigen: how it got its colour (af.geo.colours.BASIS_*), "" when uncoloured
     basis: tuple[str, ...] = ()
+    # per antigen: the shared path's style, with the clade-evidence state of an unpainted one
+    styles: tuple[DotStyle, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -391,8 +393,9 @@ class StoreColours:
             keys, row.key, scheme, groups=groups, lineage_minority=dict(sorted(minority.items()))
         )
         return ChartColours(
-            found.scheme, found.labels, found.sequenced, found.provenance, found.basis
-        )
+            found.scheme, found.labels, found.sequenced, found.provenance, found.basis,
+            found.styles,
+        )  # fmt: skip
 
     def for_preparations(
         self,
@@ -438,7 +441,9 @@ class StoreColours:
         for key in keys:
             dot = style(key)
             labels.append(labels_for(dot.label, legend_keys))
-            sequenced.append(key in self._sequences)
+            # An unobserved tree clade is not known: drawn and counted as an unsequenced antigen
+            # (Sarah, 8 Oct 2026), not as a sequenced one the scheme failed to paint.
+            sequenced.append(key in self._sequences and dot.state != STATE_UNOBSERVED)
             basis.append(dot.basis)
             styles.append(dot)
         rows = map_scheme(colouring.scheme)
@@ -480,6 +485,10 @@ class StoreColours:
             ),
             # how the coloured antigens got their colour, and which had no clade to go by
             "basis": dict(sorted(counts.basis.items())),
+            # tree-derived clades: each matched record's clade_evidence, and the supported clades
+            # the scheme has no row for (preparations); empty for Nextclade-derived clades
+            "clade_evidence": dict(sorted(counts.evidence.items())),
+            "unpainted_clades": dict(sorted(counts.unpainted_clades.items())),
             "coloured_without_clade": [
                 f"ag{i}" for i, b in enumerate(basis) if b == BASIS_GROUP_NO_CLADE
             ],
