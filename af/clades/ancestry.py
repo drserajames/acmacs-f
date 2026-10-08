@@ -1,10 +1,12 @@
-"""Mark tree calls that rest on ancestry alone (Sarah, 8 Oct 2026, Q124/Q124b).
+"""Mark tree calls that rest on ancestry alone (Sarah, 8 Oct 2026, Q124/Q124b, re-answered).
 
 A tree engine labels a leaf by where it sits: a virus inside a clade's subtree carries the
 clade even when its own sequence cannot show the clade's defining changes (the loci fall in an
 unsequenced stretch) or shows something else there (a reversion). That is a claim about
-ancestry, not about the virus's sequence. Sarah's ruling: publish such calls, record them as
-ancestry only, and do not let them colour a point on a map.
+ancestry, not about the virus's sequence. Sarah's ruling: publish such calls as they are, and
+record and report them as ancestry only. The mark is information, not a filter: it does not
+change the clade and does not affect colouring (her re-answer of 8 Oct, after learning that maps
+were coloured from Nextclade's calls until now).
 
 The mark is general, never a hand list. A tree row is ``ancestry_only`` when both hold:
 

@@ -13,7 +13,7 @@ was decided, and how much of the clade's signature the sequence actually showed:
     ancestry_only, ancestry_reason
 
 ``ancestry_only`` marks a tree call the virus's own sequence does not show (af.clades.ancestry):
-it is published, and must not colour a map point (Sarah, 8 Oct 2026). Versions written before
+recorded and reported only; it changes neither the clade nor any colouring (Sarah, 8 Oct 2026). Versions written before
 the column existed lack it; readers treat that as false for every row, and count it.
 
 ``clade`` is a single name; ancestry is derived from the clade set, so "is this virus in
