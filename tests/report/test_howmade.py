@@ -430,7 +430,8 @@ def _continuity_record(ref: StoreRef, parent: StoreRef, chosen: bytes) -> dict[s
                        "movers": {"distance": 1.0, "reason": "r"}},
         "stress": {"new": 11.0, "previous": 10.0, "difference": 1.0, "relative": 0.1},
         "points": {"paired": 7, "added": {"antigens": 1, "sera": 0},
-                   "removed": {"antigens": 0, "sera": 0}, "ambiguous": {"count": 0}},
+                   "removed": {"antigens": 0, "sera": 0}, "ambiguous": {"count": 0},
+                   "filled": {"count": 0, "listed": []}},
         "procrustes": {"compared": 7, "disconnected": 0, "rmsd": 0.3,
                        "apart": [{"distance": 0.5, "count": 2}]},
         "movers": [{"kind": "antigen", "point": "POINT-A", "distance": 1.5}],
@@ -470,3 +471,9 @@ def test_a_rebuilt_map_reads_its_continuity_record_and_a_first_version_says_so(
     note = howmade.map_note("labx-hi", [fig], store, None, [], records)
     assert f"the continuity record against {first.version}" in note.missing
     assert not any("points shared" in line for line in note.lines)
+
+    record["map_sha256"] = _continuity_record(second, first, b"second map")["map_sha256"]
+    del record["points"]["filled"]  # a record older than its renderer is a gap, not a crash
+    path.write_text(json.dumps(record))
+    note = howmade.map_note("labx-hi", [fig], store, None, [], records)
+    assert "the continuity record's fields as af.chain.continuity reads them" in note.missing

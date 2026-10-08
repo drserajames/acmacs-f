@@ -577,7 +577,13 @@ def _continuity(
         f"{field(by.get('script'), 'measured_by.script')} on "
         f"{field(by.get('release'), 'measured_by.release')} ({path.name})"
     )
-    for sentence in sentences(record):
+    try:
+        said = sentences(record)
+    except (KeyError, TypeError) as error:  # written by an older af.chain.continuity
+        what = "the continuity record's fields as af.chain.continuity reads them"
+        note.item(note.gap(what, f"{path} (lacks {error})"))
+        return
+    for sentence in said:
         note.item(sentence)
 
 
