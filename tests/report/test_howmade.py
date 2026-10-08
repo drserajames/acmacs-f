@@ -329,3 +329,18 @@ def test_sd_limit_drops_come_from_the_diagnostics_or_a_record_checked_against_th
     path.write_text(json.dumps({**record, "map_sha256": "0" * 64}))  # another map's record
     note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [], records)
     assert what in note.missing
+
+
+def test_an_undatable_vaccine_rule_says_not_known_and_is_not_counted(tmp_path: Path) -> None:
+    """Sarah, 8 Oct (Q126): a date no source gives is "not known", printed, not a blank."""
+    from af.report.vaccine_dates import VaccineDates
+
+    store = Store.create(tmp_path / "store")
+    ref = _chain(store, full=True)
+    fig = _figure(ref, full=True)
+    fig["provenance"]["decisions"]["vaccines"][0].pop("decided")
+    without = howmade.map_note("labx-hi", [fig], store, None, [])
+    assert any("vaccine rule" in m for m in without.missing)  # no resolver: counted, as before
+    note = howmade.map_note("labx-hi", [fig], store, None, [], None, VaccineDates([], {}))
+    assert not any("vaccine rule" in m for m in note.missing)
+    assert any("decided not known: neither WHO" in line for line in note.lines)

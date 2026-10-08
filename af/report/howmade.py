@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from af.report.vaccine_dates import VaccineDates, load_who
 from af.store import Store, StoreError, StoreRef
 from af.util.artefacts import sha256_path
 
@@ -369,7 +370,10 @@ def _moves(note: Note, dec: dict[str, Any], cfg: dict[str, Any] | None) -> None:
             note.item(f"Move {configured}: " + note.gap(what, "figure provenance.decisions.moves"))
 
 
-def _vaccines(note: Note, dec: dict[str, Any], cfg: dict[str, Any] | None) -> None:
+def _vaccines(
+    note: Note, dec: dict[str, Any], cfg: dict[str, Any] | None,
+    dates: VaccineDates | None = None,
+) -> None:  # fmt: skip
     rules = dec.get("vaccines")
     if rules is None:
         if (cfg or {}).get("vaccine_choose") or (cfg or {}).get("vaccine_disable"):
@@ -378,7 +382,11 @@ def _vaccines(note: Note, dec: dict[str, Any], cfg: dict[str, Any] | None) -> No
         return
     for v in rules:
         used = "used" if v.get("used") else "matched nothing"
-        when = _when(note, v, "vaccine rule(s)")
+        if dates is None:
+            when = _when(note, v, "vaccine rule(s)")
+        else:  # Sarah, 8 Oct (Q126): derived, or "not known", never a counted blank
+            date, source = dates.resolve(v)
+            when = f"decided {date}: {source}"
         note.item(
             f"Vaccine rule ({v.get('scope', '')}) {v.get('rule', '')} {v.get('name', '')} "
             f"{v.get('passage', '')}: {used} ({v.get('reason', '')}; {when})"
@@ -397,7 +405,10 @@ def _orientation(note: Note, ori: dict[str, Any] | None) -> None:
               f"points: {fit}")  # fmt: skip
 
 
-def _map_stage(note: Note, fig: dict[str, Any], cfg: dict[str, Any] | None) -> None:
+def _map_stage(
+    note: Note, fig: dict[str, Any], cfg: dict[str, Any] | None,
+    dates: VaccineDates | None = None,
+) -> None:  # fmt: skip
     prov = fig.get("provenance", {})
     dec = prov.get("decisions", {})
     _moves(note, dec, cfg)
@@ -422,7 +433,7 @@ def _map_stage(note: Note, fig: dict[str, Any], cfg: dict[str, Any] | None) -> N
         what, where = "the map stage's non-ferret sera check", "figure provenance.decisions.sera"
         note.item("Sera check: " + note.gap(what, where))
     _orientation(note, fig.get("map", {}).get("orientation"))
-    _vaccines(note, dec, cfg)
+    _vaccines(note, dec, cfg, dates)
     for key in ("vaccine_defaults", "vaccine_rules_unused_optional"):
         if key in dec:
             note.item(f"{key.replace('_', ' ').capitalize()}: {dec[key]}")
@@ -514,7 +525,7 @@ def _comparison(note: Note, rows: list[dict[str, Any]]) -> None:
 def map_note(
     folder: str, figures: list[dict[str, Any]], store: Store | None,
     cfg: dict[str, Any] | None, rows: list[dict[str, Any]],
-    reference_records: Path | None = None,
+    reference_records: Path | None = None, dates: VaccineDates | None = None,
 ) -> Note:  # fmt: skip
     """The note for one map: ``figures`` are its window figures' I7 documents."""
     note = Note(folder)
@@ -570,7 +581,7 @@ def map_note(
     else:
         note.item(note.gap("which points were removed", "a chain version (this map has none)"))
     note.section("Changes at the map stage (af.map.build)")
-    _map_stage(note, fig, cfg)
+    _map_stage(note, fig, cfg, dates)
     note.section("Against the ae round")
     _references(note, files, reference_records)
     _comparison(note, rows)
@@ -582,7 +593,7 @@ def map_note(
 def write_notes(
     record: dict[str, Any], store: Store | None, maps_config: dict[str, Any] | None,
     comparison: list[dict[str, Any]], out: Path, *, ignore_busy: bool = False,
-    reference_records: Path | None = None,
+    reference_records: Path | None = None, dates: VaccineDates | None = None,
 ) -> list[Note]:  # fmt: skip
     """One note per map folder in the build record, and an index; returns the notes.
 
@@ -612,6 +623,7 @@ def write_notes(
                 configs.get(folder),
                 rows.get(folder, []),
                 reference_records,
+                dates,
             )  # fmt: skip
             for folder in sorted(by_folder)
         ]
@@ -647,6 +659,11 @@ def main(argv: list[str] | None = None) -> int:
         "(<dir>/<dataset>/<version>.json)",
     )  # fmt: skip
     parser.add_argument(
+        "--who-recommendations", type=Path,
+        help="WHO's recommendations (who-vaccine-recommendations data/*.json): with it, a vaccine "
+        "rule's date is derived when config has none (WHO, then git), else 'not known'",
+    )  # fmt: skip
+    parser.add_argument(
         "--ignore-busy", action="store_true",
         help="read the store even while a batch is publishing (diagnosis only; the index says so)",
     )  # fmt: skip
@@ -655,9 +672,17 @@ def main(argv: list[str] | None = None) -> int:
     store = Store.open(args.store) if args.store else None
     maps_config = tomllib.loads(args.maps_config.read_text()) if args.maps_config else None
     comparison = json.loads(args.comparison.read_text()) if args.comparison else []
+    dates = None
+    if args.who_recommendations:
+        files = {}
+        if args.maps_config:
+            files["map"] = args.maps_config
+            if (defaults := (maps_config or {}).get("vaccine_defaults")) is not None:
+                files["subtype default"] = (args.maps_config.parent / defaults).resolve()
+        dates = VaccineDates(load_who(args.who_recommendations), files)
     notes = write_notes(
         record, store, maps_config, comparison, args.out, ignore_busy=args.ignore_busy,
-        reference_records=args.reference_records,
+        reference_records=args.reference_records, dates=dates,
     )  # fmt: skip
     print(f"{len(notes)} notes, {sum(len(n.missing) for n in notes)} fact(s) MISSING -> "
           f"{args.out}", file=sys.stderr)  # fmt: skip
