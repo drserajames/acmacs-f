@@ -211,3 +211,78 @@ def test_a_group_needing_no_clade_colours_a_virus_with_none(tmp_path: Path) -> N
     assert style(preps["clade"]) == DotStyle("P with 5K", "#aa00aa", BASIS_CLADE)
     assert counts.uncoloured == {"nomenclature names no clade": 1}
     assert counts.basis == {BASIS_GROUP_NO_CLADE: 1, BASIS_CLADE: 1}
+
+
+def test_tree_clade_evidence_decides_which_clade_paints(tmp_path: Path) -> None:
+    """Sarah, 8 Oct 2026, for tree-derived clades (04-clades' clade_evidence, read, never
+    recomputed): unobserved, not painted (drawn as unsequenced); contradicted, painted by the
+    deepest supported clade; no supported clade, or no scheme row for it, not painted, by its own
+    reason, the supported clade counted so the scheme gap is reported."""
+    from af.geo.colours import (
+        BASIS_SUPPORTED_CLADE,
+        STATE_NO_SCHEME_ROW,
+        STATE_NO_SUPPORTED,
+        STATE_UNOBSERVED,
+    )
+
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    only_p1 = ColourScheme(
+        SUBTYPE, "only-p1",
+        (ColourEntry(order=1, key="P.1", legend="Clade P.1", colour="#0000aa", is_group=False),),
+    )  # fmt: skip
+
+    def tree(clade: str, evidence: str, supported: str | None = None) -> PreparationSequence:
+        return PreparationSequence(
+            "EPI_ISL_1", "ACC1", clade, "exact", conflict=False,
+            clade_evidence=evidence, supported_clade=supported,
+        )  # fmt: skip
+
+    names = ("supported", "unobserved", "to-p1", "to-p2", "none-supported", "fallback")
+    preps = {n: prep(n) for n in names}
+    links = {
+        key(preps["supported"]): tree("P.1.1", "supported"),
+        key(preps["unobserved"]): tree("P.1.1", "unobserved"),
+        key(preps["to-p1"]): tree("P.1.1", "contradicted", "P.1"),  # paints as P.1
+        key(preps["to-p2"]): tree("P.1.1", "contradicted", "P.2"),  # P.2: no row in only-p1
+        key(preps["none-supported"]): tree("P.1.1", "contradicted", None),
+        key(preps["fallback"]): linked("P.1.1"),  # a Nextclade row: no evidence, as before
+    }
+    style, counts = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), only_p1, clade_set)
+    assert style(preps["supported"]) == DotStyle("Clade P.1", "#0000aa", BASIS_CLADE)
+    assert style(preps["fallback"]) == DotStyle("Clade P.1", "#0000aa", BASIS_CLADE)
+    assert style(preps["to-p1"]) == DotStyle("Clade P.1", "#0000aa", BASIS_SUPPORTED_CLADE)
+    assert style(preps["unobserved"]).state == STATE_UNOBSERVED
+    assert style(preps["unobserved"]).colour is None
+    gap = style(preps["to-p2"])
+    assert (gap.colour, gap.state, gap.clade, gap.tree_clade) == (
+        None, STATE_NO_SCHEME_ROW, "P.2", "P.1.1"
+    )  # fmt: skip
+    none = style(preps["none-supported"])
+    assert (none.colour, none.state, none.tree_clade) == (None, STATE_NO_SUPPORTED, "P.1.1")
+    assert counts.uncoloured == {STATE_UNOBSERVED: 1, STATE_NO_SCHEME_ROW: 1, STATE_NO_SUPPORTED: 1}
+    assert counts.unpainted_clades == {"P.2": 1}
+    assert counts.evidence == {"supported": 1, "unobserved": 1, "contradicted": 3}
+    assert counts.basis == {BASIS_CLADE: 2, BASIS_SUPPORTED_CLADE: 1}
+
+
+def test_a_tie_with_an_unobserved_candidate_follows_the_tie_rule(tmp_path: Path) -> None:
+    """Evidence goes into each candidate's style, so the existing tie rule applies unchanged:
+    candidates that differ (one unobserved) are split, and ae's rank decides."""
+    from af.geo.colours import STATE_UNOBSERVED
+    from af.serology.joins import TiedSequence
+
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    seen = TiedSequence("EPI_ISL_1", "ACC1", "P.1", clade_evidence="supported")
+    unseen = TiedSequence("EPI_ISL_2", "ACC2", "P.1", clade_evidence="unobserved")
+    preps = {n: prep(n) for n in ("ranked-seen", "ranked-unseen")}
+    links = {
+        key(preps["ranked-seen"]): PreparationSequence(
+            None, None, None, "", conflict=False, tied=(seen, unseen), ranked=seen
+        ),
+        key(preps["ranked-unseen"]): PreparationSequence(
+            None, None, None, "", conflict=False, tied=(seen, unseen), ranked=unseen
+        ),
+    }
+    style, _ = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), SCHEME, clade_set)
+    assert style(preps["ranked-seen"]).label == "Clade P.1"
+    assert style(preps["ranked-unseen"]).state == STATE_UNOBSERVED

@@ -44,13 +44,32 @@ from af.clades.groups import GroupSet
 from af.clades.nomenclature import CladeSet
 from af.clades.sequence import AlignedSequence
 from af.seq.matching import TIE_AGREES, TIE_RANKED
-from af.serology.joins import ROWS_PASSAGE_MATCHED, PreparationKey, PreparationSequence
+from af.serology.joins import (
+    ROWS_PASSAGE_MATCHED,
+    PreparationKey,
+    PreparationSequence,
+    TiedSequence,
+)
 from af.serology.query import Preparation
 
 #: How a coloured dot got its colour: the virus's clade (any row matched with a clade named) ...
 BASIS_CLADE = "clade"
 #: ... or a group needing no clade, for a sequence the nomenclature names no clade for.
 BASIS_GROUP_NO_CLADE = "group, no clade named"
+#: ... or the deepest clade its sequence supports, where the tree's clade is contradicted by
+#: the sequence at that clade's own loci (Sarah, 8 Oct 2026: clade_evidence "contradicted").
+BASIS_SUPPORTED_CLADE = "supported clade, tree clade contradicted"
+
+# Why an uncoloured dot is uncoloured, beyond "no sequence" (states carried on the DotStyle so
+# the maps can act on them; reasons counted in ColourCounts.uncoloured). Tree-derived clades
+# only: 04-clades' clade_evidence on method="tree" rows (Sarah, 8 Oct 2026).
+#: The tree's clade cannot be shown from the sequence (an own locus unobserved, strict): the
+#: clade is not known, so the dot is drawn as an unsequenced one.
+STATE_UNOBSERVED = "clade not observable in its sequence"
+#: The tree's clade is contradicted and its sequence supports no clade it descends from.
+STATE_NO_SUPPORTED = "contradicted, no supported clade"
+#: The supported clade has no row in the colour scheme: a scheme gap, reported as a warning.
+STATE_NO_SCHEME_ROW = "supported clade not in the colour scheme"
 
 
 @dataclass(frozen=True)
@@ -65,6 +84,11 @@ class DotStyle:
     label: str
     colour: str | None  # None: outline only
     basis: str = ""
+    # for an uncoloured dot, a STATE_* when clade evidence left it so; with STATE_NO_SCHEME_ROW,
+    # ``clade`` names the supported clade the scheme has no row for
+    state: str = ""
+    clade: str = ""
+    tree_clade: str = ""  # with STATE_NO_SCHEME_ROW / STATE_NO_SUPPORTED: the tree's label
 
 
 UNCOLOURED = DotStyle(label="", colour=None)
@@ -78,6 +102,11 @@ class ColourCounts:
     doubtful: Counter[str] = field(default_factory=Counter)  # doubt flag -> coloured preparations
     rows: Counter[str] = field(default_factory=Counter)  # ROWS_* resolution -> preparations
     basis: Counter[str] = field(default_factory=Counter)  # BASIS_* -> coloured preparations
+    # clade_evidence of each preparation's matched record ("supported", "unobserved",
+    # "contradicted"); tree-derived records only
+    evidence: Counter[str] = field(default_factory=Counter)
+    # supported clade -> preparations left unpainted because the scheme has no row for it
+    unpainted_clades: Counter[str] = field(default_factory=Counter)
 
 
 def dot_styles(
@@ -104,6 +133,11 @@ def dot_styles(
         key = prep if isinstance(prep, tuple) else prep.key()
         if key not in cache:
             cache[key], reason = _style(key)
+            linked = sequences_of.get(key)
+            if linked is not None and linked.clade_evidence:
+                counts.evidence[linked.clade_evidence] += 1
+            if cache[key].state == STATE_NO_SCHEME_ROW:
+                counts.unpainted_clades[cache[key].clade] += 1
             if reason:
                 counts.uncoloured[reason] += 1
             else:
@@ -123,16 +157,14 @@ def dot_styles(
             return UNCOLOURED, "proxy pairing not used"
         if linked.tied:
             return _tie(linked)
-        assert linked.epi_isl is not None and linked.accession is not None
-        return _sequence_style(linked.epi_isl, linked.accession, linked.clade)
+        return _sequence_style(linked)
 
     def _rows(linked: PreparationSequence) -> tuple[DotStyle, str]:
         """Rows naming different records: the passage-matched one, else only if they agree."""
         if linked.resolution == ROWS_PASSAGE_MATCHED:
-            assert linked.epi_isl is not None and linked.accession is not None
             counts.rows[ROWS_PASSAGE_MATCHED] += 1
-            return _sequence_style(linked.epi_isl, linked.accession, linked.clade)
-        results = {_sequence_style(a.epi_isl, a.accession, a.clade) for a in linked.alternatives}
+            return _sequence_style(linked)
+        results = {_sequence_style(a) for a in linked.alternatives}
         if len(results) == 1 and linked.resolution:
             counts.rows[linked.resolution] += 1
             return results.pop()
@@ -140,17 +172,29 @@ def dot_styles(
 
     def _tie(linked: PreparationSequence) -> tuple[DotStyle, str]:
         """Every tied sequence styled as if it were the match; agree, or ae's rank decides."""
-        results = {_sequence_style(t.epi_isl, t.accession, t.clade) for t in linked.tied}
+        results = {_sequence_style(t) for t in linked.tied}
         if len(results) == 1:
             counts.ties[TIE_AGREES] += 1
             return results.pop()
         if linked.ranked is None:
             return UNCOLOURED, "tie with no ranked sequence"
         counts.ties[TIE_RANKED] += 1
-        ranked = linked.ranked
-        return _sequence_style(ranked.epi_isl, ranked.accession, ranked.clade)
+        return _sequence_style(linked.ranked)
 
-    def _sequence_style(epi_isl: str, accession: str, clade: str | None) -> tuple[DotStyle, str]:
+    def _sequence_style(record: PreparationSequence | TiedSequence) -> tuple[DotStyle, str]:
+        """One record's style. Its clade evidence (tree-derived clades) decides which clade
+        paints it: unobserved, none; contradicted, the deepest supported clade; else its own.
+        The evidence is 04-clades' and is read, never recomputed here."""
+        epi_isl, accession, clade = record.epi_isl, record.accession, record.clade
+        assert epi_isl is not None and accession is not None
+        basis, tree_clade = BASIS_CLADE, ""
+        if record.clade_evidence == "unobserved":
+            return DotStyle("", None, state=STATE_UNOBSERVED), STATE_UNOBSERVED
+        if record.clade_evidence == "contradicted":
+            if not record.supported_clade:
+                none = DotStyle("", None, state=STATE_NO_SUPPORTED, tree_clade=clade or "")
+                return none, STATE_NO_SUPPORTED
+            tree_clade, clade, basis = clade or "", record.supported_clade, BASIS_SUPPORTED_CLADE
         if clade is None:
             return UNCOLOURED, "no clade assignment"
         if clade == "":
@@ -166,7 +210,12 @@ def dot_styles(
             return UNCOLOURED, "no aligned sequence"
         entry = scheme.entry_for(clade, sequence, clade_set, group_set)
         if entry is None:
+            if basis == BASIS_SUPPORTED_CLADE:
+                gap = DotStyle(
+                    "", None, state=STATE_NO_SCHEME_ROW, clade=clade, tree_clade=tree_clade
+                )
+                return gap, STATE_NO_SCHEME_ROW
             return UNCOLOURED, "not in the colour scheme"
-        return DotStyle(entry.legend, entry.colour, BASIS_CLADE), ""
+        return DotStyle(entry.legend, entry.colour, basis), ""
 
     return style, counts
