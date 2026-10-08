@@ -344,3 +344,33 @@ def test_an_undatable_vaccine_rule_says_not_known_and_is_not_counted(tmp_path: P
     note = howmade.map_note("labx-hi", [fig], store, None, [], None, VaccineDates([], {}))
     assert not any("vaccine rule" in m for m in note.missing)
     assert any("decided not known: neither WHO" in line for line in note.lines)
+
+
+def test_a_reference_record_lacking_a_field_counts_it_missing(tmp_path: Path) -> None:
+    import hashlib
+
+    store = Store.create(tmp_path / "store")
+    step = {"table_id": "labx-t1", "chosen": "scratch", "stress": {"scratch": 1.0},
+            "platform": {"release": "abcdef0123456789"}, "diagnostics": {}}  # fmt: skip
+    chain = {"mode": "merge_all", "config": {},
+             "steps": [{"directory": "steps/0000", "table_id": "labx-t1",
+                        "chosen_file": "chosen.ace"}]}  # fmt: skip
+    with store.build("chains", "labx/hi/merged") as build:
+        (build.path / "steps/0000").mkdir(parents=True)
+        (build.path / "steps/0000/step.json").write_text(json.dumps(step))
+        (build.path / "steps/0000/chosen.ace").write_text("a map")
+        (build.path / "chain.json").write_text(json.dumps(chain))
+        ref = build.publish(Provenance("af.chain", (), {"options": OPTIONS}, T0, T0))
+    records = tmp_path / "reference-records"
+    path = records / "labx/hi/merged" / f"{ref.version}.json"
+    path.parent.mkdir(parents=True)
+    record = {"map_sha256": hashlib.sha256(b"a map").hexdigest(),
+              "measured_by": {"script": "a script"}, "method_note": "kept as built.",
+              "references": [_reference()]}  # fmt: skip
+    path.write_text(json.dumps(record))
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [], records)
+    text = "\n".join(note.lines)
+    assert "?" not in text.split("kept as built")[1].split("\n")[0]
+    assert "the reference record's measured" in note.missing
+    assert "the reference record's measured_by.release" in note.missing
+    assert "the reference record's measured_by.script" not in note.missing
