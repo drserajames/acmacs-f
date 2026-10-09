@@ -22,12 +22,16 @@ The cut-offs are data (a thresholds TOML, each with its reason), not literals:
     reason = "..."
 
     python -m af.chain.continuity <chains root> <lab/group/variant> <version> <thresholds> <records>
+        [--note TEXT]
 
 writes ``<records>/<lab/group/variant>/<version>.continuity.json``; it refuses to overwrite.
+``--note`` says why the record exists when it is not a month-to-month one (e.g. a one-off rebuild
+on the same tables); it is recorded as ``context`` and read first.
 """
 
 from __future__ import annotations
 
+import argparse
 import datetime
 import json
 import sys
@@ -45,6 +49,7 @@ from af.util.artefacts import sha256_path
 from af.util.config import ConfigError, load_config
 
 FIELDS = (
+    "context: why this record exists when it is not month to month (--note), else null. "
     "stress: each map's own best stress; comparable only when same_problem is true. "
     "points: paired = same kind and designation once on each side; filled = the same point "
     "with its passage (antigen) or serum id (serum) filled in or emptied (same kind, name, "
@@ -221,9 +226,17 @@ def _problem(version_dir: Path) -> dict[str, Any]:
 
 
 def record(
-    chains: Path, dataset: str, version: str, thresholds_path: Path, records: Path
+    chains: Path,
+    dataset: str,
+    version: str,
+    thresholds_path: Path,
+    records: Path,
+    note: str | None = None,
 ) -> dict[str, Any]:
-    """The continuity record of `version` against its parent (HISTORY.jsonl's `parent`)."""
+    """The continuity record of `version` against its parent (HISTORY.jsonl's `parent`); `note`
+    is the context a reader needs first, when the pair is not last month's map and this one's."""
+    if note is not None and not note.strip():
+        raise ValueError("--note is empty: give the context or leave it out")
     root = chains / dataset
     parent = _history(root, version).get("parent")
     if parent is None:
@@ -244,6 +257,7 @@ def record(
     return {
         "dataset": dataset,
         "version": version,
+        "context": note,
         "map_sha256": sha256_path(new_path),
         "previous": {"version": parent, "map_sha256": sha256_path(prev_path)},
         "same_problem": same,
@@ -273,7 +287,8 @@ def sentences(rec: dict[str, Any], *, movers: int = 8) -> list[str]:
     """What the record says, in words; `movers` are listed by name, all are counted."""
     s, p, f = rec["stress"], rec["points"], rec["procrustes"]
     prev = rec["previous"]["version"]
-    out = [
+    out = [rec["context"]] if rec.get("context") else []  # records before --note have no key
+    out += [
         f"Against the previous version {prev}: {p['paired']} points shared,"
         f" {p['added']['antigens']} antigens and {p['added']['sera']} sera added,"
         f" {p['removed']['antigens']} antigens and {p['removed']['sera']} sera gone"
@@ -321,20 +336,20 @@ def sentences(rec: dict[str, Any], *, movers: int = 8) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 5:
-        print(__doc__.strip().splitlines()[-4], file=sys.stderr)
-        return 2
-    chains, dataset, version, thresholds, records = (
-        Path(argv[0]),
-        argv[1],
-        argv[2],
-        Path(argv[3]),
-        Path(argv[4]),
+    parser = argparse.ArgumentParser(
+        prog="python -m af.chain.continuity", description=__doc__.split("\n")[0]
     )
-    out = records / dataset / f"{version}.continuity.json"
+    parser.add_argument("chains", type=Path, help="the chains store root")
+    parser.add_argument("dataset", help="lab/group/variant, e.g. labx/h3/merged")
+    parser.add_argument("version", help="the rebuilt map's version")
+    parser.add_argument("thresholds", type=Path, help="the cut-offs TOML")
+    parser.add_argument("records", type=Path, help="records directory beside the store")
+    parser.add_argument("--note", help="why this record exists, when not month to month")
+    args = parser.parse_args(argv)
+    out = args.records / args.dataset / f"{args.version}.continuity.json"
     if out.exists():
         raise FileExistsError(f"{out} exists; continuity records are never overwritten")
-    rec = record(chains, dataset, version, thresholds, records)
+    rec = record(args.chains, args.dataset, args.version, args.thresholds, args.records, args.note)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(rec, indent=1))
