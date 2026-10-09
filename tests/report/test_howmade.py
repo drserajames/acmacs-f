@@ -401,3 +401,79 @@ def test_the_map_steps_warnings_are_listed_verbatim_per_window_and_counted(tmp_p
     note = howmade.map_note("labx-hi", figures, store, None, [])
     assert "the warned figure's window" in note.missing
     assert not any("(?)" in w for w in note.warnings)
+
+
+def _chain_version(store: Store, chosen: bytes) -> StoreRef:
+    step = {"table_id": "labx-t1", "chosen": "scratch", "stress": {"scratch": 1.0},
+            "platform": {"release": "abcdef0123456789"}, "diagnostics": {}}  # fmt: skip
+    chain = {"mode": "merge_all", "config": {},
+             "steps": [{"directory": "steps/0000", "table_id": "labx-t1",
+                        "chosen_file": "chosen.ace"}]}  # fmt: skip
+    with store.build("chains", "labx/hi/merged") as build:
+        (build.path / "steps/0000").mkdir(parents=True)
+        (build.path / "steps/0000/step.json").write_text(json.dumps(step))
+        (build.path / "steps/0000/chosen.ace").write_bytes(chosen)
+        (build.path / "chain.json").write_text(json.dumps(chain))
+        return build.publish(Provenance("af.chain", (), {"options": OPTIONS}, T0, T0))
+
+
+def _continuity_record(ref: StoreRef, parent: StoreRef, chosen: bytes) -> dict[str, Any]:
+    import hashlib
+
+    return {
+        "dataset": ref.dataset, "version": ref.version,
+        "map_sha256": hashlib.sha256(chosen).hexdigest(),
+        "previous": {"version": parent.version, "map_sha256": "0" * 64},
+        "same_problem": True, "inputs_differ": False, "parameters_differ": [], "retires": None,
+        "thresholds": {"path": "t.toml", "sha256": "0" * 64,
+                       "apart": [{"distance": 0.5, "reason": "r"}],
+                       "movers": {"distance": 1.0, "reason": "r"}},
+        "stress": {"new": 11.0, "previous": 10.0, "difference": 1.0, "relative": 0.1},
+        "points": {"paired": 7, "added": {"antigens": 1, "sera": 0},
+                   "removed": {"antigens": 0, "sera": 0}, "ambiguous": {"count": 0},
+                   "filled": {"count": 0, "listed": []}},
+        "procrustes": {"compared": 7, "disconnected": 0, "rmsd": 0.3,
+                       "apart": [{"distance": 0.5, "count": 2}]},
+        "movers": [{"kind": "antigen", "point": "POINT-A", "distance": 1.5}],
+        "method_note": "rebuilt map against the version it replaces.",
+        "measured": "2026-10-08", "measured_by": {"script": "a script", "release": "a release"},
+    }  # fmt: skip
+
+
+def test_a_rebuilt_map_reads_its_continuity_record_and_a_first_version_says_so(
+    tmp_path: Path,
+) -> None:
+    store = Store.create(tmp_path / "store")
+    records = tmp_path / "reference-records"
+    first = _chain_version(store, b"first map")
+    note = howmade.map_note("labx-hi", [_figure(first, full=True)], store, None, [], records)
+    assert any("First version of labx/hi/merged" in line for line in note.lines)
+    assert not any("continuity record" in m for m in note.missing)
+
+    second = _chain_version(store, b"second map")
+    fig = _figure(second, full=True)
+    note = howmade.map_note("labx-hi", [fig], store, None, [], records)
+    assert f"the continuity record against {first.version}" in note.missing
+
+    path = records / second.dataset / f"{second.version}.continuity.json"
+    path.parent.mkdir(parents=True)
+    record = _continuity_record(second, first, b"second map")
+    path.write_text(json.dumps(record))
+    note = howmade.map_note("labx-hi", [fig], store, None, [], records)
+    text = "\n".join(note.lines)
+    assert "rebuilt map against the version it replaces. Measured 2026-10-08 by a script" in text
+    assert f"Against the previous version {first.version}: 7 points shared" in text
+    assert "furthest: POINT-A 1.50" in text
+    assert not any("continuity" in m for m in note.missing)
+
+    record["map_sha256"] = "0" * 64  # a record of another map is refused, not quoted
+    path.write_text(json.dumps(record))
+    note = howmade.map_note("labx-hi", [fig], store, None, [], records)
+    assert f"the continuity record against {first.version}" in note.missing
+    assert not any("points shared" in line for line in note.lines)
+
+    record["map_sha256"] = _continuity_record(second, first, b"second map")["map_sha256"]
+    del record["points"]["filled"]  # a record older than its renderer is a gap, not a crash
+    path.write_text(json.dumps(record))
+    note = howmade.map_note("labx-hi", [fig], store, None, [], records)
+    assert "the continuity record's fields as af.chain.continuity reads them" in note.missing
