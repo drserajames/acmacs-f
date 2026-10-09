@@ -25,6 +25,7 @@ like a placeholder, and is counted on the cover.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,8 @@ class StoreUse:
     # Older versions of a dataset reached only through PINNED slots (the report's own version of
     # it is in refs): kept on purpose, so recorded and listed in the manifest to reproduce it.
     pinned_versions: dict[StoreRef, list[str]] = field(default_factory=dict)
+    # Datasets every one of whose versions is under pinned slots: the report's own is CURRENT.
+    pinned_resolved_by_current: list[str] = field(default_factory=list)
 
     def all_refs(self) -> list[StoreRef]:
         """Every version the report rests on: its own, then the pinned-only older ones."""
@@ -74,6 +77,7 @@ class StoreUse:
     def to_json(self) -> dict[str, Any]:
         return {
             "refs": [ref.to_json() for ref in self.refs],
+            "pinned_resolved_by_current": self.pinned_resolved_by_current,
             "pinned_versions": {
                 f"{ref.kind}/{ref.dataset}@{ref.version}": slots
                 for ref, slots in sorted(self.pinned_versions.items(), key=lambda kv: str(kv[0]))
@@ -110,7 +114,11 @@ def write_report_manifest(path: Path, use: StoreUse, description: str) -> Path:
 
 
 def one_version_each(
-    by_dataset: Versions, pinned: set[str], verb: str
+    by_dataset: Versions,
+    pinned: set[str],
+    verb: str,
+    current: Callable[[str, str], StoreRef] | None = None,
+    resolved_by_current: list[str] | None = None,
 ) -> tuple[Chosen, dict[StoreRef, list[str]]]:
     """The report's one version of each dataset, and the older ones only pinned slots reach.
 
@@ -119,6 +127,12 @@ def one_version_each(
     figure may rest on an older version. So a dataset may appear in more than one version only
     if every version but one is reached solely through pinned slots; two versions under
     unpinned slots are refused, naming every version and its slots.
+
+    When EVERY version is under pinned slots, none is the report's by use, and version ids are
+    hashes whose order means nothing: the report's own is the dataset's CURRENT if it is among
+    them (named in ``resolved_by_current``), otherwise the report is refused until one slot is
+    unpinned. Without ``current`` (before the store is read) the choice is provisional, made
+    again when the store is (:func:`expand_upstream` re-reads every version).
     """
     chosen: Chosen = {}
     extra: dict[StoreRef, list[str]] = {}
@@ -133,7 +147,27 @@ def one_version_each(
                 )  # fmt: skip
             )
             continue
-        main = unpinned[0] if unpinned else min(versions, key=str)
+        if len(versions) == 1:
+            ((main, _),) = versions.items()  # one version: pinned or not, nothing to choose
+        elif unpinned:
+            main = unpinned[0]
+        elif current is None:
+            main = next(iter(versions))  # provisional: decided against the store later
+        else:
+            now = current(kind, dataset)
+            if now not in versions:
+                conflicts.append(
+                    f"{kind}/{dataset}: every version is under pinned slots and none is CURRENT "
+                    f"({now.version}): unpin the slots that should carry the report's own; "
+                    + "; ".join(
+                        f"{ref.version} {verb} {', '.join(sorted(s))}"
+                        for ref, s in versions.items()
+                    )  # fmt: skip
+                )
+                continue
+            main = now
+            if resolved_by_current is not None:
+                resolved_by_current.append(f"{kind}/{dataset}")
         chosen[(kind, dataset)] = (main, versions[main])
         extra.update({ref: sorted(s) for ref, s in versions.items() if ref != main})
     if conflicts:
@@ -225,7 +259,10 @@ def expand_upstream(use: StoreUse, store: Store, pinned: set[str] | None = None)
             labels[ref] = clades_label_only(store, ref, read, use)
         label_only = labels.get(ref)
         queue.extend((up, slot) for up in upstream_refs(store, ref) if up != label_only)
-    chosen, use.pinned_versions = one_version_each(by_dataset, pinned or set(), "under")
+    use.pinned_resolved_by_current = []
+    chosen, use.pinned_versions = one_version_each(
+        by_dataset, pinned or set(), "under", store.current, use.pinned_resolved_by_current
+    )
     use.refs = []
     use.used_by = {}
     for key, (ref, slots) in chosen.items():

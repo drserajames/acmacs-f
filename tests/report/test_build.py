@@ -544,3 +544,19 @@ def test_the_build_record_carries_the_map_steps_warnings(tmp_path: Path) -> None
     build.build(cfg, root, tmp_path / "out", store_root=store.root, manifest_path=manifest)
     record = json.loads((tmp_path / "out" / "test-report.build.json").read_text())
     assert record["warnings"] == [{"slot": "map/m1/all", "warning": "WARNING: a sentence."}]
+
+
+def test_with_every_version_pinned_the_reports_own_is_current_or_refused(tmp_path: Path) -> None:
+    """Version ids are hashes: when no unpinned slot picks the report's version, CURRENT does."""
+    cfg, root, store, old, new = _two_chains_on_two_tables(tmp_path, pin_m2=True)
+    cfg.write_text(cfg.read_text().replace(
+        'pins = { "map/m2/all" = "v1" }',
+        'pins = { "map/m1/all" = "v1", "map/m2/all" = "v1" }'))  # fmt: skip
+    use = build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                                 tmp_path / "m.json", deep=False)  # fmt: skip
+    assert new in use.refs and use.pinned_versions == {old: ["map/m2/all"]}
+    assert use.pinned_resolved_by_current == ["tables/labx/m"]
+    _publish(store, "tables", "labx/m", "tables v3")  # now neither pinned version is CURRENT
+    with pytest.raises(ProvenanceError, match="every version is under pinned slots and none"):
+        build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                               tmp_path / "m.json", deep=False)  # fmt: skip
