@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from af.map.style import Marker
+from af.tables.labs import Lab
 
 PassageClass = Literal["egg", "cell", "reassortant"]
 PASSAGE_CLASSES: tuple[PassageClass, ...] = ("cell", "egg", "reassortant")
@@ -298,3 +299,22 @@ def marker_for(kind: str, passage: str | None) -> Marker:
     if kind == "serum":
         return "uglyegg" if egg else "box"
     return "egg" if egg else "circle"
+
+
+def display_serum_id(serum_id: str, lab: Lab) -> str:
+    """A serum id as printed on maps and report pages (Sarah, 8 Oct 2026, Q123: as ae printed
+    them). The stored id is "<LAB> <the lab's id>" and stays so (Q74): it keeps two labs'
+    identically numbered sera apart, and matching uses it. Only the printed form changes.
+
+    ``lab`` is the table's testing lab (:func:`af.tables.labs.read_labs`; its
+    ``serum_id_print`` is data, never a list here, design rule 10). "with-lab" prints the stored
+    id; "bare" drops exactly the leading "<code> ", so an id naming another lab prints as the
+    lab wrote it ("VIDRL CDC1" -> "CDC1"). An id without that prefix is printed unchanged.
+    """
+    if lab.serum_id_print == "with-lab":
+        return serum_id
+    if lab.serum_id_print != "bare":
+        raise ValueError(f"lab {lab.code}: unknown serum_id_print {lab.serum_id_print!r}")
+    prefix = f"{lab.code} "
+    rest = serum_id[len(prefix) :] if serum_id.startswith(prefix) else serum_id
+    return rest if rest.strip() else serum_id
