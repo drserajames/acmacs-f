@@ -1038,3 +1038,25 @@ def test_a_map_with_no_bulk_reports_no_rotation_but_the_window_angle() -> None:
         rotation_deg_max=1.0)) if c["check"] == "rotation deg")  # fmt: skip
     assert rotation["no_bulk"] and rotation["ok"] is None
     assert maps.orientation_text(p).startswith("no bulk orientation: only ")
+
+
+def test_one_sided_sera_print_their_ids_as_maps_do_and_keys_keep_the_stored_id() -> None:
+    """Q123 (Sarah, 8 Oct): the listing prints ids bare for a "bare" lab; keys stay stored."""
+    from af.report.compare.run import _one_sided, shown_serum
+    from af.tables.labs import Lab
+
+    serum = "-".join(["SERUM", "ONE"])
+    stored = f"LABX {serum}"
+    key = f"NAME|{stored}"
+    sera = {"only_new_keys": [key], "only_ref_keys": ["OTHER|cell"],
+            "serum_id_lab_dropped": {"lab": "LABX", "ref": 0, "new": 1}}  # fmt: skip
+    bare = {"LABX": Lab("LABX", "a lab", "none yet", "bare")}
+    listed = "\n".join(_one_sided("map/x/all", {}, sera, bare))
+    assert f"sera only in new (1): NAME|{serum}" in listed
+    assert "sera only in ref (1): OTHER|cell" in listed  # no id: printed unchanged
+    assert sera["only_new_keys"] == [key]  # the stored key, for matching and excusals
+    with_lab = Lab("LABX", "a lab", "none yet", "with-lab")
+    assert shown_serum(key, with_lab) == key
+    assert shown_serum(key, None) == key
+    with pytest.raises(ValueError, match="not in the labs table"):
+        _one_sided("map/x/all", {}, sera, {})

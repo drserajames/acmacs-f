@@ -25,6 +25,7 @@ import json
 import math
 import sys
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from af.report.compare import ae_hash, geo, maps, trees
 from af.report.howmade import figure_warnings
 from af.store import Store
 from af.store.work import PathsConfig
+from af.tables.labs import Lab, read_labs
 from af.util.config import ConfigError, load_config
 
 
@@ -576,8 +578,10 @@ class Sides:
 
 def markdown(
     manifest: dict[str, Any], rows: list[dict[str, Any]], limits_name: str, how: str,
-    adoption: Adoption, sides: Sides | None = None,
+    adoption: Adoption, sides: Sides | None = None, labs: Mapping[str, Lab] | None = None,
 ) -> str:  # fmt: skip
+    """COMPARISON.md. ``labs`` (code -> :class:`af.tables.labs.Lab`) prints the one-sided sera's
+    serum ids as maps print them (Q123); the CLI always passes it, matching never uses it."""
     status = (
         f"**Limits {adoption.status.upper()}**: adopted by {adoption.adopted_by} on "
         f"{adoption.adopted.isoformat()}"
@@ -611,7 +615,7 @@ def markdown(
             )
             lines.append(f"| {row['slot']} | {row['status']} | {counts} | "
                          + " | ".join(_cell(c) for c in row["checks"]) + " |")  # fmt: skip
-            one_sided += _one_sided(row["slot"], a, s)
+            one_sided += _one_sided(row["slot"], a, s, labs)
             notes += [f"- {row['slot']} / {c['check']}: {c['expected']}"
                       for c in row["checks"] if "expected" in c]  # fmt: skip
             notes += [f"- {row['slot']}: {n['note']}" for n in row.get("excused", [])]
@@ -683,9 +687,30 @@ def markdown(
     return "\n".join(lines) + "\n"
 
 
-def _one_sided(slot: str, antigens: dict[str, Any], sera: dict[str, Any]) -> list[str]:
+def shown_serum(label: str, lab: Lab | None) -> str:
+    """A listed serum (``<name>|<serum id>``) with its id as maps print it (Q123, Sarah 8 Oct:
+    af.map.vaccines.display_serum_id). Only the listing changes: keys, matching and excusals keep
+    the stored id. A serum listed with a passage class instead of an id is printed unchanged."""
+    from af.map.vaccines import display_serum_id
+
+    if lab is None:
+        return label
+    name, sep, serum_id = label.rpartition("|")
+    return f"{name}{sep}{display_serum_id(serum_id, lab)}" if sep else label
+
+
+def _one_sided(
+    slot: str, antigens: dict[str, Any], sera: dict[str, Any],
+    labs: Mapping[str, Lab] | None = None,
+) -> list[str]:  # fmt: skip
     """List one-sided points for a person to read; long lists are cut, with the count kept."""
     out = []
+    code = (sera.get("serum_id_lab_dropped") or {}).get("lab")
+    printed_as = None
+    if labs is not None and code:
+        if code not in labs:
+            raise ValueError(f"{slot}: lab {code} is not in the labs table (--labs)")
+        printed_as = labs[code]
     for group, g in (("antigens", antigens), ("sera", sera)):
         for side in ("ref", "new"):
             kinds = [
@@ -697,6 +722,8 @@ def _one_sided(slot: str, antigens: dict[str, Any], sera: dict[str, Any]) -> lis
                 kinds.append((f"colour_only_{side}_keys", f"in a clade colour only in {side}"))
             for field_name, what in kinds:
                 keys = g.get(field_name, [])
+                if group == "sera":
+                    keys = [shown_serum(k, printed_as) for k in keys]
                 if keys:
                     listed = ", ".join(keys[:ONE_SIDED_LISTED])
                     more = (
@@ -757,6 +784,11 @@ def main(argv: list[str] | None = None) -> int:
         help="clades config (TOML): map tree clade labels to canonical names before comparing",
     )  # fmt: skip
     parser.add_argument(
+        "--labs", type=Path, required=True,
+        help="the labs table (acmacs-f-data rules/tables/labs.tsv): how each lab's serum ids "
+        "are printed in the one-sided lists (Q123); matching uses the stored ids",
+    )  # fmt: skip
+    parser.add_argument(
         "--store", type=Path,
         help="the af store: needed when a tree figure's leaves are EPI_ISL keyed, to match them "
         "to the reference by sequence",
@@ -770,7 +802,8 @@ def main(argv: list[str] | None = None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "COMPARISON.json").write_text(json.dumps(rows, indent=1))
     sides = sides_from(args, manifest)
-    report_md = markdown(manifest, rows, args.limits.name, args.match, limits.adoption, sides)
+    labs = {lab.code: lab for lab in read_labs(args.labs)}
+    report_md = markdown(manifest, rows, args.limits.name, args.match, limits.adoption, sides, labs)
     (args.out / "COMPARISON.md").write_text(report_md)
     missing = sum(r["status"] == "no reference" for r in rows)
     print(
