@@ -14,12 +14,13 @@ rules in the old system that were written with the wrong offset: one was correct
 September 2026, the other still matches nothing.
 
 Some loci cannot be expressed at all against a mature-HA sequence: the signal peptide
-precedes it, and a few nucleotide positions fall before its first base. Those are not
-silently dropped — :func:`convert` returns them as :class:`Unexpressible`, and callers
-report them (design rule 1). They are unobservable rather than false: a sequence that
-starts at the mature HA carries no evidence either way.
+precedes it, a few nucleotide positions fall before its first base, and a few after its last
+(in the 3' untranslated region: B/Vic A's nuc 1843). Those are not silently dropped —
+:func:`convert` returns them as :class:`Unexpressible`, and callers report them (design
+rule 1). They are unobservable rather than false: a sequence that starts at the mature HA
+carries no evidence either way.
 
-Each subtype's two numbers are data, not code: the ``clades`` section of its row in
+Each subtype's three numbers are data, not code: the ``clades`` section of its row in
 ``af/subtypes.toml``, with their source (:func:`af.clades.subtypes.coordinates_for`).
 """
 
@@ -41,11 +42,13 @@ class Coordinates:
 
     ``ha1_length`` is the number of amino acids in HA1, which is also the offset added to
     an upstream HA2 position. ``nuc_offset`` is subtracted from an upstream nucleotide
-    position to index af's mature-HA nucleotide string.
+    position to index af's mature-HA nucleotide string. ``mature_nt`` is that string's
+    length: a converted position past it lies outside the mature HA.
     """
 
     ha1_length: int
     nuc_offset: int
+    mature_nt: int
 
 
 @dataclass(frozen=True)
@@ -93,11 +96,14 @@ def convert(
         raise ValueError(f"{locus} position must be 1-based, got {position}")
     if locus == "SigPep":
         return Unexpressible(locus, position, state, "signal peptide precedes the mature HA")
-    if locus == "HA1":
-        return Position("aa", position, state)
-    if locus == "HA2":
-        return Position("aa", coordinates.ha1_length + position, state)
+    if locus in ("HA1", "HA2"):
+        converted = position + (coordinates.ha1_length if locus == "HA2" else 0)
+        if converted > coordinates.mature_nt // 3:
+            return Unexpressible(locus, position, state, "residue follows the mature HA")
+        return Position("aa", converted, state)
     converted = position - coordinates.nuc_offset
     if converted < 1:
         return Unexpressible(locus, position, state, "nucleotide precedes the mature HA")
+    if converted > coordinates.mature_nt:
+        return Unexpressible(locus, position, state, "nucleotide follows the mature HA")
     return Position("nuc", converted, state)

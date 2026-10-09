@@ -47,6 +47,28 @@ def test_nucleotide_before_the_mature_ha_is_unexpressible() -> None:
     assert "precedes" in result.reason
 
 
+def test_nucleotide_after_the_mature_ha_is_unexpressible() -> None:
+    """B/Vic A's nuc 1843 lies in the 3' untranslated region. As a position it could never be
+    observed, so every A virus would count as having that locus unobservable."""
+    result = convert("nuc", 1843, "T", coordinates_for("B/Vic"))
+    assert isinstance(result, Unexpressible)
+    assert "follows" in result.reason
+
+
+def test_last_nucleotide_of_the_mature_ha_is_expressible() -> None:
+    coordinates = coordinates_for("B/Vic")
+    last = coordinates.nuc_offset + coordinates.mature_nt
+    assert convert("nuc", last, "A", coordinates) == Position("nuc", coordinates.mature_nt, "A")
+    assert isinstance(convert("nuc", last + 1, "A", coordinates), Unexpressible)
+
+
+def test_residue_after_the_mature_ha_is_unexpressible() -> None:
+    coordinates = coordinates_for("A(H3N2)")
+    last_ha2 = coordinates.mature_nt // 3 - coordinates.ha1_length
+    assert convert("HA2", last_ha2, "K", coordinates) == Position("aa", 550, "K")
+    assert isinstance(convert("HA2", last_ha2 + 1, "K", coordinates), Unexpressible)
+
+
 def test_first_nucleotide_of_the_mature_ha_is_position_one() -> None:
     coordinates = coordinates_for("A(H3N2)")
     assert convert("nuc", coordinates.nuc_offset + 1, "C", coordinates) == Position("nuc", 1, "C")
