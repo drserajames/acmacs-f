@@ -374,3 +374,30 @@ def test_a_reference_record_lacking_a_field_counts_it_missing(tmp_path: Path) ->
     assert "the reference record's measured" in note.missing
     assert "the reference record's measured_by.release" in note.missing
     assert "the reference record's measured_by.script" not in note.missing
+
+
+WARNING = ("WARNING: 3 point(s) (1 reference preparation(s)) are not painted: their sequences "
+           "support clade X, and colour scheme clades has no row for X.")  # fmt: skip
+
+
+def test_the_map_steps_warnings_are_listed_verbatim_per_window_and_counted(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "store")
+    ref = _chain(store, full=True)
+    figures = []
+    for window in ("all", "12m"):
+        fig = _figure(ref, full=True)
+        fig["map"]["window"] = {"name": window}
+        record = {"clade": "X", "points": 3, "reference_preparations": 1, "warning": WARNING}
+        fig["provenance"]["decisions"]["unpainted_clades"] = [record]
+        figures.append(fig)
+    note = howmade.map_note("labx-hi", figures, store, None, [])
+    assert note.warnings == [
+        f"**WARNING** ({w}): " + WARNING.removeprefix("WARNING: ") for w in ("all", "12m")
+    ]
+    assert "## Warnings" in note.lines and not any("clade X" in m for m in note.missing)
+    assert howmade.figure_warnings(figures[0]) == [WARNING]
+    assert howmade.figure_warnings(_figure(ref, full=True)) == []  # none recorded: none shown
+    del figures[1]["map"]["window"]  # a window the figure doesn't name is counted, never "?"
+    note = howmade.map_note("labx-hi", figures, store, None, [])
+    assert "the warned figure's window" in note.missing
+    assert not any("(?)" in w for w in note.warnings)

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from af.report.compare import ae_hash, geo, maps, trees
+from af.report.howmade import figure_warnings
 from af.store import Store
 from af.store.work import PathsConfig
 from af.util.config import ConfigError, load_config
@@ -431,7 +432,8 @@ def compare_report(
             failed += status == "FAIL"
             rows.append({"slot": slot, "status": status, "checks": checks, "detail": res,
                          "excused": notes,
-                         "flags": list(new["map"].get("flags", []))})  # fmt: skip
+                         "flags": list(new["map"].get("flags", [])),
+                         "warnings": figure_warnings(new)})  # fmt: skip
         elif new["kind"] == "geo":
             res = geo_month(json.loads(ref_path.read_text()), new)
             checks = geo_checks(res, limits.geo)
@@ -614,6 +616,7 @@ def markdown(
                       for c in row["checks"] if "expected" in c]  # fmt: skip
             notes += [f"- {row['slot']}: {n['note']}" for n in row.get("excused", [])]
             flagged += [f"- {row['slot']}: {flag}" for flag in row.get("flags", [])]
+            notes += [f"- {row['slot']}: {w}" for w in row.get("warnings", [])]
             if orientation := maps.orientation_text(row["detail"].get("procrustes", {})):
                 notes.append(f"- {row['slot']}: {orientation}")
         else:

@@ -531,3 +531,16 @@ def test_the_manifest_lists_every_version_a_pinned_report_rests_on(tmp_path: Pat
     # and af.store reads back every version the report rests on, which all resolve
     every = read_manifest(manifest, include_pinned=True)
     assert old in every and new in every and check_refs(store, every, deep=True) == []
+
+
+@needs_latex
+def test_the_build_record_carries_the_map_steps_warnings(tmp_path: Path) -> None:
+    cfg, root, store, _, _ = _store_setup(tmp_path)
+    i7 = root / "map/m1/all/v1/figure.i7.json"
+    doc = json.loads(i7.read_text())
+    doc["provenance"]["decisions"] = {"unpainted_clades": [{"warning": "WARNING: a sentence."}]}
+    i7.write_text(json.dumps(doc))
+    manifest = tmp_path / "manifest.json"
+    build.build(cfg, root, tmp_path / "out", store_root=store.root, manifest_path=manifest)
+    record = json.loads((tmp_path / "out" / "test-report.build.json").read_text())
+    assert record["warnings"] == [{"slot": "map/m1/all", "warning": "WARNING: a sentence."}]

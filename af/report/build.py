@@ -33,6 +33,7 @@ from typing import Any
 from af.report import text
 from af.report.config import Meeting, ReportConfig, Section, load, period_first, period_last
 from af.report.figures import FigureError, Resolved, resolve
+from af.report.howmade import figure_warnings
 from af.report.provenance import (
     ProvenanceError,
     StoreUse,
@@ -411,6 +412,11 @@ def build_record(
             if manifest_path else None
         ),
         "store": use.to_json(),
+        # The map step's own warnings (e.g. points left unpainted), verbatim, per slot.
+        "warnings": [
+            {"slot": slot, "warning": w} for slot, r in figs.items()
+            for w in figure_warnings(r.figure.doc)
+        ],
         "placeholders": sum(r.figure.placeholder for r in figs.values()),
         "figures": [
             {
@@ -496,6 +502,8 @@ def build(
         cfg, config_path, figs, use, final, pages, passes, built_at, manifest_path
     )
     record["store_read"] = guard.to_json() if guard is not None else None
+    for item in record["warnings"]:
+        print(f"{item['slot']}: {item['warning']}", file=sys.stderr)
     record["text_gaps"] = gaps
     (out_dir / f"{cfg.report.id}.build.json").write_text(json.dumps(record, indent=1))
     return final
