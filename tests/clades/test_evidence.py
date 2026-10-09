@@ -5,6 +5,7 @@ Synthetic nomenclature (``synthetic.py``): 5 K makes a virus P; 9 T and 331 W ma
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -64,3 +65,13 @@ def test_a_tree_row_without_a_sequence_is_fatal(tmp_path: Path) -> None:
     clade_set = load_synthetic(build_clone(tmp_path).parent)
     with pytest.raises(ValueError, match="no aligned sequence"):
         evidence.judge([row(1, "P.1")], {}, clade_set)
+
+
+def test_a_clade_with_no_own_locus_is_fatal(tmp_path: Path) -> None:
+    clade_set = load_synthetic(build_clone(tmp_path).parent)
+    empty = dataclasses.replace(
+        clade_set,
+        subclades={**clade_set.subclades, "P": dataclasses.replace(clade_set["P"], mutations=())},
+    )
+    with pytest.raises(ValueError, match="clade P has no expressible own locus"):
+        evidence.own_loci(sequence(p5="K"), empty, "P")

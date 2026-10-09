@@ -56,9 +56,17 @@ class OwnLoci:
 
 
 def own_loci(sequence: AlignedSequence, clade_set: CladeSet, clade: str) -> OwnLoci:
-    """The clade's own loci (its branch, not its ancestors') the sequence does not show."""
+    """The clade's own loci (its branch, not its ancestors') the sequence does not show.
+
+    A clade with no expressible own locus is an error, not ``supported``: with nothing to
+    test, every virus would pass, and an ancestor with nothing to test would colour every
+    contradicted descendant (design rule 1).
+    """
+    mutations = clade_set[clade].mutations
+    if not mutations:
+        raise ValueError(f"clade {clade} has no expressible own locus to judge a sequence by")
     unobservable, contradicted = [], []
-    for locus in clade_set[clade].mutations:
+    for locus in mutations:
         evidence = sequence.evidence(locus.alphabet, locus.position, locus.state)
         token = f"{locus.position}{locus.state}"
         token = token if locus.alphabet == "aa" else f"nuc{token}"
