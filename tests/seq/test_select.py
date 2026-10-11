@@ -227,3 +227,105 @@ def test_select_reads_partitions_with_and_without_aa_partial(
         ("EPI_ISL_2", "EPI2"): partial,
         ("EPI_ISL_3", "EPI3"): False,
     }
+
+
+# ---- low_divergence: too close to the outgroup for the collection year -------------------
+
+LOW = S.Rule("low", "low_divergence", "far too close to the outgroup for its year",
+             min_ratio=0.4, min_year_records=3)  # fmt: skip
+
+
+def diverged(changes: int, *, unknown: int = 0) -> str:
+    """A 100-base sequence differing from the all-A outgroup at ``changes`` sites."""
+    return "C" * changes + "N" * unknown + "A" * (100 - changes - unknown)
+
+
+def low_store(tmp_path: Path, extra: dict[int, tuple[str, str | None]]) -> Store:
+    """An outgroup, four ordinary 2021 records (20 changes), and ``extra`` (n -> date, bases)."""
+    st = Store.create(tmp_path / "low-store")
+    spec: dict[int, tuple[str, str | None]] = {1: ("2009-05-01", diverged(0))}
+    spec.update({n: ("2021-03-05", diverged(20)) for n in (2, 3, 4, 5)})
+    spec.update(extra)
+    by_pull: dict[str, list[SequenceRecord]] = {"p1": [], "p2": []}
+    found = {}
+    for n, (date, bases) in spec.items():
+        rec = record(n, accession=f"EPI{n}", collection_date=parse_date(date))
+        by_pull["p2" if n >= 10 else "p1"].append(rec)
+        found[rec.epi_isl] = aligned(rec, nucleotides=bases)
+    for pull, recs in by_pull.items():
+        if recs:
+            publish(st, pull, recs, found)
+    return st
+
+
+def test_a_record_far_too_close_to_the_outgroup_for_its_year_is_removed(tmp_path: Path) -> None:
+    # 2 changes where the year's median is 20: an old virus under a new date
+    st = low_store(tmp_path, {6: ("2021-07-01", diverged(2)), 10: ("2021-08-01", diverged(3))})
+    sel = S.select(st, rules(LOW))
+    assert ("EPI_ISL_6", "EPI6") not in sel.keys and ("EPI_ISL_10", "EPI10") not in sel.keys
+    (count,) = sel.counts
+    assert (count.removed, count.remaining, count.untested) == (2, 4, 0)
+    assert count.by_pull == {"p1": 1, "p2": 1}  # reported by the pull that brought each
+
+
+def test_a_record_at_the_ratio_is_kept(tmp_path: Path) -> None:
+    st = low_store(tmp_path, {6: ("2021-07-01", diverged(10)), 7: ("2021-07-01", diverged(9))})
+    half = S.Rule("low", "low_divergence", "why", min_ratio=0.5, min_year_records=3)
+    sel = S.select(st, rules(half))  # 10 of the year's 20 is the ratio exactly: kept
+    assert ("EPI_ISL_6", "EPI6") in sel.keys and ("EPI_ISL_7", "EPI7") not in sel.keys
+
+
+def test_a_year_with_too_few_records_is_not_judged(tmp_path: Path) -> None:
+    # a median of one or two records is not an expectation; the record stays and is counted
+    st = low_store(tmp_path, {6: ("2021-07-01", diverged(2)), 7: ("2023-01-01", diverged(1))})
+    sel = S.select(st, rules(LOW))
+    assert ("EPI_ISL_7", "EPI7") in sel.keys
+    assert (sel.counts[0].removed, sel.counts[0].untested) == (1, 1)
+
+
+def test_a_record_with_too_little_sequence_to_compare_is_not_judged(tmp_path: Path) -> None:
+    st = low_store(
+        tmp_path,
+        {6: ("2021-07-01", diverged(2)), 7: ("2021-07-01", diverged(0, unknown=50)),
+         8: ("2021-07-01", None)},
+    )  # fmt: skip
+    sel = S.select(st, rules(LOW))
+    assert {("EPI_ISL_7", "EPI7"), ("EPI_ISL_8", "EPI8")} <= set(sel.keys)
+    assert (sel.counts[0].removed, sel.counts[0].untested) == (1, 2)
+
+
+def test_low_divergence_judges_what_the_other_rules_left(tmp_path: Path) -> None:
+    # the swine records would drag 2021's median down to their own level and hide EPI_ISL_6
+    st = Store.create(tmp_path / "ordered")
+    spec = {1: ("2009-05-01", 0, "Human"), 6: ("2021-07-01", 2, "Human")}
+    spec.update({n: ("2021-03-05", 20, "Human") for n in (2, 3, 4)})
+    spec.update({n: ("2021-03-05", 2, "Swine") for n in (11, 12, 13, 14, 15)})
+    recs, found = [], {}
+    for n, (date, changes, host) in spec.items():
+        rec = record(n, accession=f"EPI{n}", collection_date=parse_date(date), host=host)
+        recs.append(rec)
+        found[rec.epi_isl] = aligned(rec, nucleotides=diverged(changes))
+    publish(st, "p1", recs, found)
+    sel = S.select(st, rules(LOW, HOST))  # config order does not matter: the order is fixed
+    assert [(c.rule, c.removed) for c in sel.counts] == [("host", 5), ("low", 1)]
+
+
+def test_a_low_divergence_rule_that_removes_nothing_is_an_error_unless_optional(
+    tmp_path: Path,
+) -> None:
+    st = low_store(tmp_path, {})
+    with pytest.raises(S.SelectionError, match="changed nothing"):
+        S.select(st, rules(LOW))
+    optional = S.Rule("low", "low_divergence", "why", optional=True, min_ratio=0.4,
+                      min_year_records=3)  # fmt: skip
+    assert len(S.select(st, rules(optional)).keys) == 5
+
+
+@pytest.mark.parametrize(
+    "fields", [{}, {"min_ratio": 0.4}, {"min_ratio": 1.5, "min_year_records": 3}]
+)
+def test_a_low_divergence_rule_needs_both_its_limits(
+    store: Store, fields: dict[str, float]
+) -> None:
+    with pytest.raises(S.SelectionError, match="low_divergence needs"):
+        S.select(store, rules(S.Rule("low", "low_divergence", "why", **fields)))  # type: ignore[arg-type]
