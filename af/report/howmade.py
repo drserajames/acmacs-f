@@ -619,12 +619,33 @@ def _comparison(note: Note, rows: list[dict[str, Any]]) -> None:
 # ---------------------------------------------------------------- one map, all maps
 
 
+def _same_content(note: Note, folder: str, store_use: dict[str, Any] | None) -> None:
+    """A tree under this map exported from another sequences version than the report read, with
+    an export record showing the same export: said, with both versions and how the record came to
+    be (Sarah's rule, 5 Oct: same content is information, not a refusal)."""
+    if not store_use:
+        return
+    used_by = store_use.get("used_by", {})
+    for dataset, (exported, read, path, how) in sorted(
+        store_use.get("trees_same_content", {}).items()
+    ):
+        if any(s.startswith(f"{MAP_PREFIX}{folder}/") for s in used_by.get(f"trees/{dataset}", [])):
+            note.item(
+                f"Same content, not the same version: trees/{dataset} was exported from "
+                f"sequences {exported}; this report read {read}; their exports are identical "
+                f"(alignment.fasta and leaves.parquet sha256), per the export record {path} "
+                f"({how})"
+            )
+
+
 def map_note(
     folder: str, figures: list[dict[str, Any]], store: Store | None,
     cfg: dict[str, Any] | None, rows: list[dict[str, Any]],
     reference_records: Path | None = None, dates: VaccineDates | None = None,
+    store_use: dict[str, Any] | None = None,
 ) -> Note:  # fmt: skip
-    """The note for one map: ``figures`` are its window figures' I7 documents."""
+    """The note for one map: ``figures`` are its window figures' I7 documents; ``store_use`` is
+    the build record's ``store`` (what the report's provenance check found)."""
     note = Note(folder)
     note.lines += [
         f"# {folder}: how this map was made",
@@ -658,6 +679,7 @@ def map_note(
                 note.item(note.gap("the chain's records", f"the store ({error})"))
         if files:
             _source(note, files, reference_records)
+        _same_content(note, folder, store_use)
     else:
         layout = (fig.get("provenance", {}).get("stand_in") or {}).get("layout")
         note.source = "stand-in layout" if layout else "unknown"
@@ -724,6 +746,7 @@ def write_notes(
                 rows.get(folder, []),
                 reference_records,
                 dates,
+                record.get("store"),
             )  # fmt: skip
             for folder in sorted(by_folder)
         ]

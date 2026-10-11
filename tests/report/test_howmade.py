@@ -477,3 +477,20 @@ def test_a_rebuilt_map_reads_its_continuity_record_and_a_first_version_says_so(
     path.write_text(json.dumps(record))
     note = howmade.map_note("labx-hi", [fig], store, None, [], records)
     assert "the continuity record's fields as af.chain.continuity reads them" in note.missing
+
+
+def test_a_tree_same_in_content_is_said_with_both_versions_and_how_the_record_came(
+    tmp_path: Path,
+) -> None:
+    store = Store.create(tmp_path / "store")
+    ref = _chain(store, full=True)
+    use = {"used_by": {"trees/bx/weekly": ["map/labx-hi/all"]},
+           "trees_same_content": {"bx/weekly": ["v-old", "v-read", "rec.export.json",
+                                                "back-filled"]}}  # fmt: skip
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [], None, None, use)
+    line = next(x for x in note.lines if "Same content, not the same version" in x)
+    assert "exported from sequences v-old; this report read v-read" in line
+    assert line.endswith("rec.export.json (back-filled)")
+    other = howmade.map_note("labx-other", [_figure(ref, full=True)], store, None, [], None,
+                             None, use)  # fmt: skip
+    assert not any("Same content" in x for x in other.lines)  # not under this map's slots

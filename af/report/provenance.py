@@ -15,6 +15,15 @@ builder:
   (``af.clades.coverage``): labelled from another sequences version whose clade-call inputs are
   identical, it is recorded as ``clades_same_content`` and the older label is not followed;
   behind in content, or not labelled from exactly one version, it is refused;
+- compares a tree with the sequences the figures read by the **export it was built from**. A
+  tree cites the sequences version it was exported from and its export files' sha256. When that
+  version is not the one the figures read, the read version's export record decides:
+  ``<export records>/<dataset>/<alignment sha256[:16]>/<version>.export.json``, written by
+  af.tree (``export`` is its export.json verbatim). Both file hashes the same is
+  ``trees_same_content``, and the older label is not followed; a record of that version under
+  another alignment is behind in content; no record, or a malformed one, is refused. The check
+  never computes an export, and runs for slots that are not pinned (a pinned slot keeps its
+  older inputs on purpose);
 - writes the report manifest in the store's snapshot format (``af.store.write_manifest``), which
   is what "reproduce this report" starts from.
 
@@ -69,6 +78,9 @@ class StoreUse:
     pinned_versions: dict[StoreRef, list[str]] = field(default_factory=dict)
     # Datasets every one of whose versions is under pinned slots: the report's own is CURRENT.
     pinned_resolved_by_current: list[str] = field(default_factory=list)
+    # tree dataset -> (sequences version it was exported from, sequences version the figures
+    # read, the export record that shows both exports identical, how that record was written)
+    trees_same_content: dict[str, tuple[str, str, str, str]] = field(default_factory=dict)
 
     def all_refs(self) -> list[StoreRef]:
         """Every version the report rests on: its own, then the pinned-only older ones."""
@@ -86,6 +98,9 @@ class StoreUse:
             "not_from_store": self.not_from_store,
             "clades_same_content": {
                 d: list(pair) for d, pair in sorted(self.clades_same_content.items())
+            },
+            "trees_same_content": {
+                d: list(triple) for d, triple in sorted(self.trees_same_content.items())
             },
         }
 
@@ -236,7 +251,112 @@ def clades_label_only(
     return result.labelled
 
 
-def expand_upstream(use: StoreUse, store: Store, pinned: set[str] | None = None) -> None:
+EXPORT_FILES = ("alignment.fasta", "leaves.parquet")
+
+
+def tree_export(store: Store, tree: StoreRef) -> dict[str, str]:
+    """The sha256 of each export file a tree version cites as an external input, by file name."""
+    record = json.loads((store.resolve(tree) / PROVENANCE).read_text())
+    files = {
+        Path(item["external"]["path"]).name: item["external"]["sha256"]
+        for item in record["inputs"]
+        if "external" in item and Path(item["external"].get("path", "")).name in EXPORT_FILES
+    }
+    if sorted(files) != sorted(EXPORT_FILES):
+        raise ProvenanceError(
+            f"{tree}: its provenance cites export files {sorted(files)}, not {list(EXPORT_FILES)}; "
+            "the export it was built from cannot be compared"
+        )
+    return files
+
+
+EXPORT_HOW = ("at export", "back-filled")
+
+
+def _export_record(path: Path, wanted: StoreRef) -> dict[str, Any]:
+    """An export record, verified before it is trusted: it parses, its embedded export.json
+    names the version in its file name, both file hashes are there, and it says how it was
+    written. Anything else is refused, never read as a pass."""
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError) as err:
+        raise ProvenanceError(f"{path}: unreadable export record ({err})") from err
+    if not isinstance(record, dict):
+        raise ProvenanceError(f"{path}: malformed export record: not a JSON object")
+    named = (record.get("export") or {}).get("sequences") or {}
+    files = record.get("files")
+    problems = []
+    if named.get("dataset") != wanted.dataset or named.get("version") != wanted.version:
+        problems.append(f"export.sequences is {named or 'missing'}, not {wanted}")
+    hashes = files.values() if isinstance(files, dict) else []
+    if (
+        not isinstance(files, dict)
+        or sorted(files) != sorted(EXPORT_FILES)
+        or not all(isinstance(v, str) and len(v) == 64 for v in hashes)
+    ):
+        problems.append(f"files {files!r} are not the sha256 of {list(EXPORT_FILES)}")
+    if record.get("how") not in EXPORT_HOW:
+        problems.append(f"how is {record.get('how')!r}, not one of {EXPORT_HOW}")
+    if problems:
+        raise ProvenanceError(f"{path}: malformed export record: " + "; ".join(problems))
+    return record
+
+
+def tree_label_only(
+    store: Store, tree: StoreRef, read: dict[str, StoreRef], use: StoreUse,
+    export_records: Path | None,
+) -> StoreRef | None:  # fmt: skip
+    """The sequences version ``tree`` cites if it differs from the figures' only in label.
+
+    Same content means the read version's export record, filed under the tree's alignment hash,
+    lists exactly the tree's export files (sha256). Recorded in ``use.trees_same_content`` and
+    returned, so the walk does not follow the older label. A record under another alignment,
+    no record, or a malformed one is refused. Same version, or no sequences of that dataset
+    read: None.
+    """
+    cited = [up for up in upstream_refs(store, tree) if up.kind == "sequences"]
+    differs = [up for up in cited if up.dataset in read and up != read[up.dataset]]
+    if not differs:
+        return None
+    if len(cited) != 1:
+        raise ProvenanceError(f"{tree}: cites {len(cited)} sequences versions; one is needed")
+    exported, wanted = differs[0], read[differs[0].dataset]
+    where = f"sequences/{wanted.dataset} {wanted.version}"
+    if export_records is None:
+        raise ProvenanceError(
+            f"{tree} was exported from sequences/{exported.dataset} {exported.version}, the "
+            f"figures read {wanted.version}: an export record is needed to compare them "
+            "(--export-records)"
+        )
+    files = tree_export(store, tree)
+    root = export_records / wanted.dataset
+    path = root / files["alignment.fasta"][:16] / f"{wanted.version}.export.json"
+    if not path.is_file():
+        other = sorted(p.parent.name for p in root.glob(f"*/{wanted.version}.export.json"))
+        if other:
+            raise ProvenanceError(
+                f"{tree} was exported from sequences/{exported.dataset} {exported.version} "
+                f"(alignment.fasta {files['alignment.fasta'][:16]}); {where} exports to "
+                f"{', '.join(other)} ({root}): the tree is behind in content (rebuild the tree)"
+            )
+        raise ProvenanceError(
+            f"{tree} was exported from sequences/{exported.dataset} {exported.version}, the "
+            f"figures read {wanted.version}, and {where} has no export record ({path}): "
+            "write it, or rebuild the tree"
+        )
+    record = _export_record(path, wanted)
+    if record["files"] != files:
+        raise ProvenanceError(f"{path}: its files {record['files']} are not {tree}'s {files}")
+    use.trees_same_content[tree.dataset] = (
+        exported.version, wanted.version, str(path), record["how"]
+    )  # fmt: skip
+    return exported
+
+
+def expand_upstream(
+    use: StoreUse, store: Store, pinned: set[str] | None = None,
+    export_records: Path | None = None,
+) -> None:  # fmt: skip
     """Add every version the figures' versions were built from, transitively (in place).
 
     A chain that is CURRENT but built from tables that are not shows old data just the same;
@@ -248,6 +368,7 @@ def expand_upstream(use: StoreUse, store: Store, pinned: set[str] | None = None)
     queue += [(ref, slot) for ref, slots in use.pinned_versions.items() for slot in slots]
     read = {ref.dataset: ref for ref in use.refs if ref.kind == "sequences"}
     labels: dict[StoreRef, StoreRef | None] = {}
+    exports: dict[StoreRef, StoreRef | None] = {}
     seen: set[tuple[StoreRef, str]] = set()
     while queue:
         ref, slot = queue.pop()
@@ -258,6 +379,10 @@ def expand_upstream(use: StoreUse, store: Store, pinned: set[str] | None = None)
         if ref.kind == "clades" and ref not in labels:
             labels[ref] = clades_label_only(store, ref, read, use)
         label_only = labels.get(ref)
+        if ref.kind == "trees" and slot not in (pinned or set()):
+            if ref not in exports:
+                exports[ref] = tree_label_only(store, ref, read, use, export_records)
+            label_only = exports[ref]
         queue.extend((up, slot) for up in upstream_refs(store, ref) if up != label_only)
     use.pinned_resolved_by_current = []
     chosen, use.pinned_versions = one_version_each(
@@ -271,8 +396,9 @@ def expand_upstream(use: StoreUse, store: Store, pinned: set[str] | None = None)
 
 
 def check_against_store(
-    use: StoreUse, figs: dict[str, Resolved], store: Store, *, deep: bool
-) -> None:
+    use: StoreUse, figs: dict[str, Resolved], store: Store, *, deep: bool,
+    export_records: Path | None = None,
+) -> None:  # fmt: skip
     """Every ref and everything under it resolves (``deep`` re-hashes) and is CURRENT.
 
     A ref used only by pinned slots may be old: pinning is how a report keeps an older figure
@@ -282,7 +408,7 @@ def check_against_store(
     if problems:
         raise ProvenanceError(f"{len(problems)} store problem(s):\n  " + "\n  ".join(problems))
     pinned = {slot for slot, r in figs.items() if r.pinned}
-    expand_upstream(use, store, pinned)
+    expand_upstream(use, store, pinned, export_records)
     problems = check_refs(store, use.all_refs(), deep=deep)
     for ref in use.refs:
         try:

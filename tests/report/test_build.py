@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -560,3 +561,82 @@ def test_with_every_version_pinned_the_reports_own_is_current_or_refused(tmp_pat
     with pytest.raises(ProvenanceError, match="every version is under pinned slots and none"):
         build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
                                tmp_path / "m.json", deep=False)  # fmt: skip
+
+
+def _tree_on_older_sequences(tmp: Path) -> tuple[Path, Path, Store, StoreRef, StoreRef, dict]:
+    """Figures read sequences v2; their clades sit on a tree exported from v1 (as B/Vic, 11 Oct)."""
+    from af.store.ref import ExternalInput
+
+    cfg, root = _setup(tmp, allow=False)
+    store = Store.create(tmp / "store")
+    old = _publish(store, "sequences", "bx", "sequences v1")
+    read = _publish(store, "sequences", "bx", "sequences v2")
+    export = tmp / "export"
+    export.mkdir()
+    (export / "alignment.fasta").write_text(">a\nACGT\n")
+    (export / "leaves.parquet").write_text("leaves")
+    files = {name: sha256_path(export / name) for name in ("alignment.fasta", "leaves.parquet")}
+    started = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
+    with store.build("trees", "bx/weekly") as version:
+        (version.path / "data.txt").write_text("a tree")
+        inputs = (ExternalInput.of(export / "alignment.fasta"),
+                  ExternalInput.of(export / "leaves.parquet"), old)  # fmt: skip
+        tree = version.publish(Provenance("test", inputs, {}, started, started))
+    clades = _publish(store, "clades", "bx", "clades", (tree, read))
+    for slot in load(cfg).all_slots():
+        _real_figure(root, slot, [read, clades], T0 + dt.timedelta(hours=1), "v1")
+    return cfg, root, store, old, read, files
+
+
+def _export_record(records: Path, read: StoreRef, files: dict, **change: Any) -> Path:
+    path = records / "bx" / files["alignment.fasta"][:16] / f"{read.version}.export.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"export": {"sequences": read.to_json(), "outgroup": "an outgroup"},
+              "files": files, "selection_sha256": "0" * 64, "af_release": "a release",
+              "written": "2026-10-11T00:00:00+00:00", "how": "back-filled", **change}  # fmt: skip
+    path.write_text(json.dumps(record))
+    return path
+
+
+def test_a_tree_exported_from_other_sequences_needs_an_export_record(tmp_path: Path) -> None:
+    cfg, root, store, old, read, files = _tree_on_older_sequences(tmp_path)
+    figs, records = build.resolve_all(load(cfg), root), tmp_path / "exports"
+
+    def check(export_records: Path | None) -> Any:
+        return build.check_provenance(load(cfg), figs, store.root, tmp_path / "m.json",
+                                      deep=False, export_records=export_records)  # fmt: skip
+
+    with pytest.raises(ProvenanceError, match="--export-records"):
+        check(None)
+    with pytest.raises(ProvenanceError, match="has no export record"):
+        check(records)
+    path = _export_record(records, read, files)
+    use = check(records)
+    assert use.trees_same_content == {"bx/weekly": (old.version, read.version, str(path),
+                                                    "back-filled")}  # fmt: skip
+    assert old not in use.refs and read in use.refs  # the older label is not followed
+    assert use.to_json()["trees_same_content"]["bx/weekly"][3] == "back-filled"
+
+
+def test_a_malformed_or_other_export_record_is_refused_never_a_pass(tmp_path: Path) -> None:
+    cfg, root, store, old, read, files = _tree_on_older_sequences(tmp_path)
+    figs, records = build.resolve_all(load(cfg), root), tmp_path / "exports"
+
+    def check() -> Any:
+        return build.check_provenance(load(cfg), figs, store.root, tmp_path / "m.json",
+                                      deep=False, export_records=records)  # fmt: skip
+
+    path = _export_record(records, read, files, how=None)
+    with pytest.raises(ProvenanceError, match="malformed export record: how is None"):
+        check()
+    _export_record(records, read, files, export={"sequences": old.to_json()})
+    with pytest.raises(ProvenanceError, match="malformed export record: export.sequences"):
+        check()
+    path.write_text("{not json")
+    with pytest.raises(ProvenanceError, match="unreadable export record"):
+        check()
+    path.unlink()
+    other = {**files, "alignment.fasta": "f" * 64}  # v2 exports something else
+    _export_record(records, read, other)
+    with pytest.raises(ProvenanceError, match="behind in content"):
+        check()

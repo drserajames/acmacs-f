@@ -437,7 +437,7 @@ def build_record(
 
 def check_provenance(
     cfg: ReportConfig, figs: dict[str, Resolved], store_root: Path | None,
-    manifest_path: Path | None, *, deep: bool,
+    manifest_path: Path | None, *, deep: bool, export_records: Path | None = None,
 ) -> StoreUse:  # fmt: skip
     """All provenance checks, before any LaTeX: a problem found after typesetting is wasted work."""
     use = collect(figs)
@@ -448,7 +448,9 @@ def check_provenance(
                 f"figures name {len(use.refs)} store version(s): --store and --manifest are "
                 "required to check them and record them"
             )
-        check_against_store(use, figs, Store.open(store_root), deep=deep)
+        check_against_store(
+            use, figs, Store.open(store_root), deep=deep, export_records=export_records
+        )
     elif manifest_path is not None:
         raise BuildError(
             "no figure was drawn from the store, so there is no report manifest to write; "
@@ -460,7 +462,7 @@ def check_provenance(
 def build(
     config_path: Path, figures_root: Path, out_dir: Path, *,
     store_root: Path | None = None, manifest_path: Path | None = None, deep: bool = False,
-    ignore_busy: bool = False,
+    ignore_busy: bool = False, export_records: Path | None = None,
 ) -> Path:  # fmt: skip
     """Build the report; return the PDF path. Raises on any problem, leaving no final PDF.
 
@@ -479,7 +481,9 @@ def build(
         else nullcontext(None)
     )
     with guarded as guard:
-        use = check_provenance(cfg, figs, store_root, manifest_path, deep=deep)
+        use = check_provenance(
+            cfg, figs, store_root, manifest_path, deep=deep, export_records=export_records
+        )
         intros = intro_texts(cfg, figs, Store.open(store_root) if store_root else None)
         gaps = [g for _, section_gaps in intros.values() for g in section_gaps]
         if gaps and not cfg.figures.allow_placeholders:
@@ -518,6 +522,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", type=Path, help="where to write the report manifest")
     parser.add_argument("--deep", action="store_true", help="re-hash every store file")
     parser.add_argument(
+        "--export-records", type=Path,
+        help="af.tree's export records (<dir>/<dataset>/<alignment sha256[:16]>/<version>"
+        ".export.json): needed when a tree was exported from another sequences version than "
+        "the figures read",
+    )  # fmt: skip
+    parser.add_argument(
         "--ignore-busy", action="store_true",
         help="read the store even while a batch is publishing (diagnosis only; recorded)",
     )  # fmt: skip
@@ -526,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
         pdf = build(
             args.config, args.figures, args.out,
             store_root=args.store, manifest_path=args.manifest, deep=args.deep,
-            ignore_busy=args.ignore_busy,
+            ignore_busy=args.ignore_busy, export_records=args.export_records,
         )  # fmt: skip
     except (BuildError, ConfigError, FigureError, ProvenanceError, StoreError) as err:
         print(f"report build FAILED: {err}", file=sys.stderr)
