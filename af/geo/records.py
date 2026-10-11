@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from af.geo.colours import UNCOLOURED, DotStyle
+from af.geo.colours import STATE_NO_SCHEME_ROW, STATE_NO_SUPPORTED, UNCOLOURED, DotStyle
 from af.serology.query import Preparation
 
 
@@ -45,6 +45,10 @@ DISAGREE = "preparations disagree"  # uncoloured
 CELL_CLASSES = frozenset({"cell", "original"})
 
 VirusKey = tuple[str, str, str, tuple[str, ...]]
+
+# Uncoloured because of tree-clade evidence and the scheme, not for want of a sequence: each such
+# drawn dot is warned about (Sarah, 8 Oct 2026; af.geo.colours.unpainted_warning)
+UNPAINTED_STATES = frozenset({STATE_NO_SCHEME_ROW, STATE_NO_SUPPORTED})
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,23 @@ class GeoCounts:
     # DotRule.VIRUS: subtype -> how each drawn virus's colour was decided -> viruses
     merges: dict[str, Counter[str]] = field(default_factory=dict)
     merged_preparations: Counter[str] = field(default_factory=Counter)  # subtype -> drawn preps
+    # drawn dots left unpainted by clade evidence: (subtype, month, supported clade or None for
+    # "no supported clade") -> Unpainted
+    unpainted: dict[tuple[str, Month, str | None], Unpainted] = field(default_factory=dict)
+
+
+@dataclass
+class Unpainted:
+    """Drawn dots left unpainted for one supported clade (None: their sequences support none).
+
+    ``points`` are dots (viruses under :data:`DotRule.VIRUS`); ``preparations`` are those dots'
+    preparations whose own sequence left them so; ``tree_clades`` counts the tree's label of
+    each dot (a virus's first such preparation's, by passage order).
+    """
+
+    points: int = 0
+    preparations: int = 0
+    tree_clades: Counter[str] = field(default_factory=Counter)
 
 
 def geo_counts(
@@ -106,7 +127,9 @@ def geo_counts(
     style = style_of if style_of is not None else (lambda _: UNCOLOURED)
     if rule is DotRule.PREPARATION:
         for prep in preparations:
-            _place(result, prep.subtype, prep.name, prep.collection_date, style(prep), location_of)
+            dot = style(prep)
+            if _place(result, prep.subtype, prep.name, prep.collection_date, dot, location_of):
+                _note_unpainted(result, prep.subtype, prep.collection_date, dot, [dot])
         return result
     if rule is not DotRule.VIRUS:
         raise NotImplementedError(rule)
@@ -118,11 +141,37 @@ def geo_counts(
     for (subtype, name, _, _), preps in viruses.items():
         dates = [p.collection_date for p in preps if p.collection_date is not None]
         first_date = min(dates) if dates else None
-        dot, case = merged_style([(style(p), class_of(p)) for p in preps])
+        styles = [(style(p), class_of(p)) for p in preps]
+        dot, case = merged_style(styles)
         if _place(result, subtype, name, first_date, dot, location_of):
             result.merges.setdefault(subtype, Counter())[case] += 1
             result.merged_preparations[subtype] += len(preps)
+            _note_unpainted(result, subtype, first_date, dot, [s for s, _ in styles])
     return result
+
+
+def _note_unpainted(
+    result: GeoCounts,
+    subtype: str,
+    date: datetime.date | None,
+    dot: DotStyle,
+    styles: list[DotStyle],
+) -> None:
+    """Count a drawn dot that is uncoloured because some of its preparations' clades could not
+    be painted (and none was coloured). A dot whose preparations disagree on a colour is not
+    one: it was paintable. Its clade is its first such preparation's; preparations of one
+    virus supporting different clades are rare enough to be counted under the first."""
+    if dot.colour is not None or date is None:
+        return
+    gaps = [s for s in styles if s.state in UNPAINTED_STATES]
+    if not gaps or any(s.colour is not None for s in styles):
+        return
+    first = gaps[0]
+    clade = first.clade if first.state == STATE_NO_SCHEME_ROW else None
+    entry = result.unpainted.setdefault((subtype, Month.of(date), clade), Unpainted())
+    entry.points += 1
+    entry.preparations += len(gaps)
+    entry.tree_clades[first.tree_clade] += 1
 
 
 def virus_key(prep: Preparation) -> VirusKey:
@@ -193,6 +242,7 @@ def to_i7(counts: GeoCounts, subtype: str) -> dict[str, Any]:
                     {"name": name, "points": _points(styles)}
                     for name, styles in sorted(locations.items())
                 ],
+                "unpainted": _unpainted(counts, subtype, month),
             }
             for month, locations in by_month.items()
         ],
@@ -201,10 +251,28 @@ def to_i7(counts: GeoCounts, subtype: str) -> dict[str, Any]:
     }
 
 
+def _unpainted(counts: GeoCounts, subtype: str, month: Month) -> list[dict[str, Any]]:
+    """The month's unpainted dots per supported clade (None last), for the figure's decisions."""
+    found = [(c, u) for (s, m, c), u in counts.unpainted.items() if s == subtype and m == month]
+    return [
+        {
+            "clade": clade,
+            "tree_clades": dict(sorted(u.tree_clades.items())),
+            "points": u.points,
+            "preparations": u.preparations,
+        }
+        for clade, u in sorted(found, key=lambda cu: (cu[0] is None, cu[0] or ""))
+    ]
+
+
 def _points(styles: Counter[DotStyle]) -> list[dict[str, Any]]:
-    """Point groups at one location, the largest first (drawn at the centre)."""
+    """Point groups at one location, the largest first (drawn at the centre). Dots that look
+    the same are one group: an uncoloured dot's evidence state is not drawn."""
+    looks: Counter[DotStyle] = Counter()
+    for style, n in styles.items():
+        looks[DotStyle(style.label, style.colour)] += n
     points = []
-    for style, n in sorted(styles.items(), key=lambda kv: (-kv[1], kv[0].label)):
+    for style, n in sorted(looks.items(), key=lambda kv: (-kv[1], kv[0].label)):
         point: dict[str, Any] = {"color": style.colour or "transparent", "count": n}
         if style.label:
             point["clade"] = style.label

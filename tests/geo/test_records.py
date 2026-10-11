@@ -130,3 +130,49 @@ def test_one_dot_per_virus_merges_its_preparations_and_says_how() -> None:
     assert result.merged_preparations == {"A(H3N2)": 9}
     with pytest.raises(ValueError, match="class_of"):
         geo_counts(preps, Month(2021, 1), Month(2021, 3), place, DotRule.VIRUS, style_of)
+
+
+def test_unpainted_viruses_are_counted_per_month_and_clade_not_drawn_apart() -> None:
+    """Sarah, 8 Oct: dots left unpainted by clade evidence are warned about, never silent.
+    Counted per virus dot: a virus is unpainted when none of its preparations is coloured and
+    at least one was left so by clade evidence; its other preparations are not counted as such.
+    On the map an unpainted dot looks like any uncoloured one, so they are one point group."""
+    from af.geo.colours import STATE_NO_SCHEME_ROW, STATE_NO_SUPPORTED, DotStyle
+    from af.geo.records import DotRule
+
+    d = datetime.date
+    red = DotStyle("Clade R", "#aa0000")
+    gap = DotStyle("", None, state=STATE_NO_SCHEME_ROW, clade="Q.1", tree_clade="Q.1.2")
+    none = DotStyle("", None, state=STATE_NO_SUPPORTED, tree_clade="Q.3")
+    preps = [
+        prep("Alpha-1", "E3", d(2021, 1, 9)),  # both preparations unpainted for Q.1: 1 dot
+        prep("Alpha-1", "MDCK1", d(2021, 1, 9)),
+        prep("Alpha-2", "MDCK1", d(2021, 1, 9)),  # unpainted Q.1 + no sequence: 1 dot, 1 prep
+        prep("Alpha-2", "E3", d(2021, 1, 9)),
+        prep("Alpha-3", "MDCK1", d(2021, 1, 9)),  # no sequence at all: not unpainted
+        prep("Beta-4", "E3", d(2021, 1, 9)),  # unpainted, but its cell preparation is red
+        prep("Beta-4", "MDCK1", d(2021, 1, 9)),
+        prep("Beta-5", "MDCK1", d(2021, 2, 9)),  # no supported clade, in February
+        prep("Nowhere-6", "MDCK1", d(2021, 2, 9)),  # not drawn: not counted
+    ]
+    colour = {
+        ("Alpha-1", "E3"): gap, ("Alpha-1", "MDCK1"): gap,
+        ("Alpha-2", "MDCK1"): gap, ("Alpha-2", "E3"): UNCOLOURED,
+        ("Alpha-3", "MDCK1"): UNCOLOURED,
+        ("Beta-4", "E3"): gap, ("Beta-4", "MDCK1"): red,
+        ("Beta-5", "MDCK1"): none, ("Nowhere-6", "MDCK1"): gap,
+    }  # fmt: skip
+    result = geo_counts(
+        preps, Month(2021, 1), Month(2021, 2), place, DotRule.VIRUS,
+        lambda p: colour[p.name, p.passage], lambda p: "egg" if p.passage[0] == "E" else "cell",
+    )  # fmt: skip
+    doc = to_i7(result, "A(H3N2)")
+    january, february = doc["periods"]
+    assert january["unpainted"] == [
+        {"clade": "Q.1", "tree_clades": {"Q.1.2": 2}, "points": 2, "preparations": 3}
+    ]
+    assert february["unpainted"] == [
+        {"clade": None, "tree_clades": {"Q.3": 1}, "points": 1, "preparations": 1}
+    ]
+    alpha = next(loc for loc in january["locations"] if loc["name"] == "Alpha")
+    assert alpha["points"] == [{"color": "transparent", "count": 3}]  # one group, not two
