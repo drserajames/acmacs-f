@@ -246,6 +246,12 @@ class ReferenceCheck:
     ``max_substitutions`` from the reference are **held** — placed into no dataset, so
     they stay in the raw pull and out of every tree, clade table and map.
 
+    A count alone lets a short fragment through: a few hundred bases of another lineage
+    cannot reach a threshold set for a whole gene, yet the clade engine still names a clade
+    for it. ``max_substitution_rate`` is the same distance per aligned base (see
+    :func:`substitution_rate`); a record over **either** limit is held, so adding the rate
+    can only hold more.
+
     ``expect_lineages`` are the GISAID lineage labels that should be within the threshold.
     The label never decides (it is blank or wrong too often); it is compared with the
     distance so a disagreement is flagged and counted.
@@ -255,10 +261,13 @@ class ReferenceCheck:
     max_substitutions: int
     expect_lineages: tuple[str, ...]
     reason: str
+    max_substitution_rate: float | None = None
 
 
 #: Held: too far from the dataset's reference to be its lineage.
 FAR_FROM_REFERENCE = "lineage.far-from-reference"
+#: Held: under the count but over the rate, i.e. a short fragment of another lineage.
+FAR_BY_RATE = "lineage.far-from-reference.rate"
 #: Kept, but GISAID's label is not one the dataset expects.
 LABEL_UNEXPECTED = "lineage.label-unexpected"
 #: Kept: no alignment, so distance says nothing (see :func:`hold_far_from_reference`).
@@ -277,6 +286,9 @@ def hold_far_from_reference(
     lineage the virus belongs to. Holding those would evict records on no evidence; they
     carry :data:`NO_DISTANCE` instead, and the alignment and qc rules already keep them
     out of trees.
+
+    The count is tested first, so :data:`FAR_BY_RATE` counts only the records the rate
+    adds, and a row without a rate gives the counts it always gave.
     """
     kept: list[SequenceRecord] = []
     held: list[SequenceRecord] = []
@@ -290,12 +302,33 @@ def hold_far_from_reference(
         elif distance > check.max_substitutions:
             flags[FAR_FROM_REFERENCE] += 1
             held.append(record)
+        elif _over_rate(result, check.max_substitution_rate):
+            flags[FAR_BY_RATE] += 1
+            held.append(record)
         elif record.lineage not in check.expect_lineages:
             flags[LABEL_UNEXPECTED] += 1
             kept.append(replace(record, problems=(*record.problems, LABEL_UNEXPECTED)))
         else:
             kept.append(record)
     return kept, held, flags
+
+
+def substitution_rate(result: Aligned) -> float | None:
+    """Substitutions per aligned base, or None when there is nothing to divide by.
+
+    The denominator is the A, C, G and T in the aligned mature sequence: gaps and unknown
+    bases are places the record says nothing about, so they must not dilute the distance
+    of the part that is there.
+    """
+    if result.substitutions is None or result.nucleotides is None:
+        return None
+    bases = sum(result.nucleotides.upper().count(base) for base in "ACGT")
+    return result.substitutions / bases if bases else None
+
+
+def _over_rate(result: Aligned | None, limit: float | None) -> bool:
+    rate = None if result is None or limit is None else substitution_rate(result)
+    return rate is not None and limit is not None and rate > limit
 
 
 # ---- rows --------------------------------------------------------------------------

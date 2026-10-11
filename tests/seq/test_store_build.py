@@ -767,6 +767,80 @@ def test_a_held_record_keeps_its_problems_for_the_raw_pull() -> None:
     assert held[0].problems == ("name.fields",)
 
 
+def test_a_short_fragment_under_the_count_is_held_by_its_rate() -> None:
+    # 70 substitutions is far under a whole-gene count, but over 300 bases it is another
+    # lineage: without the rate the fragment is stored and given a clade from the wrong tree
+    whole, fragment = record(1, lineage="pdm09"), record(2, lineage="pdm09")
+    kept, held, flags = processed.hold_far_from_reference(
+        [whole, fragment],
+        {processed.seq_id(whole): _at(whole, 70, nucleotides="ACGT" * 400),
+         processed.seq_id(fragment): _at(fragment, 70, nucleotides="ACGT" * 75 + "-" * 1300)},
+        _ref_check(max_substitution_rate=0.15),
+    )  # fmt: skip
+    assert [r.epi_isl for r in kept] == [whole.epi_isl]
+    assert [r.epi_isl for r in held] == [fragment.epi_isl]
+    assert flags == Counter({processed.FAR_BY_RATE: 1})
+
+
+def test_without_a_rate_a_short_fragment_is_judged_by_the_count_alone() -> None:
+    rec = record(1, lineage="pdm09")
+    kept, held, flags = processed.hold_far_from_reference(
+        [rec], {processed.seq_id(rec): _at(rec, 70, nucleotides="ACGT" * 75)}, _ref_check()
+    )
+    assert (len(kept), len(held), flags) == (1, 0, Counter())
+
+
+def test_a_record_exactly_at_the_rate_is_kept() -> None:
+    rec = record(1, lineage="pdm09")
+    kept, held, _ = processed.hold_far_from_reference(
+        [rec],
+        {processed.seq_id(rec): _at(rec, 30, nucleotides="ACGT" * 50)},
+        _ref_check(max_substitution_rate=0.15),
+    )
+    assert (len(kept), len(held)) == (1, 0)
+
+
+def test_a_record_over_both_limits_is_counted_under_the_count() -> None:
+    # so FAR_BY_RATE says how many records the rate added, and old counts stay comparable
+    rec = record(1, lineage="pdm09")
+    _, held, flags = processed.hold_far_from_reference(
+        [rec],
+        {processed.seq_id(rec): _at(rec, 400, nucleotides="ACGT" * 100)},
+        _ref_check(max_substitution_rate=0.15),
+    )
+    assert (len(held), flags) == (1, Counter({processed.FAR_FROM_REFERENCE: 1}))
+
+
+def test_the_rate_counts_only_the_bases_the_record_has() -> None:
+    # gaps and unknown bases say nothing, so they must not dilute the distance
+    rec = record(1)
+    padded = _at(rec, 10, nucleotides="acgt" * 10 + "N" * 500 + "-" * 500)
+    assert processed.substitution_rate(padded) == 0.25
+    assert processed.substitution_rate(_at(rec, 10, nucleotides="N" * 40)) is None
+    assert processed.substitution_rate(_at(rec, None)) is None
+
+
+def test_the_rate_is_recorded_in_the_counts_only_when_the_row_has_one(tmp_path: Path) -> None:
+    near, fragment = record(1, lineage="pdm09"), record(2, lineage="pdm09")
+    results = {
+        "h3": {
+            processed.seq_id(near): _at(near, 5, nucleotides="ACGT" * 400),
+            processed.seq_id(fragment): _at(fragment, 70, nucleotides="ACGT" * 75),
+        }
+    }
+    plain = build.ReferenceCheckConfig("h3", 200, ["pdm09"], "why")
+    with_rate = build.ReferenceCheckConfig("h3", 200, ["pdm09"], "why", 0.15)
+    config = b_config(tmp_path, tmp_path, reference_check=[plain])
+    assert build._hold_far_records(config, {"h3": [near, fragment]}, results) == {
+        "h3": {"max_substitutions": 200, "held": 0}
+    }
+    config = b_config(tmp_path, tmp_path, reference_check=[with_rate])
+    assert build._hold_far_records(config, {"h3": [near, fragment]}, results) == {
+        "h3": {"max_substitutions": 200, "held": 1, processed.FAR_BY_RATE: 1,
+               "max_substitution_rate": 0.15}
+    }  # fmt: skip
+
+
 def test_two_reference_check_rows_for_one_dataset_are_refused(tmp_path: Path) -> None:
     rows = [build.ReferenceCheckConfig("h3", 200, ["pdm09"], "why") for _ in range(2)]
     config = b_config(tmp_path, tmp_path, reference_check=rows)
