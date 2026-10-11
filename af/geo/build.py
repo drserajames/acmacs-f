@@ -93,10 +93,14 @@ def build_geo(
     record: dict[str, Any] = {"provenance": provenance, "slots": {}}
     for subtype, doc in sorted(report.geo_docs.items()):
         slot = slots[subtype]
-        written = write_geo_figures(doc, slot, report.coordinates, coastline, figures, provenance)
-        files += written.files
         rows = [r.key for r in subtypes().for_table(subtype, "") if r.key in report.colour_schemes]
-        key[slot] = clade_key(doc, [report.colour_schemes[r] for r in rows])
+        slot_schemes = [report.colour_schemes[r] for r in rows]
+        written = write_geo_figures(
+            doc, slot, report.coordinates, coastline, figures, provenance,
+            scheme=", ".join(s.name for s in slot_schemes),
+        )  # fmt: skip
+        files += written.files
+        key[slot] = clade_key(doc, slot_schemes)
         record["slots"][slot] = {
             "subtype": subtype,
             "drawn": written.drawn,

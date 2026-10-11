@@ -67,3 +67,41 @@ def test_the_clade_key_lists_every_scheme_entry_with_its_dots() -> None:
     assert key["uncoloured"] == {"per_month": {"2021-01": 1}, "window": 1}
     with pytest.raises(ValueError, match="not in the scheme"):
         clade_key(_doc(), [ColourScheme("h3 empty", ())])
+
+
+def test_unpainted_dots_get_the_warning_in_the_figure_and_the_key(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Each month's figure carries its unpainted dots and the one warning sentence (geo's unit
+    is the virus); the key totals them over the window. A month with none carries nothing."""
+    from af.geo.colours import unpainted_warning
+
+    doc = _doc()
+    doc["periods"][0]["unpainted"] = [
+        {"clade": "Q.1", "tree_clades": {"Q.1.2": 1}, "points": 1, "preparations": 2}
+    ]
+    doc["periods"][1]["unpainted"] = []
+    coastline = coastline_file(tmp_path)
+    with pytest.raises(ValueError, match="no scheme"):
+        write_geo_figures(doc, "h3", lambda _: (0.0, 0.0), coastline, tmp_path / "f", {})
+    write_geo_figures(
+        doc, "h3", lambda _: (0.0, 0.0), coastline, tmp_path / "f", {}, scheme="h3 test"
+    )  # fmt: skip
+    sentence = unpainted_warning(1, "Q.1", {"Q.1.2": 1}, "h3 test", unit=("virus", "viruses"))
+    assert sentence.startswith("WARNING: 1 virus is not painted")
+    folder = tmp_path / "f" / "geo" / "h3"
+    january = json.loads((folder / "2021-01" / "af" / "figure.i7.json").read_text())
+    validate(january)
+    assert january["provenance"]["decisions"]["unpainted_clades"] == [
+        {"clade": "Q.1", "tree_clades": {"Q.1.2": 1}, "points": 1, "preparations": 2,
+         "scheme": "h3 test", "warning": sentence}
+    ]  # fmt: skip
+    february = json.loads((folder / "2021-02" / "af" / "figure.i7.json").read_text())
+    assert "decisions" not in february["provenance"]
+    assert sentence in capsys.readouterr().out
+    scheme = ColourScheme("h3 test", (ColourRow("Clade R", "#aa0000", frozenset({"R"})),))
+    assert clade_key(doc, [scheme])["unpainted_clades"] == [
+        {"clade": "Q.1", "tree_clades": {"Q.1.2": 1}, "points": 1, "preparations": 2,
+         "per_month": {"2021-01": 1}, "scheme": "h3 test", "warning": sentence}
+    ]  # fmt: skip
+    assert clade_key(_doc(), [scheme])["unpainted_clades"] == []

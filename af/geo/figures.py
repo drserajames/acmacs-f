@@ -20,12 +20,29 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from af.geo.colours import unpainted_warning
 from af.geo.render import Coordinates, Look, render_period
 from af.map.style import ColourScheme as MapColourScheme
 from af.report.i7 import I7_NAME, I7_VERSION, validate
 from af.util.artefacts import sha256_path
 
 UNCOLOURED_KEY = "uncoloured"
+UNIT = ("virus", "viruses")  # a geo dot is a virus (DotRule.VIRUS), in the warning's words
+
+
+def unpainted_records(unpainted: Sequence[Mapping[str, Any]], scheme: str) -> list[dict[str, Any]]:
+    """Each unpainted group with its scheme and its warning, the sentence 11-reports copies
+    verbatim (af.geo.colours.unpainted_warning; geo passes no reference count)."""
+    return [
+        {
+            **u,
+            "scheme": scheme,
+            "warning": unpainted_warning(
+                u["points"], u["clade"], u["tree_clades"], scheme, unit=UNIT
+            ),
+        }
+        for u in unpainted
+    ]
 
 
 @dataclass
@@ -45,12 +62,15 @@ def write_geo_figures(
     *,
     variant: str = "af",
     look: Look | None = None,
+    scheme: str | None = None,
 ) -> FiguresReport:
     """Write every period of one subtype's I7 ``geo`` document as a report figure.
 
     ``provenance`` goes into each I7 as given (the store versions and tables the dots and
     colours came from); the month's dot count and any locations it could not place are added,
-    so a thin map says why on its own page.
+    so a thin map says why on its own page. A month with dots left unpainted by clade evidence
+    gets ``provenance.decisions.unpainted_clades`` with the warning, and the warning is printed
+    (Sarah, 8 Oct 2026: a warning, never a silent count); ``scheme`` names the colour scheme.
     """
     report = FiguresReport()
     for period in doc["periods"]:
@@ -61,6 +81,13 @@ def write_geo_figures(
         unplaced: Counter[str] = Counter()
         report.drawn[month] = render_period(period, coordinates, coastline, pdf, look, unplaced)
         report.no_coordinates.update(unplaced)
+        decisions: dict[str, Any] = {}
+        if period.get("unpainted"):
+            if scheme is None:
+                raise ValueError(f"{slot} {month}: unpainted dots, but no scheme to name")
+            decisions["unpainted_clades"] = unpainted_records(period["unpainted"], scheme)
+            for u in decisions["unpainted_clades"]:
+                print(f"{slot} {month}: {u['warning']}")
         i7 = {
             "i7_version": I7_VERSION,
             "kind": "geo",
@@ -72,6 +99,7 @@ def write_geo_figures(
                 "producer": "af.geo.figures",
                 "drawn": report.drawn[month],
                 "no_coordinates": dict(sorted(unplaced.items())),
+                **({"decisions": decisions} if decisions else {}),
             },
             "geo": {"subtype": slot, "month": month, "locations": period["locations"]},
         }
@@ -115,6 +143,22 @@ def clade_key(doc: Mapping[str, Any], schemes: Sequence[MapColourScheme]) -> dic
     if unknown:
         raise ValueError(f"{doc.get('subtype')}: dots labelled {unknown} are not in the scheme")
     uncoloured = per_label.get(UNCOLOURED_KEY, Counter())
+    window: dict[str | None, dict[str, Any]] = {}
+    for period in doc["periods"]:
+        for u in period.get("unpainted", ()):
+            w = window.setdefault(
+                u["clade"],
+                {"clade": u["clade"], "tree_clades": Counter(), "points": 0, "preparations": 0,
+                 "per_month": {}},
+            )  # fmt: skip
+            w["tree_clades"].update(u["tree_clades"])
+            w["points"] += u["points"]
+            w["preparations"] += u["preparations"]
+            w["per_month"][period["period"]] = u["points"]
+    unpainted = [
+        {**w, "tree_clades": dict(sorted(w["tree_clades"].items()))}
+        for _, w in sorted(window.items(), key=lambda kv: (kv[0] is None, kv[0] or ""))
+    ]
     return {
         "schemes": [scheme.name for scheme in schemes],
         "months": [p["period"] for p in doc["periods"]],
@@ -123,4 +167,6 @@ def clade_key(doc: Mapping[str, Any], schemes: Sequence[MapColourScheme]) -> dic
             "per_month": dict(sorted(uncoloured.items())),
             "window": sum(uncoloured.values()),
         },
+        # dots left unpainted by clade evidence over the window, each with its warning
+        "unpainted_clades": unpainted_records(unpainted, ", ".join(s.name for s in schemes)),
     }
