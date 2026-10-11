@@ -12,6 +12,7 @@ report slot per table subtype.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -45,8 +46,16 @@ def build_geo(
     slots: Mapping[str, str],
     *,
     ignore_busy: bool = False,
+    created: dt.datetime | None = None,
 ) -> dict[str, Any]:
     """Write the geo figures, key and run record; returns the run record.
+
+    Every figure's provenance carries what the report requires of each figure
+    (:mod:`af.report.figures`, :mod:`af.report.provenance`): ``created`` (time-zoned; the
+    report's "latest" figure per slot is chosen by it) and ``store_refs``, the store versions
+    the slot's dots and colours were READ from: serology, and the sequences and clades its
+    colours can come from (:meth:`StoreColours.store_refs`), so a stale geo input is refused by
+    the report rather than unchecked.
 
     ``schemes``: subtype row -> scheme name (``{"h3": "clades-v10", ...}``). ``slots``: table
     subtype -> report slot (``{"A(H3N2)": "h3", "B": "bvic", ...}``). A table subtype drawn
@@ -63,6 +72,9 @@ def build_geo(
             store, af_data / "rules" / "locations", coastline, first, last, work,
             dot_rule=DotRule.VIRUS, store_colours=colours, schemes=schemes,
         )  # fmt: skip
+    created = created or dt.datetime.now(dt.UTC)
+    if created.tzinfo is None:
+        raise ValueError(f"created {created.isoformat()} has no time zone")
     drawn = set(report.geo_docs)
     if missing := sorted(drawn - set(slots)):
         raise ValueError(f"no report slot given for {missing}")
@@ -90,19 +102,32 @@ def build_geo(
     }
     files: list[Path] = []
     key: dict[str, Any] = {}
-    record: dict[str, Any] = {"provenance": provenance, "slots": {}}
+    record: dict[str, Any] = {"provenance": provenance, "created": created.isoformat(), "slots": {}}
     for subtype, doc in sorted(report.geo_docs.items()):
         slot = slots[subtype]
-        rows = [r.key for r in subtypes().for_table(subtype, "") if r.key in report.colour_schemes]
+        all_rows = [r.key for r in subtypes().for_table(subtype, "")]
+        rows = [r for r in all_rows if r in report.colour_schemes]
         slot_schemes = [report.colour_schemes[r] for r in rows]
+        # the sequence datasets this slot read: every row of its table subtype (a B dot of
+        # unknown lineage is placed in a row by the dataset it matched in, and B/Yam dots are
+        # drawn uncoloured from their own), plus any dataset its colours came from
+        datasets = sorted(
+            {d for r in rows for d in report.colour_provenance[r]["datasets"]} | set(all_rows)
+        )
+        slot_provenance = {
+            **provenance,
+            "created": created.isoformat(),
+            "store_refs": colours.store_refs(datasets),
+        }
         written = write_geo_figures(
-            doc, slot, report.coordinates, coastline, figures, provenance,
+            doc, slot, report.coordinates, coastline, figures, slot_provenance,
             scheme=", ".join(s.name for s in slot_schemes),
         )  # fmt: skip
         files += written.files
         key[slot] = clade_key(doc, slot_schemes)
         record["slots"][slot] = {
             "subtype": subtype,
+            "store_refs": slot_provenance["store_refs"],
             "drawn": written.drawn,
             "no_coordinates": dict(sorted(written.no_coordinates.items())),
             "undated": doc["undated"],
