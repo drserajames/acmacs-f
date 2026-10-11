@@ -45,6 +45,7 @@ from af.report.compare.run import (
     load_limits,
     sides_from,
 )
+from af.store import Store
 
 CHECK_LISTS = ("checks", "tree_checks", "geo_checks")
 
@@ -229,7 +230,7 @@ def draft_markdown(draft: Draft, source: str, all_failing: bool, sides: Sides | 
 
 def run(
     record: dict[str, Any], reference: Path, limits: Limits, how: str, clades: Any,
-    all_failing: bool = False,
+    all_failing: bool = False, store: Store | None = None,
 ) -> Draft:  # fmt: skip
     """Compare with the limits' entries for figures still in the report; classify everything."""
     used = {f["slot"] for f in record["figures"]}
@@ -243,7 +244,7 @@ def run(
     live = dataclasses.replace(
         limits, expected=[e for e in limits.expected if e.slot in used], excused=kept_excused
     )
-    rows, _ = compare_report(record, reference, live, how, clades)
+    rows, _ = compare_report(record, reference, live, how, clades, store)
     af = str(record.get("af", {}).get("commit") or "unknown")[:12]
     draft = classify(rows, live, orphans, af, all_failing)
     for e in limits.excused:
@@ -264,12 +265,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all-failing", action="store_true",
                         help="draft every failing check, also those an entry covers")  # fmt: skip
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--store", type=Path,
+        help="the af store: needed when a tree figure's leaves are EPI_ISL keyed (as compare.run)",
+    )  # fmt: skip
     add_side_arguments(parser)
     args = parser.parse_args(argv)
     limits = load_limits(args.limits)
     clades = load_clades(args.clades) if args.clades else None
     record = json.loads(args.record.read_text())
-    draft = run(record, args.reference, limits, args.match, clades, args.all_failing)
+    store = Store.open(args.store) if args.store else None
+    draft = run(record, args.reference, limits, args.match, clades, args.all_failing, store)
     source = f"{record.get('report', args.record.name)} vs {args.reference}"
     args.out.mkdir(parents=True, exist_ok=True)
     sides = sides_from(args, record)

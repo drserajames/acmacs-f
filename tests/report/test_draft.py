@@ -160,3 +160,21 @@ def test_a_sera_row_says_ids_were_matched_after_dropping_the_lab_token() -> None
         "1 af-only, 0 reference-only; matched after dropping a leading 'LABX' from serum ids "
         "(5 af, 0 reference)"
     )
+
+
+def test_the_draft_passes_the_store_to_the_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An EPI_ISL-keyed tree is matched by sequence, which needs the store, as in compare.run."""
+    from af.store import Store
+
+    seen: list[Any] = []
+
+    def fake(record: Any, reference: Any, limits: Any, how: Any, clades: Any, store: Any) -> Any:
+        seen.append(store)
+        return [], 0
+
+    monkeypatch.setattr(draft, "compare_report", fake)
+    store = Store.create(tmp_path / "store")
+    draft.run({"figures": []}, tmp_path, _limits(tmp_path, []), "identity", None, False, store)
+    assert seen == [store]
