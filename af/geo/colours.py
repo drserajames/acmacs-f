@@ -70,6 +70,8 @@ STATE_UNOBSERVED = "clade not observable in its sequence"
 STATE_NO_SUPPORTED = "contradicted, no supported clade"
 #: The supported clade has no row in the colour scheme: a scheme gap, reported as a warning.
 STATE_NO_SCHEME_ROW = "supported clade not in the colour scheme"
+#: ColourCounts.evidence for a preparation whose tied or several-row candidates differ in evidence.
+EVIDENCE_MIXED = "mixed"
 
 
 @dataclass(frozen=True)
@@ -102,8 +104,8 @@ class ColourCounts:
     doubtful: Counter[str] = field(default_factory=Counter)  # doubt flag -> coloured preparations
     rows: Counter[str] = field(default_factory=Counter)  # ROWS_* resolution -> preparations
     basis: Counter[str] = field(default_factory=Counter)  # BASIS_* -> coloured preparations
-    # clade_evidence of each preparation's matched record ("supported", "unobserved",
-    # "contradicted"); tree-derived records only
+    # clade_evidence of each preparation's records ("supported", "unobserved", "contradicted";
+    # EVIDENCE_MIXED when tied or several-row candidates differ); tree-derived records only
     evidence: Counter[str] = field(default_factory=Counter)
     # supported clade -> preparations left unpainted because the scheme has no row for it
     unpainted_clades: Counter[str] = field(default_factory=Counter)
@@ -134,8 +136,9 @@ def dot_styles(
         if key not in cache:
             cache[key], reason = _style(key)
             linked = sequences_of.get(key)
-            if linked is not None and linked.clade_evidence:
-                counts.evidence[linked.clade_evidence] += 1
+            evidence = _evidence(linked) if linked is not None else ""
+            if evidence:
+                counts.evidence[evidence] += 1
             if cache[key].state == STATE_NO_SCHEME_ROW:
                 counts.unpainted_clades[cache[key].clade] += 1
             if reason:
@@ -158,6 +161,18 @@ def dot_styles(
         if linked.tied:
             return _tie(linked)
         return _sequence_style(linked)
+
+    def _evidence(linked: PreparationSequence) -> str:
+        """The preparation's evidence: its own record's, or its candidates' when tied or named by
+        rows (whose own field is empty); EVIDENCE_MIXED when the candidates differ."""
+        if linked.tied:
+            candidates = linked.tied
+        elif linked.conflict and linked.resolution != ROWS_PASSAGE_MATCHED:
+            candidates = linked.alternatives
+        else:
+            return linked.clade_evidence or ""
+        found = {c.clade_evidence for c in candidates if c.clade_evidence}
+        return found.pop() if len(found) == 1 else EVIDENCE_MIXED if found else ""
 
     def _rows(linked: PreparationSequence) -> tuple[DotStyle, str]:
         """Rows naming different records: the passage-matched one, else only if they agree."""

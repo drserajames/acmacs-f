@@ -288,6 +288,41 @@ def test_a_tie_with_an_unobserved_candidate_follows_the_tie_rule(tmp_path: Path)
     assert style(preps["ranked-unseen"]).state == STATE_UNOBSERVED
 
 
+def test_tied_and_row_named_preparations_count_their_candidates_evidence(tmp_path: Path) -> None:
+    """A tie or several rows leave the preparation's own clade_evidence empty, so its candidates'
+    evidence is counted: one value when they agree, EVIDENCE_MIXED when they differ."""
+    from af.geo.colours import EVIDENCE_MIXED, STATE_UNOBSERVED
+    from af.serology.joins import ROWS_PASSAGE_MATCHED, ROWS_SEVERAL_MATCH, TiedSequence
+
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    seen = TiedSequence("EPI_ISL_1", "ACC1", "P.1", clade_evidence="supported")
+    unseen = TiedSequence("EPI_ISL_2", "ACC2", "P.1", clade_evidence="unobserved")
+    unseen2 = TiedSequence("EPI_ISL_3", "ACC3", "P.1", clade_evidence="unobserved")
+    preps = {n: prep(n) for n in ("tie-unseen", "tie-mixed", "rows-mixed", "rows-matched")}
+    links = {
+        key(preps["tie-unseen"]): PreparationSequence(
+            None, None, None, "", conflict=False, tied=(unseen, unseen2), ranked=unseen
+        ),
+        key(preps["tie-mixed"]): PreparationSequence(
+            None, None, None, "", conflict=False, tied=(seen, unseen), ranked=seen
+        ),
+        key(preps["rows-mixed"]): PreparationSequence(
+            None, None, None, "", conflict=True, alternatives=(seen, unseen),
+            resolution=ROWS_SEVERAL_MATCH,
+        ),
+        key(preps["rows-matched"]): PreparationSequence(
+            "EPI_ISL_2", "ACC2", "P.1", "", conflict=True, alternatives=(seen, unseen),
+            resolution=ROWS_PASSAGE_MATCHED, clade_evidence="unobserved",
+        ),
+    }  # fmt: skip
+    style, counts = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), SCHEME, clade_set)
+    assert style(preps["tie-unseen"]).state == STATE_UNOBSERVED
+    assert style(preps["tie-mixed"]).label == "Clade P.1"
+    assert style(preps["rows-mixed"]) == UNCOLOURED  # the rows no longer agree
+    assert style(preps["rows-matched"]).state == STATE_UNOBSERVED
+    assert counts.evidence == {"unobserved": 2, EVIDENCE_MIXED: 2}
+
+
 def test_the_unpainted_warning_is_one_sentence_composed_once() -> None:
     from af.geo.colours import unpainted_warning
 
