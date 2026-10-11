@@ -36,7 +36,7 @@ records its ``basis``: by its clade, or by a group with no clade named.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from af.clades.colours import ColourScheme
@@ -72,6 +72,8 @@ STATE_NO_SUPPORTED = "contradicted, no supported clade"
 STATE_NO_SCHEME_ROW = "supported clade not in the colour scheme"
 #: ColourCounts.evidence for a preparation whose tied or several-row candidates differ in evidence.
 EVIDENCE_MIXED = "mixed"
+#: A tie whose observed candidates disagree while ae's ranked one is unobserved (it abstains).
+TIE_RANKED_UNOBSERVED = "tie: observed sequences disagree, the ranked one is unobserved"
 
 
 @dataclass(frozen=True)
@@ -174,12 +176,18 @@ def dot_styles(
         found = {c.clade_evidence for c in candidates if c.clade_evidence}
         return found.pop() if len(found) == 1 else EVIDENCE_MIXED if found else ""
 
+    def _observed(candidates: Sequence[TiedSequence]) -> Sequence[TiedSequence]:
+        """Sarah, Q135 (11 Oct 2026): "observed record wins". An unobserved candidate abstains
+        when another is observed; with none observed, all stay (and agree on unobserved)."""
+        observed = [c for c in candidates if c.clade_evidence != "unobserved"]
+        return observed or candidates
+
     def _rows(linked: PreparationSequence) -> tuple[DotStyle, str]:
         """Rows naming different records: the passage-matched one, else only if they agree."""
         if linked.resolution == ROWS_PASSAGE_MATCHED:
             counts.rows[ROWS_PASSAGE_MATCHED] += 1
             return _sequence_style(linked)
-        results = {_sequence_style(a) for a in linked.alternatives}
+        results = {_sequence_style(a) for a in _observed(linked.alternatives)}
         if len(results) == 1 and linked.resolution:
             counts.rows[linked.resolution] += 1
             return results.pop()
@@ -187,12 +195,15 @@ def dot_styles(
 
     def _tie(linked: PreparationSequence) -> tuple[DotStyle, str]:
         """Every tied sequence styled as if it were the match; agree, or ae's rank decides."""
-        results = {_sequence_style(t) for t in linked.tied}
+        candidates = _observed(linked.tied)
+        results = {_sequence_style(t) for t in candidates}
         if len(results) == 1:
             counts.ties[TIE_AGREES] += 1
             return results.pop()
         if linked.ranked is None:
             return UNCOLOURED, "tie with no ranked sequence"
+        if linked.ranked not in candidates:
+            return UNCOLOURED, TIE_RANKED_UNOBSERVED
         counts.ties[TIE_RANKED] += 1
         return _sequence_style(linked.ranked)
 

@@ -265,27 +265,53 @@ def test_tree_clade_evidence_decides_which_clade_paints(tmp_path: Path) -> None:
     assert counts.basis == {BASIS_CLADE: 2, BASIS_SUPPORTED_CLADE: 1}
 
 
-def test_a_tie_with_an_unobserved_candidate_follows_the_tie_rule(tmp_path: Path) -> None:
-    """Evidence goes into each candidate's style, so the existing tie rule applies unchanged:
-    candidates that differ (one unobserved) are split, and ae's rank decides."""
-    from af.geo.colours import STATE_UNOBSERVED
-    from af.serology.joins import TiedSequence
+def test_an_observed_candidate_wins_over_an_unobserved_one(tmp_path: Path) -> None:
+    """Sarah, Q135 (11 Oct 2026): "observed record wins". In a tie or several rows, an
+    unobserved candidate abstains when another is observed, so the dot paints from the observed
+    one whichever ae ranked. Observed candidates that disagree still split as before; with all
+    candidates unobserved the dot stays unobserved."""
+    from af.geo.colours import STATE_UNOBSERVED, TIE_RANKED_UNOBSERVED
+    from af.serology.joins import ROWS_SEVERAL_MATCH, TiedSequence
 
     clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
     seen = TiedSequence("EPI_ISL_1", "ACC1", "P.1", clade_evidence="supported")
     unseen = TiedSequence("EPI_ISL_2", "ACC2", "P.1", clade_evidence="unobserved")
-    preps = {n: prep(n) for n in ("ranked-seen", "ranked-unseen")}
+    unseen2 = TiedSequence("EPI_ISL_3", "ACC3", "P.1", clade_evidence="unobserved")
+    other = TiedSequence("EPI_ISL_4", "ACC4", "P.2", clade_evidence="supported")
+    names = ("ranked-seen", "ranked-unseen", "all-unseen", "observed-disagree",
+             "observed-disagree-ranked", "rows-one-observed", "rows-observed-disagree")  # fmt: skip
+    preps = {n: prep(n) for n in names}
+
+    def tie(*tied: TiedSequence, ranked: TiedSequence) -> PreparationSequence:
+        return PreparationSequence(None, None, None, "", conflict=False, tied=tied, ranked=ranked)
+
+    def rows(*alts: TiedSequence) -> PreparationSequence:
+        return PreparationSequence(
+            None, None, None, "", conflict=True, alternatives=alts, resolution=ROWS_SEVERAL_MATCH
+        )
+
     links = {
-        key(preps["ranked-seen"]): PreparationSequence(
-            None, None, None, "", conflict=False, tied=(seen, unseen), ranked=seen
-        ),
-        key(preps["ranked-unseen"]): PreparationSequence(
-            None, None, None, "", conflict=False, tied=(seen, unseen), ranked=unseen
-        ),
+        key(preps["ranked-seen"]): tie(seen, unseen, ranked=seen),
+        key(preps["ranked-unseen"]): tie(seen, unseen, ranked=unseen),
+        key(preps["all-unseen"]): tie(unseen, unseen2, ranked=unseen),
+        key(preps["observed-disagree"]): tie(seen, other, unseen, ranked=unseen),
+        key(preps["observed-disagree-ranked"]): tie(seen, other, unseen, ranked=other),
+        key(preps["rows-one-observed"]): rows(seen, unseen),
+        key(preps["rows-observed-disagree"]): rows(seen, other, unseen),
     }
-    style, _ = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), SCHEME, clade_set)
+    style, counts = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), SCHEME, clade_set)
     assert style(preps["ranked-seen"]).label == "Clade P.1"
-    assert style(preps["ranked-unseen"]).state == STATE_UNOBSERVED
+    assert style(preps["ranked-unseen"]).label == "Clade P.1"
+    assert style(preps["all-unseen"]).state == STATE_UNOBSERVED
+    assert style(preps["observed-disagree"]) == UNCOLOURED
+    assert style(preps["observed-disagree-ranked"]).label == "Clade P"
+    assert style(preps["rows-one-observed"]).label == "Clade P.1"
+    assert style(preps["rows-observed-disagree"]) == UNCOLOURED
+    assert counts.uncoloured == {
+        STATE_UNOBSERVED: 1,
+        TIE_RANKED_UNOBSERVED: 1,
+        "rows name different sequences": 1,
+    }
 
 
 def test_tied_and_row_named_preparations_count_their_candidates_evidence(tmp_path: Path) -> None:
@@ -318,7 +344,7 @@ def test_tied_and_row_named_preparations_count_their_candidates_evidence(tmp_pat
     style, counts = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), SCHEME, clade_set)
     assert style(preps["tie-unseen"]).state == STATE_UNOBSERVED
     assert style(preps["tie-mixed"]).label == "Clade P.1"
-    assert style(preps["rows-mixed"]) == UNCOLOURED  # the rows no longer agree
+    assert style(preps["rows-mixed"]).label == "Clade P.1"  # observed record wins (Q135)
     assert style(preps["rows-matched"]).state == STATE_UNOBSERVED
     assert counts.evidence == {"unobserved": 2, EVIDENCE_MIXED: 2}
 
