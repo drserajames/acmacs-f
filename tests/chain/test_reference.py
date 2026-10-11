@@ -13,7 +13,7 @@ from af.chain.config import ChainConfigError, MapOptions, Reference
 from af.chain.reference import BASIN_METHOD, composition, reference_check, sentences
 from af.chain.review import build_review
 from af.chart.ace import read_chart, write_chart
-from af.chart.model import Antigen, Chart, Projection, Serum, Titres, empty_table
+from af.chart.model import Antigen, Chart, Serum, Titres, empty_table
 
 from .test_engine import config, run, tables  # noqa: F401  (tables is a fixture)
 
