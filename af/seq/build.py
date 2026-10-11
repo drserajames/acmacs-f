@@ -103,6 +103,8 @@ class ReferenceCheckConfig:
     max_substitutions: int
     expect_lineages: list[str]
     reason: str
+    #: Substitutions per aligned base; absent, only the count is tested.
+    max_substitution_rate: float | None = None
 
 
 @dataclass(frozen=True)
@@ -275,7 +277,7 @@ def _hold_far_records(
     config: SequencesConfig,
     placed: dict[str, list[SequenceRecord]],
     alignments: Mapping[str, Mapping[str, nc.Aligned]],
-) -> dict[str, dict[str, int]]:
+) -> dict[str, dict[str, int | float]]:
     """Apply every ``reference_check`` to ``placed`` in place; returns the flag counts.
 
     Held records are removed from the dataset and so are never published: they stay in the
@@ -285,12 +287,16 @@ def _hold_far_records(
     seen = Counter(item.dataset for item in config.reference_check)
     if twice := sorted(d for d, n in seen.items() if n > 1):
         raise ConfigError("<config>", [f"reference_check: {twice} named twice"])
-    counts: dict[str, dict[str, int]] = {}
+    counts: dict[str, dict[str, int | float]] = {}
     for item in config.reference_check:
         if item.dataset not in placed:
             continue
         check = processed.ReferenceCheck(
-            item.dataset, item.max_substitutions, tuple(item.expect_lineages), item.reason
+            item.dataset,
+            item.max_substitutions,
+            tuple(item.expect_lineages),
+            item.reason,
+            item.max_substitution_rate,
         )
         kept, held, flags = processed.hold_far_from_reference(
             placed[item.dataset], alignments[item.dataset], check
@@ -300,6 +306,8 @@ def _hold_far_records(
             "held": len(held),
             **dict(sorted(flags.items())),
         }
+        if item.max_substitution_rate is not None:
+            counts[item.dataset]["max_substitution_rate"] = item.max_substitution_rate
         if not kept:
             raise processed.StoreBuildError(
                 f"reference_check held every record of {item.dataset!r}"
