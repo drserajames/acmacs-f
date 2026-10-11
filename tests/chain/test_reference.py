@@ -10,10 +10,10 @@ import pytest
 
 from af.chain.__main__ import measure_references
 from af.chain.config import ChainConfigError, MapOptions, Reference
-from af.chain.reference import composition, reference_check, sentences
+from af.chain.reference import BASIN_METHOD, composition, reference_check, sentences
 from af.chain.review import build_review
 from af.chart.ace import read_chart, write_chart
-from af.chart.model import Antigen, Chart, Serum, Titres, empty_table
+from af.chart.model import Antigen, Chart, Projection, Serum, Titres, empty_table
 
 from .test_engine import config, run, tables  # noqa: F401  (tables is a fixture)
 
@@ -111,6 +111,7 @@ def test_a_shortfall_is_declared_with_numbers_and_movers():
     }
     text = " ".join(sentences(check, "the reference"))
     assert "NOT the lowest-stress layout found" in text
+    assert "the rest at random, best of 50" in text  # a record from before 12 Oct: random only
     assert "0.200 (0.20%)" in text and "RMSD 1.15" in text and "TEST-CLUSTER-1 6.90" in text
     assert "the search" in text and "not the data" in text
     assert "Jaccard 0.900" in text  # composition and basin together, never one alone
@@ -132,7 +133,9 @@ def test_two_references_measured_cached_and_shown(tables, tmp_path, monkeypatch)
     doc = json.loads((root / "chain.json").read_text())
     assert [r["label"] for r in doc["references"]] == [r.label for r in both]
     for r in doc["references"]:
-        assert r["basin"]["starts"] == 2 and "shipped" in r and "chart_sha256" in r
+        assert r["basin"]["placements"]["random"]["starts"] == 2
+        assert "shipped" in r and "chart_sha256" in r
+        assert r["basin_method"] == r["basin"]["method"] == BASIN_METHOD
 
     import af.chain.reference as reference
 
@@ -195,3 +198,102 @@ def test_chain_file_reference_tables(tmp_path):
         ("unadjusted", "r/downloaded.ace", 50),
         ("adjusted", "r/styled.ace", 7),
     ]
+
+
+# ---- placing the points that do not pair (06 on gp-cnic, 08 on neut-vidrl, 11-12 Oct 2026) ----
+
+
+ROTATE = np.array([[0.0, -1.0], [1.0, 0.0]])  # a quarter turn: the reference's own frame
+
+
+def _reference_of(chart: Chart, unpaired: list[int], *, moved_zero: bool = False) -> Chart:
+    """`chart` turned and shifted into another frame, with the antigens `unpaired` renamed so
+    they pair with nothing; `moved_zero` puts a scrambled, higher-stress projection first, as a
+    hand-moved #0 would be."""
+    ref = dataclasses.replace(chart, antigens=list(chart.antigens))
+    for i in unpaired:
+        ref.antigens[i] = dataclasses.replace(ref.antigens[i], name=f"ZZ/ELSEWHERE/{i}/2021")
+    best = chart.best()
+    own = dataclasses.replace(best, layout=best.layout @ ROTATE + [5.0, -3.0])
+    ref.projections = [own]
+    if moved_zero:
+        scrambled = np.random.default_rng(1).permutation(own.layout)
+        ref.projections = [dataclasses.replace(own, layout=scrambled, stress=1e9), own]
+    return ref
+
+
+def test_unpaired_points_start_at_the_maps_own_positions(tables, tmp_path):  # noqa: F811
+    _, _, chosen = _merged_map(tables, tmp_path / "s")
+    chart = read_chart(chosen)
+    ref = _reference_of(chart, [0, 1])
+    b = reference_check(chart, ref, starts=2, seed=1)["basin"]
+    fitted, rand = b["placements"]["map-fitted"], b["placements"]["random"]
+    assert fitted["placed_from_map"] == 2 and fitted["starts"] == 1
+    assert fitted["seeded_points"] == rand["seeded_points"]  # the same pairs, both ways
+    # every point starts where this map has it, so the relax stays in this map's basin
+    assert abs(fitted["seeded_minus_map"]) <= 1e-6 * b["map_stress"]
+    lower = min(b["placements"], key=lambda n: b["placements"][n]["seeded_stress"])
+    assert b["seeded_stress"] == b["placements"][lower]["seeded_stress"]
+    assert b["placement"] in b["placements"] and b["method"] == BASIN_METHOD
+
+
+def test_map_fitted_starts_from_the_references_lowest_stress_projection(tables, tmp_path):  # noqa: F811
+    _, _, chosen = _merged_map(tables, tmp_path / "s")
+    chart = read_chart(chosen)
+    b = reference_check(chart, _reference_of(chart, [0], moved_zero=True), starts=2, seed=1)
+    tried = b["basin"]["placements"]
+    assert tried["random"]["reference_projection"] == 0  # as recorded before: comparable
+    assert tried["map-fitted"]["reference_projection"] == 1
+    assert b["basin"]["placement"] == "map-fitted"  # the scrambled #0 is a poor start
+
+
+def test_map_fitted_fills_only_the_unpaired_rows():
+    from af.chain.reference import _map_fitted
+
+    layout = np.random.default_rng(2).uniform(0, 10, size=(8, 2))
+    start = layout @ ROTATE + [1.0, 2.0]
+    start[[3, 6]] = np.nan
+    filled, n = cast(tuple[np.ndarray, int], _map_fitted(start, layout))
+    assert n == 2 and np.allclose(filled, layout @ ROTATE + [1.0, 2.0])
+    few = np.full_like(start, np.nan)
+    few[:2] = start[:2]
+    assert _map_fitted(few, layout) is None  # two pairs cannot fix a 2-D fit
+
+
+def test_the_placement_is_named_in_words():
+    b = {
+        "method": BASIN_METHOD,
+        "placement": "map-fitted",
+        "placements": {
+            "random": {"starts": 50, "seeded_stress": 101.5},
+            "map-fitted": {"starts": 1, "seeded_stress": 99.8},
+        },
+        "starts": 1,
+        "seeded_points": 11,
+        "points": 12,
+        "map_stress": 100.0,
+        "seeded_stress": 99.8,
+        "seeded_minus_map": -0.2,
+        "relative": -0.002,
+        "rmsd": 1.15,
+        "apart_over_0_5": 7,
+        "apart_over_1": 3,
+        "movers": [],
+    }
+    comp = {
+        "antigens": {"map": 10, "reference": 10, "matched": 9},
+        "sera": {"map": 2, "reference": 2, "matched": 2},
+        "jaccard": 0.9,
+        "map_only": {"antigens": {"count": 1, "listed": []}, "sera": {"count": 0, "listed": []}},
+        "reference_only": {
+            "antigens": {"count": 1, "listed": []},
+            "sera": {"count": 0, "listed": []},
+        },
+        "matched_by_stage": {"antigens": {}, "sera": {}},
+    }
+    text = " ".join(sentences({"composition": comp, "basin": b}, "the reference"))
+    assert "the rest at this map's own positions fitted into the reference's frame" in text
+    assert "with them at random 101.500" in text
+    b |= {"placement": "random", "starts": 50, "seeded_stress": 101.5}
+    text = " ".join(sentences({"composition": comp, "basin": b}, "the reference"))
+    assert "the rest at random, best of 50; with them at this map's own positions 99.800" in text

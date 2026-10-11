@@ -7,10 +7,18 @@ composition  which points the two maps share: staged identity matching (exact; p
              punctuation; place respelled; passage date dropped; name only), Jaccard over
              antigens and sera.
 basin        did the search find the best layout? Both stresses are measured on THIS map's
-             chart: its own (published) stress, and the best of N starts relaxed from the
-             reference's coordinates for every point that pairs (the rest at random). A map
-             above that "seeded" stress is not the lowest-stress layout found, and the points
-             placed most differently say where (search, not data: both fit the same titres).
+             chart: its own (published) stress, and a "seeded" one, relaxed from the reference's
+             coordinates for every point that pairs. A map above the seeded stress is not the
+             lowest-stress layout found, and the points placed most differently say where
+             (search, not data: both fit the same titres). The points that do not pair are
+             placed two ways, and the lower stress is the one reported, its placement named:
+               random      the best of N starts with them at random, from the reference's
+                           projection #0 (the only placement before 12 Oct 2026);
+               map-fitted  one relax with them at this map's own positions, carried into the
+                           reference's frame by a rigid fit over the paired points, from the
+                           reference's lowest-stress projection (a hand-moved #0 is not a
+                           minimum). Randomly placed points can be trapped, which made the random
+                           figure a weak bound and once reversed its sign (06, 08: 11-12 Oct).
 
 The seeded relax is a measurement only: nothing derived from the reference enters the map.
 """
@@ -33,6 +41,7 @@ GROUP_FROM = 1.0  # points further apart than this are grouped (map units)
 GROUP_LINK = 1.0  # two such points are linked when this close in the map AND displaced this alike
 GROUPS = 8  # groups described, largest first (all are counted)
 FAR = 5.0  # every point further apart than this is listed with its group
+BASIN_METHOD = "random+map-fitted"  # recorded with each check; "random" before 12 Oct 2026
 LABS = r"^(NIID|VIDRL|CDC|CNIC|CRICK)\s+"  # af keeps the lab's serum-id prefix; others may not
 
 
@@ -133,6 +142,35 @@ def composition(chart: Chart, ref: Chart) -> dict[str, Any]:
     }
 
 
+def _seeded_start(
+    chart: Chart,
+    ref_layout: np.ndarray,
+    pairs: tuple[dict[int, int], dict[int, int]],
+    n_ref_ag: int,
+) -> np.ndarray:
+    """The reference's coordinates for every point that pairs; NaN for the rest."""
+    start = np.full((chart.n_points, ref_layout.shape[1]), np.nan)
+    ag, sr = pairs
+    for i, j in ag.items():
+        start[i] = ref_layout[j]
+    for i, j in sr.items():
+        start[chart.n_antigens + i] = ref_layout[n_ref_ag + j]
+    return start
+
+
+def _map_fitted(start: np.ndarray, layout: np.ndarray) -> tuple[np.ndarray, int] | None:
+    """`start` with its NaN rows filled from this map's `layout`, rigidly fitted onto the paired
+    rows; None when too few points pair to fit."""
+    try:
+        fit = procrustes(start, layout)
+    except ValueError:
+        return None
+    fill = np.isnan(start).any(axis=1) & np.isfinite(layout).all(axis=1)
+    out = start.copy()
+    out[fill] = fit.apply(layout[fill])
+    return out, int(fill.sum())
+
+
 def basin(
     chart: Chart,
     ref: Chart,
@@ -155,28 +193,48 @@ def basin(
         avidity_adjust=arrays.get("avidity_adjust"),
         unmovable=arrays.get("unmovable"),
     )
-    own = float(stress(problem, np.asarray(proj.layout)))
-    ref_layout = np.asarray(ref.projections[0].layout)
-    start = np.full((chart.n_points, ref_layout.shape[1]), np.nan)
-    ag, sr = pairs
-    for i, j in ag.items():
-        start[i] = ref_layout[j]
-    for i, j in sr.items():
-        start[chart.n_antigens + i] = ref_layout[ref.n_antigens + j]
-    seeded_points = int(np.isfinite(start).all(axis=1).sum())
+    layout = np.asarray(proj.layout)
+    own = float(stress(problem, layout))
+    tried: dict[str, dict[str, Any]] = {}
+    found: dict[str, Any] = {}
+
+    start = _seeded_start(chart, np.asarray(ref.projections[0].layout), pairs, ref.n_antigens)
     result = relax(problem, n_starts=starts, seed=seed, start_layout=start, threads=threads)
-    best = result.projections[0]
-    fit = procrustes(np.asarray(proj.layout), np.asarray(best.layout))
+    seeded_points = int(np.isfinite(start).all(axis=1).sum())
+    tried["random"] = {"reference_projection": 0, "starts": starts, "seeded_points": seeded_points}
+    found["random"] = result.projections[0]
+
+    k = next(n for n, p in enumerate(ref.projections) if p is ref.best())
+    fitted = _map_fitted(
+        _seeded_start(chart, np.asarray(ref.projections[k].layout), pairs, ref.n_antigens), layout
+    )
+    if fitted is not None:
+        result = relax(problem, n_starts=1, seed=seed, start_layout=fitted[0], threads=threads)
+        tried["map-fitted"] = {
+            "reference_projection": k,
+            "starts": 1,
+            "seeded_points": int(np.isfinite(fitted[0]).all(axis=1).sum()) - fitted[1],
+            "placed_from_map": fitted[1],
+        }
+        found["map-fitted"] = result.projections[0]
+    for name, p in found.items():
+        tried[name] |= {"seeded_stress": float(p.stress), "seeded_minus_map": float(p.stress) - own}
+    # the lower stress; a tie keeps the random placement, the only one recorded before
+    placement = min(found, key=lambda n: (found[n].stress, n != "random"))
+    best = found[placement]
+    fit = procrustes(layout, np.asarray(best.layout))
     dist = np.nan_to_num(fit.distances)
     order = np.argsort(-dist)[:MOVERS]
     names = _point_names(chart, [int(p) for p in order])
     every = np.arange(chart.n_points)
-    layout = np.asarray(proj.layout)
     grouped = moved_groups(chart, every, layout, fit.apply(np.asarray(best.layout)))
     seeded = float(best.stress)
     return {
-        "starts": starts,
-        "seeded_points": seeded_points,
+        "method": BASIN_METHOD,
+        "placement": placement,
+        "placements": tried,
+        "starts": tried[placement]["starts"],
+        "seeded_points": tried[placement]["seeded_points"],
         "points": chart.n_points,
         "map_stress": own,
         "seeded_stress": seeded,
@@ -317,6 +375,22 @@ def _groups_sentence(m: dict[str, Any]) -> str:
     )
 
 
+def _placed(b: dict[str, Any]) -> str:
+    """How the points that do not pair were placed, and what the other placement reached."""
+    tried = b.get("placements")
+    if not tried:  # recorded before 12 Oct 2026: random placement only
+        return f"the rest at random, best of {b['starts']}"
+    if b["placement"] == "map-fitted":
+        out = "the rest at this map's own positions fitted into the reference's frame, one relax"
+    else:
+        out = f"the rest at random, best of {b['starts']}"
+    other = next((n for n in tried if n != b["placement"]), None)
+    if other is not None:
+        how = "at random" if other == "random" else "at this map's own positions"
+        out += f"; with them {how} {tried[other]['seeded_stress']:.3f}"
+    return out
+
+
 def sentences(check: dict[str, Any], label: str) -> list[str]:
     """What the review says, in words, so no figure can be read without the others."""
     c, b = check["composition"], check["basin"]
@@ -342,7 +416,7 @@ def sentences(check: dict[str, Any], label: str) -> list[str]:
         movers = ", ".join(f"{m['point']} {m['distance']:.2f}" for m in b["movers"][:8])
         out.append(
             f"Basin: this map is NOT the lowest-stress layout found. Relaxed from the reference's"
-            f" positions ({b['seeded_points']} of {b['points']} points, best of {b['starts']}),"
+            f" positions ({b['seeded_points']} of {b['points']} points; {_placed(b)}),"
             f" the same titres reach {b['seeded_stress']:.3f}, {-d:.3f} ({-rel:.2%}) below this"
             f" map's {b['map_stress']:.3f}. {where}. Placed most differently: {movers}. The"
             f" cause is the search (which basin the starts reached), not the data."
@@ -352,7 +426,7 @@ def sentences(check: dict[str, Any], label: str) -> list[str]:
     else:
         out.append(
             f"Basin: this map is at or below the layout relaxed from the reference's positions"
-            f" ({b['seeded_points']} of {b['points']} points, best of {b['starts']}): seeded"
+            f" ({b['seeded_points']} of {b['points']} points; {_placed(b)}): seeded"
             f" {b['seeded_stress']:.3f} vs {b['map_stress']:.3f} here ({d:+.3f}); {where}."
         )
     return out
