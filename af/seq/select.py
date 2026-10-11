@@ -11,7 +11,10 @@ here, not in config, so no config can change what beats what:
 2. ``include_list`` (R7) adds listed records back that a filter removed;
 3. ``qc`` (R3) applies to everything, included records too;
 4. ``exclude_list`` (R6) removes listed records; exclude beats include;
-5. the **outgroup** (R8) is exempt from all of it, must be in the store, and comes first.
+5. ``low_divergence`` removes records far too close to the outgroup for their collection year
+   (:func:`_low_divergence`). It runs last because "expected for the year" is measured on
+   what the other rules left;
+6. the **outgroup** (R8) is exempt from all of it, must be in the store, and comes first.
 
 Every rule reports what it removed or added. A rule that changes nothing is an error unless it
 is marked optional (design rule 1): a rule that has silently stopped matching is how today's
@@ -22,12 +25,14 @@ from __future__ import annotations
 
 import csv
 import datetime
+from collections import Counter
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
 import duckdb
+import numpy as np
 
 from af.seq.nextclade import Aligned, QcThresholds, qc_failures
 from af.store import Store
@@ -36,7 +41,12 @@ from af.store.ref import StoreRef
 Key = tuple[str, str]  # (epi_isl, accession)
 
 FILTERS = ("host", "date_floor", "aa_deletion", "cut")
-KINDS = (*FILTERS, "include_list", "qc", "exclude_list")
+LATER = ("include_list", "qc", "exclude_list", "low_divergence")  # in the order applied
+KINDS = (*FILTERS, *LATER)
+
+#: A record is compared with the outgroup only where both have a called base, and only when
+#: that is most of the gene: a distance over a short stretch says little about the whole.
+MIN_COMPARABLE = 0.9
 
 
 class SelectionError(RuntimeError):
@@ -65,6 +75,8 @@ class Rule:
     file: Path | None = None  # include_list / exclude_list; host: overrides
     max_unknown_aa: int = -1  # qc
     max_deleted_aa: int = -1  # qc
+    min_ratio: float = 0.0  # low_divergence: distance / the year's median, below this is out
+    min_year_records: int = 0  # low_divergence: a year with fewer has no median to trust
 
 
 @dataclass(frozen=True)
@@ -94,6 +106,11 @@ class RuleCount:
     remaining: int  # records still in after this rule, outgroup not counted (tree = remaining + 1)
     reason: str
     source: str  # the list file for list rules, else ""
+    #: Removed records by the pull that brought them, for rules that say so (low_divergence).
+    by_pull: dict[str, int] = field(default_factory=dict)
+    #: Records the rule could not judge and so kept (low_divergence): no date, too little
+    #: sequence to compare, or a year with too few records for a median.
+    untested: int = 0
 
 
 @dataclass
@@ -112,6 +129,7 @@ class _Record:
     first: datetime.date | None
     aa: str | None
     aligned: Aligned
+    pull: str
 
 
 def select(store: Store, config: SubtypeRules, *, cut: Cut | None = None) -> Selection:
@@ -149,6 +167,12 @@ def select(store: Store, config: SubtypeRules, *, cut: Cut | None = None) -> Sel
         removed = _listed(rule, records) & kept
         kept -= removed
         counts.append(_count(rule, len(removed), 0, len(kept)))
+    for rule in by_kind["low_divergence"]:
+        removed, untested = _low_divergence(rule, kept, records, config.outgroup.key)
+        kept -= removed
+        by_pull = Counter(records[k].pull for k in removed)
+        count = _count(rule, len(removed), 0, len(kept))
+        counts.append(replace(count, by_pull=dict(sorted(by_pull.items())), untested=untested))
 
     idle = [c.rule for c, r in zip(counts, _in_order(config.rules), strict=True)
             if not (c.removed or c.added) and not r.optional]  # fmt: skip
@@ -165,7 +189,7 @@ def select(store: Store, config: SubtypeRules, *, cut: Cut | None = None) -> Sel
 def _in_order(rules: Sequence[Rule]) -> list[Rule]:
     """Rules in the order select() applies them, to pair with the counts."""
     order = [r for r in rules if r.kind in FILTERS]
-    for kind in ("include_list", "qc", "exclude_list"):
+    for kind in LATER:
         order += [r for r in rules if r.kind == kind]
     return order
 
@@ -192,6 +216,12 @@ def _check_rules(rules: Sequence[Rule], cut: Cut | None) -> None:
                 datetime.date.fromisoformat(rule.floor)
             except ValueError:
                 problems.append(f"{rule.id}: floor {rule.floor!r} is not an ISO date")
+        if rule.kind == "low_divergence" and not (
+            0 < rule.min_ratio < 1 and rule.min_year_records >= 1
+        ):
+            problems.append(
+                f"{rule.id}: low_divergence needs 0 < min_ratio < 1 and min_year_records >= 1"
+            )
         if rule.kind == "cut" and cut is None:
             problems.append(f"{rule.id}: a cut rule needs the cycle's cut pin")
     if len({r.id for r in rules}) != len(rules):
@@ -219,6 +249,63 @@ def _filtered(rule: Rule, record: _Record, cut: Cut | None, known: frozenset[Key
         # CUT-NODE.md §3c: keep what is below the cut or was not known when it was chosen.
         return record.key not in cut.below and record.key in known
     raise SelectionError(f"{rule.id}: not a filter")
+
+
+def _low_divergence(
+    rule: Rule, kept: Collection[Key], records: dict[Key, _Record], outgroup: Key
+) -> tuple[set[Key], int]:
+    """``(removed, untested)``: records much closer to the outgroup than their year's are.
+
+    A virus collected years after the outgroup has had those years to diverge from it. One
+    that is nearly identical to it is a mislabelled old virus, a laboratory strain or a
+    contaminated sequence, and a group of them pulls the root of the tree in among the
+    newest viruses. The test is relative, ``distance / median distance of the same collection
+    year < min_ratio``, so one threshold serves every year and subtype without knowing any
+    rate of evolution.
+
+    A record that cannot be judged is kept and counted as untested, never removed: no
+    collection date, too few comparable sites (:data:`MIN_COMPARABLE`), or a year with fewer
+    than ``min_year_records`` measured records, where a median means nothing.
+    """
+    reference = records[outgroup].aligned.nucleotides
+    if reference is None:
+        raise SelectionError(f"{rule.id}: the outgroup has no aligned sequence to measure from")
+    distance = _distances(reference, {k: records[k].aligned.nucleotides for k in kept})
+    by_year: dict[int, list[float]] = {}
+    year: dict[Key, int] = {}
+    for key, value in distance.items():
+        first = records[key].first
+        if first is not None:
+            year[key] = first.year
+            by_year.setdefault(first.year, []).append(value)
+    median = {
+        y: float(np.median(values))
+        for y, values in by_year.items()
+        if len(values) >= rule.min_year_records
+    }
+    tested = {k for k, y in year.items() if median.get(y, 0.0) > 0}
+    removed = {k for k in tested if distance[k] / median[year[k]] < rule.min_ratio}
+    return removed, len(kept) - len(tested)
+
+
+def _distances(reference: str, sequences: dict[Key, str | None]) -> dict[Key, float]:
+    """Nucleotide p-distance to ``reference`` over the sites where both have A, C, G or T.
+
+    Only records aligned to the reference's length with enough comparable sites are measured.
+    """
+    called = np.frombuffer(b"ACGT", dtype=np.uint8)
+    ref = np.frombuffer(reference.upper().encode(), dtype=np.uint8)
+    ref_called = np.isin(ref, called)
+    out: dict[Key, float] = {}
+    for key, nucleotides in sequences.items():
+        if nucleotides is None or len(nucleotides) != len(ref):
+            continue
+        query = np.frombuffer(nucleotides.upper().encode(), dtype=np.uint8)
+        both = ref_called & np.isin(query, called)
+        sites = int(both.sum())
+        if sites and sites >= MIN_COMPARABLE * len(ref):
+            out[key] = float((query[both] != ref[both]).sum()) / sites
+    return out
 
 
 def _keys(store: Store, ref: StoreRef) -> frozenset[Key]:
@@ -281,7 +368,8 @@ def _load(store: Store, ref: StoreRef) -> dict[Key, _Record]:
     version = store.resolve(ref)
     sequences = str(version / "sequences" / "*" / "*.parquet")
     rows = duckdb.execute(
-        "select i.epi_isl, i.accession, i.host, i.collection_date_first, s.align_error,"
+        "select i.epi_isl, i.accession, i.host, i.collection_date_first, i.source_pull,"
+        " s.align_error,"
         " s.alignment_start, s.alignment_end, s.covers_mature, s.nuc_aligned, s.aa_aligned,"
         " s.failed_cds, s.frameshifts, s.deleted_aa, s.inserted_aa, s.unknown_aa,"
         " s.premature_stop, s.nextclade_qc_status, " + _partial(sequences) +
@@ -291,12 +379,12 @@ def _load(store: Store, ref: StoreRef) -> dict[Key, _Record]:
     ).fetchall()  # fmt: skip
     out = {}
     for row in rows:
-        epi, acc, host, first, error, start, end, covers, nuc, aa, failed, *rest = row
+        epi, acc, host, first, pull, error, start, end, covers, nuc, aa, failed, *rest = row
         frameshifts, deleted, inserted, unknown, stop, status, partial = rest
         aligned = Aligned(f"{epi}.{acc}", error, start, end, bool(covers), nuc, aa,
                           tuple(failed or ()), frameshifts or 0, deleted or 0, inserted or 0,
                           unknown or 0, bool(stop), status or "", bool(partial))  # fmt: skip
-        out[(epi, acc)] = _Record((epi, acc), host, first, aa, aligned)
+        out[(epi, acc)] = _Record((epi, acc), host, first, aa, aligned, pull)
     return out
 
 
