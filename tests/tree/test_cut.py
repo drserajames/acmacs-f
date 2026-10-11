@@ -450,3 +450,19 @@ def test_the_cli_proposes_then_pins_then_recovers(
     assert found["recovered"]["below_under"] == 14
     assert found["resumption"]["resumed"] == 4
     assert found["recovered"]["anchors_found"] == 6  # quorum emitted as 5 of 6, not 15 of 6
+
+
+def test_the_module_runs_as_a_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`python -m af.tree.cut` must actually run: CUT-NODE.md documents that as the CLI.
+
+    The other CLI test calls main() directly, so it passed for weeks while the module had no
+    __main__ guard and `python -m af.tree.cut propose <version>` printed nothing and exited 0
+    (found 11 Oct 2026, task 5.7). runpy with run_name="__main__" is that invocation in process.
+    """
+    import runpy
+
+    tree = version(tmp_path / "v1")
+    monkeypatch.setattr("sys.argv", ["af.tree.cut", "propose", str(tree), "--json"])
+    with pytest.raises(SystemExit) as raised:
+        runpy.run_module("af.tree.cut", run_name="__main__")
+    assert raised.value.code == 0
