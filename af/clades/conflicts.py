@@ -1,11 +1,16 @@
 """Refuse a tree whose clade labels hide a large sibling conflict (Sarah, 1 Oct 2026).
 
-The engine cannot recover a sibling clade once its walk has gone down the wrong branch
-(:mod:`af.clades.assign`, known limitation), so a wrongly reconstructed ancestor can hand a
-whole clade's leaves to its sister, silently. :func:`af.clades.assign.sibling_conflicts`
-finds such nodes; the tree's metadata carries their review (``counts.clade_review``). A
-publish from a tree is refused when its largest *topmost* conflict covers at least the
-subtype's limit of leaves.
+A wrongly reconstructed ancestor can hand a whole clade's leaves to its sister, silently.
+:func:`af.clades.assign.sibling_conflicts` finds such nodes; the tree's metadata carries
+their review (``counts.clade_review``). A publish from a tree is refused when its largest
+*topmost* conflict covers at least the subtype's limit of leaves.
+
+**What counts as covered** (Sarah, 11 October 2026, Q138): the leaves still labelled within
+the conflicting label, ``leaves_in_label``. Sibling recovery (:mod:`af.clades.assign`) can
+move a subtree out of that label below the node, and those leaves are then not mislabelled;
+counting them would refuse a tree the engine has already put right. A review written before
+that field existed has only ``leaves``, which is used instead: an older tree is still
+checked, on the stricter of the two counts.
 
 Measured on five trees before Sarah chose the limit (``notes/clades/GUARDS-MEASURED.md``):
 the largest topmost conflict was at most 83 leaves on the three reference trees, 3,700 on a
@@ -112,14 +117,17 @@ def check_conflicts(
             f"{tree}: no sibling-conflict review in its metadata (counts.clade_review); "
             "it cannot be checked, so it is not published"
         )
-    over = [
-        c for c in review.get("topmost", []) if c["leaves"] >= limit.max_topmost_conflict_leaves
-    ]
+
+    def covered(conflict: Mapping[str, Any]) -> int:
+        """Leaves the conflict still mislabels; ``leaves`` for a review written before Q138."""
+        return int(conflict.get("leaves_in_label", conflict["leaves"]))
+
+    over = [c for c in review.get("topmost", []) if covered(c) >= limit.max_topmost_conflict_leaves]
     result = {**limit.to_json(), "over_limit": len(over), "accepted": accept_conflict}
     if over and accept_conflict is None:
         listed = "; ".join(
             f"node {c['node']} labelled {c['label']} also matches {c['other']} "
-            f"over {c['leaves']:,} leaves"
+            f"over {covered(c):,} leaves still in {c['label']}"
             for c in over[:5]
         )
         # the list is the largest topmost conflicts first, so ones over the limit can lie beyond
@@ -130,8 +138,8 @@ def check_conflicts(
         raise ConflictError(
             f"{limit.subtype}: {tree} has {count} sibling conflict(s) covering at least "
             f"{limit.max_topmost_conflict_leaves:,} leaves: {listed}. The tree's ancestral "
-            "states put a clade's marker on the wrong branch, and the engine cannot recover the "
-            f"sibling (af.clades.assign). Limit: {limit.reason}. To publish anyway, give "
+            "states put a clade's marker on the wrong branch, and sibling recovery could not "
+            f"put it right (af.clades.assign). Limit: {limit.reason}. To publish anyway, give "
             "accept_conflict='<reason>'."
         )
     return result

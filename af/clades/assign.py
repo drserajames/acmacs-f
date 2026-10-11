@@ -25,21 +25,31 @@ Sequences with no place on a tree — map antigens before the tree is built, vir
 never made it into one — are assigned by the fallback engine instead
 (:mod:`af.clades.fallback`), which Sarah chose to be Nextclade.
 
-**Known limitation: a sibling clade cannot be recovered once the walk has gone down the
-wrong branch, and this happens silently.** Candidates at a node are the inherited clade and
-its descendants only, so a node whose sequence fully matches a *sibling* of its inherited
-clade is never tested against that sibling. Example (October 2026, an H3 tree whose ancestral
-states put a sister clade's marker too high): a node of 3,700 leaves gained the sibling
-clade's own defining substitution on its edge and matched that sibling's whole signature with
-the same support as its inherited clade, yet kept the inherited label, and every leaf below
-it followed; the sibling clade was assigned nowhere. Labelling is deliberately left as it is
-(changing candidate selection would move every tree's labels); instead
-:func:`sibling_conflicts` reports every such node, and :attr:`TreeAssignment.ties` every
-exact tie between candidates that only the name decided.
+**Sibling recovery** (Sarah, 11 October 2026, Q138). A wrongly reconstructed ancestor can put
+a clade's marker above the node where it really arose, and the rule above cannot then recover
+the sister clade: candidates are the inherited clade and its descendants, so a node matching a
+*sibling* of its inherited clade is never tested against it. Measured on an H3 tree: a node of
+3,700 leaves contradicted its inherited G.2.1 at that clade's own locus, matched the whole
+signature of its sister, and still kept G.2.1, which left the sister assigned nowhere.
+
+So an **internal** node whose own sequence *contradicts* its inherited clade X is searched
+again from X's parent, and may take a sibling of X — never X's parent, and never anything
+higher: a node that also contradicts the parent keeps X, as before. Each recovery is recorded
+(:attr:`TreeAssignment.recoveries`). **Leaves are never recovered**, so a tip still cannot
+fall out of its clade: that property is why Sarah chose this engine.
+
+Measured when it was adopted: on the H3 tree above it fires at one node, recovers 3,699 leaves
+to the sister (Nextclade gives 3,697 the same clade), moves nothing else, and takes agreement
+with Nextclade from 1.96% to 0.05%; on H1 it changes nothing; on B/Vic it moves 9 leaves.
+
+:func:`sibling_conflicts` still reports every node matching a clade outside its label's
+lineage, and :attr:`TreeAssignment.ties` every exact tie between candidates that only the name
+decided.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 
@@ -61,6 +71,16 @@ class NameTie:
 
 
 @dataclass(frozen=True)
+class SiblingRecovery:
+    """A node moved from the clade it inherited to a sibling of it, its sequence having
+    contradicted the inherited clade (see the module docstring)."""
+
+    node: str
+    inherited: str
+    recovered: str
+
+
+@dataclass(frozen=True)
 class SiblingConflict:
     """A node labelled ``label`` whose sequence also fully matches ``other``, a clade outside
     ``label``'s lineage, with at least the same support: the walk may have gone down the
@@ -70,6 +90,9 @@ class SiblingConflict:
     label: str
     other: str
     leaves: int
+    leaves_in_label: int
+    """Leaves under this node still labelled within ``label``: what the guard counts. A
+    recovered descendant takes its leaves out of the conflict, so they are not counted."""
     label_support: int
     """Matching loci of ``label`` at this node; -1 when the node contradicts it."""
     other_support: int
@@ -122,6 +145,8 @@ class TreeAssignment:
     founders: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     ties: tuple[NameTie, ...] = ()
     """Nodes where two candidates tied on standing, depth and support, so the name chose."""
+    recoveries: tuple[SiblingRecovery, ...] = ()
+    """Internal nodes moved to a sibling of the clade they inherited."""
 
     def clade(self, node: str) -> str | None:
         try:
@@ -172,10 +197,17 @@ def assign_tree(
     assignments: dict[str, Assignment] = {}
     founders: dict[str, list[str]] = {}
     ties: list[NameTie] = []
+    recoveries: list[SiblingRecovery] = []
     stack: list[tuple[str, str | None]] = [(root, None) for root in roots]
     while stack:
         name, inherited = stack.pop()
-        assignment = _assign_node(by_name[name], inherited, clade_set, ties)
+        assignment = _assign_node(
+            by_name[name],
+            inherited,
+            clade_set,
+            ties,
+            recoveries=recoveries if children.get(name) else None,
+        )
         assignments[name] = assignment
         if assignment.clade is not None and assignment.clade != inherited:
             founders.setdefault(assignment.clade, []).append(name)
@@ -191,6 +223,7 @@ def assign_tree(
         assignments=assignments,
         founders={clade: tuple(nodes) for clade, nodes in founders.items()},
         ties=tuple(ties),
+        recoveries=tuple(recoveries),
     )
 
 
@@ -199,12 +232,23 @@ def _assign_node(
     inherited: str | None,
     clade_set: CladeSet,
     ties: list[NameTie] | None = None,
+    *,
+    recoveries: list[SiblingRecovery] | None = None,
 ) -> Assignment:
     """The deepest candidate the sequence does not contradict, else the inherited clade.
 
     A tie on standing, depth and support is decided by the name, deterministically; each
     such tie is appended to ``ties`` so it is reported rather than silent.
+
+    ``recoveries`` is a list for an **internal** node only (None for a leaf, which is never
+    recovered): when the sequence contradicts ``inherited``, sibling recovery may move the
+    node to a sibling of it, and appends the move there.
     """
+    if recoveries is not None and inherited is not None:
+        recovered = _recover_sibling(node, inherited, clade_set, ties)
+        if recovered is not None:
+            recoveries.append(SiblingRecovery(node.name, inherited, str(recovered.clade)))
+            return recovered
     # Restrict to the inherited clade's subtree — but by its deepest *published* ancestor.
     # A label with no published ancestry (a locally defined pre-nomenclature lineage) makes
     # no claim about where the virus sits in the nomenclature, so it must not shut the
@@ -251,6 +295,29 @@ def _assign_node(
     if tied and ties is not None:
         ties.append(NameTie(node.name, str(best.clade), tuple(sorted(set(tied) - {best.clade}))))
     return replace(best, inherited=best.clade == inherited)
+
+
+def _recover_sibling(
+    node: Node, inherited: str, clade_set: CladeSet, ties: list[NameTie] | None
+) -> Assignment | None:
+    """A sibling of ``inherited`` for a node whose sequence contradicts ``inherited``.
+
+    Only a sibling: the search runs from ``inherited``'s parent, and a result that is the
+    parent itself (or nothing deeper than it) is refused, so a contradicted node keeps its
+    inherited clade rather than climbing the hierarchy. None when there is nothing to do.
+    """
+    if _test(node, clade_set, inherited) is not None:
+        return None  # the sequence does not contradict the clade it inherited
+    ancestors = clade_set.ancestors(inherited)
+    if not ancestors:
+        return None  # inherited is a root clade: it has no parent to search its siblings from
+    parent = ancestors[0]
+    if _test(node, clade_set, parent) is None:
+        return None  # the parent is contradicted too: recovering into its subtree would be a guess
+    candidate = _assign_node(node, parent, clade_set, ties)
+    if candidate.clade is None or candidate.clade in (parent, inherited):
+        return None
+    return replace(candidate, inherited=False)
 
 
 def _published_anchor(inherited: str | None, clade_set: CladeSet) -> str | None:
@@ -374,8 +441,13 @@ def sibling_conflicts(
     (neither X, nor an ancestor, nor a descendant of X), with support at least X's.
 
     "Fully matches" is the engine's own test: Y's whole signature uncontradicted and at least
-    one of Y's own loci observed. Reported, never acted on (the module docstring says why).
-    Y's own loci are checked first, so the full test runs only where Y could match at all.
+    one of Y's own loci observed. Y's own loci are checked first, so the full test runs only
+    where Y could match at all.
+
+    Each conflict carries both the leaves under the node and ``leaves_in_label``, those still
+    labelled within X. Sibling recovery can take a subtree out of X below the node, and such
+    leaves are no longer mislabelled: counting them would refuse a tree the engine has already
+    put right (Sarah, 11 October 2026, Q138). The guard counts ``leaves_in_label``.
     """
     by_name = {node.name: node for node in nodes}
     children = _children(by_name)
@@ -389,7 +461,7 @@ def sibling_conflicts(
         name: {name, *clade_set.ancestors(name), *clade_set.descendants(name)}
         for name in clade_set.names
     }
-    found: list[SiblingConflict] = []
+    found: list[tuple[str, str, str, int, int, bool, bool]] = []
     flagged: dict[str, set[tuple[str, str]]] = {}
     order = _preorder(by_name, children)
     for name in order:
@@ -410,11 +482,10 @@ def sibling_conflicts(
                 gained = parent is not None and not _own_observed(parent, mutations, every=True)
                 here.add((label, other))
                 found.append(
-                    SiblingConflict(
+                    (
                         name,
                         label,
                         other,
-                        leaves[name],
                         label_support,
                         verdict[0],
                         gained,
@@ -422,7 +493,50 @@ def sibling_conflicts(
                     )
                 )
         flagged[name] = here
-    return tuple(found)
+    in_label = _leaves_in_label(by_name, children, result, clade_set, {c[0] for c in found})
+    return tuple(
+        SiblingConflict(
+            node, label, other, leaves[node], in_label[node][label], mine, theirs, gained, topmost
+        )
+        for node, label, other, mine, theirs, gained, topmost in found
+    )
+
+
+def _leaves_in_label(
+    by_name: Mapping[str, Node],
+    children: Mapping[str, list[str]],
+    result: TreeAssignment,
+    clade_set: CladeSet,
+    wanted: set[str],
+) -> dict[str, dict[str, int]]:
+    """For each node in ``wanted``: how many leaves below it carry each clade, summed by
+    lineage, so ``[node][label]`` is the leaves still labelled within ``label``.
+
+    Counted in one post-order pass that merges each child's tally into its parent's and then
+    drops it, so only the nodes asked for are kept.
+    """
+    tally: dict[str, Counter[str]] = {}
+    kept: dict[str, Counter[str]] = {}
+    for name in reversed(_preorder(by_name, children)):
+        below = children.get(name, ())
+        if below:
+            counts: Counter[str] = Counter()
+            for child in below:
+                counts.update(tally.pop(child))
+        else:
+            clade = result.assignments[name].clade
+            counts = Counter([clade] if clade is not None else [])
+        tally[name] = counts
+        if name in wanted:
+            kept[name] = counts.copy()
+    return {
+        node: {
+            label: sum(n for clade, n in counts.items() if clade_set.is_within(clade, label))
+            for label in {result.assignments[node].clade}
+            if label is not None
+        }
+        for node, counts in kept.items()
+    }
 
 
 def _own_observed(node: Node, mutations: tuple, *, every: bool = False) -> bool:
@@ -464,22 +578,32 @@ REVIEW_KEEP = 20
 
 
 def conflict_review(
-    conflicts: Iterable[SiblingConflict], ties: Iterable[NameTie], *, keep: int = REVIEW_KEEP
+    conflicts: Iterable[SiblingConflict],
+    ties: Iterable[NameTie],
+    recoveries: Iterable[SiblingRecovery] = (),
+    *,
+    keep: int = REVIEW_KEEP,
 ) -> dict[str, object]:
     """A tree's sibling-conflict review, as it is written into the tree's metadata.
 
     Counts always cover every conflict; the list keeps the ``keep`` largest *topmost* ones
     (a conflict's descendants repeat it) so the metadata stays readable and diff-able.
+    Largest by ``leaves_in_label``, which is what the guard counts, so a conflict that would
+    refuse the tree can never be the one left out.
     """
     found = list(conflicts)
-    top = sorted((c for c in found if c.topmost), key=lambda c: (-c.leaves, c.node))
+    top = sorted(
+        (c for c in found if c.topmost), key=lambda c: (-c.leaves_in_label, -c.leaves, c.node)
+    )
     tied = list(ties)
+    recovered = list(recoveries)
     return {
         "counts": {
             "all": len(found),
             "multi_leaf": sum(1 for c in found if c.leaves > 1),
             "topmost": len(top),
             "topmost_multi_leaf": sum(1 for c in top if c.leaves > 1),
+            "recovered_nodes": len(recovered),
         },
         "topmost": [
             {
@@ -487,12 +611,18 @@ def conflict_review(
                 "label": c.label,
                 "other": c.other,
                 "leaves": c.leaves,
+                "leaves_in_label": c.leaves_in_label,
                 "label_support": c.label_support,
                 "other_support": c.other_support,
                 "gained_on_edge": c.gained_on_edge,
             }
             for c in top[:keep]
         ],
+        "recovered": [
+            {"node": r.node, "inherited": r.inherited, "recovered": r.recovered}
+            for r in recovered[:keep]
+        ],
+        "recovered_truncated": max(0, len(recovered) - keep),
         "topmost_truncated": max(0, len(top) - keep),
         "ties": {
             "count": len(tied),

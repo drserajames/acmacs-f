@@ -28,7 +28,9 @@ HEADER = "subtype\tmax_topmost_conflict_leaves\treason\tevidence\n"
 LIMIT = ConflictLimit(SUBTYPE, 100, "the limit", "five trees")
 
 
-def review_with(*leaves: int, truncated: int = 0) -> dict[str, Any]:
+def review_with(*leaves: int, truncated: int = 0, in_label: bool = True) -> dict[str, Any]:
+    """``leaves``, one topmost conflict each. ``in_label=False``: a review written before Q138,
+    which has no ``leaves_in_label``."""
     review = conflict_review((), ())
     review["topmost"] = [
         {
@@ -36,6 +38,7 @@ def review_with(*leaves: int, truncated: int = 0) -> dict[str, Any]:
             "label": "P.1",
             "other": "P.2",
             "leaves": n,
+            **({"leaves_in_label": n} if in_label else {}),
             "label_support": 3,
             "other_support": 3,
             "gained_on_edge": True,
@@ -176,3 +179,17 @@ def test_a_tree_without_a_clade_set_carries_no_review(tmp_path: Path) -> None:
     store = Store.create(tmp_path / "store")
     tree = tree_version(store, None)
     assert "clade_review" not in i6.read_metadata(store.resolve(tree))["counts"]
+
+
+def test_the_guard_counts_the_leaves_still_in_the_label() -> None:
+    """Sibling recovery can take a subtree out of the conflicting label; those leaves are not
+    mislabelled, so they do not count towards the limit (Sarah, 11 Oct 2026, Q138)."""
+    review = review_with(3700)
+    review["topmost"][0]["leaves_in_label"] = 1
+    assert check_conflicts(review, LIMIT, "tree")["over_limit"] == 0
+
+
+def test_a_review_written_before_the_field_is_checked_on_its_leaves() -> None:
+    """An older tree is still checked, on the stricter of the two counts."""
+    with pytest.raises(ConflictError, match="covering at least 100 leaves"):
+        check_conflicts(review_with(3700, in_label=False), LIMIT, "tree")
