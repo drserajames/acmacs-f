@@ -183,7 +183,7 @@ def basin(
     from af.map.optimise import MapProblem, relax, stress
 
     proj = chart.best()
-    arrays = chart.optimiser_arrays(projection=proj)
+    arrays = chart.optimiser_arrays(proj.minimum_column_basis, projection=proj)
     problem = MapProblem(
         titre_value=arrays["titre_value"],
         titre_type=arrays["titre_type"],
