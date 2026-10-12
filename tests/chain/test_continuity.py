@@ -126,6 +126,7 @@ def store(tmp_path):
     _version(root, "v1", None, prev, {"seed": 1})
     _version(root, "v2", "v1", new, {"seed": 1})
     _version(root, "v3", "v2", new, {"seed": 2})
+    _version(root, "v4", "v2", new, {"seed": 1, "options": {"resolve_best": 3}})
     (tmp_path / "t.toml").write_text(TOML)
     return tmp_path
 
@@ -213,3 +214,11 @@ def test_a_note_says_why_the_record_exists_and_is_read_first(store):
 def test_an_empty_note_is_refused(store):
     with pytest.raises(ValueError, match="--note is empty"):
         _run(store, "v2", "--note", "  ")
+
+
+def test_resolve_best_is_a_search_setting_not_a_new_problem(store):
+    rec = _run(store, "v4")  # v2 has no options: resolve_best absent = 1
+    assert rec["same_problem"] is True and rec["parameters_differ"] == []
+    assert rec["search_differ"] == {"options.resolve_best": [1, 3]}
+    assert "Only the search differs (options.resolve_best 1 -> 3)" in sentences(rec)[1]
+    assert _run(store, "v2")["search_differ"] == {}
