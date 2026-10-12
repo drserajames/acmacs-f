@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from numpy.typing import NDArray
 
+from af.chart.merge import reference_antigens
 from af.chart.model import Chart
 from af.map.render import (
     DEFAULT_LOOK,
@@ -72,6 +73,7 @@ __all__ = [
     "Scene",
     "Window",
     "chart_points",
+    "reference_flags",
     "chart_scene",
     "draw_axes",
     "frame_around",
@@ -116,6 +118,20 @@ def marker_for_passage(kind: str, passage: str, reassortant: str = "") -> Marker
     return marker_for(kind, passage_class(passage, reassortant))
 
 
+def reference_flags(chart: Chart) -> list[bool]:
+    """Which antigens are reference antigens: the chart's own flags ("T" "R") where it carries
+    any, else ae's rule (:func:`af.chart.merge.reference_antigens`).
+
+    A chart exported by ae records the flag on each antigen; af's chain charts record none, and
+    reading only the flag left every chain map with no reference antigen, so the draw order and
+    the unpainted warning's count treated them all as test antigens.
+    """
+    if any("T" in a.extra for a in chart.antigens):
+        return [bool((a.extra.get("T") or {}).get("R")) for a in chart.antigens]
+    flagged = set(reference_antigens(chart))
+    return [i in flagged for i in range(chart.n_antigens)]
+
+
 def chart_points(
     chart: Chart,
     xy: NDArray[np.float64],
@@ -138,6 +154,7 @@ def chart_points(
     if sequenced is None:
         sequenced = [bool(a.extra.get("A")) for a in chart.antigens]
     hidden = hidden or {}
+    reference = reference_flags(chart)
     points: list[PointIn] = []
     for i, a in enumerate(chart.antigens):
         ok = bool(np.isfinite(xy[i]).all())
@@ -150,7 +167,7 @@ def chart_points(
                 labels[i],
                 parse_date(a.date),
                 passage_class(a.passage, a.reassortant),
-                bool((a.extra.get("T") or {}).get("R")),
+                reference[i],
                 sequenced=sequenced[i],
                 hide=hidden.get(i),
                 passage=a.passage,
