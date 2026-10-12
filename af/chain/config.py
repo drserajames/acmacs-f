@@ -76,6 +76,12 @@ class MapOptions:
     # merge with the same best (06-optimiser). "fine": every start fine, af's method before
     # 2 Oct 2026. Sarah, 2 Oct 2026: "Yes, match AD".
     scratch_precision: str = "rough"
+    # How many of a map's best refined layouts the trapped-point loop resolves; the lowest is
+    # kept. 1 (the default) resolves only the best, as every chain before 12 Oct 2026. A layout
+    # that refines worse can resolve far lower (06-optimiser, gp-cnic: the best refined layout
+    # resolved to 26,882, the next four to ~26,236). A search setting: the problem is unchanged.
+    # At most 5, the layouts that are refined fine. Opt-in; using it is Sarah's decision (Q155).
+    resolve_best: int = 1
 
     def __post_init__(self) -> None:
         ColumnBasisConvention(self.column_bases)  # raises on an unknown convention
@@ -83,12 +89,19 @@ class MapOptions:
             raise ChainConfigError(
                 f"scratch_precision must be rough or fine: {self.scratch_precision!r}"
             )
+        if not 1 <= self.resolve_best <= 5:
+            raise ChainConfigError(f"resolve_best must be 1 to 5: {self.resolve_best!r}")
 
 
 # Options added after chains were first published, with the value that reproduces them. They
 # enter a step's parameters (and chain.json) only when set otherwise, so adding one neither
 # reruns nor republishes existing chains.
-LATER_OPTIONS = {"move_groups": False, "merge_all": False, "scratch_precision": "fine"}
+LATER_OPTIONS = {
+    "move_groups": False,
+    "merge_all": False,
+    "scratch_precision": "fine",
+    "resolve_best": 1,
+}
 
 
 # Options renamed after chains were published: they enter a step's parameters (and chain.json)

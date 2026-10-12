@@ -48,9 +48,15 @@ from af.chart.procrustes import procrustes
 from af.util.artefacts import sha256_path
 from af.util.config import ConfigError, load_config
 
+# Options that change how hard the optimiser searches, not the map's problem: a pair differing
+# only in these is still the same problem, and its stresses compare (the lower found more).
+SEARCH_OPTIONS = ("resolve_best",)
+
 FIELDS = (
     "context: why this record exists when it is not month to month (--note), else null. "
     "stress: each map's own best stress; comparable only when same_problem is true. "
+    "search_differ: options that change how hard the optimiser searches, not the problem "
+    "(SEARCH_OPTIONS), as [previous, new]; they leave same_problem true. "
     "points: paired = same kind and designation once on each side; filled = the same point "
     "with its passage (antigen) or serum id (serum) filled in or emptied (same kind, name, "
     "reassortant, annotations; one candidate a side; the field empty on one side), fitted like "
@@ -225,6 +231,19 @@ def _problem(version_dir: Path) -> dict[str, Any]:
     return {"inputs": prov["inputs"], "parameters": prov["parameters"]}
 
 
+def _search_apart(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The parameters without SEARCH_OPTIONS, and those options' values (absent = the value
+    every chain had before the option existed)."""
+    from af.chain.config import LATER_OPTIONS
+
+    rest = dict(params)
+    options = dict(rest.pop("options", None) or {})
+    search = {k: options.pop(k, LATER_OPTIONS[k]) for k in SEARCH_OPTIONS}
+    if options:  # options that held only search settings are no options
+        rest["options"] = options
+    return rest, search
+
+
 def record(
     chains: Path,
     dataset: str,
@@ -247,8 +266,10 @@ def record(
     new_path, prev_path = _chosen(vn), _chosen(vp)
     thresholds = load_thresholds(thresholds_path)
     pn, pp = _problem(vn), _problem(vp)
-    keys = sorted(set(pn["parameters"]) | set(pp["parameters"]))
-    differ = [k for k in keys if pn["parameters"].get(k) != pp["parameters"].get(k)]
+    (an, sn), (ap, sp) = _search_apart(pn["parameters"]), _search_apart(pp["parameters"])
+    keys = sorted(set(an) | set(ap))
+    differ = [k for k in keys if an.get(k) != ap.get(k)]
+    search = {f"options.{k}": [sp[k], sn[k]] for k in SEARCH_OPTIONS if sp[k] != sn[k]}
     same = pn["inputs"] == pp["inputs"] and not differ
     drift = records / dataset / f"{parent}.tables-drift.json"
     from af.run.runtime import release_info
@@ -263,6 +284,7 @@ def record(
         "same_problem": same,
         "inputs_differ": pn["inputs"] != pp["inputs"],
         "parameters_differ": differ,
+        "search_differ": search,
         "retires": str(drift.relative_to(records)) if drift.is_file() else None,
         "thresholds": {
             "path": str(thresholds_path),
@@ -306,9 +328,16 @@ def sentences(rec: dict[str, Any], *, movers: int = 8) -> list[str]:
         + "."
     ]
     if rec["same_problem"]:
+        search = rec.get("search_differ") or {}  # records before 12 Oct 2026 have no key
+        how = "; ".join(f"{k} {a} -> {b}" for k, (a, b) in search.items())
         out.append(
             f"Same tables and parameters: stress {s['previous']:.3f} -> {s['new']:.3f}"
             f" ({s['relative']:+.2%})."
+            + (
+                f" Only the search differs ({how}): the same problem, searched harder."
+                if how
+                else ""
+            )
         )
     else:
         why = ["the tables inputs"] if rec["inputs_differ"] else []

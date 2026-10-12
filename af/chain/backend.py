@@ -28,6 +28,7 @@ class Optimiser(Protocol):
         seed: int,
         start_layout: np.ndarray | None,
         move_groups: bool = False,
+        resolve_best: int = 1,
     ) -> list[MapResult]: ...
 
     def relax_chunk(
@@ -41,7 +42,12 @@ class Optimiser(Protocol):
     ) -> list[MapResult]: ...
 
     def combine(
-        self, arrays: dict, chunks: list[MapResult], incremental: bool, move_groups: bool = False
+        self,
+        arrays: dict,
+        chunks: list[MapResult],
+        incremental: bool,
+        move_groups: bool = False,
+        resolve_best: int = 1,
     ) -> list[MapResult]: ...
 
     def grid_test(self, layout: np.ndarray, arrays: dict) -> list[dict]: ...
@@ -108,7 +114,9 @@ class CoreOptimiser:
             termination=r["termination"],
         )
 
-    def optimise(self, arrays, n_starts, dim, seed, start_layout, move_groups=False):
+    def optimise(
+        self, arrays, n_starts, dim, seed, start_layout, move_groups=False, resolve_best=1
+    ):
         from af.map.optimise import refine, relax
 
         problem = self._problem(arrays)
@@ -127,7 +135,7 @@ class CoreOptimiser:
         if rough:  # as AD chart-relax-grid: every start rough, then the best 5 fine
             projections = refine(problem, projections, n_best=5, threads=self.threads)
         maps = [self._as_dict(p, result.threads) for p in projections]
-        return self._resolve(problem, maps, move_groups)
+        return self._resolve(problem, maps, move_groups, resolve_best=resolve_best)
 
     def relax_chunk(self, arrays, first_start, n_starts, dim, seed, start_layout):
         """One job's share of a map's starts. Incremental chunks, and scratch chunks relaxed
@@ -148,7 +156,7 @@ class CoreOptimiser:
         )
         return [self._as_dict(p, result.threads) for p in result.projections]
 
-    def combine(self, arrays, chunks, incremental, move_groups=False):
+    def combine(self, arrays, chunks, incremental, move_groups=False, resolve_best=1):
         from af.map.optimise import refine, sort_projections
 
         problem = self._problem(arrays)
@@ -157,7 +165,8 @@ class CoreOptimiser:
             projections = refine(problem, projections, n_best=5, threads=self.threads)
         # the relax threads of the chunks, whatever order the maps are in now
         relax = [{"threads": r["threads"], "cpus": r["cpus"]} for r in chunks if "threads" in r]
-        return self._resolve(problem, [self._as_dict(p) for p in projections], move_groups, relax)
+        maps = [self._as_dict(p) for p in projections]
+        return self._resolve(problem, maps, move_groups, relax, resolve_best)
 
     def _resolve(
         self,
@@ -165,46 +174,61 @@ class CoreOptimiser:
         maps: list[MapResult],
         move_groups: bool,
         relax: list[dict] | None = None,
+        resolve_best: int = 1,
     ) -> list[MapResult]:
-        """`relax` is the threads/CPUs of each split chunk's starts; unsplit, the maps carry
-        their own."""
+        """The trapped-point loop on the best `resolve_best` maps (MapOptions.resolve_best); the
+        lowest is kept. `relax` is the threads/CPUs of each split chunk's starts; unsplit, the
+        maps carry their own. With more than one resolved, each map records the rank it had
+        before the loop (`refined_rank`), so a step says which one it kept."""
         from af.map.optimise import available_cpus, resolve_trapped
 
         if relax is None:
             relax = [{"threads": m["threads"], "cpus": m["cpus"]} for m in maps if "threads" in m]
-        fixed = resolve_trapped(
-            problem, maps[0]["layout"], threads=self.threads, move_groups=move_groups
-        )
-        groups = [
-            {
-                "members": [int(m) for m in g.members],
-                "shift": [float(x) for x in g.shift],
-                "stress_before": float(g.stress_before),
-                "stress_after": float(g.stress_after),
-                "kept": bool(g.kept),
-                "n_antigens": int(g.n_antigens),
-                "n_sera": int(g.n_sera),
-                "mixed": bool(g.mixed),
-            }
-            for g in fixed.groups
-        ]
-        run_threads = {
+        changed = False
+        groups_of: dict[int, list[dict]] = {}
+        threads = 0
+        for rank in range(min(resolve_best, len(maps))):
+            fixed = resolve_trapped(
+                problem, maps[rank]["layout"], threads=self.threads, move_groups=move_groups
+            )
+            threads = int(fixed.threads)
+            groups_of[rank] = [
+                {
+                    "members": [int(m) for m in g.members],
+                    "shift": [float(x) for x in g.shift],
+                    "stress_before": float(g.stress_before),
+                    "stress_after": float(g.stress_after),
+                    "kept": bool(g.kept),
+                    "n_antigens": int(g.n_antigens),
+                    "n_sera": int(g.n_sera),
+                    "mixed": bool(g.mixed),
+                }
+                for g in fixed.groups
+            ]
+            if fixed.moved or any(g["kept"] for g in groups_of[rank]):
+                p = fixed.projection
+                maps[rank] = {
+                    **maps[rank],
+                    "layout": p.layout,
+                    "stress": p.stress,
+                    "resolved_rounds": fixed.rounds,
+                    "resolved_moves": fixed.moved,
+                }
+                changed = True
+            if resolve_best > 1:
+                maps[rank] = {**maps[rank], "refined_rank": rank}
+        run_threads: dict[str, Any] = {
             "relax": _count_runs(relax),
-            "trapped": {"threads": int(fixed.threads), "cpus": available_cpus()},
+            "trapped": {"threads": threads, "cpus": available_cpus()},
         }
-        if fixed.moved or any(g["kept"] for g in groups):
-            p = fixed.projection
-            maps[0] = {
-                **maps[0],
-                "layout": p.layout,
-                "stress": p.stress,
-                "resolved_rounds": fixed.rounds,
-                "resolved_moves": fixed.moved,
-            }
+        if resolve_best > 1:
+            run_threads["trapped"]["maps"] = len(groups_of)
+        if changed:
             maps.sort(key=lambda r: r["stress"])
         best = min(range(len(maps)), key=lambda i: maps[i]["stress"])
         maps[best] = {**maps[best], "run_threads": run_threads}
         if move_groups:  # recorded on the best map, also when no group was found
+            groups = groups_of[maps[best].get("refined_rank", 0)]
             maps[best] = {**maps[best], "resolved_groups": groups}
         return maps
 
@@ -243,7 +267,9 @@ class StubOptimiser:
     name = "stub-numpy-gradient-descent"
     key = "stub"
 
-    def optimise(self, arrays, n_starts, dim, seed, start_layout, move_groups=False):
+    def optimise(
+        self, arrays, n_starts, dim, seed, start_layout, move_groups=False, resolve_best=1
+    ):
         return self.relax_chunk(arrays, 0, n_starts, dim, seed, start_layout)
 
     def relax_chunk(self, arrays, first_start, n_starts, dim, seed, start_layout):
@@ -259,7 +285,7 @@ class StubOptimiser:
             first_start=first_start,
         )
 
-    def combine(self, arrays, chunks, incremental, move_groups=False):
+    def combine(self, arrays, chunks, incremental, move_groups=False, resolve_best=1):
         return sorted(chunks, key=lambda r: (r["stress"], r["start_seed"]))
 
     def grid_test(self, layout, arrays):

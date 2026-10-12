@@ -109,10 +109,17 @@ class Mapper:
         seed: int,
         start_layout: np.ndarray | None,
         move_groups: bool = False,
+        resolve_best: int = 1,
     ) -> list[dict]:
         if self.split is None or self.split.chunks <= 1:
             return self.optimiser.optimise(
-                arrays, n_starts, dim, seed, start_layout, move_groups=move_groups
+                arrays,
+                n_starts,
+                dim,
+                seed,
+                start_layout,
+                move_groups=move_groups,
+                resolve_best=resolve_best,
             )
         work = self.split.work_dir / label
         problem = work / "problem.npz"
@@ -180,7 +187,11 @@ class Mapper:
             runner.run_many(jobs)
         chunks = [m for path in chunk_files for m in read_result(path)]
         return self.optimiser.combine(
-            arrays, chunks, incremental=start_layout is not None, move_groups=move_groups
+            arrays,
+            chunks,
+            incremental=start_layout is not None,
+            move_groups=move_groups,
+            resolve_best=resolve_best,
         )
 
 
@@ -434,6 +445,15 @@ def _map_chart(chart: Chart, projections: list[Projection]) -> Chart:
 def _loop(maps: list[dict]) -> dict:
     best = min(maps, key=lambda r: r["stress"])
     loop = {"rounds": best.get("resolved_rounds", 0), "moves": best.get("resolved_moves", 0)}
+    if "refined_rank" in best:  # resolve_best > 1: which refined layout the kept map came from
+        loop["refined_rank"] = best["refined_rank"]
+        loop["resolved"] = [
+            {"refined_rank": r["refined_rank"], "stress": r["stress"],
+             "rounds": r.get("resolved_rounds", 0), "moves": r.get("resolved_moves", 0)}
+            for r in sorted(
+                (r for r in maps if "refined_rank" in r), key=lambda r: r["refined_rank"]
+            )
+        ]  # fmt: skip
     if "resolved_groups" in best:
         loop["groups"] = best["resolved_groups"]
     return loop
@@ -508,6 +528,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
         seed,
         None,
         move_groups=o.move_groups,
+        resolve_best=o.resolve_best,
     )
     chart = _map_chart(
         table,
@@ -579,6 +600,7 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
         seed,
         None,
         move_groups=o.move_groups,
+        resolve_best=o.resolve_best,
     )
     chart = _map_chart(
         merged,
@@ -657,6 +679,7 @@ def _merge_step(
         seed,
         start,
         move_groups=o.move_groups,
+        resolve_best=o.resolve_best,
     )
     all_scratch = mapper.make(
         runner,
@@ -667,6 +690,7 @@ def _merge_step(
         seed ^ 0x5DEECE66D,
         None,
         move_groups=o.move_groups,
+        resolve_best=o.resolve_best,
     )
     inc_chart = _map_chart(
         merged,
