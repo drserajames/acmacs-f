@@ -441,7 +441,7 @@ def af_clades_assigner(clade_set: Any, *, require_gap_support: bool = True) -> C
         ]
         result = assign.assign_tree(nodes, clade_set, require_gap_support=require_gap_support)
         review = assign.conflict_review(
-            assign.sibling_conflicts(nodes, result, clade_set), result.ties
+            assign.sibling_conflicts(nodes, result, clade_set), result.ties, result.recoveries
         )
         calls = {
             name: CladeCall(a.clade, a.support, a.unobservable, a.inherited)

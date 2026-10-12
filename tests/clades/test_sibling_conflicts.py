@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any, cast
 
-from af.clades.assign import Node, assign_tree, sibling_conflicts
+from af.clades.assign import Node, assign_tree, conflict_review, sibling_conflicts
 from af.clades.nomenclature import CladeSet
 
 from .synthetic import build_clone, commit_command, load_synthetic, write_clade
@@ -90,3 +91,86 @@ def test_no_tie_when_support_differs(tmp_path: Path) -> None:
         Node("leaf", "root", sequence(p5="K", p9="T", p331="W")),
     ]
     assert assign_tree(nodes, clade_set).ties == ()
+
+
+# ------------------------------------- sibling recovery (Sarah, 11 Oct 2026, Q138)
+
+
+def recovery_tree() -> list[Node]:
+    """P → P.1, then an internal node whose own sequence reverts P.1's own 9T and matches
+    sister P.2 (its deletion at 7), with a leaf below it."""
+    reverted = sequence(p5="K", p7="-", p9="A")
+    return [
+        Node("root", None, sequence(p5="K")),
+        Node("in-p1", "root", sequence(p5="K", p9="T", p331="W")),
+        Node("reverts", "in-p1", reverted),
+        Node("leaf", "reverts", reverted),
+    ]
+
+
+def test_an_internal_node_contradicting_its_clade_is_recovered_to_a_sibling(tmp_path: Path) -> None:
+    """The node reverts P.1's own 9T and matches P.2 instead. Without recovery it would keep
+    P.1 and take its leaves with it, and P.2 would be assigned nowhere."""
+    clade_set = _synthetic(tmp_path)
+    nodes = recovery_tree()
+    result = assign_tree(nodes, clade_set)
+    assert result.clade("in-p1") == "P.1"
+    assert result.clade("reverts") == "P.2"
+    assert result.clade("leaf") == "P.2"
+    assert [(r.node, r.inherited, r.recovered) for r in result.recoveries] == [
+        ("reverts", "P.1", "P.2")
+    ]
+    assert not result.assignments["reverts"].inherited
+
+
+def test_a_leaf_is_never_recovered(tmp_path: Path) -> None:
+    """A tip cannot fall out of its clade: the same sequence as a leaf keeps P.1."""
+    clade_set = _synthetic(tmp_path)
+    nodes = [node for node in recovery_tree() if node.name != "leaf"]
+    nodes[-1] = Node("reverts", "in-p1", nodes[-1].sequence)  # now a leaf: no children
+    result = assign_tree(nodes, clade_set)
+    assert result.clade("reverts") == "P.1"
+    assert result.assignments["reverts"].inherited
+    assert result.recoveries == ()
+
+
+def test_recovery_never_climbs_above_the_parent_clade(tmp_path: Path) -> None:
+    """Contradicting P as well as P.1 (P's own 5K reverted) keeps P.1: recovering into P's
+    subtree on a sequence that contradicts P itself would be a guess."""
+    clade_set = _synthetic(tmp_path)
+    nodes = [
+        Node("root", None, sequence(p5="K")),
+        Node("in-p1", "root", sequence(p5="K", p9="T", p331="W")),
+        Node("reverts", "in-p1", sequence(p5="E", p7="-", p9="A")),
+        Node("leaf", "reverts", sequence(p5="E", p7="-", p9="A")),
+    ]
+    result = assign_tree(nodes, clade_set)
+    assert result.clade("reverts") == "P.1"
+    assert result.recoveries == ()
+
+
+def test_a_conflict_counts_only_the_leaves_still_in_its_label(tmp_path: Path) -> None:
+    """Below a node labelled P.2 that also matches P.1, one subtree is recovered to P.1. Those
+    leaves are no longer mislabelled, so the guard must not count them (Q138)."""
+    clade_set = _synthetic(tmp_path)
+    nodes = [
+        Node("root", None, sequence(p5="K")),
+        Node("p2", "root", sequence(p5="K", p7="-")),
+        Node("gains-p1", "p2", sequence(p5="K", p7="-", p9="T", p331="W")),
+        Node("stays", "gains-p1", sequence(p5="K", p7="-", p9="T", p331="W")),
+        Node("moved", "gains-p1", sequence(p5="K", p7="A", p9="T", p331="W")),
+        Node("moved-leaf", "moved", sequence(p5="K", p7="A", p9="T", p331="W")),
+    ]
+    result = assign_tree(nodes, clade_set)
+    assert result.clade("gains-p1") == "P.2"
+    assert result.clade("moved") == "P.1" and result.clade("moved-leaf") == "P.1"
+    conflict = next(c for c in sibling_conflicts(nodes, result, clade_set) if c.node == "gains-p1")
+    assert (conflict.leaves, conflict.leaves_in_label) == (2, 1)
+    review = conflict_review(
+        sibling_conflicts(nodes, result, clade_set), result.ties, result.recoveries
+    )
+    topmost = cast("list[dict[str, Any]]", review["topmost"])
+    assert topmost[0]["leaves_in_label"] == 1
+    assert topmost[0]["leaves"] == 2  # kept: 05-trees reads it
+    assert cast("dict[str, int]", review["counts"])["recovered_nodes"] == 1
+    assert review["recovered"] == [{"node": "moved", "inherited": "P.2", "recovered": "P.1"}]
