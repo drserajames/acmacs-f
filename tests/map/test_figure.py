@@ -7,7 +7,14 @@ import pytest
 
 from af.chart.model import Antigen, Chart, Serum, Titres
 from af.map.colouring import ChartColours
-from af.map.figure import FigureError, chart_points, chart_scene, draw_axes, frame_around
+from af.map.figure import (
+    FigureError,
+    chart_points,
+    chart_scene,
+    draw_axes,
+    frame_around,
+    reference_flags,
+)
 from af.map.render import DEFAULT_LOOK
 from af.map.style import ColourRow, ColourScheme
 
@@ -37,6 +44,18 @@ def test_points_follow_the_chart_and_skip_missing_coordinates() -> None:
     assert pts[2].xy is None  # no coordinates: never drawn, never guessed
     with pytest.raises(FigureError, match="layout has shape"):
         chart_points(chart(), XY[:3])
+
+
+def test_reference_antigens_come_from_the_charts_flags_else_from_its_sera() -> None:
+    # A chain chart records no flags: the antigen named as a serum is the reference antigen.
+    c = chart()
+    c.antigens[0] = Antigen(c.sera[0].name, passage="E2", date="2020-02-01")
+    assert reference_flags(c) == [True, False, False]
+    assert [p.reference for p in chart_points(c, XY)[:3]] == [True, False, False]
+    # A chart carrying the flags (ae's export) is read as it says, even where the rule differs.
+    c.antigens[1].extra["T"] = {"R": True}
+    assert reference_flags(c) == [False, True, False]
+    assert reference_flags(chart()) == [False, False, False]
 
 
 def test_scene_paints_by_the_given_colours() -> None:
