@@ -15,7 +15,7 @@
 #include <span>
 #include <vector>
 
-#include "portable_math.hh"
+#include "numerics.hh"
 #include "problem.hh"
 
 namespace af::map
@@ -25,9 +25,10 @@ namespace af::map
     {
         constexpr double sigmoid_multiplier = 10.0;
 
-        // portable::exp, not std::exp: the system's differs in the last bit between machines, and
-        // the minimiser turns one bit into a different map (portable_math.hh).
-        inline double sigmoid(double x) { return 1.0 / (1.0 + portable::exp(-x)); }
+        // numerics::exp: the portable exp under the contract (the system's differs in the last bit
+        // between machines, and the minimiser turns one bit into a different map), the system's in
+        // the original arithmetic (numerics.hh).
+        inline double sigmoid(double x) { return 1.0 / (1.0 + numerics::exp(-x)); }
 
         // Error of one "<" titre as a function of diff = target + 1 - map distance.
         inline double less_than_error(double diff) { return diff * diff * sigmoid(sigmoid_multiplier * diff); }

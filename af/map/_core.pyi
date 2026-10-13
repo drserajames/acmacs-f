@@ -10,6 +10,7 @@ import numpy as np
 import numpy.typing as npt
 
 openmp: bool
+library: str
 NUMERICS: str
 
 def contracts_multiply_add() -> bool: ...

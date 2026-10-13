@@ -13,6 +13,10 @@ hash passing on both IS the cross-machine check. If a hash changes, the arithmet
 A release build runs this file as a gate, so it needs no data and no network, uses fixed thread
 counts (2; and 1 against 5 to show the count does not matter), takes about a second, and has no
 skip: a skipped check would read as a passed one.
+
+The original arithmetic is kept as an option (af.map._core_original). Its bits belong to one
+machine, so the tests here only check that it is offered, repeats itself, and cannot be mixed with
+the contract's core; tools/check-original-arithmetic.py compares it with an earlier release.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import math
 import random
 import struct
 import sys
+from typing import Any
 
 import numpy as np
 import pytest
@@ -127,7 +132,9 @@ def test_portable_functions_stay_close_to_the_system_ones(name, low, high, limit
 # the same layout on every machine
 
 
-def integer_table(n_antigens: int = 90, n_sera: int = 14, seed: int = 20261013) -> MapProblem:
+def integer_table(
+    n_antigens: int = 90, n_sera: int = 14, seed: int = 20261013, *, numerics: str | None = None
+) -> MapProblem:
     """A noisy titre table made with integer arithmetic only.
 
     Positions are whole eighths, column bases and logged titres whole numbers, the random numbers
@@ -159,12 +166,16 @@ def integer_table(n_antigens: int = 90, n_sera: int = 14, seed: int = 20261013) 
                 value[ag, sr], kind[ag, sr] = 0.0, TitreType.LESS_THAN
             else:
                 value[ag, sr], kind[ag, sr] = float(min(logged, 10.0)), TitreType.REGULAR
+    # numerics left unsaid is the build's default; tools/check-original-arithmetic.py uses this
+    # table too, also with releases from before MapProblem had the argument
+    options: dict[str, Any] = {} if numerics is None else {"numerics": numerics}
     return MapProblem(
         titre_value=value,
         titre_type=kind,
         column_bases=np.array(colbase),
         disconnected=np.zeros(n_antigens + n_sera, dtype=bool),
         dodgy_is_regular=False,
+        **options,
     )
 
 
@@ -244,6 +255,61 @@ def test_ties_between_starts_are_broken_by_start_number():
     twins = [opt.Projection(p.layout, 100.0, 2, 0, p.start_seed, p.start_index, 0) for p in rough]
     ordered = opt.sort_projections(list(reversed(twins)))
     assert [p.start_index for p in ordered] == sorted(p.start_index for p in twins)
+
+
+# ---------------------------------------------------------------------------------------
+# the original arithmetic, kept as an option
+
+
+def test_both_arithmetics_are_offered_and_the_default_is_the_contract():
+    """Sarah, 13 Oct 2026: "please keep the original optimiser (non-reproducible on a different
+    machine) as an option". It is chosen by name, per problem, and never by default."""
+    assert opt.NUMERICS_OFFERED == ("strict-fp-1", "original")
+    assert integer_table().numerics == opt.NUMERICS
+    assert opt._core_original.NUMERICS is None  # no name: its bits belong to one machine
+    with pytest.raises(ValueError, match="offers"):
+        integer_table(numerics="fast")  # an unknown name is an error, not a fallback
+
+
+def test_a_problem_is_run_by_the_core_it_was_made_for():
+    strict, original = integer_table(), integer_table(numerics=opt.ORIGINAL)
+    assert type(strict._core_problem).__module__ == "af.map._core"
+    assert type(original._core_problem).__module__ == "af.map._core_original"
+    # an object of one core handed to the other is refused, never quietly run under the wrong one
+    with pytest.raises(TypeError):
+        opt._core.relax(original._core_problem, dimensions=2, n_starts=1, seed=1)
+    with pytest.raises(TypeError):
+        opt._core_original.relax(strict._core_problem, dimensions=2, n_starts=1, seed=1)
+    with pytest.raises(TypeError):
+        opt._core.grid_test(
+            original._core_problem, np.zeros((strict.n_points, 2)), step=0.1, threads=1
+        )
+
+
+def test_the_original_repeats_itself_on_one_machine():
+    """Its bits are this machine's, so none is recorded here (tools/check-original-arithmetic.py
+    compares them with an earlier release on the same machine). Only: the same bits every time,
+    at any thread count."""
+    problem = integer_table(numerics=opt.ORIGINAL)
+    first, again, more_threads = (
+        chain_like_map(problem),
+        chain_like_map(problem),
+        chain_like_map(problem, threads=5),
+    )
+    hashes = {layout_hash(run[2].projection.layout) for run in (first, again, more_threads)}
+    assert len(hashes) == 1
+    assert [p.stress for p in first[0].projections] == [
+        p.stress for p in more_threads[0].projections
+    ]
+
+
+def test_the_contract_holds_with_the_original_loaded_and_used():
+    # the two cores share a process, each with its own alglib: neither may reach the other's
+    original = chain_like_map(integer_table(numerics=opt.ORIGINAL))
+    strict = chain_like_map(integer_table())
+    assert layout_hash(strict[2].projection.layout) == SCRATCH["resolved"]
+    # the same problem under both: near-equal minima, whatever the last bits
+    assert original[2].projection.stress == pytest.approx(strict[2].projection.stress, rel=0.05)
 
 
 # Recorded with NUMERICS "strict-fp-1" on macOS arm64 (Apple clang). The same values are required on

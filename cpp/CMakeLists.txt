@@ -92,15 +92,23 @@ foreach(unit IN LISTS AF_ALGLIB_UNITS)
   endif()
   list(APPEND AF_ALGLIB_SOURCES "${source}")
 endforeach()
-add_library(af_alglib STATIC ${AF_ALGLIB_SOURCES})
+# alglib's minimisers are part of the arithmetic, so there is one alglib per arithmetic (see
+# cpp/optimiser/numerics.hh): af_alglib without contraction for the contract, af_alglib_original
+# with the compiler's defaults, as every release before the contract built it. Their symbols are
+# hidden, so the two extension modules cannot pick up each other's copy when both are loaded.
+foreach(af_alglib_target af_alglib af_alglib_original)
+  add_library(${af_alglib_target} STATIC ${AF_ALGLIB_SOURCES})
+  # The public include is marked SYSTEM so alglib's own warnings don't drown ours.
+  target_include_directories(${af_alglib_target} SYSTEM PUBLIC "${alglib_SOURCE_DIR}/src")
+  target_compile_definitions(${af_alglib_target} PUBLIC AE_COMPILE_MINLBFGS AE_COMPILE_MINCG AE_COMPILE_PCA)
+  set_target_properties(${af_alglib_target} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(${af_alglib_target} PRIVATE -w)
+  endif()
+endforeach()
 add_library(af::alglib ALIAS af_alglib)
-# The public include is marked SYSTEM so alglib's own warnings don't drown ours.
-target_include_directories(af_alglib SYSTEM PUBLIC "${alglib_SOURCE_DIR}/src")
-target_compile_definitions(af_alglib PUBLIC AE_COMPILE_MINLBFGS AE_COMPILE_MINCG AE_COMPILE_PCA)
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  target_compile_options(af_alglib PRIVATE -w)
-endif()
-target_compile_options(af_alglib PRIVATE ${AF_STRICT_FP_OPTIONS})   # alglib's CG is part of the arithmetic
+add_library(af::alglib_original ALIAS af_alglib_original)
+target_compile_options(af_alglib PRIVATE ${AF_STRICT_FP_OPTIONS})
 
 # --- Python bindings: pybind11 --------------------------------------------------
 # pybind11 (workstream 6's choice): mature, good numpy array support. The pip

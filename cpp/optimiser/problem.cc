@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "portable_math.hh"
+#include "numerics.hh"
 
 namespace af::map
 {
@@ -60,7 +60,7 @@ namespace af::map
         TableDistances result;
         const auto n_ag = problem.n_antigens;
         const auto n_sr = problem.n_sera;
-        const auto logged_adjust = [&problem](std::size_t point) { return problem.avidity_adjust.empty() ? 0.0 : portable::log2(problem.avidity_adjust[point]); };
+        const auto logged_adjust = [&problem](std::size_t point) { return problem.avidity_adjust.empty() ? 0.0 : numerics::log2(problem.avidity_adjust[point]); };
 
         for (std::size_t ag = 0; ag < n_ag; ++ag) {
             for (std::size_t sr = 0; sr < n_sr; ++sr) {

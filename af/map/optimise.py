@@ -21,17 +21,29 @@ import math
 import os
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
 
-from af.map import _core
+from af.map import _core, _core_original
 
-# Names the optimiser's arithmetic (cpp/optimiser/numerics.hh). The same input gives the same bits
-# on every machine with the same NUMERICS; a different value means results may differ bit for bit,
-# so anything that reuses or compares optimiser output must keep the two apart.
+# The optimiser is compiled twice, once per arithmetic (cpp/optimiser/numerics.hh), and a
+# MapProblem says which one it is for (``MapProblem.numerics``).
+#
+# NUMERICS, the default, names the arithmetic under contract: the same input gives the same bits on
+# every machine. A different name means results may differ bit for bit, so anything that reuses or
+# compares optimiser output must keep the two apart.
+#
+# ORIGINAL asks for the arithmetic as it was before the contract (the compiler's defaults and the
+# system exp): the same bits as earlier releases on the same machine, different ones on another
+# (Sarah, 13 Oct 2026: "please keep the original optimiser (non-reproducible on a different
+# machine) as an option"). It is only ever chosen by name. It has no arithmetic name of its own,
+# because its results belong to one machine: "original" is the word that asks for it.
 NUMERICS: str = _core.NUMERICS
+ORIGINAL = "original"
+NUMERICS_OFFERED: tuple[str, ...] = (NUMERICS, ORIGINAL)
+_CORES = {NUMERICS: _core, ORIGINAL: _core_original}
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +65,24 @@ class TitreType(IntEnum):
     DODGY = 4
 
 
+def _core_named(numerics: str) -> Any:
+    """The compiled core for an arithmetic. An unknown name is an error: there is no fallback, and
+    the original is never chosen for a caller who did not ask for it."""
+    try:
+        return _CORES[numerics]
+    except (KeyError, TypeError):
+        raise ValueError(
+            f"unknown optimiser arithmetic {numerics!r}: this build offers {NUMERICS_OFFERED} "
+            f"({_core.library})"
+        ) from None
+
+
+def _core_of(problem: MapProblem) -> Any:
+    """The compiled core a problem was made for. Its Problem object belongs to that module, and
+    the other module's functions refuse it (a TypeError), so the two never mix."""
+    return _core_named(problem.numerics)
+
+
 @dataclass(frozen=True)
 class MapProblem:
     """One table ready for the optimiser (interface I1). Points are antigens then sera.
@@ -71,6 +101,7 @@ class MapProblem:
     avidity_adjust: FloatArray | None = None  # [n_points], raw factors (.ace projection "f")
     gradient_multipliers: FloatArray | None = None  # [n_points]; only 1.0 is supported
     unmovable: BoolArray | None = None  # [n_points]
+    numerics: str = NUMERICS  # which compiled core: NUMERICS (the same bits everywhere) or ORIGINAL
     _core_problem: _core.Problem = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -84,7 +115,7 @@ class MapProblem:
             raise TypeError("disconnected must be a boolean array")
         if self.unmovable is not None and np.asarray(self.unmovable).dtype != np.bool_:
             raise TypeError("unmovable must be a boolean array")
-        core = _core.Problem(
+        core = _core_named(self.numerics).Problem(
             np.asarray(self.titre_value, dtype=np.float64),
             titre_type.astype(np.int8),
             np.asarray(self.column_bases, dtype=np.float64),
@@ -190,7 +221,7 @@ def relax(
     core = problem._core_problem
     if start_layout is None:
         _require_positive("dimensions", dimensions)
-        raw = _core.relax(
+        raw = _core_of(problem).relax(
             core,
             dimensions=dimensions,
             n_starts=n_starts,
@@ -210,7 +241,7 @@ def relax(
         if layout.shape[1] != dimensions:
             raise ValueError(f"start_layout has {layout.shape[1]} dimensions, not {dimensions}")
         rough = precision == "fine"
-        raw = _core.relax_incremental(
+        raw = _core_of(problem).relax_incremental(
             core,
             layout,
             n_starts=n_starts,
@@ -249,7 +280,7 @@ def refine(
     _require_positive("n_best", n_best)
     ordered = sort_projections(projections)
     best, rest = ordered[:n_best], ordered[n_best:]
-    raw = _core.refine(
+    raw = _core_of(problem).refine(
         problem._core_problem,
         [_layout(problem, p.layout) for p in best],
         method=method,
@@ -284,7 +315,7 @@ def optimise(
 ) -> Projection:
     """Minimise one given layout, without randomising anything (ae ``Projection.relax``)."""
     return _projection(
-        _core.optimise(
+        _core_of(problem).optimise(
             problem._core_problem, _layout(problem, layout), method=method, precision=precision
         )
     )
@@ -294,7 +325,7 @@ def grid_test(
     problem: MapProblem, layout: FloatArray, *, step: float = 0.1, threads: int = 0
 ) -> list[GridResult]:
     """Look for trapped and hemisphering points (one result per point)."""
-    raw = _core.grid_test(
+    raw = _core_of(problem).grid_test(
         problem._core_problem, _layout(problem, layout), step=step, threads=threads
     )
     return [
@@ -680,7 +711,7 @@ def fit_antigen_reactivity(
     if fixed_arr.shape != (n_ag,) or start_arr.shape != (n_ag,):
         raise ValueError(f"fixed and start must have one entry per antigen ({n_ag})")
     layout_arr = _layout(problem, layout)
-    raw = _core.fit_reactivity(
+    raw = _core_of(problem).fit_reactivity(
         problem._core_problem,
         layout_arr,
         start_arr,
@@ -762,7 +793,7 @@ def antigen_reactivity_scan(
             if column_bases == "recompute":
                 reactivity = np.zeros(problem.n_antigens)
                 reactivity[antigen] = adjust
-                changes["column_bases"] = _core.reactivity_column_bases(
+                changes["column_bases"] = _core_of(problem).reactivity_column_bases(
                     problem._core_problem,
                     reactivity,
                     column_bases="recompute",

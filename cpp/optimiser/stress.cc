@@ -69,6 +69,7 @@ namespace af::map
     {
         std::fill(gradient.begin(), gradient.end(), 0.0);
         double result = 0.0;
+#ifndef AF_ORIGINAL_ARITHMETIC
         if (dimensions == 2) {
             // Two dimensions, which is every map the chains make: the same operations in the same
             // order as the general loops below, written out, with each coordinate difference
@@ -107,6 +108,7 @@ namespace af::map
             zero_unmovable(gradient, dimensions);
             return result;
         }
+#endif
         for (const auto& entry : distances_.regular) {
             const double dist = map_distance(layout, dimensions, entry.p1, entry.p2);
             const double diff = entry.distance - dist;
@@ -115,9 +117,16 @@ namespace af::map
         }
         for (const auto& entry : distances_.less_than) {
             const double dist = map_distance(layout, dimensions, entry.p1, entry.p2);
+#ifdef AF_ORIGINAL_ARITHMETIC
+            // as it was: the two functions, each with its own sigmoid
+            const double diff = entry.distance - dist + 1.0;
+            result += entry.weight * less_than_error(diff);
+            push_apart(layout, gradient, dimensions, entry.p1, entry.p2, entry.weight * terms::less_than_error_slope(diff) / nonzero(dist));
+#else
             const auto term = terms::less_than(entry.distance - dist + 1.0);
             result += entry.weight * term.error;
             push_apart(layout, gradient, dimensions, entry.p1, entry.p2, entry.weight * term.slope / nonzero(dist));
+#endif
         }
         zero_unmovable(gradient, dimensions);
         return result;
