@@ -20,6 +20,7 @@ from af.store import (
     write_manifest,
     write_snapshot,
 )
+from af.util.running import running_af
 
 T0 = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
 
@@ -82,6 +83,48 @@ def test_identical_rebuild_is_reconfirmed_not_republished(store: Store) -> None:
     history = store.history("serology", "all")
     assert [event["event"] for event in history] == ["published", "reconfirmed"]
     assert history[1]["parent"] == first.version
+
+
+def another_af(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Make the store believe a different af is running (another commit, a changed checkout)."""
+    other = {**running_af(), "commit": "f" * 40, "dirty": True, "release": None}
+    monkeypatch.setattr("af.store.store.running_af", lambda: dict(other))
+    monkeypatch.setattr("af.store.snapshot.running_af", lambda: dict(other))
+    return other
+
+
+def test_a_version_says_which_af_wrote_it(store: Store) -> None:
+    ref = publish(store, "serology", "all", {"part.parquet": "rows"})
+    written = json.loads((store.resolve(ref) / "PROVENANCE.json").read_text())
+    assert written["af"] == running_af() and written["af_version"] == running_af()["version"]
+    assert store.history("serology", "all")[-1]["af"] == running_af()
+
+
+def test_which_af_wrote_it_changes_no_version_id(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = publish(store, "serology", "all", {"part.parquet": "rows"})
+    other = another_af(monkeypatch)
+    second = publish(store, "serology", "all", {"part.parquet": "rows"})
+    elsewhere = publish(Store.create(tmp_path / "b"), "serology", "all", {"part.parquet": "rows"})
+    assert first == second == elsewhere  # the record is outside the manifest
+    history = store.history("serology", "all")
+    assert [event["event"] for event in history] == ["published", "reconfirmed"]
+    assert [event["af"]["commit"] for event in history] == [running_af()["commit"], other["commit"]]
+    # the version keeps the record of the af that first wrote its files
+    written = json.loads((store.resolve(first) / "PROVENANCE.json").read_text())
+    assert written["af"]["commit"] == running_af()["commit"]
+
+
+def test_a_snapshot_says_which_af_wrote_it_and_keeps_its_id(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = publish(store, "trees", "h3/report", {"tree.nwk": "(a,b);"})
+    snapshot = write_snapshot(store, [tree], "example")
+    document = json.loads((store.root / "snapshots" / f"{snapshot}.json").read_text())
+    assert document["af"] == running_af()
+    another_af(monkeypatch)
+    assert write_snapshot(store, [tree], "the same refs, from another af") == snapshot
 
 
 def test_new_version_links_unchanged_files(store: Store) -> None:

@@ -19,6 +19,7 @@ from af.pipeline import (
 from af.run import Job, LocalRunner
 from af.util.artefacts import Artefact, ArtefactError, read_provenance
 from af.util.config import ConfigError
+from af.util.running import running_af
 
 
 class Chain:
@@ -75,6 +76,29 @@ def test_second_run_skips_everything(tmp_path: Path) -> None:
     assert statuses(outcomes) == [("upper", "skipped"), ("count", "skipped")]
     assert chain.ran == ["upper", "count"]
     assert chain.count.read_text() == "4"
+
+
+def test_a_different_af_alone_reruns_no_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chain = Chain(tmp_path)
+    chain.pipeline().run()
+    record = tmp_path / "state" / "upper.json"
+    assert json.loads(record.read_text())["af"] == running_af()
+    other = {**running_af(), "commit": "f" * 40, "dirty": True}
+    monkeypatch.setattr("af.pipeline.record.running_af", lambda: other)
+    assert statuses(chain.pipeline().run()) == [("upper", "skipped"), ("count", "skipped")]
+    assert json.loads(record.read_text())["af"] == running_af()  # a skipped step keeps its record
+
+
+def test_a_record_from_before_the_af_key_is_still_up_to_date(tmp_path: Path) -> None:
+    chain = Chain(tmp_path)
+    chain.pipeline().run()
+    for path in (tmp_path / "state").glob("*.json"):
+        record = json.loads(path.read_text())
+        del record["af"]
+        path.write_text(json.dumps(record))
+    assert statuses(chain.pipeline().run()) == [("upper", "skipped"), ("count", "skipped")]
 
 
 def test_changed_input_reruns_downstream(tmp_path: Path) -> None:
