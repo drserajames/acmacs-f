@@ -14,13 +14,13 @@ from __future__ import annotations
 import copy
 import dataclasses
 import logging
-import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
+from af.chart import exact
 from af.chart.titre import MISSING_TITRE, Titre, TitreType, column_basis
 
 _log = logging.getLogger(__name__)
@@ -154,7 +154,7 @@ def minimum_column_basis_value(mcb: str) -> float:
     """ "none" -> 0; "1280" -> log2(1280/10) = 7."""
     if mcb in ("none", ""):
         return 0.0
-    return math.log2(float(mcb) / 10.0)
+    return exact.log2(float(mcb) / 10.0)  # as a titre's log: the same on every machine
 
 
 @dataclass
