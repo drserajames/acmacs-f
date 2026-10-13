@@ -226,3 +226,71 @@ def test_a_back_fill_can_record_which_env_wrote_the_bytes(
     assert (
         R.read_record(path)["af_release"] is None
     )  # not written by a release, and does not claim to
+
+
+# ---------------------------------------------------------------------------------------------
+# The record written at export, by the exporting process itself
+
+
+def cli(store: Store, selection: Path, out: Path, *extra: str) -> int:
+    return E.main([str(selection), "h3", str(store.root), str(out), *extra])
+
+
+def test_an_export_writes_its_own_record_when_given_the_records_root(
+    store: Store, tmp_path: Path, selection: Path
+) -> None:
+    """The env that writes the bytes writes the record, so the two match by construction."""
+    out, root = tmp_path / "out", tmp_path / "records"
+    assert cli(store, selection, out, "--records", str(root)) == 0
+    export_json = json.loads((out / E.EXPORT_FILE).read_text())
+    record = R.read_record(R.record_path(root, export_json))
+    assert record["how"] == R.AT_EXPORT
+    assert record["files"] == export_json["files"]
+    assert record["export"] == export_json
+    assert record["selection_sha256"] == R.sha256_path(selection)
+    assert sorted(record["content"]) == sorted(export_json["files"])
+
+
+def test_an_export_must_say_where_its_record_goes_or_why_there_is_none(
+    store: Store, tmp_path: Path, selection: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No silent default: an unrecorded export is only found out at report time."""
+    with pytest.raises(SystemExit) as refused:
+        cli(store, selection, tmp_path / "out")
+    assert refused.value.code == 2
+    assert "--records" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()  # refused before anything was written
+
+
+def test_an_export_can_decline_a_record_only_with_a_reason(
+    store: Store, tmp_path: Path, selection: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        cli(store, selection, tmp_path / "blank", "--no-record", "  ")
+    assert cli(store, selection, tmp_path / "out", "--no-record", "placement experiment") == 0
+    assert "no export record: placement experiment" in capsys.readouterr().out
+    assert not list(tmp_path.rglob(f"*{R.RECORD_SUFFIX}"))
+
+
+def test_a_record_is_refused_for_files_the_export_did_not_write(
+    store: Store, tmp_path: Path, selection: Path
+) -> None:
+    """A record vouches for bytes: a directory changed since the export gets no record."""
+    out = tmp_path / "out"
+    exported(store, out)
+    with (out / E.ALIGNMENT_FILE).open("a") as handle:
+        handle.write(">another\nACGT\n")
+    with pytest.raises(R.RecordError, match="not the files this export wrote"):
+        R.record_export(out, selection, tmp_path / "records")
+    assert not list(tmp_path.rglob(f"*{R.RECORD_SUFFIX}"))
+
+
+def test_recording_an_export_twice_changes_nothing(
+    store: Store, tmp_path: Path, selection: Path
+) -> None:
+    out, root = tmp_path / "out", tmp_path / "records"
+    exported(store, out)
+    first = R.record_export(out, selection, root)
+    before = first.read_text()
+    assert R.record_export(out, selection, root) == first
+    assert first.read_text() == before

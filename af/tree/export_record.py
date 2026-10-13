@@ -223,6 +223,48 @@ def read_record(path: Path) -> dict[str, Any]:
     return record
 
 
+def record_export(
+    directory: Path,
+    selection: Path,
+    root: Path,
+    *,
+    af_release: str | None = None,
+    note: str | None = None,
+) -> Path:
+    """Record an export whose files are in ``directory``: the record written *at export*.
+
+    This is what every new tree's export calls (``python -m af.tree.export --records``), so the
+    env that wrote the bytes writes the record too and the two match by construction -- no
+    writer-version question can arise, unlike a :func:`back_fill`.
+
+    The files are re-hashed against ``export.json`` first. A record vouches for bytes, so it is
+    refused for a directory whose files are no longer the ones the export wrote (a second export
+    over the top, a truncated copy): better no record than one for some other content.
+    """
+    directory = Path(directory)
+    export_json = json.loads((directory / "export.json").read_text())
+    _, _, files = _checked(export_json)
+    for name, recorded in sorted(files.items()):
+        path = directory / name
+        if not path.is_file():
+            raise RecordError(f"{path}: named in export.json but missing; nothing to record")
+        actual = sha256_path(path)
+        if actual != recorded:
+            raise RecordError(
+                f"{path}: sha256 {actual[:12]} is not what export.json recorded "
+                f"({recorded[:12]}); these are not the files this export wrote"
+            )
+    return write_record(
+        root,
+        export_json,
+        how=AT_EXPORT,
+        selection_sha256=sha256_path(selection),
+        af_release=af_release,
+        directory=directory,
+        note=note,
+    )
+
+
 def back_fill(
     store: Store,
     subtype: str,

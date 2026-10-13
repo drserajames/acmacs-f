@@ -24,6 +24,13 @@ design rule 8 asks, without carrying a date signal the leaf order should never h
 **outgroup is written first** whatever the seed, because CMAPLE takes the first record as its
 reference; that belongs here rather than in a caller, so a future export cannot lose it.
 
+**The export record.** The command line also writes the export's record
+(:mod:`af.tree.export_record`): sequences version -> the two file hashes, which is what lets a
+report tell that a tree read the same content as the version its figures read. It is written here,
+by the process that wrote the bytes, so no later re-export has to reproduce them (``leaves.parquet``
+is not byte-reproducible across pyarrow versions). ``--records ROOT`` says where; ``--no-record
+REASON`` is the only way to export without one.
+
 **Embargo.** Embargoed sequences may be used in WHO reports, not in publications. Nothing here
 drops them; the flag travels with each leaf into the tree store, and the count is in
 ``export.json``, so every consumer can tell.
@@ -292,7 +299,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="root on this stand-in, not the configured outgroup; labels the export test-only",
     )
     parser.add_argument("--test-only-reason", default="", help="required with the stand-in")
+    # One of the two is required: a tree built from an unrecorded export cannot be tied to the
+    # sequences version its figures read, and that is only found out at report time. The root is
+    # an argument because the records live outside the store, at a site's own path.
+    recording = parser.add_mutually_exclusive_group(required=True)
+    recording.add_argument(
+        "--records",
+        type=Path,
+        metavar="ROOT",
+        help="write this export's record under ROOT/exports (af.tree.export_record)",
+    )
+    recording.add_argument(
+        "--no-record",
+        metavar="REASON",
+        help="write no record, and say why (an experiment that will never be published)",
+    )
     args = parser.parse_args(argv)
+    if args.no_record is not None and not args.no_record.strip():
+        parser.error("--no-record needs its reason")
 
     test_only = None
     if args.test_only_outgroup:
@@ -317,6 +341,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{record.subtype}: {record.leaves} leaves (outgroup {record.outgroup}), "
         f"{record.embargoed} embargoed, from {record.sequences}, {seconds:.1f} s{label}"
     )
+    if args.records is None:
+        print(f"no export record: {args.no_record}")
+        return 0
+    from af.run.runtime import release_info
+    from af.tree.export_record import record_export  # it imports this module's exporter
+
+    release = release_info()
+    path = record_export(
+        args.out,
+        args.selection,
+        args.records,
+        af_release=None if release is None else str(release["commit"])[:12],
+    )
+    print(f"export record: {path}")
     return 0
 
 
