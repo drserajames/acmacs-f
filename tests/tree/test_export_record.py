@@ -210,3 +210,19 @@ def test_a_record_cannot_claim_content_it_could_not_hash(tmp_path: Path) -> None
     }
     with pytest.raises(R.RecordError, match="cannot hash content"):
         R.build_record(export_json, how=R.AT_EXPORT, directory=tmp_path)
+
+
+def test_a_back_fill_can_record_which_env_wrote_the_bytes(
+    store: Store, tmp_path: Path, selection: Path
+) -> None:
+    """The env that wrote a tree's own files is often not the one available at back-fill time.
+
+    The first real record needed exactly this: the tree's leaves.parquet came from o's release
+    env, which no laptop release reproduces, so the note says where the bytes came from and why
+    pyarrow was pinned. Without it the record looks as though a release wrote it.
+    """
+    path, _ = R.back_fill(store, "h3", selection, tmp_path / "records", note="pyarrow pinned to X")
+    assert R.read_record(path)["note"] == "pyarrow pinned to X"
+    assert (
+        R.read_record(path)["af_release"] is None
+    )  # not written by a release, and does not claim to

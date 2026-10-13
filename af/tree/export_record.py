@@ -132,8 +132,13 @@ def build_record(
     af_release: str | None = None,
     written: datetime.datetime | None = None,
     directory: Path | None = None,
+    note: str | None = None,
 ) -> dict[str, Any]:
     """The record's content. ``written`` carries a zone; a naive datetime is refused.
+
+    ``note`` says in words what the structured fields cannot, and a back-fill usually needs one:
+    the env that wrote a tree's own files is often not the env available now. For the first
+    B/Vic record the bytes came from o's release env, which no laptop release reproduces.
 
     With ``directory`` (the export's files, still on disk) the record also carries ``content``:
     writer-independent hashes, which are what lets a reader prove same-content when the file bytes
@@ -154,6 +159,7 @@ def build_record(
         "written": when.isoformat(),
         "how": how,
         "writer": _writer(),
+        "note": note,
     }
     if directory is not None:
         missing = [name for name in files if not (Path(directory) / name).is_file()]
@@ -171,6 +177,7 @@ def write_record(
     selection_sha256: str | None = None,
     af_release: str | None = None,
     directory: Path | None = None,
+    note: str | None = None,
 ) -> Path:
     """Write the record for one export. Idempotent; refuses to change an existing one silently.
 
@@ -186,6 +193,7 @@ def write_record(
         selection_sha256=selection_sha256,
         af_release=af_release,
         directory=directory,
+        note=note,
     )
     if path.exists():
         existing = json.loads(path.read_text())
@@ -223,6 +231,7 @@ def back_fill(
     *,
     af_release: str | None = None,
     work: Path | None = None,
+    note: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Export the store's current version of ``subtype`` into scratch, record it, discard the files.
 
@@ -244,6 +253,7 @@ def back_fill(
             selection_sha256=sha256_path(selection),
             af_release=af_release,
             directory=out,
+            note=note,
         )
         return path, export_json
     finally:
@@ -262,6 +272,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--af-release", help="the release this was exported with, for the record")
     parser.add_argument(
+        "--note",
+        help="free text for the record: what the structured fields cannot say, such as which env "
+        "wrote the tree's own files when it is not the env running now",
+    )
+    parser.add_argument(
         "--expect-alignment",
         help="refuse unless the export's alignment.fasta has this sha256 -- use the hash a tree "
         "recorded, so a back-fill cannot quietly record a different export",
@@ -269,7 +284,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     path, export_json = back_fill(
-        Store.open(args.store), args.subtype, args.selection, args.root, af_release=args.af_release
+        Store.open(args.store),
+        args.subtype,
+        args.selection,
+        args.root,
+        af_release=args.af_release,
+        note=args.note,
     )
     files = export_json["files"]
     if args.expect_alignment and files.get("alignment.fasta") != args.expect_alignment:
