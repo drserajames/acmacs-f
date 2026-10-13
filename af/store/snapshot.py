@@ -20,6 +20,7 @@ from typing import Any
 import af
 from af.store.ref import StoreError, StoreRef
 from af.store.store import Store
+from af.util.running import running_af
 
 SNAPSHOTS = "snapshots"
 
@@ -36,6 +37,7 @@ def refs_document(refs: Sequence[StoreRef], description: str) -> dict[str, Any]:
     return {
         "description": description,
         "af_version": af.__version__,
+        "af": running_af(),
         "created": datetime.datetime.now(datetime.UTC).isoformat(),
         "refs": [ref.to_json() for ref in sorted(refs, key=lambda ref: (ref.kind, ref.dataset))],
     }
