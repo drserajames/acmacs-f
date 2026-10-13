@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,6 +81,15 @@ class RunSettings:
     split: SplitSettings | None = None
     # Where this machine keeps reference maps (a chain's [reference] chart is relative to it)
     references: Path | None = None
+    # This machine's own label ("laptop", "cluster-a"), written to each step's platform record.
+    # A label chosen here, never a host name: maps are repeatable per machine, not across them.
+    site: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.site is not None and not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", self.site):
+            raise ChainConfigError(
+                f"site must be a short label (lower-case letters, digits, '-'): {self.site!r}"
+            )
 
 
 def dataset_from_path(chain: Path) -> str:
@@ -192,6 +202,7 @@ def main(argv: list[str]) -> int:
             runner=make_runner(run.runner, args.run, default_work_dir=work.root / "jobs"),
             split=split,
             root=work.root,
+            site=run.site,
         )
         remade = sum(1 for r in results if not r.reused)
         logging.info(

@@ -95,9 +95,12 @@ class SplitStarts:
 class Mapper:
     """Makes a map's starts, in one process or split into jobs."""
 
-    def __init__(self, optimiser: Optimiser, split: SplitStarts | None) -> None:
+    def __init__(
+        self, optimiser: Optimiser, split: SplitStarts | None, site: str | None = None
+    ) -> None:
         self.optimiser = optimiser
         self.split = split
+        self.site = site  # the run config's label for where this runs (platform_info)
 
     def make(
         self,
@@ -349,6 +352,7 @@ def run_chain(
     until_step: int | None = None,
     split: SplitStarts | None = None,
     root: Path | None = None,
+    site: str | None = None,
 ) -> list[StepResult]:
     """Run or resume a chain into `store_root/<name>/`; returns every step, skipped or remade.
 
@@ -360,7 +364,7 @@ def run_chain(
     # `root` is the chain's own directory (af.store.Work: <work>/chains/<dataset>); without
     # it, <store_root>/<name>. Pipeline state goes in <root>/state (DatasetWork.state).
     root = Path(root) if root is not None else Path(store_root) / cfg.name
-    steps = chain_steps(cfg, root, Mapper(optimiser, split))
+    steps = chain_steps(cfg, root, Mapper(optimiser, split, site))
     # Inputs are named and outputs recorded relative to the chain root, so a store or a tables
     # checkout moved to another root (a sync to o or the HPC) re-runs nothing.
     pipeline = Pipeline(steps, state_dir=root / "state", runner=runner or LocalRunner(), root=root)
@@ -464,22 +468,31 @@ def _threads(maps: list[dict]) -> dict | None:
     return min(maps, key=lambda r: r["stress"]).get("run_threads")
 
 
-def _write_step_record(directory: Path, record: dict) -> None:
-    record = {**record, "platform": platform_info()}
+def _write_step_record(directory: Path, record: dict, site: str | None = None) -> None:
+    record = {**record, "platform": platform_info(site)}
     (directory / STEP_RECORD).write_text(json.dumps(record, indent=1, default=_json_default))
 
 
-def platform_info() -> dict[str, str | None]:
+def platform_info(site: str | None = None) -> dict[str, str | None]:
     """What made this step: near-tied incremental/scratch choices can differ between compilers
     (diagnostics.Thresholds.near_tie), so each step says which build it came from. Outside a
-    release the compiler is unknown (None), and says so rather than guessing."""
+    release the compiler is unknown (None), and says so rather than guessing.
+
+    `site` is the run config's own label for where the step ran (RunSettings.site). A map is
+    repeatable on one machine but not across machines: the same seed and starting layouts
+    minimise to different local minima under another compiler and CPU (measured 13 Oct 2026 on
+    one map built at two sites). The label is recorded only when the run config gives one, so
+    records made without it are unchanged; it is never read from the host."""
     release = release_info() or {}
-    return {
+    info: dict[str, str | None] = {
         "release": release.get("commit"),
         "cxx_version": release.get("cxx_version"),
         "machine": platform.machine(),
         "system": platform.system(),
     }
+    if site is not None:
+        info["site"] = site
+    return info
 
 
 def _json_default(o: object) -> object:
@@ -508,7 +521,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
             "stress": {"seed": chart.best().stress_value},
         }
         record["diagnostics"] = step_diagnostics(chart, None, None, None, None, None, cfg)
-        _write_step_record(directory, record)
+        _write_step_record(directory, record, mapper.site)
         return
     t = cfg.tables[0]
     table, sera = select.apply_sera_policy(cfg.sera_policy, read_chart(t.path))
@@ -556,7 +569,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
     if o.move_groups:
         diagnostics["group_moves"] = group_moves(chart, _loop(all_maps).get("groups"))
     record["diagnostics"] = diagnostics
-    _write_step_record(directory, record)
+    _write_step_record(directory, record, mapper.site)
 
 
 def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Mapper) -> None:
@@ -641,7 +654,7 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
     if o.move_groups:
         diagnostics["group_moves"] = group_moves(chart, _loop(all_maps).get("groups"))
     record["diagnostics"] = diagnostics
-    _write_step_record(directory, record)
+    _write_step_record(directory, record, mapper.site)
 
 
 def _merge_step(
@@ -751,7 +764,7 @@ def _merge_step(
     if o.move_groups:
         diagnostics["group_moves"] = group_moves(chosen, _loop(chosen_maps).get("groups"))
     record["diagnostics"] = diagnostics
-    _write_step_record(directory, record)
+    _write_step_record(directory, record, mapper.site)
 
 
 def _write_chain_record(
