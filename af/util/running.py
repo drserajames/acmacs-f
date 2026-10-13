@@ -14,12 +14,19 @@ What it says, and how it knows:
   from it. ``release`` is null.
 - Otherwise ``commit`` and ``dirty`` are null: not known, said rather than guessed.
 
+``libraries`` are the installed versions of the libraries that decide a written file's bytes
+(the Parquet writers): the same table written by two pyarrow versions is two different files, so
+a byte mismatch between two builds is explained by this line, and an environment made outside
+the release locks shows up in it. They are the libraries of the process that wrote the *record*;
+a Parquet file's own ``created_by`` says what wrote that file.
+
 It never records a host name or a path: a record is read on other machines, and by other people.
 """
 
 from __future__ import annotations
 
 import functools
+import importlib.metadata
 import platform
 import subprocess
 import sys
@@ -31,6 +38,7 @@ import af
 
 RELEASE_FILE = "RELEASE.toml"
 RELEASE_ID_LENGTH = 12  # a release's directory name: the first 12 characters of its commit
+BYTE_DECIDING_LIBRARIES = ("duckdb", "pyarrow")  # each writes Parquet, and its version into it
 
 
 def release_info() -> dict[str, Any] | None:
@@ -42,12 +50,15 @@ def release_info() -> dict[str, Any] | None:
 
 
 def running_af() -> dict[str, Any]:
-    """``version``, ``commit``, ``dirty``, ``release`` and ``python`` of this process's af.
+    """``version``, ``commit``, ``dirty``, ``release``, ``python`` and ``libraries`` of this
+    process's af.
 
     Asked once per process: a long run records the af it started with, also when the checkout
     it runs from is edited meanwhile.
     """
-    return dict(_running_af())
+    record = dict(_running_af())
+    record["libraries"] = dict(record["libraries"])
+    return record
 
 
 @functools.cache
@@ -58,6 +69,7 @@ def _running_af() -> dict[str, Any]:
         "dirty": None,
         "release": None,
         "python": platform.python_version(),
+        "libraries": {name: _installed(name) for name in BYTE_DECIDING_LIBRARIES},
     }
     source = Path(af.__file__).resolve().parent
     release = release_info()
@@ -76,6 +88,14 @@ def _running_af() -> dict[str, Any]:
     except (OSError, subprocess.CalledProcessError):
         pass  # no git, or not a checkout: not known
     return record
+
+
+def _installed(distribution: str) -> str | None:
+    """The installed version, read from its metadata (nothing is imported); None if absent."""
+    try:
+        return importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 def _git(source: Path, *args: str) -> str:
