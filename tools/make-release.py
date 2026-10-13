@@ -24,10 +24,12 @@ It makes ``<releases>/<sha12>/`` containing:
 - af installed into ``env`` **non-editable**, with the C++ optimiser built there using
   ``--cxx`` (recorded), in a clean environment. Compiler flags exported by your shell
   (LDFLAGS, CPPFLAGS, …) are not inherited;
-- checks: af and its compiled optimiser import from inside the release; every tool test
-  passes with ``--require-tools`` (pdflatex excepted); ``af.run.smoke --local`` passes;
-- ``RELEASE.toml`` (commit, compiler, versions, host, time), ``conda-explicit.txt`` and
-  ``pip-freeze.txt``, written last. The whole tree is then made read-only;
+- checks: af and its compiled optimisers import from inside the release; ``af.run.smoke
+  --local`` passes; the optimisers built here keep their arithmetic (below); every tool test
+  passes with ``--require-tools`` (pdflatex excepted);
+- ``RELEASE.toml`` (commit, compiler, arithmetic, versions, host, time),
+  ``conda-explicit.txt`` and ``pip-freeze.txt``, written last. The whole tree is then made
+  read-only;
 - ``CONTENTS.txt``: first, ``# packages:`` lines saying how the env was made (replayed or
   solved, and why) and every package that moved since the newest earlier release on this
   platform, generated from the two releases' locks; then every pull request merged into the
@@ -35,6 +37,29 @@ It makes ``<releases>/<sha12>/`` containing:
   (``#182<TAB>maps-align<TAB><merge sha><TAB><date><TAB><title>``). A project that
   pins a release can see whether it has the change it needs with ``grep '^#182' CONTENTS.txt``,
   without a clone or a git walk.
+
+**The optimiser's arithmetic.** The C++ compiler is the system's, outside the package locks:
+two releases with identical locks can hold optimisers built by different compilers, and an
+operating-system update changes the compiler unasked. So the build that was just made is
+tested, in two ways, and ``RELEASE.toml`` says what was found.
+
+- A build offers two arithmetics (``af.map.optimise.NUMERICS_OFFERED``): the default, under a
+  contract of the same bits on every machine, and the original, which repeats only on the
+  machine and compiler that built it. The commit's ``tests/map/test_numerics.py`` is run
+  against the installed af: it compares maps it makes with hashes recorded in that file. Any
+  failure stops the release, and so does a skipped test: a check that did not run must not
+  read as one that passed. ``numerics_default`` and ``numerics_offered`` record the names;
+  two releases with the same non-empty default give the same map bits from the same input.
+- The original has no recorded hashes, since they would belong to one machine. It is
+  compared with the newest earlier release for this platform in ``<releases>``, by the
+  commit's ``tools/check-original-arithmetic.py``. Different bits stop the release: maps
+  made with the original would no longer repeat here. When that is expected (a new system
+  compiler), ``--accept-original-change`` lets the build finish and the change is recorded.
+  ``original_reference`` and ``original_result`` say which release it was compared with and
+  the answer; with no earlier release there, that it was not compared.
+
+A commit from before the contract declares no arithmetic and has no such tests: it still
+builds, the log says nothing was checked, and the names are empty.
 
 The last line printed is the release's python, ``<release>/bin/python`` (``bin`` links
 to ``env/bin``). Launch runs with it, and every Python job
@@ -57,6 +82,7 @@ import argparse
 import dataclasses
 import datetime
 import fcntl
+import json
 import os
 import platform
 import re
@@ -64,7 +90,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -114,6 +142,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="time the package solve alone first (a micromamba --dry-run), so a slow "
         "'environment' stage can be split into solving and fetching/linking",
+    )
+    parser.add_argument(
+        "--accept-original-change",
+        action="store_true",
+        help="finish the release although its original optimiser arithmetic gives different "
+        "bits from the newest earlier release here (expected after a system compiler change); "
+        "recorded in RELEASE.toml",
     )
     return parser.parse_args()
 
@@ -190,11 +225,24 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
         step("smoke test", "smoke")
         smoke = [python, "-m", "af.run.smoke", "--local", "--work-dir", scratch]
         run(smoke, build_env, cwd=scratch)
-        step("tool tests", "tool_tests")
         # The tests without the source tree beside them, so they exercise the installed af
         # (with its compiled optimiser), not src/af.
         (Path(scratch) / "tests").symlink_to(src / "tests")
         shutil.copy2(src / "pyproject.toml", Path(scratch) / "pyproject.toml")
+        step("the optimiser's arithmetic", "numerics")
+        numerics = verify_numerics(python, src, build_env, Path(scratch))
+        original = ("", "")
+        if numerics.default:
+            step("the original arithmetic against the release before", "original")
+            original = compare_original(
+                python,
+                src,
+                build_env,
+                Path(scratch),
+                choice.previous,
+                accept_change=args.accept_original_change,
+            )
+        step("tool tests", "tool_tests")
         tool_tests = [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-m", "tool"]
         run([*tool_tests, "--require-tools", "--skip-tool", "pdflatex"], build_env, cwd=scratch)
 
@@ -215,7 +263,7 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
         )
     packages = package_section(choice, previous, lock, pip)
     (release / "CONTENTS.txt").write_text(packages + contents(args.repo, sha))
-    write_release_file(args, release, sha, started, build_env)
+    write_release_file(args, release, sha, started, build_env, numerics, original)
     (release / "bin").symlink_to("env/bin")  # so <release>/bin/python, like o's env/bin/python
     make_read_only(release)
     step(f"release {sha[:12]} ready in {release}")
@@ -434,12 +482,23 @@ def clean_environment(args: argparse.Namespace) -> dict[str, str]:
     return env
 
 
+IMPORTS_PROBE = """
+import importlib.util
+import af, af.map._core as core
+print(af.__file__)
+print(core.__file__)
+if importlib.util.find_spec("af.map._core_original"):  # absent before the arithmetic contract
+    import af.map._core_original as original
+    print(original.__file__)
+"""
+
+
 def verify_imports(release: Path) -> None:
-    """af and its compiled optimiser must import from inside this release's env."""
-    probe = "import af, af.map._core as c; print(af.__file__); print(c.__file__)"
-    lines = capture([python_of(release), "-I", "-c", probe], {"PATH": "/usr/bin:/bin"}).split()
+    """af and its compiled optimisers must import from inside this release's env."""
+    env = {"PATH": "/usr/bin:/bin"}
+    lines = capture([python_of(release), "-I", "-c", IMPORTS_PROBE], env).splitlines()
     outside = [line for line in lines if not Path(line).resolve().is_relative_to(release)]
-    if len(lines) != 2 or outside:
+    if len(lines) not in (2, 3) or outside:
         raise SystemExit(f"af does not import from inside {release}: {lines}")
 
 
@@ -551,8 +610,160 @@ def verify_one_openmp(python: str, env: dict[str, str]) -> None:
         )
 
 
+NUMERICS_TESTS = "tests/map/test_numerics.py"
+NUMERICS_PROBE = (
+    "import json, af.map.optimise as o; "
+    "print(json.dumps([getattr(o, 'NUMERICS', ''), list(getattr(o, 'NUMERICS_OFFERED', ()))]))"
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class Numerics:
+    """The arithmetics a build says it offers; nothing at all before the contract."""
+
+    default: str
+    offered: tuple[str, ...]
+
+
+def verify_numerics(python: str, src: Path, env: dict[str, str], scratch: Path) -> Numerics:
+    """The arithmetics this build declares, after checking that it keeps them.
+
+    ``scratch`` holds ``tests`` (the commit's) and no ``af``, so the tests import the
+    installed af. A build under the contract must offer its default and at least one other
+    (the original), and pass every test, with none skipped. A commit from before the
+    contract declares nothing and has no tests of it: that is said in the log, and the names
+    are empty. A declaration without the tests, or the tests without one, is an error.
+    """
+    declared = declared_numerics(python, env)
+    tests = src / NUMERICS_TESTS
+    if not declared.default:
+        if tests.is_file() or declared.offered:
+            raise SystemExit(
+                f"the commit has {NUMERICS_TESTS} or offers {declared.offered}, but the "
+                "optimiser built from it declares no default arithmetic "
+                "(af.map.optimise.NUMERICS): not releasing it"
+            )
+        print(
+            "   this commit predates the arithmetic contract (no af.map.optimise.NUMERICS): "
+            "nothing to check; its maps may differ between machines",
+            flush=True,
+        )
+        return declared
+    if declared.default not in declared.offered or len(set(declared.offered)) < 2:
+        raise SystemExit(
+            f"the build's default arithmetic is {declared.default!r} but it offers "
+            f"{declared.offered}: a release must offer its default and the original"
+        )
+    if not tests.is_file():
+        raise SystemExit(
+            f"the optimiser declares arithmetic {declared.default!r} but the commit has no "
+            f"{NUMERICS_TESTS} to check it with: not releasing it"
+        )
+    report = scratch / "numerics.xml"
+    tests_run = [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "xfail_strict=true"]
+    run([*tests_run, f"--junitxml={report}", NUMERICS_TESTS], env, cwd=scratch)
+    counts = junit_counts(report.read_text())
+    not_passed = {key: n for key, n in counts.items() if key != "tests" and n}
+    if counts["tests"] == 0 or not_passed:
+        raise SystemExit(
+            f"arithmetic {declared.default!r} not shown: of {counts['tests']} tests in "
+            f"{NUMERICS_TESTS} {not_passed or 'none ran'} (a skipped test is not a passed one)"
+        )
+    print(
+        f"   arithmetic {declared.default} (offered: {', '.join(declared.offered)}): "
+        f"{counts['tests']} tests passed, none skipped",
+        flush=True,
+    )
+    return declared
+
+
+def declared_numerics(python: str, env: dict[str, str]) -> Numerics:
+    """``af.map.optimise``'s NUMERICS and NUMERICS_OFFERED in the installed build."""
+    default, offered = json.loads(capture([python, "-I", "-c", NUMERICS_PROBE], env))
+    return Numerics(str(default), tuple(str(name) for name in offered))
+
+
+def junit_counts(report: str) -> dict[str, int]:
+    """Tests, failures, errors and skipped in a pytest ``--junitxml`` report (xfail is skipped)."""
+    suites = list(ET.fromstring(report).iter("testsuite"))
+    if not suites:
+        raise SystemExit("the test report holds no test suite: cannot tell what ran")
+    keys = ("tests", "failures", "errors", "skipped")
+    return {key: sum(int(suite.attrib[key]) for suite in suites) for key in keys}
+
+
+ORIGINAL_TOOL = "tools/check-original-arithmetic.py"
+ORIGINAL_SAME = "original arithmetic: the same bits"
+ORIGINAL_DIFFERENT = "original arithmetic: DIFFERENT bits"
+NOT_COMPARED = "not compared: no earlier release for this platform"
+
+
+def compare_original(
+    python: str,
+    src: Path,
+    env: dict[str, str],
+    scratch: Path,
+    previous: Path | None,
+    *,
+    accept_change: bool,
+) -> tuple[str, str]:
+    """The release the original arithmetic was compared with, and the answer.
+
+    The original repeats only on the machine and compiler that built it, so the one thing
+    to hold it to is the newest earlier release here. Different bits stop the release unless
+    ``accept_change``; a comparison that could not be made always does, since accepting a
+    change is not accepting not knowing.
+    """
+    if previous is None:
+        print(f"   {NOT_COMPARED}", flush=True)
+        return "", NOT_COMPARED
+    tool = src / ORIGINAL_TOOL
+    if not tool.is_file():
+        raise SystemExit(f"the commit has no {ORIGINAL_TOOL} to compare the original with")
+    command = [python, "-I", str(tool), "--reference", python_of(previous)]
+    done = subprocess.run(command, env=env, cwd=scratch, capture_output=True, text=True)
+    print(textwrap.indent(done.stdout + done.stderr, "   "), end="", flush=True)
+    outcome = original_outcome(done.returncode, done.stdout)
+    if outcome is None:
+        raise SystemExit(
+            f"could not compare the original arithmetic with release {previous.name} "
+            f"(exit {done.returncode}): not releasing it"
+        )
+    if outcome == "same":
+        return previous.name, "same"
+    if not accept_change:
+        raise SystemExit(
+            f"the original arithmetic gives different bits from release {previous.name}: maps "
+            "made with it would no longer repeat on this machine. If that is expected (a new "
+            "system compiler), build again with --accept-original-change; it is recorded."
+        )
+    print(f"   DIFFERENT from {previous.name}: accepted (--accept-original-change)", flush=True)
+    return previous.name, "different: accepted with --accept-original-change"
+
+
+def original_outcome(returncode: int, stdout: str) -> str | None:
+    """ "same" or "different" when the tool's exit status and its summary line agree; else None.
+
+    Both, not the status alone: a python that dies of an unhandled error also exits 1, and
+    that is not a comparison.
+    """
+    lines = stdout.strip().splitlines()
+    summary = lines[-1] if lines else ""
+    if returncode == 0 and summary.startswith(ORIGINAL_SAME):
+        return "same"
+    if returncode == 1 and summary.startswith(ORIGINAL_DIFFERENT):
+        return "different"
+    return None
+
+
 def write_release_file(
-    args: argparse.Namespace, release: Path, sha: str, started: str, env: dict[str, str]
+    args: argparse.Namespace,
+    release: Path,
+    sha: str,
+    started: str,
+    env: dict[str, str],
+    numerics: Numerics,
+    original: tuple[str, str],
 ) -> None:
     python = python_of(release)
     af_version = capture([python, "-I", "-c", "import af; print(af.__version__)"], env).strip()
@@ -565,6 +776,10 @@ def write_release_file(
         "python": python,
         "cxx": cxx,
         "cxx_version": cxx_version,
+        "numerics_default": numerics.default,
+        "numerics_offered": list(numerics.offered),
+        "original_reference": original[0],
+        "original_result": original[1],
         "micromamba": capture([str(args.micromamba), "--version"], env).strip(),
         "extras": args.extras,
         "host": platform.node(),
@@ -572,10 +787,15 @@ def write_release_file(
         "finished": now(),
         "stage_seconds": stage_summary(),
     }
-    body = "".join(
-        f'{key} = "{str(value).replace(chr(34), chr(39))}"\n' for key, value in fields.items()
-    )
+    body = "".join(f"{key} = {toml_value(value)}\n" for key, value in fields.items())
     (release / RELEASE_FILE).write_text("# af release: frozen; do not edit\n" + body)
+
+
+def toml_value(value: object) -> str:
+    """A string, or a list of strings, as TOML (a double quote in one becomes a single one)."""
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    return '"' + str(value).replace('"', "'") + '"'
 
 
 def python_of(release: Path) -> str:
