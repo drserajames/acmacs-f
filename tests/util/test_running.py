@@ -6,6 +6,9 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
+import duckdb
+import pyarrow
+import pyarrow.parquet as pq
 import pytest
 
 import af
@@ -122,6 +125,7 @@ def test_neither_a_release_nor_a_checkout_is_not_known_rather_than_guessed(
         "dirty": None,
         "release": None,
         "python": ".".join(str(n) for n in sys.version_info[:3]),
+        "libraries": {"duckdb": duckdb.__version__, "pyarrow": pyarrow.__version__},
     }
 
 
@@ -137,11 +141,25 @@ def test_no_git_is_not_known(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 def test_the_record_names_no_host_and_no_path() -> None:
     record = running.running_af()  # this test run's own af, whatever it is
-    assert set(record) == {"version", "commit", "dirty", "release", "python"}
-    text = [value for value in record.values() if isinstance(value, str)]
+    assert set(record) == {"version", "commit", "dirty", "release", "python", "libraries"}
+    text = [v for v in [*record.values(), *record["libraries"].values()] if isinstance(v, str)]
     assert not any("/" in value or socket.gethostname() in value for value in text)
 
 
 def test_each_caller_gets_its_own_copy() -> None:
-    running.running_af()["commit"] = "edited by a caller"
-    assert running.running_af()["commit"] != "edited by a caller"
+    record = running.running_af()
+    record["commit"] = record["libraries"]["pyarrow"] = "edited by a caller"
+    again = running.running_af()
+    assert "edited by a caller" not in (again["commit"], again["libraries"]["pyarrow"])
+
+
+def test_the_library_versions_are_the_ones_parquet_files_are_stamped_with(tmp_path: Path) -> None:
+    path = tmp_path / "t.parquet"
+    pq.write_table(pyarrow.table({"n": [1]}), path)
+    stamped = pq.ParquetFile(path).metadata.created_by  # "parquet-cpp-arrow version <x.y.z>"
+    assert stamped.endswith(" " + running.running_af()["libraries"]["pyarrow"])
+
+
+def test_a_library_not_installed_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(running, "BYTE_DECIDING_LIBRARIES", ("no-such-distribution-af-test",))
+    assert running.running_af()["libraries"] == {"no-such-distribution-af-test": None}
