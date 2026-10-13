@@ -17,6 +17,8 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from af.chart import exact
+
 
 class TitreType(enum.IntEnum):
     """Numeric codes are interface I1's `titre_type`."""
@@ -76,10 +78,12 @@ class Titre:
         return self.type == TitreType.MISSING
 
     def logged(self) -> float:
-        """log2(value/10); the threshold prefix is ignored (ae `Titer::logged`)."""
+        """log2(value/10); the threshold prefix is ignored (ae `Titer::logged`). Correctly
+        rounded (`af.chart.exact`), not the C library's log2: this number is the optimiser's
+        input, and it must be the same on every machine."""
         if self.is_missing:
             return math.nan
-        return math.log2(self.value / 10.0)
+        return exact.log2(self.value / 10.0)
 
     def logged_with_thresholded(self) -> float:
         """`<X` one dilution down, `>X` one up: used for the merge SD and mean."""

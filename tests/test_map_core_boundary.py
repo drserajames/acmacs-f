@@ -54,9 +54,9 @@ FLU_TERMS = re.compile(
 
 CORE = {
     "af/chart/__init__.py", "af/chart/ace.py", "af/chart/column_bases.py", "af/chart/control.py",
-    "af/chart/identity.py", "af/chart/merge.py", "af/chart/model.py", "af/chart/procrustes.py",
-    "af/chart/titre.py", "af/map/__init__.py", "af/map/align.py", "af/map/curate.py",
-    "af/map/optimise.py", "af/map/orient.py", "af/map/viewport.py",
+    "af/chart/exact.py", "af/chart/identity.py", "af/chart/merge.py", "af/chart/model.py",
+    "af/chart/procrustes.py", "af/chart/titre.py", "af/map/__init__.py", "af/map/align.py",
+    "af/map/curate.py", "af/map/optimise.py", "af/map/orient.py", "af/map/viewport.py",
 }  # fmt: skip
 
 #: file -> (pinned af-side imports, pinned flu terms, the seam it splits along)
