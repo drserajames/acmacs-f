@@ -5,15 +5,18 @@ pybind11_add_module(_core
   bindings.cc
   grid_test.cc
   minimise.cc
+  numerics.cc
   problem.cc
   reactivity.cc
   relax.cc
   stress.cc)
-target_link_libraries(_core PRIVATE af::alglib)
+target_link_libraries(_core PRIVATE af::alglib ${CMAKE_DL_LIBS})   # dl: dladdr, for the contract's error message
 target_compile_features(_core PRIVATE cxx_std_20)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(_core PRIVATE -Wall -Wextra)
 endif()
+# The same bits on every machine (numerics.hh): cpp/CMakeLists.txt checked these flags.
+target_compile_options(_core PRIVATE ${AF_STRICT_FP_OPTIONS})
 
 # OpenMP runs the random starts in parallel. It is optional: without it the results are
 # identical (every start has its own seed), only slower. Apple clang has no OpenMP of its

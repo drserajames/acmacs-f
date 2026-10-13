@@ -5,10 +5,15 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <dlfcn.h>
+
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 #include "grid_test.hh"
+#include "numerics.hh"
+#include "portable_math.hh"
 #include "problem.hh"
 #include "random.hh"
 #include "reactivity.hh"
@@ -115,6 +120,18 @@ namespace
                 return "hemisphering";
         }
         return "unknown";
+    }
+} // namespace
+
+namespace
+{
+    // The path of this shared library, for the message of a build that breaks the contract.
+    std::string this_library()
+    {
+        Dl_info info;
+        if (dladdr(reinterpret_cast<const void*>(&af::map::numerics::require), &info) != 0 && info.dli_fname != nullptr)
+            return info.dli_fname;
+        return "af.map._core, path unknown";
     }
 } // namespace
 
@@ -372,4 +389,20 @@ PYBIND11_MODULE(_core, m)
 #else
     m.attr("openmp") = false;
 #endif
+
+    // The arithmetic contract (numerics.hh). A build that does not keep it refuses to load: its
+    // maps would silently differ from every other machine's.
+    try {
+        numerics::require();
+    }
+    catch (const std::runtime_error& err) {
+        // Name the file: the first sign is often a failed batch task's log, not an interactive import.
+        throw std::runtime_error{std::string{err.what()} + " (" + this_library() + ")"};
+    }
+    m.attr("NUMERICS") = numerics::id;
+    m.def("contracts_multiply_add", &numerics::contracts_multiply_add, "True when this build fuses a*b+c (it must not).");
+    m.def(
+        "portable_exp", [](double x) { return portable::exp(x); }, py::arg("x"), "The exp the stress uses: the same bits on every machine.");
+    m.def(
+        "portable_log2", [](double x) { return portable::log2(x); }, py::arg("x"), "The log2 the avidity adjustments use: the same bits on every machine.");
 }

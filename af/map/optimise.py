@@ -28,6 +28,11 @@ import numpy.typing as npt
 
 from af.map import _core
 
+# Names the optimiser's arithmetic (cpp/optimiser/numerics.hh). The same input gives the same bits
+# on every machine with the same NUMERICS; a different value means results may differ bit for bit,
+# so anything that reuses or compares optimiser output must keep the two apart.
+NUMERICS: str = _core.NUMERICS
+
 log = logging.getLogger(__name__)
 
 Method = Literal["cg", "lbfgs"]

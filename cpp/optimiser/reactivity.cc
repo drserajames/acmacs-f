@@ -40,7 +40,7 @@ namespace af::map
             {
                 const auto n_ag = problem.n_antigens, n_sr = problem.n_sera;
                 for (std::size_t point = 0; point < problem.n_points() && !problem.avidity_adjust.empty(); ++point)
-                    logged_adjust_[point] = std::log2(problem.avidity_adjust[point]);
+                    logged_adjust_[point] = portable::log2(problem.avidity_adjust[point]);
                 for (std::size_t ag = 0; ag < n_ag; ++ag) {
                     for (std::size_t sr = 0; sr < n_sr; ++sr) {
                         const auto cell = ag * n_sr + sr;
@@ -102,8 +102,9 @@ namespace af::map
                     double d_target; // d(term)/d(target); d(term)/d(dist) is its negative
                     if (titre.less_than) {
                         const double diff = target + 1.0 - dist;
-                        value += titre.weight * terms::less_than_error(diff);
-                        d_target = titre.weight * terms::less_than_error_slope(diff);
+                        const auto term = terms::less_than(diff);
+                        value += titre.weight * term.error;
+                        d_target = titre.weight * term.slope;
                     }
                     else {
                         const double diff = target - dist;

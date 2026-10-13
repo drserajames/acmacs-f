@@ -9,7 +9,6 @@ namespace af::map
     namespace
     {
         using terms::less_than_error;
-        using terms::less_than_error_slope;
         using terms::nonzero;
 
         // Adds `scale * (x1 - x2)` to the gradient of p2 and subtracts it from p1.
@@ -78,9 +77,9 @@ namespace af::map
         }
         for (const auto& entry : distances_.less_than) {
             const double dist = map_distance(layout, dimensions, entry.p1, entry.p2);
-            const double diff = entry.distance - dist + 1.0;
-            result += entry.weight * less_than_error(diff);
-            push_apart(layout, gradient, dimensions, entry.p1, entry.p2, entry.weight * less_than_error_slope(diff) / nonzero(dist));
+            const auto term = terms::less_than(entry.distance - dist + 1.0);
+            result += entry.weight * term.error;
+            push_apart(layout, gradient, dimensions, entry.p1, entry.p2, entry.weight * term.slope / nonzero(dist));
         }
         if (!unmovable_.empty()) {
             for (std::size_t point = 0; point < n_points_; ++point) {

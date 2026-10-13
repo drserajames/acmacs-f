@@ -22,6 +22,52 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# --- floating point: the same bits on every machine ----------------------------
+# A map must not depend on the machine that built it (cpp/optimiser/numerics.hh). The compiler
+# must not fuse a*b+c into one rounding (arm64 does by default, baseline x86_64 cannot), and must
+# not be allowed to reorder or approximate arithmetic. The flag goes on both targets below, after
+# any CXXFLAGS from the environment, so it wins; the checks here fail the build otherwise.
+include(CheckCXXCompilerFlag)
+if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  message(FATAL_ERROR "af: the optimiser needs clang or gcc (it relies on -ffp-contract=off); "
+                      "this compiler is ${CMAKE_CXX_COMPILER_ID}")
+endif()
+check_cxx_compiler_flag(-ffp-contract=off AF_HAS_FP_CONTRACT_OFF)
+if(NOT AF_HAS_FP_CONTRACT_OFF)
+  message(FATAL_ERROR "af: the compiler does not accept -ffp-contract=off")
+endif()
+set(AF_STRICT_FP_OPTIONS -ffp-contract=off)
+
+string(TOUPPER "${CMAKE_BUILD_TYPE}" af_build_type)
+set(af_given_flags "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${af_build_type}}")
+foreach(af_unsafe -ffast-math -Ofast -funsafe-math-optimizations -fassociative-math
+                  -freciprocal-math -ffinite-math-only -fno-signed-zeros -fcx-limited-range)
+  if(" ${af_given_flags} " MATCHES " ${af_unsafe} ")
+    message(FATAL_ERROR "af: ${af_unsafe} lets the compiler change floating-point results, so maps "
+                        "would differ between machines. Remove it from CXXFLAGS / CMAKE_CXX_FLAGS "
+                        "(given: ${af_given_flags})")
+  endif()
+endforeach()
+
+# Compile and run a*b+c under the build's own flags: it must not be fused.
+if(NOT CMAKE_CROSSCOMPILING)
+  unset(AF_FP_CHECK_RAN CACHE)        # never a cached verdict: the flags may have changed
+  unset(AF_FP_CHECK_COMPILED CACHE)
+  try_run(AF_FP_CHECK_RAN AF_FP_CHECK_COMPILED
+          SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/optimiser/check_fp_contract.cc"
+          COMPILE_DEFINITIONS ${AF_STRICT_FP_OPTIONS}
+          CMAKE_FLAGS "-DCMAKE_CXX_FLAGS:STRING=${af_given_flags}"
+          COMPILE_OUTPUT_VARIABLE af_fp_check_output)
+  if(NOT AF_FP_CHECK_COMPILED)
+    message(FATAL_ERROR "af: the floating-point check did not compile:\n${af_fp_check_output}")
+  endif()
+  if(NOT AF_FP_CHECK_RAN EQUAL 0)
+    message(FATAL_ERROR "af: a*b+c is still fused with ${AF_STRICT_FP_OPTIONS} "
+                        "(flags given: ${af_given_flags}); maps would differ between machines")
+  endif()
+  message(STATUS "af: floating point not contracted (${AF_STRICT_FP_OPTIONS}), checked by running")
+endif()
+
 # --- alglib (GPL-2.0-or-later) -------------------------------------------------
 set(AF_ALGLIB_URL "https://www.alglib.net/translator/re/alglib-3.19.0.cpp.gpl.tgz"
     CACHE STRING "alglib source tarball: URL or local path")
@@ -54,6 +100,7 @@ target_compile_definitions(af_alglib PUBLIC AE_COMPILE_MINLBFGS AE_COMPILE_MINCG
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(af_alglib PRIVATE -w)
 endif()
+target_compile_options(af_alglib PRIVATE ${AF_STRICT_FP_OPTIONS})   # alglib's CG is part of the arithmetic
 
 # --- Python bindings: pybind11 --------------------------------------------------
 # pybind11 (workstream 6's choice): mature, good numpy array support. The pip
