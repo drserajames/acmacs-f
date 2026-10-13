@@ -55,6 +55,17 @@ def test_a_reference_that_will_not_run_is_exit_2(tool, capsys, tmp_path):
     assert "COULD NOT COMPARE" in capsys.readouterr().out
 
 
+def test_an_unforeseen_failure_is_exit_2_not_pythons_exit_1(tool, monkeypatch, capsys):
+    # python exits 1 on an unhandled exception, and 1 here means "compared, and different"
+    def broken(args):
+        raise RuntimeError("something nobody planned for")
+
+    monkeypatch.setattr(tool, "emit", broken)
+    assert tool.main(["--reference", sys.executable]) == tool.COULD_NOT_COMPARE
+    last = capsys.readouterr().out.strip().splitlines()[-1]
+    assert last.startswith("original arithmetic: COULD NOT COMPARE: RuntimeError")
+
+
 def test_a_build_without_the_original_cannot_be_compared(tool):
     class ContractOnly:  # an af whose optimiser has the contract and nothing else
         NUMERICS = "strict-fp-1"

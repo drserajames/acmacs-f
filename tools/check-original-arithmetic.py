@@ -20,8 +20,10 @@ The reference may be a release from before the contract (its only optimiser is t
 later one (its original core is used). The result does not depend on the thread count.
 
 Exit status: 0 every bit the same; 1 compared, and some bit differs; 2 could not compare (the
-reference would not run, a build without the original, a missing input). One summary line on
-stdout; one line per problem before it, with its iterations and layout hash.
+reference would not run, a build without the original, a missing input, any other failure). One
+summary line on stdout, the last, beginning "original arithmetic: the same bits", "original
+arithmetic: DIFFERENT bits" or "original arithmetic: COULD NOT COMPARE" (a release build reads
+it together with the status); one line per problem before it, with its iterations and layout hash.
 """
 
 from __future__ import annotations
@@ -210,6 +212,11 @@ def main(argv: list[str] | None = None) -> int:
             mine, theirs = emit(args), reference(args)
     except CannotCompare as err:
         print(f"original arithmetic: COULD NOT COMPARE: {err}")
+        return COULD_NOT_COMPARE
+    except Exception as err:  # noqa: BLE001
+        # Anything unforeseen is "could not compare", never python's own exit 1, which here
+        # means "compared, and different": a release build acts on the difference.
+        print(f"original arithmetic: COULD NOT COMPARE: {type(err).__name__}: {err}")
         return COULD_NOT_COMPARE
     different = []
     for name, a in mine["problems"].items():
