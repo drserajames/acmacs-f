@@ -42,6 +42,7 @@ from .sheet import Sheet, apply_cell_fixes
 SOURCE = "ae .ace, no workbook"
 ANTIGEN_COLUMNS = ("N", "R", "a", "P", "D", "l")
 SERUM_COLUMNS = ("N", "R", "a", "I", "P", "s")
+ANNOTATION_SEP = "; "  # several annotations in one cell: an annotation may itself hold spaces
 DATED_PASSAGE = re.compile(r"(.*?)\s*\((\d{4}-\d{2}-\d{2})\)")
 
 
@@ -117,12 +118,17 @@ def _sheet(path: Path, name: str, items: list[dict[str, Any]], keys: tuple[str, 
         for key in keys:
             value = item.get(key, "")
             if key == "a":
-                value = " ".join(v for v in value if v != "DISTINCT")
+                value = ANNOTATION_SEP.join(v for v in value if v != "DISTINCT")
             elif key == "l":
                 value = value[0] if value else ""
             row.append(str(value))
         rows.append(row)
     return Sheet(path=path, name=name, rows=rows)
+
+
+def _annotations(cell: str) -> list[str]:
+    """The annotations of one cell, each whole ("ISOLATE 2" is one, not two)."""
+    return [a.strip() for a in cell.split(ANNOTATION_SEP.strip()) if a.strip()]
 
 
 def _passage(text: str, passages: PassageParser, warnings: list[str]) -> tuple[str, str | None]:
@@ -155,7 +161,7 @@ def _antigen(row, item, subtype, lineage, lab, passages, rules, test_date, warni
         reference="R" in item.get("S", ""),
         lineage=lineage,
         reassortant=reassortant or name.reassortant,
-        annotations=[*name.annotations, *annotations.split()],
+        annotations=[*name.annotations, *_annotations(annotations)],
         source={"ace": True, "passage": passage_raw},
     )
     if renamed:
@@ -177,7 +183,7 @@ def _serum(row, subtype, lineage, lab, passages, rules, test_date, warnings) -> 
         species="" if species.upper() in ("", "FERRET") else species.upper(),
         lineage=lineage,
         reassortant=reassortant or name.reassortant,
-        annotations=[*name.annotations, *annotations.split()],
+        annotations=[*name.annotations, *_annotations(annotations)],
         source={"ace": True, "passage": passage_raw},
     )
     if renamed:
