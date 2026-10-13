@@ -38,6 +38,7 @@ from typing import Any
 
 import af
 from af.util.artefacts import Artefact, CheckedArtefact, sha256_path
+from af.util.running import running_af
 
 
 class StepInputMissing(FileNotFoundError):
@@ -162,6 +163,7 @@ def save_record(
         "format": RECORD_FORMAT,
         "step": step,
         "af_version": af.__version__,
+        "af": running_af(),  # not read by is_current: a new af alone re-runs no step
         "inputs": current.inputs,
         "parameters": current.parameters,
         "outputs": {role: output.sha256 for role, output in outputs.items()},

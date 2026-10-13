@@ -57,6 +57,7 @@ from af.store.ref import (
     input_to_json,
 )
 from af.util.critical import critical
+from af.util.running import running_af
 
 LAYOUT_VERSION = 1
 STORE_FILE = "STORE.toml"
@@ -69,7 +70,11 @@ TMP_PREFIX = ".tmp-"
 
 @dataclass(frozen=True)
 class Provenance:
-    """What a version was built from. Written to the version's PROVENANCE.json."""
+    """What a version was built from. Written to the version's PROVENANCE.json.
+
+    The record also says which af wrote it (``af``: :func:`af.util.running.running_af`).
+    PROVENANCE.json is outside the manifest, so that changes no version id.
+    """
 
     step: str
     inputs: tuple[Input, ...]
@@ -81,6 +86,7 @@ class Provenance:
         return {
             "step": self.step,
             "af_version": af.__version__,
+            "af": running_af(),  # which af wrote it: af_version alone cannot say
             "inputs": [input_to_json(item) for item in self.inputs],
             "parameters": json.loads(json.dumps(dict(self.parameters), sort_keys=True)),
             "started": _utc(self.started),
@@ -418,6 +424,7 @@ class VersionBuilder:
                 "parent": previous,
                 "created": _utc(datetime.datetime.now(datetime.UTC)),
                 "af_version": af.__version__,
+                "af": running_af(),
                 "step": provenance.step,
                 "inputs": [input_to_json(item) for item in provenance.inputs],
                 "summary": dict(summary or {}),

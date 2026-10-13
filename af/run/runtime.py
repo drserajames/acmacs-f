@@ -4,18 +4,18 @@ Long runs (chain replays, tree builds, reports) launch with a release's python, 
 ``tools/make-release.py``. A run config names it, e.g. ``python = "<release>/bin/python"``,
 and the driver calls :func:`require_python` first. Started by any other interpreter (a
 dev venv, a shared editable clone that someone may pull mid-run), it refuses rather than
-running code nobody pinned. :func:`release_info` reads the release's RELEASE.toml, so a
-run can log exactly which commit produced it.
+running code nobody pinned. :func:`release_info` (from :mod:`af.util.running`) reads the
+release's RELEASE.toml, so a run can log exactly which commit produced it.
 """
 
 from __future__ import annotations
 
 import sys
-import tomllib
 from pathlib import Path
-from typing import Any
 
-RELEASE_FILE = "RELEASE.toml"
+from af.util.running import RELEASE_FILE, release_info
+
+__all__ = ["RELEASE_FILE", "WrongInterpreter", "release_info", "require_python"]
 
 
 class WrongInterpreter(RuntimeError):
@@ -33,11 +33,3 @@ def require_python(expected: Path | str) -> None:
             f"this run must be started by {wanted} (a frozen af release), "
             f"but it was started by {running}"
         )
-
-
-def release_info() -> dict[str, Any] | None:
-    """The running release's RELEASE.toml, or None when not running from a release."""
-    path = Path(sys.prefix).parent / RELEASE_FILE
-    if not path.is_file():
-        return None
-    return tomllib.loads(path.read_text())
