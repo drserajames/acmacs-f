@@ -12,7 +12,9 @@ reference release's python and under the python running it, and compares every b
 With no --chart the problem is the integer-only invented table of tests/map/test_numerics.py (no
 data, no network), run as a chain makes a scratch map: 40 rough starts, the best 5 refined, the
 trapped loop on the first. With --chart, real maps: STARTS rough starts, the best 5 refined, and
-the trapped loop on the first only with --trapped-loop (it is slow on large maps).
+the trapped loop on the first only with --trapped-loop (it is slow on large maps). A chart's
+arrays are made once, by the python running this, and both sides run those same arrays: what is
+compared is the optimiser, not how a chart becomes arrays.
 
 The reference may be a release from before the contract (its only optimiser is the original) or a
 later one (its original core is used). The result does not depend on the thread count.
@@ -30,6 +32,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -72,23 +75,43 @@ def integer_problem(options: dict[str, Any]) -> Any:
     return module.integer_table(**options)
 
 
-def chart_problem(path: str, options: dict[str, Any]) -> Any:
+def chart_arrays(path: str, out: Path) -> None:
+    """A chart's optimiser arrays, written once by THIS python. Both sides then run these same
+    arrays, so the comparison is of the optimiser and not of how a chart becomes arrays (which
+    has changed on its own: Titre.logged is a correctly rounded log2 since October 2026)."""
     import numpy as np
 
     from af.chart.ace import read_chart
-    from af.map.optimise import MapProblem
 
     chart = read_chart(path)
     arrays = chart.optimiser_arrays(projection=chart.best())
-    return MapProblem(
-        titre_value=arrays["titre_value"],
-        titre_type=arrays["titre_type"],
-        column_bases=np.asarray(arrays["column_bases"], dtype=float),
-        disconnected=arrays["disconnected"],
-        dodgy_is_regular=bool(arrays.get("dodgy_is_regular", False)),
-        avidity_adjust=arrays.get("avidity_adjust"),
-        **options,
-    )
+    kept = {
+        "titre_value": np.asarray(arrays["titre_value"], dtype=float),
+        "titre_type": np.asarray(arrays["titre_type"]),
+        "column_bases": np.asarray(arrays["column_bases"], dtype=float),
+        "disconnected": np.asarray(arrays["disconnected"]),
+        "dodgy_is_regular": np.asarray(bool(arrays.get("dodgy_is_regular", False))),
+    }
+    if arrays.get("avidity_adjust") is not None:
+        kept["avidity_adjust"] = np.asarray(arrays["avidity_adjust"], dtype=float)
+    np.savez(out, **kept)
+
+
+def arrays_problem(path: str, options: dict[str, Any]) -> Any:
+    import numpy as np
+
+    from af.map.optimise import MapProblem
+
+    with np.load(path) as z:
+        return MapProblem(
+            titre_value=z["titre_value"],
+            titre_type=z["titre_type"],
+            column_bases=z["column_bases"],
+            disconnected=z["disconnected"],
+            dodgy_is_regular=bool(z["dodgy_is_regular"]),
+            avidity_adjust=z["avidity_adjust"] if "avidity_adjust" in z.files else None,
+            **options,
+        )
 
 
 def measure(problem: Any, starts: int, threads: int, trapped_loop: bool) -> dict[str, Any]:
@@ -120,11 +143,11 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
     options = original_options(opt)
     core = getattr(opt, "_core_original", opt._core)  # the module that will do the work
     out: dict[str, Any] = {"python": sys.executable, "core": core.__file__, "problems": {}}
-    if args.chart:
-        for spec in args.chart:
+    if args.problem:
+        for spec in args.problem:
             name, rest = spec.split("=", 1)
             path, starts = rest.rsplit(":", 1)
-            problem = chart_problem(path, options)
+            problem = arrays_problem(path, options)
             out["problems"][name] = measure(problem, int(starts), args.threads, args.trapped_loop)
     else:
         out["problems"]["invented table"] = measure(
@@ -144,8 +167,8 @@ def reference(args: argparse.Namespace) -> dict[str, Any]:
         "--threads",
         str(args.threads),
     ]
-    for spec in args.chart or []:
-        command += ["--chart", spec]
+    for spec in args.problem or []:
+        command += ["--problem", spec]
     if args.trapped_loop:
         command.append("--trapped-loop")
     try:
@@ -166,6 +189,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trapped-loop", action="store_true")
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--emit", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--problem", action="append", help=argparse.SUPPRESS
+    )  # NAME=ARRAYS.npz:STARTS
     args = parser.parse_args(argv)
     try:
         if args.emit:
@@ -173,7 +199,15 @@ def main(argv: list[str] | None = None) -> int:
             return SAME
         if not args.reference:
             parser.error("--reference is required")
-        mine, theirs = emit(args), reference(args)
+        with tempfile.TemporaryDirectory() as scratch:
+            args.problem = []
+            for number, spec in enumerate(args.chart or []):
+                name, rest = spec.split("=", 1)
+                path, starts = rest.rsplit(":", 1)
+                arrays = Path(scratch) / f"problem{number}.npz"
+                chart_arrays(path, arrays)
+                args.problem.append(f"{name}={arrays}:{starts}")
+            mine, theirs = emit(args), reference(args)
     except CannotCompare as err:
         print(f"original arithmetic: COULD NOT COMPARE: {err}")
         return COULD_NOT_COMPARE
