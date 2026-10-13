@@ -130,3 +130,19 @@ def test_a_stale_cell_fix_is_an_error(tmp_path):
     (folder / "labn-20300102.ace").write_text(json.dumps(CHART_CHANGED))
     with pytest.raises(ValueError, match="expects 'A4/A2/HCK1'"):
         _add_ace(AceInputs(lab="LABN", dir=folder), rules, [], [], [])
+
+
+def test_an_annotation_of_two_words_stays_one(tmp_path):
+    folder, rules = setup(tmp_path)
+    chart = json.loads(json.dumps(CHART))
+    chart["c"]["a"][0]["a"] = ["ISOLATE 2", "EXAMPLE1X"]
+    chart["c"]["s"][0]["a"] = ["ISOLATE 2"]
+    (folder / "labn-20300102.ace").write_text(json.dumps(chart))
+    tables: list = []
+    errors: list[str] = []
+    _add_ace(AceInputs(lab="LABN", dir=folder), rules, tables, [], errors)
+    assert errors == []
+    (t,) = tables
+    assert t.antigens[0].annotations == ["ISOLATE 2", "EXAMPLE1X"]
+    assert t.antigens[1].annotations == []
+    assert t.sera[0].annotations == ["ISOLATE 2"]
