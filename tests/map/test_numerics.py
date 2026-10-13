@@ -52,14 +52,17 @@ def test_the_build_keeps_the_arithmetic_contract():
 
 EXP_BITS = {
     0.0: "3ff0000000000000",
-    1.0: "4005bf0a8b14576a",
-    -1.0: "3fd78b56362cef38",
+    1.0: "4005bf0a8b145769",
+    -1.0: "3fd78b56362cef37",
     0.5: "3ffa61298e1e069c",
     -37.25: "3c93278bcd70e981",
     12.345678901234567: "410c12618f0f1566",
-    100.0: "48f3494a9b171bf5",
+    100.0: "48f3494a9b171bf4",
     -700.0: "00d14f2b0fb9307f",
+    700.0: "7f0d945df4f8ec8e",
     1e-9: "3ff000000044b830",
+    -0.0027: "3fefe9e953ac0bf4",
+    36.9: "4342d61a967da146",
 }
 LOG2_BITS = {
     1.0: "0000000000000000",
@@ -104,10 +107,11 @@ def test_portable_functions_at_the_edges():
 def test_portable_functions_stay_close_to_the_system_ones(name, low, high, limit):
     """They replace libm for sameness, not accuracy, and must not drift from it.
 
-    Measured on macOS arm64 over 400,000 arguments per range: exp differs from the system exp by
-    0 ulp on 90% and by 1 ulp on the rest, never more; log2 by 0 (86%), 1 (14%) or 2 ulp (5 of
-    400,000). The limits here are one ulp wider, because the system functions themselves differ
-    by an ulp between machines.
+    Measured on macOS arm64: exp over 4,000,000 arguments in each of [-40, 40], [-700, 700],
+    [-1, 1] and [-400, 40] differs from the system exp by 0 ulp on 74% and by 1 ulp on the rest,
+    never more; log2 over 400,000 arguments by 0 (86%), 1 (14%) or 2 ulp (5 of 400,000). The
+    limits here are one ulp wider, because the system functions themselves differ by an ulp
+    between machines.
     """
     rng = random.Random(1)
     mine, system = (
@@ -246,14 +250,14 @@ def test_ties_between_starts_are_broken_by_start_number():
 # every platform; see the module docstring before changing one.
 PROBLEM_HASH = "1de121d83411b9083fff2704eb7fcc6452b722cd7fe1c14ba9180a3c729d313c"
 SCRATCH = {
-    "rough stresses": "00628138a1e8f3a81588ac1c46a1e55680dde5dd26e0ba3355d1d5f53a249889",
-    "refined #0": "262494c29f90f73e1bb3426357a378832453d7f8ba7f169ea2898007c275d7fe",
-    "refined #4": "cce7f61eebefb497776da45e14a1485f9cf8b67a324ee2c555a17a4be3ba63ad",
-    "resolved": "ac530283f30634f9e652b7cd32a90a2327be8abbc7399736b646437d95a17f64",
-    "resolved stress": "4099dcb1d11f3839",
+    "rough stresses": "e7f51dba92e6d651262b8c36c951b15abbcb67f9ba987b60bd0c431040843d40",
+    "refined #0": "da6a2e8c56e102adbad924bd4db61f183c222d1a2581f9663acaa53921cc3f42",
+    "refined #4": "bb0bf7853a864a3e9378bf49c3ae4ccc5be87311ed99e1994bbd055e335c433b",
+    "resolved": "3a5263eac14dd1f892536120bdcd49eca8dcf2487985d5f97cb1a3f4262c0031",
+    "resolved stress": "4099dcb1d11f3830",
 }
-INCREMENTAL = "0d317043b722f123b860dff2a4e379ec2f5b58ac4899f70077a417f8fd1f3ff5"
+INCREMENTAL = "e2f51a2d2080adf1a21555052d8a813fd5a6c43838d4e5906f8efd694ca54cd5"
 OTHER = {
-    "annealed": "ec830c54238944c82f32a7a3d4b21e57fbca74af77a99dc9d717e3365334bdf3",
-    "lbfgs": "f4b64f59bf2f4d4550fd84d5c4587c742f7804446c7032fd249863efda8ed603",
+    "annealed": "bd8e42caae529680c1ce8a7c5ff0bd07b47539aad52485ba28b777ffa95a2d6c",
+    "lbfgs": "8b54c2f64f7a68cef4a761e887d2ab9060d73072278599e324a3d3cf8cb41d72",
 }
