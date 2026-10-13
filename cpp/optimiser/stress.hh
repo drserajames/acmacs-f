@@ -91,6 +91,8 @@ namespace af::map
         const std::vector<PointEntry>& entries_for(std::size_t point) const { return by_point_[point]; }
 
       private:
+        void zero_unmovable(std::span<double> gradient, std::size_t dimensions) const;
+
         TableDistances distances_;
         std::size_t n_points_;
         std::vector<char> unmovable_;
