@@ -102,10 +102,13 @@ def _cell_ref(ref: str) -> tuple[int, int]:
 
 def load(path: Path) -> list[Sheet]:
     """Every worksheet of the workbook. Needs openpyxl, imported here so that a TSV-only run
-    (CDC) does not depend on it."""
+    (CDC) does not depend on it.
+
+    Links to other workbooks are not read (``keep_links=False``): only cell values are wanted,
+    and a link's cached copy of the other file can be malformed where the sheets are sound."""
     import openpyxl
 
-    workbook = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    workbook = openpyxl.load_workbook(path, data_only=True, read_only=True, keep_links=False)
     try:
         return [
             Sheet(
