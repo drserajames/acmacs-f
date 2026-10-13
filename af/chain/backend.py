@@ -8,6 +8,7 @@ back together (`combine`) so that the result is the same however the starts were
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from typing import Any, Protocol
 
@@ -19,6 +20,13 @@ MapResult = dict[str, Any]
 class Optimiser(Protocol):
     name: str
     key: str  # the name `python -m af.chain.starts` knows it by
+
+    @property
+    def numerics(self) -> str | None:
+        """Which arithmetic this build's maps come from (`af.map.optimise.NUMERICS`), or None
+        for an optimiser that names none. Two values may give different maps from the same
+        problem, so chunks, steps and checks made under one are never reused under another."""
+        ...
 
     def optimise(
         self,
@@ -63,6 +71,12 @@ class CoreOptimiser:
 
     def __init__(self, threads: int = 0):
         self.threads = threads
+
+    @property
+    def numerics(self) -> str:
+        from af.map.optimise import NUMERICS
+
+        return NUMERICS
 
     @staticmethod
     def _problem(arrays: dict) -> Any:
@@ -224,8 +238,8 @@ class CoreOptimiser:
         if resolve_best > 1:
             run_threads["trapped"]["maps"] = len(groups_of)
         if changed:
-            maps.sort(key=lambda r: r["stress"])
-        best = min(range(len(maps)), key=lambda i: maps[i]["stress"])
+            maps.sort(key=map_order)
+        best = min(range(len(maps)), key=lambda i: map_order(maps[i]))
         maps[best] = {**maps[best], "run_threads": run_threads}
         if move_groups:  # recorded on the best map, also when no group was found
             groups = groups_of[maps[best].get("refined_rank", 0)]
@@ -248,6 +262,13 @@ class CoreOptimiser:
         ]
 
 
+def map_order(r: MapResult) -> tuple[bool, float, int]:
+    """The core's order (`af.map.optimise.sort_projections`): stress ascending, NaN last, ties by
+    start index. Used wherever maps are ranked after the trapped-point loop, so the map kept does
+    not depend on the order the maps happened to arrive in."""
+    return (math.isnan(r["stress"]), r["stress"], r["start_seed"])
+
+
 def _scratch_rough(arrays: dict) -> bool:
     """A map from scratch relaxed rough, then its best 5 fine (MapOptions.scratch_precision).
     Absent means af's original method, every start fine."""
@@ -266,6 +287,7 @@ class StubOptimiser:
 
     name = "stub-numpy-gradient-descent"
     key = "stub"
+    numerics: str | None = None  # numpy on whatever machine: it names no arithmetic
 
     def optimise(
         self, arrays, n_starts, dim, seed, start_layout, move_groups=False, resolve_best=1
@@ -286,7 +308,7 @@ class StubOptimiser:
         )
 
     def combine(self, arrays, chunks, incremental, move_groups=False, resolve_best=1):
-        return sorted(chunks, key=lambda r: (r["stress"], r["start_seed"]))
+        return sorted(chunks, key=map_order)
 
     def grid_test(self, layout, arrays):
         from af.chain import stub_optimiser

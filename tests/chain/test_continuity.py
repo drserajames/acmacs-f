@@ -127,6 +127,8 @@ def store(tmp_path):
     _version(root, "v2", "v1", new, {"seed": 1})
     _version(root, "v3", "v2", new, {"seed": 2})
     _version(root, "v4", "v2", new, {"seed": 1, "options": {"resolve_best": 3}})
+    _version(root, "v5", "v2", new, {"seed": 1, "numerics": "test-fp-1"})
+    _version(root, "v6", "v5", new, {"seed": 1, "numerics": "test-fp-2"})
     (tmp_path / "t.toml").write_text(TOML)
     return tmp_path
 
@@ -222,3 +224,14 @@ def test_resolve_best_is_a_search_setting_not_a_new_problem(store):
     assert rec["search_differ"] == {"options.resolve_best": [1, 3]}
     assert "Only the search differs (options.resolve_best 1 -> 3)" in sentences(rec)[1]
     assert _run(store, "v2")["search_differ"] == {}
+
+
+def test_another_arithmetic_is_the_same_problem_and_is_said(store):
+    rec = _run(store, "v5")  # v2 was made before the arithmetic had a name
+    assert rec["same_problem"] is True and rec["parameters_differ"] == []
+    assert rec["numerics_differ"] == [None, "test-fp-1"]
+    assert "arithmetic differs (not named -> test-fp-1)" in sentences(rec)[1]
+    rec = _run(store, "v6")
+    assert rec["same_problem"] is True and rec["numerics_differ"] == ["test-fp-1", "test-fp-2"]
+    plain = _run(store, "v2")
+    assert plain["numerics_differ"] is None and "arithmetic" not in sentences(plain)[1]

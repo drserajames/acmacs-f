@@ -126,6 +126,7 @@ def measure_references(cfg: Any, run: RunSettings, root: Path) -> None:
     page shows and publishing keeps. Each is cached on the chosen map's and the reference's
     sha256 and the start count: a rerun that changed nothing measures nothing."""
     from af.chain.reference import BASIN_METHOD, reference_check
+    from af.map.optimise import NUMERICS
 
     if run.references is None:
         raise ChainConfigError(f"{cfg.name}: [[reference]] needs `references` in the run config")
@@ -146,6 +147,7 @@ def measure_references(cfg: Any, run: RunSettings, root: Path) -> None:
             "chart_sha256": sha256_path(path),
             "starts": ref.starts,
             "basin_method": BASIN_METHOD,  # a check measured by an older method is measured again
+            "numerics": NUMERICS,  # as is one relaxed under another arithmetic
         }
         old = cache.get(ref.label)
         if old is not None and old.get("key") == key:

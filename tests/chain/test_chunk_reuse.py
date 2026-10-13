@@ -128,7 +128,9 @@ def test_a_fine_problem_has_the_digest_of_one_written_before_the_setting(arrays)
     from af.chain.starts import problem_digest
 
     def digest(a: dict) -> str:
-        return problem_digest(a, seed=3, dimensions=2, optimiser="stub", start_layout=None)
+        return problem_digest(
+            a, seed=3, dimensions=2, optimiser="stub", numerics=None, start_layout=None
+        )
 
     assert digest({**arrays, "scratch_precision": "fine"}) == digest(arrays)
     assert digest({**arrays, "scratch_precision": "rough"}) != digest(arrays)

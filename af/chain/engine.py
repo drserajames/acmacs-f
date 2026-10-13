@@ -36,10 +36,16 @@ from typing import Any
 import numpy as np
 
 from af.chain import adjust, select
-from af.chain.backend import Optimiser, default_optimiser
+from af.chain.backend import Optimiser, default_optimiser, map_order
 from af.chain.config import ChainConfig, TableRef, config_to_json, option_parameters
 from af.chain.diagnostics import group_moves, run_threads, step_diagnostics, two_position_points
-from af.chain.starts import finished, problem_digest, read_result, write_problem
+from af.chain.starts import (
+    finished,
+    problem_digest,
+    read_result,
+    result_numerics,
+    write_problem,
+)
 from af.chart.ace import read_chart, read_json, write_chart
 from af.chart.merge import (
     ColumnBasisConvention,
@@ -132,11 +138,13 @@ class Mapper:
             seed=seed,
             dimensions=dim,
             optimiser=self.optimiser.key,
+            numerics=self.optimiser.numerics,
             start_layout=start_layout,
         )
         # Finished chunks of the SAME problem are kept, so a run killed after its array (e.g. in
         # the driver's refine) does not pay for the array again (2 Oct 2026: ~830 core-h at stake
-        # on one map). Any other problem, or a missing key, starts the work directory afresh.
+        # on one map). Any other problem, or a missing key, starts the work directory afresh;
+        # so do chunks made under another arithmetic (Optimiser.numerics is in the digest).
         same = key.is_file() and key.read_text().strip() == digest and problem.is_file()
         if not same:
             if work.exists():
@@ -148,6 +156,7 @@ class Mapper:
                 seed=seed,
                 dimensions=dim,
                 optimiser=self.optimiser.key,
+                numerics=self.optimiser.numerics,
                 start_layout=start_layout,
             )
             key.write_text(digest + "\n")
@@ -188,6 +197,16 @@ class Mapper:
         )
         if jobs:
             runner.run_many(jobs)
+        # a task runs its own interpreter: one from a build with another arithmetic (or from
+        # before chunks said which) must not be combined with the rest
+        made = {path.name: result_numerics(path) for path in chunk_files}
+        wrong = {name: n for name, n in made.items() if n != self.optimiser.numerics}
+        if wrong:
+            raise ChainError(
+                f"{label}: {len(wrong)} of {len(made)} chunk(s) were made under numerics"
+                f" {sorted(set(wrong.values()), key=str)}, not this build's"
+                f" {self.optimiser.numerics!r} (first: {sorted(wrong)[0]} in {work})"
+            )
         chunks = [m for path in chunk_files for m in read_result(path)]
         return self.optimiser.combine(
             arrays,
@@ -235,6 +254,10 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
         "optimiser": mapper.optimiser.name,
         "seed": cfg.seed,
     }
+    # the arithmetic the maps come from: a step made under another is made again. Only an
+    # optimiser that names one gets the key, so the others keep their steps.
+    if mapper.optimiser.numerics is not None:
+        common["numerics"] = mapper.optimiser.numerics
     if cfg.remove:  # only a chain that selects points gets the key: others keep their steps
         common["select_remove"] = [r.to_json() for r in cfg.remove]
     if cfg.drop_cells:  # likewise
@@ -411,7 +434,7 @@ def distinct_basins(maps: list[dict], keep: int, min_rmsd: float = 0.5) -> list[
     Ten copies of one basin tell a reviewer nothing; the alternatives are what matter.
     """
     kept: list[dict] = []
-    for m in sorted(maps, key=lambda r: r["stress"]):
+    for m in sorted(maps, key=map_order):
         if len(kept) >= keep:
             break
         if all(procrustes(k["layout"], m["layout"]).rmsd > min_rmsd for k in kept):
@@ -447,7 +470,7 @@ def _map_chart(chart: Chart, projections: list[Projection]) -> Chart:
 
 
 def _loop(maps: list[dict]) -> dict:
-    best = min(maps, key=lambda r: r["stress"])
+    best = min(maps, key=map_order)
     loop = {"rounds": best.get("resolved_rounds", 0), "moves": best.get("resolved_moves", 0)}
     if "refined_rank" in best:  # resolve_best > 1: which refined layout the kept map came from
         loop["refined_rank"] = best["refined_rank"]
@@ -465,15 +488,15 @@ def _loop(maps: list[dict]) -> dict:
 
 def _threads(maps: list[dict]) -> dict | None:
     """What the best map's relax and trapped pass ran on (`CoreOptimiser`; None for the stub)."""
-    return min(maps, key=lambda r: r["stress"]).get("run_threads")
+    return min(maps, key=map_order).get("run_threads")
 
 
-def _write_step_record(directory: Path, record: dict, site: str | None = None) -> None:
-    record = {**record, "platform": platform_info(site)}
+def _write_step_record(directory: Path, record: dict, mapper: Mapper) -> None:
+    record = {**record, "platform": platform_info(mapper.site, mapper.optimiser.numerics)}
     (directory / STEP_RECORD).write_text(json.dumps(record, indent=1, default=_json_default))
 
 
-def platform_info(site: str | None = None) -> dict[str, str | None]:
+def platform_info(site: str | None = None, numerics: str | None = None) -> dict[str, str | None]:
     """What made this step: near-tied incremental/scratch choices can differ between compilers
     (diagnostics.Thresholds.near_tie), so each step says which build it came from. Outside a
     release the compiler is unknown (None), and says so rather than guessing.
@@ -482,7 +505,11 @@ def platform_info(site: str | None = None) -> dict[str, str | None]:
     repeatable on one machine but not across machines: the same seed and starting layouts
     minimise to different local minima under another compiler and CPU (measured 13 Oct 2026 on
     one map built at two sites). The label is recorded only when the run config gives one, so
-    records made without it are unchanged; it is never read from the host."""
+    records made without it are unchanged; it is never read from the host.
+
+    `numerics` is the optimiser's name for its arithmetic (Optimiser.numerics): builds with the
+    same name give the same bits from the same problem on any machine, so with it a reader can
+    tell which maps are repeatable elsewhere. Recorded only when the optimiser names one."""
     release = release_info() or {}
     info: dict[str, str | None] = {
         "release": release.get("commit"),
@@ -492,6 +519,8 @@ def platform_info(site: str | None = None) -> dict[str, str | None]:
     }
     if site is not None:
         info["site"] = site
+    if numerics is not None:
+        info["numerics"] = numerics
     return info
 
 
@@ -521,7 +550,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
             "stress": {"seed": chart.best().stress_value},
         }
         record["diagnostics"] = step_diagnostics(chart, None, None, None, None, None, cfg)
-        _write_step_record(directory, record, mapper.site)
+        _write_step_record(directory, record, mapper)
         return
     t = cfg.tables[0]
     table, sera = select.apply_sera_policy(cfg.sera_policy, read_chart(t.path))
@@ -569,7 +598,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
     if o.move_groups:
         diagnostics["group_moves"] = group_moves(chart, _loop(all_maps).get("groups"))
     record["diagnostics"] = diagnostics
-    _write_step_record(directory, record, mapper.site)
+    _write_step_record(directory, record, mapper)
 
 
 def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Mapper) -> None:
@@ -654,7 +683,7 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
     if o.move_groups:
         diagnostics["group_moves"] = group_moves(chart, _loop(all_maps).get("groups"))
     record["diagnostics"] = diagnostics
-    _write_step_record(directory, record, mapper.site)
+    _write_step_record(directory, record, mapper)
 
 
 def _merge_step(
@@ -764,7 +793,7 @@ def _merge_step(
     if o.move_groups:
         diagnostics["group_moves"] = group_moves(chosen, _loop(chosen_maps).get("groups"))
     record["diagnostics"] = diagnostics
-    _write_step_record(directory, record, mapper.site)
+    _write_step_record(directory, record, mapper)
 
 
 def _write_chain_record(
@@ -776,6 +805,7 @@ def _write_chain_record(
         "mode": "merge_all" if cfg.options.merge_all else "chain",
         "config": config_to_json(cfg),
         "optimiser": optimiser.name,
+        **({"numerics": optimiser.numerics} if optimiser.numerics is not None else {}),
         "complete": len(results) == n_steps,
         "steps": [
             {

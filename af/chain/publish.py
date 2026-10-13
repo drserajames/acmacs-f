@@ -77,7 +77,9 @@ def publish_chain(store_root: Path, dataset: str, chain_root: Path) -> StoreRef:
             | {
                 "tables": [t["table_id"] for t in doc["config"]["tables"]],
                 "optimiser": doc["optimiser"],
-            },
+            }
+            # the arithmetic the maps came from; chains published before it was named have no key
+            | ({"numerics": doc["numerics"]} if "numerics" in doc else {}),
             started=started,
             finished=datetime.datetime.now(datetime.UTC),
         )

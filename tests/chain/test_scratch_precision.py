@@ -82,11 +82,18 @@ def test_the_problem_file_carries_it_to_every_chunk(arrays, tmp_path):
         seed=7,
         dimensions=2,
         optimiser="core",
+        numerics=None,
         start_layout=None,
     )
     read, *_ = read_problem(path)
     assert read["scratch_precision"] == "rough"
     old = write_problem(
-        tmp_path / "q.npz", arrays, seed=7, dimensions=2, optimiser="core", start_layout=None
+        tmp_path / "q.npz",
+        arrays,
+        seed=7,
+        dimensions=2,
+        optimiser="core",
+        numerics=None,
+        start_layout=None,
     )
     assert "scratch_precision" not in read_problem(old)[0]  # absent: every start fine, as before

@@ -257,6 +257,8 @@ def _step_info(s: dict, r: dict) -> list[str]:
             _e(
                 f"made by {pf.get('cxx_version') or 'unknown compiler (not a release)'}"
                 f" · {pf.get('system')} {pf.get('machine')}"
+                # the optimiser's arithmetic, when it names one: the same name, the same bits
+                + (f" · numerics {pf['numerics']}" if pf.get("numerics") else "")
             )
         )
     if m.get("copied_references") or m.get("cheating_assay"):  # the key before 6 Oct 2026
