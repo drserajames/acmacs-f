@@ -119,6 +119,45 @@ def open_chain(store: Store, ref: StoreRef) -> ChainFiles:
     return ChainFiles(ref, chain, provenance, step, current, chosen_sha)
 
 
+def _built(
+    note: Note, files: ChainFiles | None, drawn_by: dict[str, Any] | None, *, stand_in: bool
+) -> None:
+    """Where the layout was optimised and what drew the figure: a map is repeatable on one
+    machine and not across machines, so a reader comparing two builds needs both."""
+    if files:
+        platform = files.last_step.get("platform", {})
+        parts = [platform.get(k) for k in ("system", "machine", "cxx_version")]
+        note.item(
+            "Layout optimised (last chain step) on "
+            + (
+                f"{parts[0]} {parts[1]}, compiler {parts[2]}"
+                if all(parts)
+                else note.gap(
+                    "the build platform (system, architecture, compiler)",
+                    "last step.json platform.system, .machine, .cxx_version",
+                )
+            )
+            + "; build site "
+            + (
+                f"`{platform['site']}`"
+                if platform.get("site")
+                else note.gap("the build site", "last step.json platform.site")
+            )
+        )  # fmt: skip
+    elif stand_in:
+        note.item("Layout not optimised by af: a stand-in")
+    if not drawn_by or not drawn_by.get("commit"):
+        note.item(note.gap("the af that drew the figures", "the build record's af"))
+        return
+    release = (drawn_by.get("release") or {}).get("commit")
+    how = (
+        f"release `{release[:12]}`"
+        if release and release == drawn_by["commit"] and not drawn_by.get("dirty")
+        else "NOT a release" + (", with uncommitted changes" if drawn_by.get("dirty") else "")
+    )
+    note.item(f"Figures drawn by af `{drawn_by['commit'][:12]}` ({how})")
+
+
 def _source(note: Note, files: ChainFiles, records: Path | None = None) -> None:
     ch, params, step = files.chain, files.provenance.get("parameters", {}), files.last_step
     ref = files.ref
@@ -642,10 +681,11 @@ def map_note(
     folder: str, figures: list[dict[str, Any]], store: Store | None,
     cfg: dict[str, Any] | None, rows: list[dict[str, Any]],
     reference_records: Path | None = None, dates: VaccineDates | None = None,
-    store_use: dict[str, Any] | None = None,
+    store_use: dict[str, Any] | None = None, drawn_by: dict[str, Any] | None = None,
 ) -> Note:  # fmt: skip
     """The note for one map: ``figures`` are its window figures' I7 documents; ``store_use`` is
-    the build record's ``store`` (what the report's provenance check found)."""
+    the build record's ``store`` (what the report's provenance check found); ``drawn_by`` its
+    ``af`` (the af that drew the figures)."""
     note = Note(folder)
     note.lines += [
         f"# {folder}: how this map was made",
@@ -689,6 +729,8 @@ def map_note(
         else:
             where = "figure provenance.inputs.chain or stand_in"
             note.item(note.gap("the map's source", where))
+    note.section("Built")
+    _built(note, files, drawn_by, stand_in=note.mode == "stand-in")
     note.section("Column bases")
     if files:
         _column_bases(note, files)
@@ -747,6 +789,7 @@ def write_notes(
                 reference_records,
                 dates,
                 record.get("store"),
+                record.get("af"),
             )  # fmt: skip
             for folder in sorted(by_folder)
         ]

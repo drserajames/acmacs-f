@@ -43,6 +43,8 @@ def _chain(store: Store, *, full: bool) -> StoreRef:
         "steps": [{"index": 0, "directory": "steps/0000", "table_id": "labx-t2"}],
     }
     if full:
+        step["platform"] |= {"system": "SysA", "machine": "archB", "cxx_version": "a compiler 1.0",
+                             "site": "site-c"}  # fmt: skip
         chain["mode"] = "merge_all"
         step["merge_all"] = [{"table_id": "labx-t1"}, {"table_id": "labx-t2"}]
         chain["config"]["column_basis_adjustments"] = [
@@ -106,13 +108,19 @@ def test_a_full_record_leaves_nothing_missing(tmp_path: Path) -> None:
     ref = _chain(store, full=True)
     cfg = {"folder": "labx-hi", "moves": [{"name": "m1"}, {"name": "m2"}]}
     rows = [_comparison_row("all"), _comparison_row("12m")]
-    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, cfg, rows)
+    drawn_by = {"commit": "fedcba9876543210", "dirty": False,
+                "release": {"commit": "fedcba9876543210"}}  # fmt: skip
+    note = howmade.map_note(
+        "labx-hi", [_figure(ref, full=True)], store, cfg, rows, drawn_by=drawn_by
+    )
     text = "\n".join(note.lines)
     assert note.missing == [], note.missing
     assert note.mode == "merge_all" and note.source == f"labx/hi/merged@{ref.version}"
     for expected in (
         "(the CURRENT version)", "2 tables merged in one step", "labx-t1 to labx-t2",
         "af release `abcdef012345`", "Minimum column basis: none",
+        "Layout optimised (last chain step) on SysA archB, compiler a compiler 1.0; build site "
+        "`site-c`", "Figures drawn by af `fedcba987654` (release `fedcba987654`)",
         "Adjustment all-sera -1.0: 2 sera changed", "Removed by rule antigen a name: 1 point(s)",
         "All 2 sera on the map are ferret sera.", "Move m1: applied, 3 movers",
         "Move m2: REFUSED by the from_target guard: 4.500 against a max limit of 4.000",
@@ -136,6 +144,8 @@ def test_an_older_record_says_what_it_lacks(tmp_path: Path) -> None:
         "what configured move m3 did", "the configured vaccine rules as applied",
         "decision dates of 1 move(s)", "decision dates of 1 rotation(s)",
         "the chain's checks against the ae round's maps", "the report's comparison of this map",
+        "the build platform (system, architecture, compiler)", "the build site",
+        "the af that drew the figures",
     ])  # fmt: skip
     assert note.lines[-1].startswith(f"_{len(note.missing)} fact(s) MISSING")
 
@@ -163,12 +173,15 @@ def test_write_notes_writes_one_note_per_map_and_an_index(tmp_path: Path) -> Non
     tree = tmp_path / "tree.i7.json"
     tree.write_text("{}")
     figures.append({"slot": "tree/x/report", "i7": str(tree)})  # not a map: no note
-    record = {"report": "rep-1", "figures": figures}
+    af = {"commit": "fedcba9876543210", "dirty": False, "release": {"commit": "fedcba9876543210"}}
+    record = {"report": "rep-1", "figures": figures, "af": af}
     rows = [_comparison_row("all"), _comparison_row("12m")]
     notes = howmade.write_notes(record, store, {"maps": [{"folder": "labx-hi"}]}, rows,
                                 tmp_path / "out")  # fmt: skip
     assert [n.folder for n in notes] == ["labx-hi"]
-    assert (tmp_path / "out/labx-hi.md").read_text().startswith("# labx-hi: how this map was made")
+    text = (tmp_path / "out/labx-hi.md").read_text()
+    assert text.startswith("# labx-hi: how this map was made")
+    assert "Figures drawn by af `fedcba987654` (release `fedcba987654`)" in text
     index = (tmp_path / "out/README.md").read_text()
     assert "| [labx-hi](labx-hi.md) | labx/hi/merged@" in index and "| merge_all | 0 |" in index
 
@@ -494,3 +507,14 @@ def test_a_tree_same_in_content_is_said_with_both_versions_and_how_the_record_ca
     other = howmade.map_note("labx-other", [_figure(ref, full=True)], store, None, [], None,
                              None, use)  # fmt: skip
     assert not any("Same content" in x for x in other.lines)  # not under this map's slots
+
+
+def test_figures_drawn_by_a_working_tree_say_it_is_not_a_release(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "store")
+    ref = _chain(store, full=True)
+    dirty = {"commit": "0123456789abcdef", "dirty": True, "release": None}
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [], drawn_by=dirty)
+    assert (
+        "Figures drawn by af `0123456789ab` (NOT a release, with uncommitted changes)"
+        in "\n".join(note.lines)
+    )
