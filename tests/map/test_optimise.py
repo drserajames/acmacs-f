@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
+import json
+import math
 import os
 import subprocess
 import sys
 import tempfile
+import typing
 from typing import Any
 
 import numpy as np
@@ -568,6 +571,137 @@ def test_group_pass_never_raises_the_stress(seed):
             assert group.kept == (group.stress_after < group.stress_before - opt.GROUP_MIN_GAIN)
         if not any(g.kept for g in grouped.groups):
             np.testing.assert_array_equal(grouped.projection.layout, plain.projection.layout)
+
+
+# ---------------------------------------------------------------------------------------
+# hemisphering points whose other position is lower (resolve_trapped move_lower)
+
+
+def assert_move_lower_record(resolved: opt.TrappedResolution, problem: MapProblem) -> None:
+    """What every move-lower result must say: kept rounds lower the stress by more than the
+    rule's margin, one after another; a rejected round is the last and changes nothing; the
+    last grid test describes the returned map."""
+    rule = opt.MOVE_LOWER_RULE
+    stress = None
+    for n, r in enumerate(resolved.move_lower, start=1):
+        assert r.round == n
+        if stress is not None:
+            assert r.stress_before == stress
+        assert r.kept == (r.stress_after < r.stress_before - rule.min_gain)
+        assert r.kept == bool(r.moved)
+        assert set(r.moved) <= set(r.candidates)
+        if not r.kept:
+            assert n == len(resolved.move_lower) and r.stress_after == r.stress_before
+            assert resolved.move_lower_stop == "stress did not fall"
+        stress = r.stress_after
+    if stress is not None:
+        assert resolved.projection.stress == stress
+    fresh = opt.grid_test(problem, resolved.projection.layout)
+    assert [(r.diagnosis, r.stress_diff) for r in resolved.last_grid] == [
+        (r.diagnosis, r.stress_diff) for r in fresh
+    ]
+
+
+@pytest.mark.parametrize("numerics", opt.NUMERICS_OFFERED)
+def test_move_lower_moves_a_block_the_plain_loop_leaves(numerics):
+    block, best, stuck, copies = stuck_block()
+    block = with_changes(block, numerics=numerics)
+    stuck = opt.optimise(block, stuck.layout)
+    best = opt.optimise(block, best.layout)
+    plain = opt.resolve_trapped(block, stuck.layout)
+    assert plain.projection.stress > best.stress + 0.5
+    assert plain.move_lower == [] and plain.move_lower_stop is None
+
+    lower = opt.resolve_trapped(block, stuck.layout, move_lower=True)
+    assert lower.move_lower_stop == "nothing lower"
+    first = lower.move_lower[0]
+    assert set(copies) <= set(first.candidates)
+    assert first.how == "jointly" and first.kept
+    assert first.stress_before == pytest.approx(plain.projection.stress)
+    assert lower.projection.stress == pytest.approx(best.stress, rel=1e-4)
+    assert_move_lower_record(lower, block)
+    # nothing the rule would move is left
+    assert not [
+        r
+        for r in lower.last_grid
+        if r.position is not None
+        and r.stress_diff < 0.0
+        and r.diagnosis in opt.MOVE_LOWER_RULE.diagnoses
+    ]
+
+
+def test_move_lower_moves_one_hemisphering_point():
+    # measured (seed 6): the plain loop moves nothing and leaves antigen 0 hemisphering, its
+    # other position 9 units away and 0.04 lower; the rule moves it alone, gaining 0.05
+    problem, _, reflected = reflected_antigen(seed=6)
+    plain = opt.resolve_trapped(problem, reflected.layout)
+    assert plain.moved == 0
+    assert plain.last_grid[0].diagnosis == "hemisphering" and plain.last_grid[0].stress_diff < 0
+    lower = opt.resolve_trapped(problem, reflected.layout, move_lower=True)
+    first = lower.move_lower[0]
+    assert (first.candidates, first.how, first.moved) == ((0,), "jointly", (0,))
+    assert lower.projection.stress < plain.projection.stress - opt.MOVE_LOWER_RULE.min_gain
+    assert lower.move_lower_stop == "nothing lower"
+    assert_move_lower_record(lower, problem)
+
+
+def test_move_lower_is_off_by_default_and_changes_nothing_then():
+    block, _, stuck, _ = stuck_block()
+    default = opt.resolve_trapped(block, stuck.layout)
+    off = opt.resolve_trapped(block, stuck.layout, move_lower=False)
+    np.testing.assert_array_equal(default.projection.layout, off.projection.layout)
+    assert default.move_lower == off.move_lower == []
+    assert default.move_lower_stop is None and off.move_lower_stop is None
+
+
+@pytest.mark.parametrize("seed", [3, 5, 9, 12])
+def test_move_lower_never_raises_the_stress(seed):
+    problem, _ = synthetic_table(n_antigens=25, n_sera=6, noise=0.8, seed=seed)
+    for projection in opt.relax(problem, n_starts=20, seed=seed, keep=5).projections:
+        plain = opt.resolve_trapped(problem, projection.layout)
+        lower = opt.resolve_trapped(problem, projection.layout, move_lower=True)
+        assert lower.projection.stress <= plain.projection.stress
+        assert lower.move_lower_stop is not None
+        assert_move_lower_record(lower, problem)
+        if not any(r.kept for r in lower.move_lower):
+            np.testing.assert_array_equal(lower.projection.layout, plain.projection.layout)
+
+
+def test_move_lower_tries_one_at_a_time_when_the_joint_move_fails(monkeypatch):
+    block, best, stuck, copies = stuck_block()
+    real = opt.optimise
+    calls = []
+
+    def joint_fails(problem, layout, **kwargs):
+        # the first minimise the rule asks for is its joint move (the loop moves nothing here)
+        result = real(problem, layout, **kwargs)
+        calls.append(result.stress)
+        return dataclasses.replace(result, stress=math.inf) if len(calls) == 1 else result
+
+    monkeypatch.setattr(opt, "optimise", joint_fails)
+    lower = opt.resolve_trapped(block, stuck.layout, move_lower=True)
+    first = lower.move_lower[0]
+    assert first.joint_stress == math.inf and first.how == "one at a time"
+    assert len(calls) == 1 + len(first.candidates) + sum(
+        1 + len(r.candidates) * (r.how == "one at a time") for r in lower.move_lower[1:]
+    )
+    assert_move_lower_record(lower, block)
+    assert lower.projection.stress <= stuck.stress
+
+
+def test_move_lower_stops_at_max_rounds():
+    block, _, stuck, _ = stuck_block()
+    lower = opt.resolve_trapped(block, stuck.layout, move_lower=True, max_rounds=1)
+    assert len(lower.move_lower) == 1
+    assert lower.move_lower_stop in ("round limit", "nothing lower")
+    assert_move_lower_record(lower, block)
+
+
+def test_move_lower_rule_is_a_record():
+    rule = dataclasses.asdict(opt.MOVE_LOWER_RULE)
+    assert json.loads(json.dumps(rule)) == {**rule, "diagnoses": list(rule["diagnoses"])}
+    assert rule["name"] == "move-lower-1"
+    assert set(rule["diagnoses"]) <= set(typing.get_args(opt.Diagnosis))
 
 
 def test_group_tolerance_is_checked():
