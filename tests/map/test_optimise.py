@@ -667,8 +667,13 @@ def test_move_lower_never_raises_the_stress(seed):
             np.testing.assert_array_equal(lower.projection.layout, plain.projection.layout)
 
 
-def test_move_lower_tries_one_at_a_time_when_the_joint_move_fails(monkeypatch):
-    block, best, stuck, copies = stuck_block()
+@pytest.mark.parametrize("case", ["one point", "block"])
+def test_move_lower_tries_one_at_a_time_when_the_joint_move_fails(monkeypatch, case):
+    if case == "one point":  # the seed-6 table above: its one candidate, alone, is kept
+        problem, _, start = reflected_antigen(seed=6)
+    else:
+        problem, _, start, _ = stuck_block()
+    expected = opt.resolve_trapped(problem, start.layout, move_lower=True)
     real = opt.optimise
     calls = []
 
@@ -679,14 +684,18 @@ def test_move_lower_tries_one_at_a_time_when_the_joint_move_fails(monkeypatch):
         return dataclasses.replace(result, stress=math.inf) if len(calls) == 1 else result
 
     monkeypatch.setattr(opt, "optimise", joint_fails)
-    lower = opt.resolve_trapped(block, stuck.layout, move_lower=True)
+    lower = opt.resolve_trapped(problem, start.layout, move_lower=True)
     first = lower.move_lower[0]
     assert first.joint_stress == math.inf and first.how == "one at a time"
     assert len(calls) == 1 + len(first.candidates) + sum(
         1 + len(r.candidates) * (r.how == "one at a time") for r in lower.move_lower[1:]
     )
-    assert_move_lower_record(lower, block)
-    assert lower.projection.stress <= stuck.stress
+    assert_move_lower_record(lower, problem)
+    assert lower.projection.stress <= start.stress
+    if case == "one point":
+        # alone, the move is the joint move: kept, and the same map as without the failure
+        assert first.moved == (0,) and first.kept
+        assert lower.projection.stress == expected.projection.stress
 
 
 def test_move_lower_stops_at_max_rounds():
