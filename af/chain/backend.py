@@ -8,6 +8,7 @@ back together (`combine`) so that the result is the same however the starts were
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from typing import Any, Protocol
 
@@ -19,6 +20,24 @@ MapResult = dict[str, Any]
 class Optimiser(Protocol):
     name: str
     key: str  # the name `python -m af.chain.starts` knows it by
+
+    @property
+    def numerics(self) -> str | None:
+        """The name of the arithmetic this optimiser's maps come from (`af.map.optimise.NUMERICS`),
+        or None when it has no name: the stand-in, and the core's original arithmetic, whose
+        results belong to one machine. Two values may give different maps from the same problem,
+        so chunks, steps and checks made under one are never reused under another. Nothing is
+        written for None, so maps made before arithmetics had names keep their digests and
+        records."""
+        ...
+
+    @property
+    def refine_best(self) -> int | None:
+        """How many of a map's lowest-stress starts the optimiser minimises again at fine
+        precision when the starts were relaxed rough (incremental maps, and scratch maps under
+        MapOptions.scratch_precision = "rough"); None when it has no such stage. Recorded with
+        each step and chain; maps made before it was recorded used 5."""
+        ...
 
     def optimise(
         self,
@@ -61,11 +80,32 @@ class CoreOptimiser:
     name = "af.map.optimise (alglib CG) + resolve_trapped"
     key = "core"
 
-    def __init__(self, threads: int = 0):
-        self.threads = threads
+    def __init__(self, threads: int = 0, arithmetic: str | None = None):
+        """`arithmetic` is the word that asks for one of the build's two compiled cores
+        (`af.map.optimise.NUMERICS_OFFERED`): the arithmetic under contract, the default as in
+        `MapProblem`, or "original". A run names it in its config; nothing here guesses."""
+        from af.map.optimise import NUMERICS, NUMERICS_OFFERED
 
-    @staticmethod
-    def _problem(arrays: dict) -> Any:
+        self.threads = threads
+        self.arithmetic = NUMERICS if arithmetic is None else arithmetic
+        if self.arithmetic not in NUMERICS_OFFERED:
+            raise ValueError(
+                f"unknown optimiser arithmetic {arithmetic!r}: this build offers {NUMERICS_OFFERED}"
+            )
+
+    @property
+    def numerics(self) -> str | None:
+        from af.map.optimise import ORIGINAL
+
+        return None if self.arithmetic == ORIGINAL else self.arithmetic
+
+    @property
+    def refine_best(self) -> int:
+        from af.map.optimise import INCREMENTAL_REFINED  # the one copy: refine()'s own default
+
+        return INCREMENTAL_REFINED
+
+    def _problem(self, arrays: dict) -> Any:
         from af.map.optimise import MapProblem
 
         return MapProblem(
@@ -77,6 +117,7 @@ class CoreOptimiser:
             weights=arrays.get("weights"),
             avidity_adjust=arrays.get("avidity_adjust"),
             unmovable=arrays.get("unmovable"),
+            numerics=self.arithmetic,
         )
 
     @staticmethod
@@ -132,10 +173,12 @@ class CoreOptimiser:
             threads=self.threads,
         )
         projections = result.projections
-        if rough:  # as AD chart-relax-grid: every start rough, then the best 5 fine
-            projections = refine(problem, projections, n_best=5, threads=self.threads)
+        if rough:  # as AD chart-relax-grid: every start rough, then the best few fine
+            projections = refine(problem, projections, threads=self.threads)
         maps = [self._as_dict(p, result.threads) for p in projections]
-        return self._resolve(problem, maps, move_groups, resolve_best=resolve_best)
+        # an incremental relax refines its best few itself (af.map.optimise.relax)
+        refined = rough or start_layout is not None
+        return self._resolve(problem, maps, move_groups, resolve_best=resolve_best, refined=refined)
 
     def relax_chunk(self, arrays, first_start, n_starts, dim, seed, start_layout):
         """One job's share of a map's starts. Incremental chunks, and scratch chunks relaxed
@@ -161,12 +204,13 @@ class CoreOptimiser:
 
         problem = self._problem(arrays)
         projections = sort_projections([self._as_projection(r) for r in chunks])
-        if incremental or _scratch_rough(arrays):
-            projections = refine(problem, projections, n_best=5, threads=self.threads)
+        refined = incremental or _scratch_rough(arrays)
+        if refined:
+            projections = refine(problem, projections, threads=self.threads)
         # the relax threads of the chunks, whatever order the maps are in now
         relax = [{"threads": r["threads"], "cpus": r["cpus"]} for r in chunks if "threads" in r]
         maps = [self._as_dict(p) for p in projections]
-        return self._resolve(problem, maps, move_groups, relax, resolve_best)
+        return self._resolve(problem, maps, move_groups, relax, resolve_best, refined)
 
     def _resolve(
         self,
@@ -175,11 +219,20 @@ class CoreOptimiser:
         move_groups: bool,
         relax: list[dict] | None = None,
         resolve_best: int = 1,
+        refined: bool | None = None,
     ) -> list[MapResult]:
         """The trapped-point loop on the best `resolve_best` maps (MapOptions.resolve_best); the
         lowest is kept. `relax` is the threads/CPUs of each split chunk's starts; unsplit, the
         maps carry their own. With more than one resolved, each map records the rank it had
-        before the loop (`refined_rank`), so a step says which one it kept."""
+        before the loop (`refined_rank`), so a step says which one it kept.
+
+        Every map the loop ran on records the stress it had before (`stress_before_resolve`):
+        the loop lowers only those maps, so their final stress is not comparable with the other
+        starts', and without the earlier figure a list of start stresses reads as one population
+        when it is not. For the same reason the kept map records how many of the maps (the
+        lowest) are at fine precision, the rest being rough (`fine_starts`), and, when a refine
+        stage made that so (`refined`), how many it refined (`refine_best`). `refined` None: the
+        caller did not say, and neither is recorded."""
         from af.map.optimise import available_cpus, resolve_trapped
 
         if relax is None:
@@ -188,6 +241,7 @@ class CoreOptimiser:
         groups_of: dict[int, list[dict]] = {}
         threads = 0
         for rank in range(min(resolve_best, len(maps))):
+            maps[rank] = {**maps[rank], "stress_before_resolve": maps[rank]["stress"]}
             fixed = resolve_trapped(
                 problem, maps[rank]["layout"], threads=self.threads, move_groups=move_groups
             )
@@ -224,9 +278,14 @@ class CoreOptimiser:
         if resolve_best > 1:
             run_threads["trapped"]["maps"] = len(groups_of)
         if changed:
-            maps.sort(key=lambda r: r["stress"])
-        best = min(range(len(maps)), key=lambda i: maps[i]["stress"])
+            maps.sort(key=map_order)
+        best = min(range(len(maps)), key=lambda i: map_order(maps[i]))
         maps[best] = {**maps[best], "run_threads": run_threads}
+        if refined is not None:
+            fine = min(self.refine_best, len(maps)) if refined else len(maps)
+            maps[best] = {**maps[best], "fine_starts": fine}
+            if refined:
+                maps[best] = {**maps[best], "refine_best": self.refine_best}
         if move_groups:  # recorded on the best map, also when no group was found
             groups = groups_of[maps[best].get("refined_rank", 0)]
             maps[best] = {**maps[best], "resolved_groups": groups}
@@ -248,6 +307,13 @@ class CoreOptimiser:
         ]
 
 
+def map_order(r: MapResult) -> tuple[bool, float, int]:
+    """The core's order (`af.map.optimise.sort_projections`): stress ascending, NaN last, ties by
+    start index. Used wherever maps are ranked after the trapped-point loop, so the map kept does
+    not depend on the order the maps happened to arrive in."""
+    return (math.isnan(r["stress"]), r["stress"], r["start_seed"])
+
+
 def _scratch_rough(arrays: dict) -> bool:
     """A map from scratch relaxed rough, then its best 5 fine (MapOptions.scratch_precision).
     Absent means af's original method, every start fine."""
@@ -266,6 +332,8 @@ class StubOptimiser:
 
     name = "stub-numpy-gradient-descent"
     key = "stub"
+    numerics: str | None = None  # numpy on whatever machine: it names no arithmetic
+    refine_best: int | None = None  # every start is relaxed once
 
     def optimise(
         self, arrays, n_starts, dim, seed, start_layout, move_groups=False, resolve_best=1
@@ -286,7 +354,7 @@ class StubOptimiser:
         )
 
     def combine(self, arrays, chunks, incremental, move_groups=False, resolve_best=1):
-        return sorted(chunks, key=lambda r: (r["stress"], r["start_seed"]))
+        return sorted(chunks, key=map_order)
 
     def grid_test(self, layout, arrays):
         from af.chain import stub_optimiser
@@ -297,12 +365,30 @@ class StubOptimiser:
 BACKENDS = {"core": CoreOptimiser, "stub": StubOptimiser}
 
 
-def optimiser_by_key(key: str, threads: int = 0) -> Optimiser:
+def optimiser_by_key(key: str, threads: int = 0, arithmetic: str | None = None) -> Optimiser:
+    """`arithmetic` is the run config's word for the core's arithmetic (CoreOptimiser); the
+    stand-in has none."""
     if key == "core":
-        return CoreOptimiser(threads=threads)
+        return CoreOptimiser(threads=threads, arithmetic=arithmetic)
     if key == "stub":
         return StubOptimiser()
     raise ValueError(f"unknown optimiser {key!r}; known: {sorted(BACKENDS)}")
+
+
+def optimiser_for_problem(key: str, numerics: str | None, threads: int = 0) -> Optimiser:
+    """The optimiser a chunk problem was written for: `numerics` is the arithmetic's name in the
+    problem file, absent (None) for the core's original arithmetic and for the stand-in. Raises
+    when this build cannot make it (the driver and the task run different builds)."""
+    if key == "core":
+        from af.map.optimise import ORIGINAL
+
+        return CoreOptimiser(threads=threads, arithmetic=ORIGINAL if numerics is None else numerics)
+    opt = optimiser_by_key(key, threads=threads)
+    if opt.numerics != numerics:
+        raise ValueError(
+            f"the {key!r} optimiser has numerics {opt.numerics!r}, not the problem's {numerics!r}"
+        )
+    return opt
 
 
 def default_optimiser() -> Optimiser:

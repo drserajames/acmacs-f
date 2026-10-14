@@ -46,7 +46,7 @@ def test_rough_refines_only_the_best_five(arrays):
     from af.map.optimise import MapProblem, relax
 
     rough = _scratch(arrays, "rough")
-    problem = backend.CoreOptimiser._problem(arrays)
+    problem = backend.CoreOptimiser()._problem(arrays)
     assert isinstance(problem, MapProblem)
     plain = relax(problem, n_starts=N_STARTS, seed=7, dimensions=2, precision="rough", keep=None)
     plain_by_start = {p.start_index: p.stress for p in plain.projections}
@@ -82,11 +82,18 @@ def test_the_problem_file_carries_it_to_every_chunk(arrays, tmp_path):
         seed=7,
         dimensions=2,
         optimiser="core",
+        numerics=None,
         start_layout=None,
     )
     read, *_ = read_problem(path)
     assert read["scratch_precision"] == "rough"
     old = write_problem(
-        tmp_path / "q.npz", arrays, seed=7, dimensions=2, optimiser="core", start_layout=None
+        tmp_path / "q.npz",
+        arrays,
+        seed=7,
+        dimensions=2,
+        optimiser="core",
+        numerics=None,
+        start_layout=None,
     )
     assert "scratch_precision" not in read_problem(old)[0]  # absent: every start fine, as before

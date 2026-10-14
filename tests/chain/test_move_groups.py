@@ -108,7 +108,7 @@ def test_core_keeps_a_kept_group_move_and_records_every_group(monkeypatch, kept)
     monkeypatch.setattr(
         optimise, "resolve_trapped", lambda *a, **k: fake_resolution(moved_layout, [group])
     )
-    maps = [{"layout": np.array([[0.0, 0.0]]), "stress": 2.0}]
+    maps = [{"layout": np.array([[0.0, 0.0]]), "stress": 2.0, "start_seed": 0}]
     out = backend.CoreOptimiser()._resolve(None, maps, move_groups=True)
     assert out[0]["resolved_groups"] == [
         {
@@ -137,6 +137,6 @@ def test_core_records_nothing_when_off(monkeypatch):
 
     monkeypatch.setattr(optimise, "resolve_trapped", resolve)
     out = backend.CoreOptimiser()._resolve(
-        None, [{"layout": np.zeros((1, 2)), "stress": 2.0}], move_groups=False
+        None, [{"layout": np.zeros((1, 2)), "stress": 2.0, "start_seed": 0}], move_groups=False
     )
     assert seen["move_groups"] is False and "resolved_groups" not in out[0]

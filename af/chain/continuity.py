@@ -51,12 +51,18 @@ from af.util.config import ConfigError, load_config
 # Options that change how hard the optimiser searches, not the map's problem: a pair differing
 # only in these is still the same problem, and its stresses compare (the lower found more).
 SEARCH_OPTIONS = ("resolve_best",)
+REFINED_BEFORE_RECORDED = 5  # refine_best of every version published without the parameter
 
 FIELDS = (
     "context: why this record exists when it is not month to month (--note), else null. "
     "stress: each map's own best stress; comparable only when same_problem is true. "
     "search_differ: options that change how hard the optimiser searches, not the problem "
-    "(SEARCH_OPTIONS), as [previous, new]; they leave same_problem true. "
+    "(SEARCH_OPTIONS, and refine_best: how many rough starts were refined fine, 5 where a "
+    "version does not record it), as [previous, new]; they leave same_problem true. "
+    "numerics_differ: the optimiser's name for its arithmetic as [previous, new] when the two "
+    "maps were made under different ones (null = not named, before it was), else null; it "
+    "leaves same_problem true: the same stress function, but the two builds can end in "
+    "different minima from the same starts. "
     "points: paired = same kind and designation once on each side; filled = the same point "
     "with its passage (antigen) or serum id (serum) filled in or emptied (same kind, name, "
     "reassortant, annotations; one candidate a side; the field empty on one side), fitted like "
@@ -267,9 +273,16 @@ def record(
     thresholds = load_thresholds(thresholds_path)
     pn, pp = _problem(vn), _problem(vp)
     (an, sn), (ap, sp) = _search_apart(pn["parameters"]), _search_apart(pp["parameters"])
+    # the arithmetic is how the problem was computed, not the problem (as SEARCH_OPTIONS)
+    numerics = [ap.pop("numerics", None), an.pop("numerics", None)]
+    # likewise how many rough starts were refined fine; versions before it was recorded used 5
+    before = REFINED_BEFORE_RECORDED
+    refined = [ap.pop("refine_best", before), an.pop("refine_best", before)]
     keys = sorted(set(an) | set(ap))
     differ = [k for k in keys if an.get(k) != ap.get(k)]
     search = {f"options.{k}": [sp[k], sn[k]] for k in SEARCH_OPTIONS if sp[k] != sn[k]}
+    if refined[0] != refined[1]:
+        search["refine_best"] = refined
     same = pn["inputs"] == pp["inputs"] and not differ
     drift = records / dataset / f"{parent}.tables-drift.json"
     from af.run.runtime import release_info
@@ -285,6 +298,7 @@ def record(
         "inputs_differ": pn["inputs"] != pp["inputs"],
         "parameters_differ": differ,
         "search_differ": search,
+        "numerics_differ": numerics if numerics[0] != numerics[1] else None,
         "retires": str(drift.relative_to(records)) if drift.is_file() else None,
         "thresholds": {
             "path": str(thresholds_path),
@@ -330,12 +344,20 @@ def sentences(rec: dict[str, Any], *, movers: int = 8) -> list[str]:
     if rec["same_problem"]:
         search = rec.get("search_differ") or {}  # records before 12 Oct 2026 have no key
         how = "; ".join(f"{k} {a} -> {b}" for k, (a, b) in search.items())
+        arithmetic = rec.get("numerics_differ")  # records before the key: not named on either
         out.append(
             f"Same tables and parameters: stress {s['previous']:.3f} -> {s['new']:.3f}"
             f" ({s['relative']:+.2%})."
             + (
                 f" Only the search differs ({how}): the same problem, searched harder."
                 if how
+                else ""
+            )
+            + (
+                f" The optimiser's arithmetic differs ({_arithmetic(arithmetic[0])} ->"
+                f" {_arithmetic(arithmetic[1])}): the same problem, but the two builds can end in"
+                " different minima from the same starts."
+                if arithmetic
                 else ""
             )
         )
@@ -362,6 +384,10 @@ def sentences(rec: dict[str, Any], *, movers: int = 8) -> list[str]:
     if rec["retires"]:
         out.append(f"This rebuild retires the drift record {rec['retires']}.")
     return out
+
+
+def _arithmetic(numerics: str | None) -> str:
+    return numerics if numerics is not None else "not named"
 
 
 def main(argv: list[str]) -> int:
