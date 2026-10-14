@@ -278,11 +278,18 @@ def record(
     # likewise how many rough starts were refined fine; versions before it was recorded used 5
     before = REFINED_BEFORE_RECORDED
     refined = [ap.pop("refine_best", before), an.pop("refine_best", before)]
+    # a finished map (af.chain.finish) is the same problem searched further from its parent's
+    # layout: the rule is a search setting; where it came from is the record's parent anyway
+    finish = [ap.pop("finish", None), an.pop("finish", None)]
+    ap.pop("finished_from", None)
+    an.pop("finished_from", None)
     keys = sorted(set(an) | set(ap))
     differ = [k for k in keys if an.get(k) != ap.get(k)]
     search = {f"options.{k}": [sp[k], sn[k]] for k in SEARCH_OPTIONS if sp[k] != sn[k]}
     if refined[0] != refined[1]:
         search["refine_best"] = refined
+    if finish[0] != finish[1]:
+        search["finish"] = finish
     same = pn["inputs"] == pp["inputs"] and not differ
     drift = records / dataset / f"{parent}.tables-drift.json"
     from af.run.runtime import release_info
@@ -343,7 +350,7 @@ def sentences(rec: dict[str, Any], *, movers: int = 8) -> list[str]:
     ]
     if rec["same_problem"]:
         search = rec.get("search_differ") or {}  # records before 12 Oct 2026 have no key
-        how = "; ".join(f"{k} {a} -> {b}" for k, (a, b) in search.items())
+        how = "; ".join(f"{k} {_setting(a)} -> {_setting(b)}" for k, (a, b) in search.items())
         arithmetic = rec.get("numerics_differ")  # records before the key: not named on either
         out.append(
             f"Same tables and parameters: stress {s['previous']:.3f} -> {s['new']:.3f}"
@@ -384,6 +391,15 @@ def sentences(rec: dict[str, Any], *, movers: int = 8) -> list[str]:
     if rec["retires"]:
         out.append(f"This rebuild retires the drift record {rec['retires']}.")
     return out
+
+
+def _setting(value: Any) -> str:
+    """A search setting as a reader wants it: a finish rule by what it turns on."""
+    if value is None:
+        return "none"
+    if isinstance(value, dict):
+        return ", ".join(k for k, v in value.items() if v is True) or "none"
+    return str(value)
 
 
 def _arithmetic(numerics: str | None) -> str:

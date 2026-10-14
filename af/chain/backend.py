@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
 import numpy as np
@@ -70,6 +71,24 @@ class Optimiser(Protocol):
     ) -> list[MapResult]: ...
 
     def grid_test(self, layout: np.ndarray, arrays: dict) -> list[dict]: ...
+
+    def finish(self, arrays: dict, layout: np.ndarray, rule: FinishRule) -> MapResult: ...
+
+
+@dataclass(frozen=True)
+class FinishRule:
+    """How `af.chain.finish` improves a published layout without new starts: the trapped-point
+    loop on that layout alone, with the options named here. Recorded verbatim with the map it
+    makes, so a reader knows which rule a version got."""
+
+    move_groups: bool = False  # af.map.optimise.resolve_trapped's group pass (DECISIONS Q61, Q78)
+
+    def __post_init__(self) -> None:
+        if not any(asdict(self).values()):
+            raise ValueError("a finish rule must turn something on, or it would change nothing")
+
+    def to_json(self) -> dict[str, Any]:
+        return {"loop": "af.map.optimise.resolve_trapped", **asdict(self)}
 
 
 class CoreOptimiser:
@@ -291,6 +310,44 @@ class CoreOptimiser:
             maps[best] = {**maps[best], "resolved_groups": groups}
         return maps
 
+    def finish(self, arrays, layout, rule):
+        """The trapped-point loop on `layout` alone, under `rule`: no starts, no refine. The
+        loop only ever lowers the stress, so the result is never worse than the layout given."""
+        from af.map.optimise import resolve_trapped, stress
+
+        problem = self._problem(arrays)
+        before = stress(problem, layout)
+        fixed = resolve_trapped(problem, layout, threads=self.threads, move_groups=rule.move_groups)
+        p = fixed.projection
+        return {
+            "layout": p.layout,
+            "stress": p.stress,
+            "dimensions": p.dimensions,
+            "n_iterations": p.n_iterations,
+            "start_seed": 0,
+            "finish": {
+                "rule": rule.to_json(),
+                "stress_before": before,
+                "stress_after": p.stress,
+                "rounds": fixed.rounds,
+                "moves": fixed.moved,
+                "groups": [
+                    {
+                        "members": [int(m) for m in g.members],
+                        "shift": [float(x) for x in g.shift],
+                        "stress_before": float(g.stress_before),
+                        "stress_after": float(g.stress_after),
+                        "kept": bool(g.kept),
+                        "n_antigens": int(g.n_antigens),
+                        "n_sera": int(g.n_sera),
+                        "mixed": bool(g.mixed),
+                    }
+                    for g in fixed.groups
+                ],
+                "threads": int(fixed.threads),
+            },
+        }
+
     def grid_test(self, layout, arrays):
         from af.map.optimise import grid_test
 
@@ -355,6 +412,9 @@ class StubOptimiser:
 
     def combine(self, arrays, chunks, incremental, move_groups=False, resolve_best=1):
         return sorted(chunks, key=map_order)
+
+    def finish(self, arrays, layout, rule):
+        raise ValueError("the stand-in optimiser cannot finish a map: finishing needs the core")
 
     def grid_test(self, layout, arrays):
         from af.chain import stub_optimiser

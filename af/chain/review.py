@@ -168,8 +168,9 @@ def _stress_points(steps: list[Step]) -> list[tuple[int, float, float, str, str]
         if not terms:
             continue
         st = r["stress"]
-        inc = st.get("incremental", st.get("scratch", st.get("seed")))
-        scr = st.get("scratch", st.get("seed"))
+        one = st.get("scratch", st.get("seed", st.get("finished")))  # a finished map has one
+        inc = st.get("incremental", one)
+        scr = one
         pts.append((s["index"], inc / terms, scr / terms, s["table_id"], r["chosen"]))
     return pts
 
@@ -249,7 +250,13 @@ def _step_info(s: dict, r: dict) -> list[str]:
     info = [
         f"<b>step {s['index']}</b> · {_e(s['table_id'])}",
         counts,
-        f"stress {stresses} · <b>chose {r['chosen']}</b>",
+        f"stress {stresses} · <b>chose {r['chosen']}</b>"
+        + (  # af.chain.finish: the published layout this map was finished from, and how
+            f" · finished from {_e(r['finished_from']['version'])} by the trapped-point loop with "
+            + _e(", ".join(k for k, v in r["finish"]["rule"].items() if v is True))
+            if "finished_from" in r
+            else ""
+        ),
         f"RMSD to previous {rmsd_prev} · incremental vs scratch RMSD {rmsd_basin}",
     ]
     if pf := r.get("platform"):  # which build made the step: near ties can differ between them
