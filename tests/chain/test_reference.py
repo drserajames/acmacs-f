@@ -14,6 +14,7 @@ from af.chain.reference import BASIN_METHOD, composition, reference_check, sente
 from af.chain.review import build_review
 from af.chart.ace import read_chart, write_chart
 from af.chart.model import Antigen, Chart, Serum, Titres, empty_table
+from af.map.optimise import NUMERICS
 
 from .test_engine import config, run, tables  # noqa: F401  (tables is a fixture)
 
@@ -70,7 +71,7 @@ def _merged_map(tables_dir, store):
 def test_basin_against_itself_is_not_a_shortfall(tables, tmp_path):  # noqa: F811
     _, _, chosen = _merged_map(tables, tmp_path / "s")
     chart = read_chart(chosen)
-    check = reference_check(chart, chart, starts=3, seed=1)
+    check = reference_check(chart, chart, starts=3, seed=1, numerics=NUMERICS)
     b = check["basin"]
     placed = int(np.isfinite(chart.best().layout).all(axis=1).sum())
     assert b["seeded_points"] == placed  # every placed point starts at its own place
@@ -128,7 +129,7 @@ def test_two_references_measured_cached_and_shown(tables, tmp_path, monkeypatch)
         Reference("adjusted (the round, shipped)", "round/styled.ace", starts=2),
     ]
     cfg = dataclasses.replace(cfg, references=both)
-    settings = cast(Any, SimpleNamespace(references=refs, threads=1))
+    settings = cast(Any, SimpleNamespace(references=refs, threads=1, numerics=NUMERICS))
     measure_references(cfg, settings, root)
     doc = json.loads((root / "chain.json").read_text())
     assert [r["label"] for r in doc["references"]] == [r.label for r in both]
@@ -136,6 +137,7 @@ def test_two_references_measured_cached_and_shown(tables, tmp_path, monkeypatch)
         assert r["basin"]["placements"]["random"]["starts"] == 2
         assert "shipped" in r and "chart_sha256" in r
         assert r["basin_method"] == r["basin"]["method"] == BASIN_METHOD
+        assert r["numerics"] == NUMERICS  # measured under the arithmetic the run names
 
     import af.chain.reference as reference
 
@@ -156,9 +158,13 @@ def test_a_missing_reference_is_an_error(tables, tmp_path):  # noqa: F811
     cfg, root, _ = _merged_map(tables, tmp_path / "s")
     cfg = dataclasses.replace(cfg, references=[Reference("nowhere", "nowhere.ace")])
     with pytest.raises(ChainConfigError, match="reference map 'nowhere' missing"):
-        measure_references(cfg, cast(Any, SimpleNamespace(references=tmp_path, threads=1)), root)
+        measure_references(
+            cfg, cast(Any, SimpleNamespace(references=tmp_path, threads=1, numerics=NUMERICS)), root
+        )
     with pytest.raises(ChainConfigError, match="references"):
-        measure_references(cfg, cast(Any, SimpleNamespace(references=None, threads=1)), root)
+        measure_references(
+            cfg, cast(Any, SimpleNamespace(references=None, threads=1, numerics=NUMERICS)), root
+        )
 
 
 def test_a_block_carried_elsewhere_is_one_tight_group():
@@ -226,7 +232,7 @@ def test_unpaired_points_start_at_the_maps_own_positions(tables, tmp_path):  # n
     _, _, chosen = _merged_map(tables, tmp_path / "s")
     chart = read_chart(chosen)
     ref = _reference_of(chart, [0, 1])
-    b = reference_check(chart, ref, starts=2, seed=1)["basin"]
+    b = reference_check(chart, ref, starts=2, seed=1, numerics=NUMERICS)["basin"]
     fitted, rand = b["placements"]["map-fitted"], b["placements"]["random"]
     assert fitted["placed_from_map"] == 2 and fitted["starts"] == 1
     assert fitted["seeded_points"] == rand["seeded_points"]  # the same pairs, both ways
@@ -240,7 +246,8 @@ def test_unpaired_points_start_at_the_maps_own_positions(tables, tmp_path):  # n
 def test_map_fitted_starts_from_the_references_lowest_stress_projection(tables, tmp_path):  # noqa: F811
     _, _, chosen = _merged_map(tables, tmp_path / "s")
     chart = read_chart(chosen)
-    b = reference_check(chart, _reference_of(chart, [0], moved_zero=True), starts=2, seed=1)
+    ref = _reference_of(chart, [0], moved_zero=True)
+    b = reference_check(chart, ref, starts=2, seed=1, numerics=NUMERICS)
     tried = b["basin"]["placements"]
     assert tried["random"]["reference_projection"] == 0  # as recorded before: comparable
     assert tried["map-fitted"]["reference_projection"] == 1

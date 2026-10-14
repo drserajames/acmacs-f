@@ -178,8 +178,11 @@ def basin(
     *,
     starts: int,
     seed: int,
+    numerics: str,
     threads: int = 0,
 ) -> dict[str, Any]:
+    """`numerics` is the optimiser arithmetic to measure under (`af.map.optimise.NUMERICS_OFFERED`):
+    the one the map was made with, so the seeded stress and the map's are of one kind."""
     from af.map.optimise import MapProblem, relax, stress
 
     proj = chart.best()
@@ -192,6 +195,7 @@ def basin(
         dodgy_is_regular=bool(arrays.get("dodgy_is_regular", False)),
         avidity_adjust=arrays.get("avidity_adjust"),
         unmovable=arrays.get("unmovable"),
+        numerics=numerics,
     )
     layout = np.asarray(proj.layout)
     own = float(stress(problem, layout))
@@ -351,14 +355,16 @@ def shipped(chart: Chart, ref: Chart, pairs: tuple[dict[int, int], dict[int, int
 
 
 def reference_check(
-    chart: Chart, ref: Chart, *, starts: int, seed: int, threads: int = 0
+    chart: Chart, ref: Chart, *, starts: int, seed: int, numerics: str, threads: int = 0
 ) -> dict[str, Any]:
     comp = composition(chart, ref)
     pairs = comp.pop("_pairs")
     return {
         "composition": comp,
         "shipped": shipped(chart, ref, pairs),
-        "basin": basin(chart, ref, pairs, starts=starts, seed=seed, threads=threads),
+        "basin": basin(
+            chart, ref, pairs, starts=starts, seed=seed, numerics=numerics, threads=threads
+        ),
     }
 
 

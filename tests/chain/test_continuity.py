@@ -129,6 +129,8 @@ def store(tmp_path):
     _version(root, "v4", "v2", new, {"seed": 1, "options": {"resolve_best": 3}})
     _version(root, "v5", "v2", new, {"seed": 1, "numerics": "test-fp-1"})
     _version(root, "v6", "v5", new, {"seed": 1, "numerics": "test-fp-2"})
+    _version(root, "v7", "v2", new, {"seed": 1, "refine_best": 5})
+    _version(root, "v8", "v7", new, {"seed": 1, "refine_best": 7})
     (tmp_path / "t.toml").write_text(TOML)
     return tmp_path
 
@@ -235,3 +237,12 @@ def test_another_arithmetic_is_the_same_problem_and_is_said(store):
     assert rec["same_problem"] is True and rec["numerics_differ"] == ["test-fp-1", "test-fp-2"]
     plain = _run(store, "v2")
     assert plain["numerics_differ"] is None and "arithmetic" not in sentences(plain)[1]
+
+
+def test_the_refine_count_is_a_search_setting_and_was_five_before_it_was_recorded(store):
+    rec = _run(store, "v7")  # v2 does not record it: it used 5
+    assert rec["same_problem"] is True and rec["parameters_differ"] == []
+    assert rec["search_differ"] == {}
+    rec = _run(store, "v8")
+    assert rec["same_problem"] is True and rec["search_differ"] == {"refine_best": [5, 7]}
+    assert "Only the search differs (refine_best 5 -> 7)" in sentences(rec)[1]

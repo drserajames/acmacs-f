@@ -84,6 +84,11 @@ class RunSettings:
     # This machine's own label ("laptop", "cluster-a"), written to each step's platform record.
     # A label chosen here, never a host name: maps are repeatable per machine, not across them.
     site: str | None = None
+    # Which of the build's arithmetics the core runs with (af.map.optimise.NUMERICS_OFFERED): the
+    # one under contract, by its name, or "original" (the same bits as earlier releases on this
+    # machine, different ones on another). A run with the core must say; there is no default,
+    # because the choice decides whether existing maps are reused or remade.
+    numerics: str | None = None
 
     def __post_init__(self) -> None:
         if self.site is not None and not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", self.site):
@@ -120,16 +125,34 @@ def check_tables_dataset(chain: Path, dataset: str) -> None:
         )
 
 
+def arithmetic(run: RunSettings) -> str:
+    """The arithmetic the run config names, checked against what this build offers."""
+    from af.map.optimise import NUMERICS_OFFERED
+
+    if run.numerics is None:
+        raise ChainConfigError(
+            "the run config must name the optimiser's arithmetic: `numerics = ` one of "
+            f"{', '.join(repr(n) for n in NUMERICS_OFFERED)}"
+        )
+    if run.numerics not in NUMERICS_OFFERED:
+        raise ChainConfigError(
+            f"numerics = {run.numerics!r}: this build offers "
+            f"{', '.join(repr(n) for n in NUMERICS_OFFERED)}"
+        )
+    return run.numerics
+
+
 def measure_references(cfg: Any, run: RunSettings, root: Path) -> None:
     """Measure the finished map against each of the chain's reference maps (af.chain.reference)
     and record them in chain.json ("references", in the chain file's order), which the review
     page shows and publishing keeps. Each is cached on the chosen map's and the reference's
     sha256 and the start count: a rerun that changed nothing measures nothing."""
     from af.chain.reference import BASIN_METHOD, reference_check
-    from af.map.optimise import NUMERICS
+    from af.map.optimise import ORIGINAL
 
     if run.references is None:
         raise ChainConfigError(f"{cfg.name}: [[reference]] needs `references` in the run config")
+    numerics = arithmetic(run)  # measured under the arithmetic the map is made with
     paths = [Path(run.references) / ref.chart for ref in cfg.references]
     for ref, path in zip(cfg.references, paths, strict=True):
         if not path.is_file():  # all checked before any is measured
@@ -147,8 +170,9 @@ def measure_references(cfg: Any, run: RunSettings, root: Path) -> None:
             "chart_sha256": sha256_path(path),
             "starts": ref.starts,
             "basin_method": BASIN_METHOD,  # a check measured by an older method is measured again
-            "numerics": NUMERICS,  # as is one relaxed under another arithmetic
         }
+        if numerics != ORIGINAL:  # as is one relaxed under another arithmetic; the original has
+            key["numerics"] = numerics  # no name, so checks cached before names existed still hold
         old = cache.get(ref.label)
         if old is not None and old.get("key") == key:
             check = old["check"]
@@ -161,6 +185,7 @@ def measure_references(cfg: Any, run: RunSettings, root: Path) -> None:
                 read_chart(path),
                 starts=ref.starts,
                 seed=cfg.seed,
+                numerics=numerics,
                 threads=run.threads,
             )
             cache[ref.label] = {"key": key, "check": check}
@@ -170,6 +195,13 @@ def measure_references(cfg: Any, run: RunSettings, root: Path) -> None:
     tmp = doc_path.with_suffix(".json.tmp")  # as the engine writes it: never half a chain.json
     tmp.write_text(json.dumps(doc, indent=1))
     tmp.replace(doc_path)
+
+
+def _optimiser(run: RunSettings) -> Any:
+    """The run's optimiser; the core with the arithmetic the run config names."""
+    if run.optimiser == "core":
+        return optimiser_by_key("core", threads=run.threads, arithmetic=arithmetic(run))
+    return optimiser_by_key(run.optimiser, threads=run.threads)
 
 
 def main(argv: list[str]) -> int:
@@ -200,7 +232,7 @@ def main(argv: list[str]) -> int:
         results = run_chain(
             cfg,
             work.root.parent,
-            optimiser=optimiser_by_key(run.optimiser, threads=run.threads),
+            optimiser=_optimiser(run),
             runner=make_runner(run.runner, args.run, default_work_dir=work.root / "jobs"),
             split=split,
             root=work.root,

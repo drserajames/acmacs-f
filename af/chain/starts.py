@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from af.chain.backend import MapResult, optimiser_by_key
+from af.chain.backend import MapResult, optimiser_for_problem
 
 _ARRAYS = ("titre_value", "titre_type", "column_bases", "disconnected")
 _OPTIONAL = ("weights", "avidity_adjust", "unmovable")
@@ -197,15 +197,15 @@ def run_chunk(
     problem: Path, first_start: int, n_starts: int, result: Path, threads: int = 0
 ) -> Path:
     arrays, seed, dim, key, numerics, start = read_problem(problem)
-    opt = optimiser_by_key(key, threads=threads)
-    if opt.numerics != numerics:
+    try:  # the core for the problem's arithmetic (no name: the original one)
+        opt = optimiser_for_problem(key, numerics, threads=threads)
+    except ValueError as error:
         # the driver and this task run different builds (an environment changed under a run):
         # the chunk's maps would not be the ones the problem's digest stands for
         raise RuntimeError(
-            f"{problem}: written for numerics {numerics!r}, but the {key!r} optimiser of this"
-            f" build has {opt.numerics!r} ({sys.executable}); run the chunk with the build that"
-            " wrote the problem"
-        )
+            f"{problem}: written for numerics {numerics!r}, which this build cannot make"
+            f" ({error}; {sys.executable}); run the chunk with the build that wrote the problem"
+        ) from error
     maps = opt.relax_chunk(arrays, first_start, n_starts, dim, seed, start)
     if len(maps) != n_starts:
         raise RuntimeError(f"{problem}: asked for {n_starts} starts, got {len(maps)}")

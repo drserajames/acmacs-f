@@ -472,10 +472,15 @@ def _map_chart(chart: Chart, projections: list[Projection]) -> Chart:
 def _loop(maps: list[dict]) -> dict:
     best = min(maps, key=map_order)
     loop = {"rounds": best.get("resolved_rounds", 0), "moves": best.get("resolved_moves", 0)}
+    # the kept map's stress before the loop: the only figure comparable with the other starts',
+    # which the loop never ran on. Absent from records made before it was kept: not recorded.
+    if "stress_before_resolve" in best:
+        loop["stress_before"] = best["stress_before_resolve"]
     if "refined_rank" in best:  # resolve_best > 1: which refined layout the kept map came from
         loop["refined_rank"] = best["refined_rank"]
         loop["resolved"] = [
             {"refined_rank": r["refined_rank"], "stress": r["stress"],
+             "stress_before": r["stress_before_resolve"],
              "rounds": r.get("resolved_rounds", 0), "moves": r.get("resolved_moves", 0)}
             for r in sorted(
                 (r for r in maps if "refined_rank" in r), key=lambda r: r["refined_rank"]
@@ -484,6 +489,20 @@ def _loop(maps: list[dict]) -> dict:
     if "resolved_groups" in best:
         loop["groups"] = best["resolved_groups"]
     return loop
+
+
+def _search(optimiser: Optimiser, maps: dict[str, list[dict]]) -> dict[str, Any]:
+    """How a step's start stresses are to be read, per kind of map ("scratch", "incremental"):
+    `fine_starts` is how many of the list (its lowest) are at fine precision, the rest being rough
+    stresses, and `refine_best` the optimiser's count of rough starts refined fine, when any map
+    of the step was made that way. Empty for an optimiser that records neither (the stand-in), and
+    absent from steps made before these were kept: not recorded, never zero."""
+    kept = {name: min(each, key=map_order) for name, each in maps.items()}
+    fine = {name: best["fine_starts"] for name, best in kept.items() if "fine_starts" in best}
+    out: dict[str, Any] = {"fine_starts": fine} if fine else {}
+    if any("refine_best" in best for best in kept.values()):
+        out["refine_best"] = optimiser.refine_best
+    return out
 
 
 def _threads(maps: list[dict]) -> dict | None:
@@ -588,6 +607,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
         "chosen": "scratch",
         "stress": {"scratch": all_maps[0]["stress"]},
         "start_stresses": {"scratch": [r["stress"] for r in all_maps]},
+        **_search(mapper.optimiser, {"scratch": all_maps}),
         "trapped_loop": {"scratch": _loop(all_maps)},
         **({"removed": removed} if cfg.remove else {}),
         **({"dropped_cells_by_rule": dropped} if dropped else {}),
@@ -662,6 +682,7 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
         "chosen": "scratch",
         "stress": {"scratch": all_maps[0]["stress"]},
         "start_stresses": {"scratch": [r["stress"] for r in all_maps]},
+        **_search(mapper.optimiser, {"scratch": all_maps}),
         "trapped_loop": {"scratch": _loop(all_maps)},
         "merge": {
             "antigens": merged.n_antigens,
@@ -764,6 +785,7 @@ def _merge_step(
             "incremental": [r["stress"] for r in all_incremental],
             "scratch": [r["stress"] for r in all_scratch],
         },
+        **_search(optimiser, {"incremental": all_incremental, "scratch": all_scratch}),
         "trapped_loop": {"incremental": _loop(all_incremental), "scratch": _loop(all_scratch)},
         **({"removed": removed} if cfg.remove else {}),
         **({"dropped_cells_by_rule": dropped} if dropped else {}),
@@ -806,6 +828,8 @@ def _write_chain_record(
         "config": config_to_json(cfg),
         "optimiser": optimiser.name,
         **({"numerics": optimiser.numerics} if optimiser.numerics is not None else {}),
+        # how many rough starts the optimiser refines fine (chains before it was kept: 5)
+        **({"refine_best": optimiser.refine_best} if optimiser.refine_best is not None else {}),
         "complete": len(results) == n_steps,
         "steps": [
             {

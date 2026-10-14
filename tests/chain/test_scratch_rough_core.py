@@ -49,7 +49,7 @@ def test_only_the_best_five_rough_starts_are_refined_the_rest_come_back_unchange
     arrays = many_minima(6)
     maps = {m["start_seed"]: m for m in _scratch(arrays, "rough")}
     plain = relax(
-        backend.CoreOptimiser._problem(arrays),
+        backend.CoreOptimiser()._problem(arrays),
         n_starts=N_STARTS,
         seed=SEED,
         dimensions=2,

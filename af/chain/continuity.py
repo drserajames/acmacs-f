@@ -51,12 +51,14 @@ from af.util.config import ConfigError, load_config
 # Options that change how hard the optimiser searches, not the map's problem: a pair differing
 # only in these is still the same problem, and its stresses compare (the lower found more).
 SEARCH_OPTIONS = ("resolve_best",)
+REFINED_BEFORE_RECORDED = 5  # refine_best of every version published without the parameter
 
 FIELDS = (
     "context: why this record exists when it is not month to month (--note), else null. "
     "stress: each map's own best stress; comparable only when same_problem is true. "
     "search_differ: options that change how hard the optimiser searches, not the problem "
-    "(SEARCH_OPTIONS), as [previous, new]; they leave same_problem true. "
+    "(SEARCH_OPTIONS, and refine_best: how many rough starts were refined fine, 5 where a "
+    "version does not record it), as [previous, new]; they leave same_problem true. "
     "numerics_differ: the optimiser's name for its arithmetic as [previous, new] when the two "
     "maps were made under different ones (null = not named, before it was), else null; it "
     "leaves same_problem true: the same stress function, but the two builds can end in "
@@ -273,9 +275,14 @@ def record(
     (an, sn), (ap, sp) = _search_apart(pn["parameters"]), _search_apart(pp["parameters"])
     # the arithmetic is how the problem was computed, not the problem (as SEARCH_OPTIONS)
     numerics = [ap.pop("numerics", None), an.pop("numerics", None)]
+    # likewise how many rough starts were refined fine; versions before it was recorded used 5
+    before = REFINED_BEFORE_RECORDED
+    refined = [ap.pop("refine_best", before), an.pop("refine_best", before)]
     keys = sorted(set(an) | set(ap))
     differ = [k for k in keys if an.get(k) != ap.get(k)]
     search = {f"options.{k}": [sp[k], sn[k]] for k in SEARCH_OPTIONS if sp[k] != sn[k]}
+    if refined[0] != refined[1]:
+        search["refine_best"] = refined
     same = pn["inputs"] == pp["inputs"] and not differ
     drift = records / dataset / f"{parent}.tables-drift.json"
     from af.run.runtime import release_info
