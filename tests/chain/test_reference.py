@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import os
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -297,3 +298,55 @@ def test_the_placement_is_named_in_words():
     b |= {"placement": "random", "starts": 50, "seeded_stress": 101.5}
     text = " ".join(sentences({"composition": comp, "basin": b}, "the reference"))
     assert "the rest at random, best of 50; with them at this map's own positions 99.800" in text
+
+
+def test_pairs_come_in_our_index_order_in_every_process():
+    # 13 Oct 2026: pairs were made by iterating a set of names, so the order of the points a
+    # comparison walks, and which of two equal groups was listed, changed between runs
+    import subprocess
+    import sys
+
+    from af.chain.reference import staged_pairs
+
+    def key(name: str) -> str:
+        return name
+
+    ours = [f"EXAMPLETOWN/{i}/2021" for i in range(200)]
+    theirs = list(reversed(ours))
+    pairs, _ = staged_pairs(ours, theirs, [("name", key)])
+    assert list(pairs) == list(range(200)) and pairs[0] == 199
+    code = (
+        "from af.chain.reference import staged_pairs\n"
+        "ours = [f'EXAMPLETOWN/{i}/2021' for i in range(200)]\n"
+        "half = [ours[i] for i in range(0, 200, 2)]\n"
+        "pairs, _ = staged_pairs(ours, half[::-1], [('name', lambda n: n)])\n"
+        "print(list(pairs.items()))\n"
+    )
+    seen = {
+        subprocess.run(
+            [sys.executable, "-c", code],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in ("1", "2", "3")
+    }
+    assert len(seen) == 1
+
+
+def test_equal_groups_are_listed_furthest_moved_first():
+    from af.chain.reference import moved_groups
+
+    chart = _chart(
+        [Antigen(f"EXAMPLETOWN/{i}/2021", passage="MDCK1", date="2021-03-01") for i in range(40)],
+        [],
+    )
+    rng = np.random.default_rng(5)
+    layout = rng.uniform(0, 40, size=(40, 2))
+    other = layout.copy()
+    for point, shift in ((3, 2.0), (17, 7.0), (25, 4.0)):  # three points on their own
+        other[point] -= [shift, 0.0]
+    m = moved_groups(chart, np.arange(40), layout, other)
+    assert m["group_sizes"] == [1, 1, 1]
+    assert [round(g["mean_shift"], 6) for g in m["groups"]] == [7.0, 4.0, 2.0]
