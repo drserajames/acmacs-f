@@ -5,10 +5,15 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <dlfcn.h>
+
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 #include "grid_test.hh"
+#include "numerics.hh"
+#include "portable_math.hh"
 #include "problem.hh"
 #include "random.hh"
 #include "reactivity.hh"
@@ -17,6 +22,20 @@
 
 namespace py = pybind11;
 using namespace af::map;
+
+// Each compiled core binds its OWN problem type, in a namespace named after the module. pybind11
+// keeps one registry of C++ types per process, so two modules cannot both bind af::map::Problem;
+// and with distinct types a problem made by one core is refused by the other's functions (a
+// TypeError) instead of being quietly run under the wrong arithmetic.
+#define AF_BOUND_NAMESPACE_OF(module) module##_bound
+#define AF_BOUND_NAMESPACE(module) AF_BOUND_NAMESPACE_OF(module)
+namespace af::map::AF_BOUND_NAMESPACE(AF_CORE_MODULE)
+{
+    struct BoundProblem : af::map::Problem
+    {
+    };
+} // namespace af::map::AF_BOUND_NAMESPACE(AF_CORE_MODULE)
+using af::map::AF_BOUND_NAMESPACE(AF_CORE_MODULE)::BoundProblem;
 
 namespace
 {
@@ -32,7 +51,7 @@ namespace
         return result;
     }
 
-    Problem make_problem(const carray<double>& titre_value, const carray<std::int8_t>& titre_type, const carray<double>& column_bases, const carray<bool>& disconnected, bool dodgy_is_regular,
+    BoundProblem make_problem(const carray<double>& titre_value, const carray<std::int8_t>& titre_type, const carray<double>& column_bases, const carray<bool>& disconnected, bool dodgy_is_regular,
                          const std::optional<carray<double>>& weights, const std::optional<carray<double>>& avidity_adjust, const std::optional<carray<double>>& gradient_multipliers,
                          const std::optional<carray<bool>>& unmovable)
     {
@@ -48,7 +67,7 @@ namespace
                     throw std::invalid_argument{"gradient_multipliers other than 1.0 are not implemented"};
             }
         }
-        Problem problem;
+        BoundProblem problem;
         problem.n_antigens = static_cast<std::size_t>(titre_value.shape(0));
         problem.n_sera = static_cast<std::size_t>(titre_value.shape(1));
         problem.titre_value = to_vector(titre_value);
@@ -66,7 +85,7 @@ namespace
         return problem;
     }
 
-    std::vector<double> layout_vector(const Problem& problem, const carray<double>& layout, std::size_t& dimensions)
+    std::vector<double> layout_vector(const BoundProblem& problem, const carray<double>& layout, std::size_t& dimensions)
     {
         if (layout.ndim() != 2 || static_cast<std::size_t>(layout.shape(0)) != problem.n_points())
             throw std::invalid_argument{"layout must be a 2-D array [n_points, dimensions]"};
@@ -118,7 +137,20 @@ namespace
     }
 } // namespace
 
-PYBIND11_MODULE(_core, m)
+namespace
+{
+    // The path of this shared library, for the message of a build that breaks the contract.
+    std::string this_library()
+    {
+        Dl_info info;
+        if (dladdr(reinterpret_cast<const void*>(&af::map::numerics::require), &info) != 0 && info.dli_fname != nullptr)
+            return info.dli_fname;
+        return "af.map._core, path unknown";
+    }
+} // namespace
+
+// AF_CORE_MODULE is _core (the contract) or _core_original (AF_ORIGINAL_ARITHMETIC): cpp/optimiser/CMakeLists.txt
+PYBIND11_MODULE(AF_CORE_MODULE, m)
 {
     m.doc() = "af map optimiser core (C++, alglib). Use af.map.optimise rather than this module directly.";
 
@@ -143,16 +175,16 @@ PYBIND11_MODULE(_core, m)
         }
     });
 
-    py::class_<Problem>(m, "Problem")
+    py::class_<BoundProblem>(m, "Problem")
         .def(py::init(&make_problem), py::arg("titre_value"), py::arg("titre_type"), py::arg("column_bases"), py::arg("disconnected"), py::kw_only(), py::arg("dodgy_is_regular"),
              py::arg("weights") = py::none(), py::arg("avidity_adjust") = py::none(), py::arg("gradient_multipliers") = py::none(), py::arg("unmovable") = py::none())
-        .def_property_readonly("n_antigens", [](const Problem& p) { return p.n_antigens; })
-        .def_property_readonly("n_sera", [](const Problem& p) { return p.n_sera; })
+        .def_property_readonly("n_antigens", [](const BoundProblem& p) { return p.n_antigens; })
+        .def_property_readonly("n_sera", [](const BoundProblem& p) { return p.n_sera; })
         .def_property_readonly("n_points", &Problem::n_points)
-        .def_property_readonly("column_bases", [](const Problem& p) { return py::array_t<double>(static_cast<py::ssize_t>(p.column_bases.size()), p.column_bases.data()); })
+        .def_property_readonly("column_bases", [](const BoundProblem& p) { return py::array_t<double>(static_cast<py::ssize_t>(p.column_bases.size()), p.column_bases.data()); })
         .def(
             "stress",
-            [](const Problem& p, const carray<double>& layout) {
+            [](const BoundProblem& p, const carray<double>& layout) {
                 std::size_t dimensions = 0;
                 auto args = layout_vector(p, layout, dimensions);
                 for (std::size_t point = 0; point < p.n_points(); ++point) {
@@ -164,7 +196,7 @@ PYBIND11_MODULE(_core, m)
             py::arg("layout"))
         .def(
             "gradient",
-            [](const Problem& p, const carray<double>& layout) {
+            [](const BoundProblem& p, const carray<double>& layout) {
                 std::size_t dimensions = 0;
                 auto args = layout_vector(p, layout, dimensions);
                 for (std::size_t point = 0; point < p.n_points(); ++point) {
@@ -178,7 +210,7 @@ PYBIND11_MODULE(_core, m)
             py::arg("layout"))
         .def(
             "stress_table",
-            [](const Problem& p, const carray<double>& layout) {
+            [](const BoundProblem& p, const carray<double>& layout) {
                 std::size_t dimensions = 0;
                 auto args = layout_vector(p, layout, dimensions);
                 for (std::size_t point = 0; point < p.n_points(); ++point) {
@@ -192,7 +224,7 @@ PYBIND11_MODULE(_core, m)
             },
             py::arg("layout"))
         .def("table_distances",
-             [](const Problem& p) {
+             [](const BoundProblem& p) {
                  // NaN where the titre is not fitted: the same cells as stress_table
                  py::array_t<double> result({static_cast<py::ssize_t>(p.n_antigens), static_cast<py::ssize_t>(p.n_sera)});
                  std::fill_n(result.mutable_data(), result.size(), std::numeric_limits<double>::quiet_NaN());
@@ -203,7 +235,7 @@ PYBIND11_MODULE(_core, m)
                  return result;
              })
         .def("n_table_distances",
-             [](const Problem& p) {
+             [](const BoundProblem& p) {
                  const auto td = table_distances(p);
                  return py::make_tuple(td.regular.size(), td.less_than.size());
              })
@@ -211,7 +243,7 @@ PYBIND11_MODULE(_core, m)
 
     m.def(
         "relax",
-        [](const Problem& problem, std::size_t dimensions, std::size_t n_starts, std::size_t first_start, std::uint64_t seed, const std::string& method, const std::string& precision,
+        [](const BoundProblem& problem, std::size_t dimensions, std::size_t n_starts, std::size_t first_start, std::uint64_t seed, const std::string& method, const std::string& precision,
            bool dimension_annealing, std::size_t keep, int threads) {
             RelaxOptions options{dimensions, n_starts, first_start, seed, method_from_string(method), precision_from_string(precision), dimension_annealing, 2.0, keep, threads};
             std::vector<Projection> projections;
@@ -226,7 +258,7 @@ PYBIND11_MODULE(_core, m)
 
     m.def(
         "relax_incremental",
-        [](const Problem& problem, const carray<double>& start_layout, std::size_t n_starts, std::size_t first_start, std::uint64_t seed, const std::string& method,
+        [](const BoundProblem& problem, const carray<double>& start_layout, std::size_t n_starts, std::size_t first_start, std::uint64_t seed, const std::string& method,
            const std::string& precision, std::size_t keep, int threads) {
             std::size_t dimensions = 0;
             const auto layout = layout_vector(problem, start_layout, dimensions);
@@ -243,7 +275,7 @@ PYBIND11_MODULE(_core, m)
 
     m.def(
         "refine",
-        [](const Problem& problem, const std::vector<carray<double>>& layouts, const std::string& method, const std::string& precision, int threads) {
+        [](const BoundProblem& problem, const std::vector<carray<double>>& layouts, const std::string& method, const std::string& precision, int threads) {
             std::vector<Projection> projections;
             for (const auto& layout : layouts) {
                 std::size_t dimensions = 0;
@@ -261,7 +293,7 @@ PYBIND11_MODULE(_core, m)
 
     m.def(
         "optimise",
-        [](const Problem& problem, const carray<double>& layout, const std::string& method, const std::string& precision) {
+        [](const BoundProblem& problem, const carray<double>& layout, const std::string& method, const std::string& precision) {
             std::size_t dimensions = 0;
             const auto args = layout_vector(problem, layout, dimensions);
             Projection projection;
@@ -275,7 +307,7 @@ PYBIND11_MODULE(_core, m)
 
     m.def(
         "grid_test",
-        [](const Problem& problem, const carray<double>& layout, double step, int threads) {
+        [](const BoundProblem& problem, const carray<double>& layout, double step, int threads) {
             std::size_t dimensions = 0;
             const auto args = layout_vector(problem, layout, dimensions);
             std::vector<GridResult> results;
@@ -314,7 +346,7 @@ PYBIND11_MODULE(_core, m)
 
     m.def(
         "fit_reactivity",
-        [reactivity_options](const Problem& problem, const carray<double>& layout, const carray<double>& start, const carray<double>& fixed, double penalty,
+        [reactivity_options](const BoundProblem& problem, const carray<double>& layout, const carray<double>& start, const carray<double>& fixed, double penalty,
                              const std::string& column_bases, bool clip, double minimum_column_basis, const std::string& method, const std::string& precision) {
             std::size_t dimensions = 0;
             const auto args = layout_vector(problem, layout, dimensions);
@@ -340,7 +372,7 @@ PYBIND11_MODULE(_core, m)
 
     m.def(
         "reactivity_objective",
-        [reactivity_options](const Problem& problem, const carray<double>& layout, const carray<double>& reactivity, double penalty, const std::string& column_bases, bool clip,
+        [reactivity_options](const BoundProblem& problem, const carray<double>& layout, const carray<double>& reactivity, double penalty, const std::string& column_bases, bool clip,
                              double minimum_column_basis) {
             std::size_t dimensions = 0;
             const auto args = layout_vector(problem, layout, dimensions);
@@ -354,7 +386,7 @@ PYBIND11_MODULE(_core, m)
 
     m.def(
         "reactivity_column_bases",
-        [reactivity_options](const Problem& problem, const carray<double>& reactivity, const std::string& column_bases, double minimum_column_basis) {
+        [reactivity_options](const BoundProblem& problem, const carray<double>& reactivity, const std::string& column_bases, double minimum_column_basis) {
             const auto bases = reactivity_column_bases(problem, to_vector(reactivity), reactivity_options(0.0, column_bases, true, minimum_column_basis, "cg", "fine"));
             return py::array_t<double>(static_cast<py::ssize_t>(bases.size()), bases.data());
         },
@@ -371,5 +403,27 @@ PYBIND11_MODULE(_core, m)
     m.attr("openmp") = true;
 #else
     m.attr("openmp") = false;
+#endif
+
+    m.attr("library") = this_library();
+    m.def("contracts_multiply_add", &numerics::contracts_multiply_add, "True when this build fuses a*b+c.");
+#ifdef AF_ORIGINAL_ARITHMETIC
+    // The original arithmetic: whatever this machine and compiler do. No name, nothing to check.
+    m.attr("NUMERICS") = py::none();
+#else
+    // The arithmetic contract (numerics.hh). A build that does not keep it refuses to load: its
+    // maps would silently differ from every other machine's.
+    try {
+        numerics::require();
+    }
+    catch (const std::runtime_error& err) {
+        // Name the file: the first sign is often a failed batch task's log, not an interactive import.
+        throw std::runtime_error{std::string{err.what()} + " (" + this_library() + ")"};
+    }
+    m.attr("NUMERICS") = numerics::id;
+    m.def(
+        "portable_exp", [](double x) { return portable::exp(x); }, py::arg("x"), "The exp the stress uses: the same bits on every machine.");
+    m.def(
+        "portable_log2", [](double x) { return portable::log2(x); }, py::arg("x"), "The log2 the avidity adjustments use: the same bits on every machine.");
 #endif
 }

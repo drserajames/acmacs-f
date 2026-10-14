@@ -15,6 +15,7 @@
 #include <span>
 #include <vector>
 
+#include "numerics.hh"
 #include "problem.hh"
 
 namespace af::map
@@ -24,7 +25,10 @@ namespace af::map
     {
         constexpr double sigmoid_multiplier = 10.0;
 
-        inline double sigmoid(double x) { return 1.0 / (1.0 + std::exp(-x)); }
+        // numerics::exp: the portable exp under the contract (the system's differs in the last bit
+        // between machines, and the minimiser turns one bit into a different map), the system's in
+        // the original arithmetic (numerics.hh).
+        inline double sigmoid(double x) { return 1.0 / (1.0 + numerics::exp(-x)); }
 
         // Error of one "<" titre as a function of diff = target + 1 - map distance.
         inline double less_than_error(double diff) { return diff * diff * sigmoid(sigmoid_multiplier * diff); }
@@ -34,6 +38,19 @@ namespace af::map
         {
             const double s = sigmoid(sigmoid_multiplier * diff);
             return 2.0 * diff * s + diff * diff * s * (1.0 - s) * sigmoid_multiplier;
+        }
+
+        // Both at once, with one sigmoid (one exp) between them. The same expressions as the two
+        // functions above, so the same bits.
+        struct LessThan
+        {
+            double error;
+            double slope;
+        };
+        inline LessThan less_than(double diff)
+        {
+            const double s = sigmoid(sigmoid_multiplier * diff);
+            return {diff * diff * s, 2.0 * diff * s + diff * diff * s * (1.0 - s) * sigmoid_multiplier};
         }
 
         // Two points on top of each other have no direction; ae divides by 1e-5 instead of 0
@@ -75,6 +92,8 @@ namespace af::map
         const std::vector<PointEntry>& entries_for(std::size_t point) const { return by_point_[point]; }
 
       private:
+        void zero_unmovable(std::span<double> gradient, std::size_t dimensions) const;
+
         TableDistances distances_;
         std::size_t n_points_;
         std::vector<char> unmovable_;

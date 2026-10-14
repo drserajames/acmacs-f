@@ -10,6 +10,12 @@ import numpy as np
 import numpy.typing as npt
 
 openmp: bool
+library: str
+NUMERICS: str
+
+def contracts_multiply_add() -> bool: ...
+def portable_exp(x: float) -> float: ...
+def portable_log2(x: float) -> float: ...
 
 class Problem:
     def __init__(
