@@ -98,7 +98,10 @@ SERUM_STAGES: tuple[tuple[str, Callable[[Any], tuple]], ...] = (
 def staged_pairs(
     ours: Sequence[Any], theirs: Sequence[Any], stages: Sequence[tuple[str, Callable]]
 ) -> tuple[dict[int, int], dict[str, int]]:
-    """ours index -> theirs index; at each stage only keys unique on BOTH sides pair."""
+    """ours index -> theirs index, in our index order; at each stage only keys unique on BOTH
+    sides pair. The order matters downstream (the points a comparison walks, which of two equal
+    groups is listed first), so it never comes from iterating a set of strings, whose order
+    changes from one Python process to the next."""
     pairs: dict[int, int] = {}
     by_stage: dict[str, int] = {}
     for label, key in stages:
@@ -108,10 +111,10 @@ def staged_pairs(
         ca, cb = Counter(key(ours[i]) for i in lo), Counter(key(theirs[j]) for j in lr)
         a = {key(ours[i]): i for i in lo if ca[key(ours[i])] == 1}
         b = {key(theirs[j]): j for j in lr if cb[key(theirs[j])] == 1}
-        new = {a[k]: b[k] for k in a.keys() & b.keys()}
+        new = {a[k]: b[k] for k in a if k in b}
         pairs.update(new)
         by_stage[label] = len(new)
-    return pairs, by_stage
+    return dict(sorted(pairs.items())), by_stage
 
 
 def composition(chart: Chart, ref: Chart) -> dict[str, Any]:
@@ -304,7 +307,12 @@ def moved_groups(
     members: dict[int, list[int]] = {}
     for x in range(len(far)):
         members.setdefault(root(x), []).append(int(far[x]))
-    ordered = sorted(members.values(), key=lambda g: (-len(g), g[0]))
+    # largest first; of equal size the one moved furthest, then the lowest chart index: a fixed
+    # order, so the groups listed are the same ones on every run
+    ordered = sorted(
+        members.values(),
+        key=lambda g: (-len(g), -float(np.linalg.norm(disp[g].mean(axis=0))), int(points[g[0]])),
+    )
     group_of = {k: n for n, g in enumerate(ordered, start=1) for k in g}
 
     def describe(n: int, g: list[int]) -> dict[str, Any]:
