@@ -10,7 +10,7 @@ from af.chart.model import Antigen, Chart, Titres
 from af.clades.colours import ColourEntry
 from af.clades.colours import ColourScheme as CladeColourScheme
 from af.geo.colours import STATE_NO_SCHEME_ROW, STATE_NO_SUPPORTED, STATE_UNOBSERVED, DotStyle
-from af.map.build import unpainted_clades
+from af.map.build import placement_clades, unpainted_clades
 from af.map.style import PointIn
 from tests.map.test_colouring import caller_setup
 
@@ -58,3 +58,28 @@ def test_unpainted_antigens_are_reported_once_per_clade_over_drawn_points() -> N
     )
     assert got[1]["warning"].startswith("WARNING: 1 antigen, 0 of them reference antigens, is ")
     assert unpainted_clades(chart, points, [painted] * 6, "clades") == []  # nothing to report
+
+
+def test_antigens_painted_by_placement_get_one_flag_over_drawn_points() -> None:
+    """Q183 b: painted by placement, and flagged by one record whose sentence is copied
+    verbatim downstream; undrawn and hidden antigens are not counted."""
+    from af.geo.colours import BASIS_PLACEMENT, placement_warning
+
+    names = ["/".join(("A", "PLACE", str(n), "2021")) for n in range(5)]
+    chart = Chart({"V": "A(H1N1)"}, [Antigen(n) for n in names], [], Titres([[]] * 5))
+    placed = DotStyle("Clade P", "#aa0000", BASIS_PLACEMENT, tree_clade="P")
+    evidence = DotStyle("Clade P", "#aa0000", "clade")
+    styles = [placed, placed, placed, evidence, placed]
+    points = [
+        PointIn("ag0", names[0], "antigen", (0.0, 0.0), reference=True),
+        PointIn("ag1", names[1], "antigen", (1.0, 0.0)),
+        PointIn("ag2", names[2], "antigen", None),  # not drawn
+        PointIn("ag3", names[3], "antigen", (2.0, 0.0)),
+        PointIn("ag4", names[4], "antigen", (3.0, 0.0), hide="H-1"),  # hidden
+    ]
+    assert placement_clades(chart, points, styles) == [
+        {"tree_clades": {"P": 2}, "points": 2, "reference_antigens": 1,
+         "warning": placement_warning(2, {"P": 2}, reference=1)}
+    ]  # fmt: skip
+    assert unpainted_clades(chart, points, styles, "clades") == []  # painted: not unpainted
+    assert placement_clades(chart, points, [evidence] * 5) == []

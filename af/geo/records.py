@@ -27,7 +27,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from af.geo.colours import STATE_NO_SCHEME_ROW, STATE_NO_SUPPORTED, UNCOLOURED, DotStyle
+from af.geo.colours import (
+    BASIS_PLACEMENT,
+    STATE_NO_SCHEME_ROW,
+    STATE_NO_SUPPORTED,
+    UNCOLOURED,
+    DotStyle,
+)
 from af.serology.query import Preparation
 
 
@@ -91,6 +97,9 @@ class GeoCounts:
     # drawn dots left unpainted by clade evidence: (subtype, month, supported clade or None for
     # "no supported clade") -> Unpainted
     unpainted: dict[tuple[str, Month, str | None], Unpainted] = field(default_factory=dict)
+    # drawn dots painted by tree placement alone, flagged (Q183 b): (subtype, month) -> Unpainted
+    # (the same counts: dots, their placement-painted preparations, the tree's labels)
+    placement: dict[tuple[str, Month], Unpainted] = field(default_factory=dict)
 
 
 @dataclass
@@ -147,6 +156,7 @@ def geo_counts(
             result.merges.setdefault(subtype, Counter())[case] += 1
             result.merged_preparations[subtype] += len(preps)
             _note_unpainted(result, subtype, first_date, dot, [s for s, _ in styles])
+            _note_placement(result, subtype, first_date, dot, [s for s, _ in styles])
     return result
 
 
@@ -172,6 +182,22 @@ def _note_unpainted(
     entry.points += 1
     entry.preparations += len(gaps)
     entry.tree_clades[first.tree_clade] += 1
+
+
+def _note_placement(
+    result: GeoCounts,
+    subtype: str,
+    date: datetime.date | None,
+    dot: DotStyle,
+    styles: list[DotStyle],
+) -> None:
+    """Count a drawn dot painted by tree placement alone (Q183 b): painted, but flagged."""
+    if dot.basis != BASIS_PLACEMENT or date is None:
+        return
+    entry = result.placement.setdefault((subtype, Month.of(date)), Unpainted())
+    entry.points += 1
+    entry.preparations += sum(s.basis == BASIS_PLACEMENT for s in styles)
+    entry.tree_clades[dot.tree_clade] += 1
 
 
 def virus_key(prep: Preparation) -> VirusKey:
@@ -243,6 +269,7 @@ def to_i7(counts: GeoCounts, subtype: str) -> dict[str, Any]:
                     for name, styles in sorted(locations.items())
                 ],
                 "unpainted": _unpainted(counts, subtype, month),
+                "painted_by_placement": _placement(counts, subtype, month),
             }
             for month, locations in by_month.items()
         ],
@@ -262,6 +289,20 @@ def _unpainted(counts: GeoCounts, subtype: str, month: Month) -> list[dict[str, 
             "preparations": u.preparations,
         }
         for clade, u in sorted(found, key=lambda cu: (cu[0] is None, cu[0] or ""))
+    ]
+
+
+def _placement(counts: GeoCounts, subtype: str, month: Month) -> list[dict[str, Any]]:
+    """The month's dots painted by tree placement alone (Q183 b): one group, or none."""
+    u = counts.placement.get((subtype, month))
+    if u is None:
+        return []
+    return [
+        {
+            "tree_clades": dict(sorted(u.tree_clades.items())),
+            "points": u.points,
+            "preparations": u.preparations,
+        }
     ]
 
 
