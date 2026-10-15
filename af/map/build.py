@@ -651,6 +651,9 @@ def build_map(
     unpainted = unpainted_clades(chart, points, dots, scheme.name)
     if unpainted:
         decisions["unpainted_clades"] = unpainted
+    placed = placement_clades(chart, points, dots)
+    if placed:
+        decisions["painted_by_placement"] = placed
 
     size = config.frame_size(chart.info.get("V", ""), chart.info.get("A", ""))
     title_base = map_title(chart, cfg.title)
@@ -690,7 +693,7 @@ def build_map(
         time.monotonic() - started,
         dict(decisions.get("lineage_minority", {}).get("other", {})),
         non_ferret_count,
-        tuple(u["warning"] for u in unpainted),
+        tuple(u["warning"] for u in [*unpainted, *placed]),
     )
 
 
@@ -728,6 +731,34 @@ def unpainted_clades(
             }
         )
     return out
+
+
+def placement_clades(
+    chart: Chart, points: Sequence[PointIn], styles: Sequence[DotStyle]
+) -> list[dict[str, Any]]:
+    """The antigens this map draws painted by tree placement alone (Sarah, Q183 b, 14 Oct 2026:
+    a contradicted clade with no supported ancestor is coloured by placement, flagged): one
+    record with af.geo.colours.placement_warning's sentence, copied verbatim downstream
+    (11-reports), or none. Drawn as for :func:`unpainted_clades`."""
+    from af.geo.colours import BASIS_PLACEMENT, placement_warning
+
+    n, reference, tree = 0, 0, Counter[str]()
+    for p, dot in zip(points[: chart.n_antigens], styles, strict=False):
+        if dot.basis != BASIS_PLACEMENT or p.xy is None or p.hide:
+            continue
+        n += 1
+        reference += bool(p.reference)
+        tree[dot.tree_clade] += 1
+    if not n:
+        return []
+    return [
+        {
+            "tree_clades": dict(sorted(tree.items())),
+            "points": n,
+            "reference_antigens": reference,
+            "warning": placement_warning(n, tree, reference=reference),
+        }
+    ]
 
 
 # ---------------------------------------------------------------- the command

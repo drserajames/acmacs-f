@@ -216,9 +216,11 @@ def test_a_group_needing_no_clade_colours_a_virus_with_none(tmp_path: Path) -> N
 def test_tree_clade_evidence_decides_which_clade_paints(tmp_path: Path) -> None:
     """Sarah, 8 Oct 2026, for tree-derived clades (04-clades' clade_evidence, read, never
     recomputed): unobserved, not painted (drawn as unsequenced); contradicted, painted by the
-    deepest supported clade; no supported clade, or no scheme row for it, not painted, by its own
-    reason, the supported clade counted so the scheme gap is reported."""
+    deepest supported clade; no scheme row for it, not painted, the supported clade counted so the
+    scheme gap is reported. No supported clade: painted by the tree's own clade by placement,
+    flagged (Q183 b), or not painted when the scheme has no row for that either."""
     from af.geo.colours import (
+        BASIS_PLACEMENT,
         BASIS_SUPPORTED_CLADE,
         STATE_NO_SCHEME_ROW,
         STATE_NO_SUPPORTED,
@@ -237,14 +239,16 @@ def test_tree_clade_evidence_decides_which_clade_paints(tmp_path: Path) -> None:
             clade_evidence=evidence, supported_clade=supported,
         )  # fmt: skip
 
-    names = ("supported", "unobserved", "to-p1", "to-p2", "none-supported", "fallback")
+    names = ("supported", "unobserved", "to-p1", "to-p2", "none-supported", "none-no-row",
+             "fallback")  # fmt: skip
     preps = {n: prep(n) for n in names}
     links = {
         key(preps["supported"]): tree("P.1.1", "supported"),
         key(preps["unobserved"]): tree("P.1.1", "unobserved"),
         key(preps["to-p1"]): tree("P.1.1", "contradicted", "P.1"),  # paints as P.1
         key(preps["to-p2"]): tree("P.1.1", "contradicted", "P.2"),  # P.2: no row in only-p1
-        key(preps["none-supported"]): tree("P.1.1", "contradicted", None),
+        key(preps["none-supported"]): tree("P.1.1", "contradicted", None),  # placed: P.1 row
+        key(preps["none-no-row"]): tree("P.2", "contradicted", None),  # placed, but no P.2 row
         key(preps["fallback"]): linked("P.1.1"),  # a Nextclade row: no evidence, as before
     }
     style, counts = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), only_p1, clade_set)
@@ -257,12 +261,34 @@ def test_tree_clade_evidence_decides_which_clade_paints(tmp_path: Path) -> None:
     assert (gap.colour, gap.state, gap.clade, gap.tree_clade) == (
         None, STATE_NO_SCHEME_ROW, "P.2", "P.1.1"
     )  # fmt: skip
-    none = style(preps["none-supported"])
-    assert (none.colour, none.state, none.tree_clade) == (None, STATE_NO_SUPPORTED, "P.1.1")
+    placed = style(preps["none-supported"])
+    assert placed == DotStyle("Clade P.1", "#0000aa", BASIS_PLACEMENT, tree_clade="P.1.1")
+    assert placed != style(preps["supported"])  # same look, but flagged: not the same route
+    none = style(preps["none-no-row"])
+    assert (none.colour, none.state, none.tree_clade) == (None, STATE_NO_SUPPORTED, "P.2")
     assert counts.uncoloured == {STATE_UNOBSERVED: 1, STATE_NO_SCHEME_ROW: 1, STATE_NO_SUPPORTED: 1}
     assert counts.unpainted_clades == {"P.2": 1}
-    assert counts.evidence == {"supported": 1, "unobserved": 1, "contradicted": 3}
-    assert counts.basis == {BASIS_CLADE: 2, BASIS_SUPPORTED_CLADE: 1}
+    assert counts.placement_clades == {"P.1.1": 1}
+    assert counts.evidence == {"supported": 1, "unobserved": 1, "contradicted": 4}
+    assert counts.basis == {BASIS_CLADE: 2, BASIS_SUPPORTED_CLADE: 1, BASIS_PLACEMENT: 1}
+
+
+def test_tied_candidates_painted_by_placement_agree(tmp_path: Path) -> None:
+    """Q183 b in a tie: candidates whose tree clade is contradicted with nothing supported are
+    each painted by placement; when they agree, so does the tie, and the dot stays flagged."""
+    from af.geo.colours import BASIS_PLACEMENT
+    from af.serology.joins import TiedSequence
+
+    clade_set = load_synthetic(build_clone(tmp_path / "clone").parent)
+    a = TiedSequence("EPI_ISL_1", "ACC1", "P.1", clade_evidence="contradicted")
+    b = TiedSequence("EPI_ISL_2", "ACC2", "P.1", clade_evidence="contradicted")
+    tied = prep("tied")
+    links = {
+        key(tied): PreparationSequence(None, None, None, "", conflict=False, tied=(a, b), ranked=a)
+    }
+    style, counts = dot_styles(links, lambda e, x: AlignedSequence("K" * 30), SCHEME, clade_set)
+    assert style(tied) == DotStyle("Clade P.1", "#0000aa", BASIS_PLACEMENT, tree_clade="P.1")
+    assert counts.placement_clades == {"P.1": 1}
 
 
 def test_an_observed_candidate_wins_over_an_unobserved_one(tmp_path: Path) -> None:
@@ -359,7 +385,21 @@ def test_the_unpainted_warning_is_one_sentence_composed_once() -> None:
     )
     assert unpainted_warning(2, None, {"C.1.9": 2}, "clades", reference=0) == (
         "WARNING: 2 antigens, 0 of them reference antigens, are not painted: no clade on their "
-        "lineage is supported by their own sequence (tree labels: C.1.9 2; own loci contradicted)."
+        "lineage is supported by their own sequence (tree labels: C.1.9 2; own loci "
+        "contradicted), and colour scheme clades has no row for their tree labels."
     )
     geo = unpainted_warning(1, "A", {"B": 1}, "clades", unit=("virus", "viruses"))
     assert geo.startswith("WARNING: 1 virus is not painted: their sequences support clade A")
+
+
+def test_the_placement_warning_is_its_sibling_sentence() -> None:
+    """Q183 b: painted by placement, flagged, in one sentence composed once (11 copies it)."""
+    from af.geo.colours import placement_warning
+
+    assert placement_warning(13, {"P": 12, "P.1": 1}, reference=2) == (
+        "WARNING: 13 antigens, 2 of them reference antigens, are painted by tree placement "
+        "only: no clade on their lineage is supported by their own sequence (painted as tree "
+        "labels: P 12, P.1 1; own loci contradicted)."
+    )
+    geo = placement_warning(1, {"P": 1}, unit=("virus", "viruses"))
+    assert geo.startswith("WARNING: 1 virus is painted by tree placement only: ")

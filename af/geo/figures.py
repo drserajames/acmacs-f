@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from af.geo.colours import unpainted_warning
+from af.geo.colours import placement_warning, unpainted_warning
 from af.geo.render import Coordinates, Look, render_period
 from af.map.style import ColourScheme as MapColourScheme
 from af.report.i7 import I7_NAME, I7_VERSION, validate
@@ -42,6 +42,15 @@ def unpainted_records(unpainted: Sequence[Mapping[str, Any]], scheme: str) -> li
             ),
         }
         for u in unpainted
+    ]
+
+
+def placement_records(placed: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Each group of dots painted by tree placement alone, with its warning (Q183 b), the
+    sentence 11-reports copies verbatim (af.geo.colours.placement_warning)."""
+    return [
+        {**u, "warning": placement_warning(u["points"], u["tree_clades"], unit=UNIT)}
+        for u in placed
     ]
 
 
@@ -87,6 +96,10 @@ def write_geo_figures(
                 raise ValueError(f"{slot} {month}: unpainted dots, but no scheme to name")
             decisions["unpainted_clades"] = unpainted_records(period["unpainted"], scheme)
             for u in decisions["unpainted_clades"]:
+                print(f"{slot} {month}: {u['warning']}")
+        if period.get("painted_by_placement"):
+            decisions["painted_by_placement"] = placement_records(period["painted_by_placement"])
+            for u in decisions["painted_by_placement"]:
                 print(f"{slot} {month}: {u['warning']}")
         i7 = {
             "i7_version": I7_VERSION,
@@ -159,6 +172,19 @@ def clade_key(doc: Mapping[str, Any], schemes: Sequence[MapColourScheme]) -> dic
         {**w, "tree_clades": dict(sorted(w["tree_clades"].items()))}
         for _, w in sorted(window.items(), key=lambda kv: (kv[0] is None, kv[0] or ""))
     ]
+    placed: dict[str, Any] = {"tree_clades": Counter(), "points": 0, "preparations": 0,
+                              "per_month": {}}  # fmt: skip
+    for period in doc["periods"]:
+        for u in period.get("painted_by_placement", ()):
+            placed["tree_clades"].update(u["tree_clades"])
+            placed["points"] += u["points"]
+            placed["preparations"] += u["preparations"]
+            placed["per_month"][period["period"]] = u["points"]
+    placement = (
+        [{**placed, "tree_clades": dict(sorted(placed["tree_clades"].items()))}]
+        if placed["points"]
+        else []
+    )
     return {
         "schemes": [scheme.name for scheme in schemes],
         "months": [p["period"] for p in doc["periods"]],
@@ -169,4 +195,6 @@ def clade_key(doc: Mapping[str, Any], schemes: Sequence[MapColourScheme]) -> dic
         },
         # dots left unpainted by clade evidence over the window, each with its warning
         "unpainted_clades": unpainted_records(unpainted, ", ".join(s.name for s in schemes)),
+        # dots painted by tree placement alone over the window, flagged with its warning (Q183 b)
+        "painted_by_placement": placement_records(placement),
     }

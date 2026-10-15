@@ -59,6 +59,10 @@ BASIS_GROUP_NO_CLADE = "group, no clade named"
 #: ... or the deepest clade its sequence supports, where the tree's clade is contradicted by
 #: the sequence at that clade's own loci (Sarah, 8 Oct 2026: clade_evidence "contradicted").
 BASIS_SUPPORTED_CLADE = "supported clade, tree clade contradicted"
+#: ... or, where the tree's clade is contradicted and its sequence supports no clade on its
+#: lineage (the hierarchy's root), the tree's clade by placement alone, flagged with a warning
+#: (Sarah, Q183 b, 14 Oct 2026). A dot painted so is never silent: see placement_warning().
+BASIS_PLACEMENT = "tree placement only, no clade supported by its sequence"
 
 # Why an uncoloured dot is uncoloured, beyond "no sequence" (states carried on the DotStyle so
 # the maps can act on them; reasons counted in ColourCounts.uncoloured). Tree-derived clades
@@ -66,7 +70,8 @@ BASIS_SUPPORTED_CLADE = "supported clade, tree clade contradicted"
 #: The tree's clade cannot be shown from the sequence (an own locus unobserved, strict): the
 #: clade is not known, so the dot is drawn as an unsequenced one.
 STATE_UNOBSERVED = "clade not observable in its sequence"
-#: The tree's clade is contradicted and its sequence supports no clade it descends from.
+#: The tree's clade is contradicted, its sequence supports no clade it descends from, and the
+#: colour scheme has no row for the tree's clade either, so placement cannot paint it (Q183 b).
 STATE_NO_SUPPORTED = "contradicted, no supported clade"
 #: The supported clade has no row in the colour scheme: a scheme gap, reported as a warning.
 STATE_NO_SCHEME_ROW = "supported clade not in the colour scheme"
@@ -80,9 +85,10 @@ TIE_RANKED_UNOBSERVED = "tie: observed sequences disagree, the ranked one is uno
 class DotStyle:
     """How a dot is drawn. ``label`` is the legend text; the uncoloured style has none.
 
-    ``basis`` says how a coloured dot got its colour (:data:`BASIS_CLADE` or
-    :data:`BASIS_GROUP_NO_CLADE`); it is part of equality, so tied sequences reaching one colour
-    by different routes do not count as agreeing.
+    ``basis`` says how a coloured dot got its colour (a ``BASIS_*``); it is part of equality,
+    so tied sequences reaching one colour by different routes do not count as agreeing. A dot
+    painted with :data:`BASIS_PLACEMENT` carries the tree's label in ``tree_clade``: it is
+    painted, but flagged (:func:`placement_warning`).
     """
 
     label: str
@@ -92,7 +98,8 @@ class DotStyle:
     # ``clade`` names the supported clade the scheme has no row for
     state: str = ""
     clade: str = ""
-    tree_clade: str = ""  # with STATE_NO_SCHEME_ROW / STATE_NO_SUPPORTED: the tree's label
+    # with STATE_NO_SCHEME_ROW / STATE_NO_SUPPORTED / BASIS_PLACEMENT: the tree's label
+    tree_clade: str = ""
 
 
 UNCOLOURED = DotStyle(label="", colour=None)
@@ -111,6 +118,8 @@ class ColourCounts:
     evidence: Counter[str] = field(default_factory=Counter)
     # supported clade -> preparations left unpainted because the scheme has no row for it
     unpainted_clades: Counter[str] = field(default_factory=Counter)
+    # tree clade -> preparations painted by tree placement alone, flagged (Q183 b)
+    placement_clades: Counter[str] = field(default_factory=Counter)
 
 
 def dot_styles(
@@ -143,6 +152,8 @@ def dot_styles(
                 counts.evidence[evidence] += 1
             if cache[key].state == STATE_NO_SCHEME_ROW:
                 counts.unpainted_clades[cache[key].clade] += 1
+            if cache[key].basis == BASIS_PLACEMENT:
+                counts.placement_clades[cache[key].tree_clade] += 1
             if reason:
                 counts.uncoloured[reason] += 1
             else:
@@ -209,7 +220,8 @@ def dot_styles(
 
     def _sequence_style(record: PreparationSequence | TiedSequence) -> tuple[DotStyle, str]:
         """One record's style. Its clade evidence (tree-derived clades) decides which clade
-        paints it: unobserved, none; contradicted, the deepest supported clade; else its own.
+        paints it: unobserved, none; contradicted, the deepest supported clade, or with none
+        supported, the tree's own clade by placement, flagged (Q183 b); else its own.
         The evidence is 04-clades' and is read, never recomputed here."""
         epi_isl, accession, clade = record.epi_isl, record.accession, record.clade
         assert epi_isl is not None and accession is not None
@@ -218,9 +230,12 @@ def dot_styles(
             return DotStyle("", None, state=STATE_UNOBSERVED), STATE_UNOBSERVED
         if record.clade_evidence == "contradicted":
             if not record.supported_clade:
-                none = DotStyle("", None, state=STATE_NO_SUPPORTED, tree_clade=clade or "")
-                return none, STATE_NO_SUPPORTED
-            tree_clade, clade, basis = clade or "", record.supported_clade, BASIS_SUPPORTED_CLADE
+                if not clade:  # nothing placed it either
+                    return DotStyle("", None, state=STATE_NO_SUPPORTED), STATE_NO_SUPPORTED
+                tree_clade, basis = clade, BASIS_PLACEMENT
+            else:
+                tree_clade, clade = clade or "", record.supported_clade
+                basis = BASIS_SUPPORTED_CLADE
         if clade is None:
             return UNCOLOURED, "no clade assignment"
         if clade == "":
@@ -241,7 +256,12 @@ def dot_styles(
                     "", None, state=STATE_NO_SCHEME_ROW, clade=clade, tree_clade=tree_clade
                 )
                 return gap, STATE_NO_SCHEME_ROW
+            if basis == BASIS_PLACEMENT:
+                none = DotStyle("", None, state=STATE_NO_SUPPORTED, tree_clade=tree_clade)
+                return none, STATE_NO_SUPPORTED
             return UNCOLOURED, "not in the colour scheme"
+        if basis == BASIS_PLACEMENT:  # the tree's label rides along for the flag's sentence
+            return DotStyle(entry.legend, entry.colour, basis, tree_clade=tree_clade), ""
         return DotStyle(entry.legend, entry.colour, basis), ""
 
     return style, counts
@@ -261,7 +281,9 @@ def unpainted_warning(
     color for them"). Composed here only; maps, geo and the report copy it verbatim.
 
     ``clade`` is the supported clade the scheme has no row for, or None when the sequences
-    support no clade on their lineage. ``tree_clades`` counts the tree's labels of those points.
+    support no clade on their lineage and the scheme has no row for the tree's label either
+    (with a row, they are painted by placement: :func:`placement_warning`). ``tree_clades``
+    counts the tree's labels of those points.
     ``reference`` (maps) is how many are reference antigens; geo, whose dots are viruses, passes
     none and its own ``unit``.
     """
@@ -271,13 +293,40 @@ def unpainted_warning(
     labels = ", ".join(
         f"{t} {n}" for t, n in sorted(tree_clades.items(), key=lambda kv: (-kv[1], kv[0]))
     )
-    if clade is None:
+    if clade is None:  # placement could not paint them either (Q183 b)
         return (
             f"WARNING: {count} {noun}{refs} {verb} not painted: no clade on their lineage is "
-            f"supported by their own sequence (tree labels: {labels}; own loci contradicted)."
+            f"supported by their own sequence (tree labels: {labels}; own loci contradicted), "
+            f"and colour scheme {scheme} has no row for their tree labels."
         )
     return (
         f"WARNING: {count} {noun}{refs} {verb} not painted: their sequences support clade "
         f"{clade} (tree labels: {labels}; own loci contradicted), and colour scheme {scheme} "
         f"has no row for {clade}."
+    )
+
+
+def placement_warning(
+    count: int,
+    tree_clades: Mapping[str, int],
+    *,
+    reference: int | None = None,
+    unit: tuple[str, str] = ("antigen", "antigens"),
+) -> str:
+    """The one sentence for points painted by tree placement alone: their tree clade is
+    contradicted and their sequences support no clade on its lineage (Sarah, Q183 b, 14 Oct
+    2026: colour by placement, flagged). The sibling of :func:`unpainted_warning`, composed
+    here only; maps, geo and the report copy it verbatim. ``tree_clades`` counts the tree's
+    labels, which are the clades they are painted as; ``reference`` and ``unit`` as there.
+    """
+    noun = unit[0] if count == 1 else unit[1]
+    verb = "is" if count == 1 else "are"
+    refs = f", {reference} of them reference antigens," if reference is not None else ""
+    labels = ", ".join(
+        f"{t} {n}" for t, n in sorted(tree_clades.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
+    return (
+        f"WARNING: {count} {noun}{refs} {verb} painted by tree placement only: no clade on their "
+        f"lineage is supported by their own sequence (painted as tree labels: {labels}; own loci "
+        f"contradicted)."
     )

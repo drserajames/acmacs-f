@@ -490,6 +490,8 @@ class StoreColours:
             # the scheme has no row for (preparations); empty for Nextclade-derived clades
             "clade_evidence": dict(sorted(counts.evidence.items())),
             "unpainted_clades": dict(sorted(counts.unpainted_clades.items())),
+            # tree clades painted by placement alone, flagged (Q183 b): preparations
+            "placement_clades": dict(sorted(counts.placement_clades.items())),
             "coloured_without_clade": [
                 f"ag{i}" for i, b in enumerate(basis) if b == BASIS_GROUP_NO_CLADE
             ],
