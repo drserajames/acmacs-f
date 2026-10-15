@@ -8,13 +8,21 @@ back together (`combine`) so that the result is the same however the starts were
 
 from __future__ import annotations
 
+import inspect
+import json
 import math
 from collections import Counter
+from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
 import numpy as np
 
 MapResult = dict[str, Any]
+
+# How far a published layout's stress, evaluated again, may be from the one its map recorded
+# before a finish refuses it: last-bit differences between the optimiser's own final value and a
+# fresh evaluation, never a different problem (CoreOptimiser.finish).
+FINISH_STRESS_TOLERANCE = 1e-9
 
 
 class Optimiser(Protocol):
@@ -39,6 +47,12 @@ class Optimiser(Protocol):
         each step and chain; maps made before it was recorded used 5."""
         ...
 
+    @property
+    def move_lower_rule(self) -> dict[str, Any] | None:
+        """The rule the trapped-point loop applies with `move_lower` (`move_lower_rule()`), as a
+        step records it; None for an optimiser that has no such rule (the stand-in)."""
+        ...
+
     def optimise(
         self,
         arrays: dict,
@@ -48,6 +62,7 @@ class Optimiser(Protocol):
         start_layout: np.ndarray | None,
         move_groups: bool = False,
         resolve_best: int = 1,
+        move_lower: bool = False,
     ) -> list[MapResult]: ...
 
     def relax_chunk(
@@ -67,9 +82,81 @@ class Optimiser(Protocol):
         incremental: bool,
         move_groups: bool = False,
         resolve_best: int = 1,
+        move_lower: bool = False,
     ) -> list[MapResult]: ...
 
     def grid_test(self, layout: np.ndarray, arrays: dict) -> list[dict]: ...
+
+    def finish(
+        self, arrays: dict, layout: np.ndarray, rule: FinishRule, recorded_stress: float
+    ) -> MapResult: ...
+
+
+def move_lower_rule() -> dict[str, Any]:
+    """`af.map.optimise.MOVE_LOWER_RULE` as a step records it (JSON), with the round cap the
+    chain gives it: resolve_trapped's own max_rounds, which the chain never sets. A map made under
+    another rule, or another cap, is another map."""
+    from af.map.optimise import MOVE_LOWER_RULE, resolve_trapped
+
+    max_rounds = inspect.signature(resolve_trapped).parameters["max_rounds"].default
+    return json.loads(json.dumps({**asdict(MOVE_LOWER_RULE), "max_rounds": max_rounds}))
+
+
+def _move_lower_record(fixed: Any) -> dict[str, Any]:
+    """resolve_trapped's move-lower rounds, in step-record terms: why it stopped, and per round
+    tried (the rejected last one included) which points it tried and kept, and the stresses."""
+    return {
+        "stop": fixed.move_lower_stop,
+        "rounds": [
+            {
+                "round": int(r.round),
+                "candidates": [int(i) for i in r.candidates],
+                "joint_stress": float(r.joint_stress),
+                "how": r.how,
+                "moved": [int(i) for i in r.moved],
+                "stress_before": float(r.stress_before),
+                "stress_after": float(r.stress_after),
+                "kept": bool(r.kept),
+            }
+            for r in fixed.move_lower
+        ],
+    }
+
+
+def _group_record(groups: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "members": [int(m) for m in g.members],
+            "shift": [float(x) for x in g.shift],
+            "stress_before": float(g.stress_before),
+            "stress_after": float(g.stress_after),
+            "kept": bool(g.kept),
+            "n_antigens": int(g.n_antigens),
+            "n_sera": int(g.n_sera),
+            "mixed": bool(g.mixed),
+        }
+        for g in groups
+    ]
+
+
+@dataclass(frozen=True)
+class FinishRule:
+    """How `af.chain.finish` improves a published layout without new starts: the trapped-point
+    loop on that layout alone, with the options named here. Recorded verbatim with the map it
+    makes, so a reader knows which rule a version got."""
+
+    move_groups: bool = False  # af.map.optimise.resolve_trapped's group pass (DECISIONS Q61, Q78)
+    move_lower: bool = False  # its move-lower rule (af.map.optimise.MOVE_LOWER_RULE; Q195)
+
+    def __post_init__(self) -> None:
+        if not any(asdict(self).values()):
+            raise ValueError("a finish rule must turn something on, or it would change nothing")
+
+    def to_json(self) -> dict[str, Any]:
+        out = {"loop": "af.map.optimise.resolve_trapped", **asdict(self)}
+        if self.move_lower:  # which rule, so a later rule is never taken for this one
+            out["move_lower_rule"] = move_lower_rule()
+        return out
 
 
 class CoreOptimiser:
@@ -104,6 +191,10 @@ class CoreOptimiser:
         from af.map.optimise import INCREMENTAL_REFINED  # the one copy: refine()'s own default
 
         return INCREMENTAL_REFINED
+
+    @property
+    def move_lower_rule(self) -> dict[str, Any]:
+        return move_lower_rule()
 
     def _problem(self, arrays: dict) -> Any:
         from af.map.optimise import MapProblem
@@ -156,7 +247,15 @@ class CoreOptimiser:
         )
 
     def optimise(
-        self, arrays, n_starts, dim, seed, start_layout, move_groups=False, resolve_best=1
+        self,
+        arrays,
+        n_starts,
+        dim,
+        seed,
+        start_layout,
+        move_groups=False,
+        resolve_best=1,
+        move_lower=False,
     ):
         from af.map.optimise import refine, relax
 
@@ -178,7 +277,10 @@ class CoreOptimiser:
         maps = [self._as_dict(p, result.threads) for p in projections]
         # an incremental relax refines its best few itself (af.map.optimise.relax)
         refined = rough or start_layout is not None
-        return self._resolve(problem, maps, move_groups, resolve_best=resolve_best, refined=refined)
+        return self._resolve(
+            problem, maps, move_groups, resolve_best=resolve_best, refined=refined,
+            move_lower=move_lower,
+        )  # fmt: skip
 
     def relax_chunk(self, arrays, first_start, n_starts, dim, seed, start_layout):
         """One job's share of a map's starts. Incremental chunks, and scratch chunks relaxed
@@ -199,7 +301,9 @@ class CoreOptimiser:
         )
         return [self._as_dict(p, result.threads) for p in result.projections]
 
-    def combine(self, arrays, chunks, incremental, move_groups=False, resolve_best=1):
+    def combine(
+        self, arrays, chunks, incremental, move_groups=False, resolve_best=1, move_lower=False
+    ):
         from af.map.optimise import refine, sort_projections
 
         problem = self._problem(arrays)
@@ -210,7 +314,7 @@ class CoreOptimiser:
         # the relax threads of the chunks, whatever order the maps are in now
         relax = [{"threads": r["threads"], "cpus": r["cpus"]} for r in chunks if "threads" in r]
         maps = [self._as_dict(p) for p in projections]
-        return self._resolve(problem, maps, move_groups, relax, resolve_best, refined)
+        return self._resolve(problem, maps, move_groups, relax, resolve_best, refined, move_lower)
 
     def _resolve(
         self,
@@ -220,6 +324,7 @@ class CoreOptimiser:
         relax: list[dict] | None = None,
         resolve_best: int = 1,
         refined: bool | None = None,
+        move_lower: bool = False,
     ) -> list[MapResult]:
         """The trapped-point loop on the best `resolve_best` maps (MapOptions.resolve_best); the
         lowest is kept. `relax` is the threads/CPUs of each split chunk's starts; unsplit, the
@@ -232,34 +337,33 @@ class CoreOptimiser:
         when it is not. For the same reason the kept map records how many of the maps (the
         lowest) are at fine precision, the rest being rough (`fine_starts`), and, when a refine
         stage made that so (`refined`), how many it refined (`refine_best`). `refined` None: the
-        caller did not say, and neither is recorded."""
+        caller did not say, and neither is recorded.
+
+        With `move_lower`, the loop's move-lower rule runs too, and the kept map records its
+        rounds (`resolved_lower`), also when it found nothing to move."""
         from af.map.optimise import available_cpus, resolve_trapped
 
         if relax is None:
             relax = [{"threads": m["threads"], "cpus": m["cpus"]} for m in maps if "threads" in m]
         changed = False
         groups_of: dict[int, list[dict]] = {}
+        lower_of: dict[int, dict] = {}
         threads = 0
         for rank in range(min(resolve_best, len(maps))):
             maps[rank] = {**maps[rank], "stress_before_resolve": maps[rank]["stress"]}
             fixed = resolve_trapped(
-                problem, maps[rank]["layout"], threads=self.threads, move_groups=move_groups
+                problem,
+                maps[rank]["layout"],
+                threads=self.threads,
+                move_groups=move_groups,
+                move_lower=move_lower,
             )
             threads = int(fixed.threads)
-            groups_of[rank] = [
-                {
-                    "members": [int(m) for m in g.members],
-                    "shift": [float(x) for x in g.shift],
-                    "stress_before": float(g.stress_before),
-                    "stress_after": float(g.stress_after),
-                    "kept": bool(g.kept),
-                    "n_antigens": int(g.n_antigens),
-                    "n_sera": int(g.n_sera),
-                    "mixed": bool(g.mixed),
-                }
-                for g in fixed.groups
-            ]
-            if fixed.moved or any(g["kept"] for g in groups_of[rank]):
+            groups_of[rank] = _group_record(fixed.groups)
+            if move_lower:
+                lower_of[rank] = _move_lower_record(fixed)
+            lowered = move_lower and any(r["kept"] for r in lower_of[rank]["rounds"])
+            if fixed.moved or lowered or any(g["kept"] for g in groups_of[rank]):
                 p = fixed.projection
                 maps[rank] = {
                     **maps[rank],
@@ -289,7 +393,53 @@ class CoreOptimiser:
         if move_groups:  # recorded on the best map, also when no group was found
             groups = groups_of[maps[best].get("refined_rank", 0)]
             maps[best] = {**maps[best], "resolved_groups": groups}
+        if move_lower:  # likewise
+            lower = lower_of[maps[best].get("refined_rank", 0)]
+            maps[best] = {**maps[best], "resolved_lower": lower}
         return maps
+
+    def finish(self, arrays, layout, rule, recorded_stress):
+        """The trapped-point loop on `layout` alone, under `rule`: no starts, no refine. The
+        loop only ever lowers the stress, so the result is never worse than the layout given.
+
+        Refused unless `layout`'s stress in `arrays` is `recorded_stress`, the stress its map
+        recorded: otherwise the arrays are not the problem the layout was made for (a chain
+        whose column bases were adjusted, read without the adjustments, measured 18x higher),
+        and the loop would move points for a problem the map never had."""
+        from af.map.optimise import resolve_trapped, stress
+
+        problem = self._problem(arrays)
+        before = stress(problem, layout)
+        if not math.isclose(before, recorded_stress, rel_tol=FINISH_STRESS_TOLERANCE, abs_tol=0.0):
+            raise ValueError(
+                f"the layout's stress is {before!r} in these arrays, but its map recorded"
+                f" {recorded_stress!r}: these are not the arrays it was made from"
+            )
+        fixed = resolve_trapped(
+            problem,
+            layout,
+            threads=self.threads,
+            move_groups=rule.move_groups,
+            move_lower=rule.move_lower,
+        )
+        p = fixed.projection
+        return {
+            "layout": p.layout,
+            "stress": p.stress,
+            "dimensions": p.dimensions,
+            "n_iterations": p.n_iterations,
+            "start_seed": 0,
+            "finish": {
+                "rule": rule.to_json(),
+                "stress_before": before,
+                "stress_after": p.stress,
+                "rounds": fixed.rounds,
+                "moves": fixed.moved,
+                "groups": _group_record(fixed.groups),
+                **({"move_lower": _move_lower_record(fixed)} if rule.move_lower else {}),
+                "threads": int(fixed.threads),
+            },
+        }
 
     def grid_test(self, layout, arrays):
         from af.map.optimise import grid_test
@@ -334,10 +484,21 @@ class StubOptimiser:
     key = "stub"
     numerics: str | None = None  # numpy on whatever machine: it names no arithmetic
     refine_best: int | None = None  # every start is relaxed once
+    move_lower_rule: dict[str, Any] | None = None  # it has no trapped-point loop
 
     def optimise(
-        self, arrays, n_starts, dim, seed, start_layout, move_groups=False, resolve_best=1
+        self,
+        arrays,
+        n_starts,
+        dim,
+        seed,
+        start_layout,
+        move_groups=False,
+        resolve_best=1,
+        move_lower=False,
     ):
+        if move_lower:
+            raise ValueError("the stand-in optimiser has no move-lower rule: that needs the core")
         return self.relax_chunk(arrays, 0, n_starts, dim, seed, start_layout)
 
     def relax_chunk(self, arrays, first_start, n_starts, dim, seed, start_layout):
@@ -353,8 +514,15 @@ class StubOptimiser:
             first_start=first_start,
         )
 
-    def combine(self, arrays, chunks, incremental, move_groups=False, resolve_best=1):
+    def combine(
+        self, arrays, chunks, incremental, move_groups=False, resolve_best=1, move_lower=False
+    ):
+        if move_lower:
+            raise ValueError("the stand-in optimiser has no move-lower rule: that needs the core")
         return sorted(chunks, key=map_order)
+
+    def finish(self, arrays, layout, rule, recorded_stress):
+        raise ValueError("the stand-in optimiser cannot finish a map: finishing needs the core")
 
     def grid_test(self, layout, arrays):
         from af.chain import stub_optimiser

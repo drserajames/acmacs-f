@@ -82,6 +82,11 @@ class MapOptions:
     # resolved to 26,882, the next four to ~26,236). A search setting: the problem is unchanged.
     # At most 5, the layouts that are refined fine. Opt-in; using it is Sarah's decision (Q155).
     resolve_best: int = 1
+    # The trapped-point loop's move-lower rule (af.map.optimise.MOVE_LOWER_RULE): after the loop,
+    # move every point whose other position is lower, jointly, while the stress falls. The loop
+    # alone leaves hemisphering points that each gain little but together gain more (06, Q195,
+    # 14 Oct 2026). A search setting: the problem is unchanged. Opt-in; using it is Q195, Sarah's.
+    move_lower: bool = False
 
     def __post_init__(self) -> None:
         ColumnBasisConvention(self.column_bases)  # raises on an unknown convention
@@ -101,6 +106,7 @@ LATER_OPTIONS = {
     "merge_all": False,
     "scratch_precision": "fine",
     "resolve_best": 1,
+    "move_lower": False,
 }
 
 

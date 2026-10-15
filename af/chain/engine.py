@@ -119,6 +119,7 @@ class Mapper:
         start_layout: np.ndarray | None,
         move_groups: bool = False,
         resolve_best: int = 1,
+        move_lower: bool = False,
     ) -> list[dict]:
         if self.split is None or self.split.chunks <= 1:
             return self.optimiser.optimise(
@@ -129,6 +130,7 @@ class Mapper:
                 start_layout,
                 move_groups=move_groups,
                 resolve_best=resolve_best,
+                move_lower=move_lower,
             )
         work = self.split.work_dir / label
         problem = work / "problem.npz"
@@ -214,6 +216,7 @@ class Mapper:
             incremental=start_layout is not None,
             move_groups=move_groups,
             resolve_best=resolve_best,
+            move_lower=move_lower,
         )
 
 
@@ -258,6 +261,11 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
     # optimiser that names one gets the key, so the others keep their steps.
     if mapper.optimiser.numerics is not None:
         common["numerics"] = mapper.optimiser.numerics
+    if cfg.options.move_lower:  # which rule: a map made under a later one is made again
+        rule = mapper.optimiser.move_lower_rule
+        if rule is None:
+            raise ChainError(f"{cfg.name}: move_lower needs an optimiser with the rule (the core)")
+        common["move_lower_rule"] = rule
     if cfg.remove:  # only a chain that selects points gets the key: others keep their steps
         common["select_remove"] = [r.to_json() for r in cfg.remove]
     if cfg.drop_cells:  # likewise
@@ -488,6 +496,8 @@ def _loop(maps: list[dict]) -> dict:
         ]  # fmt: skip
     if "resolved_groups" in best:
         loop["groups"] = best["resolved_groups"]
+    if "resolved_lower" in best:  # MapOptions.move_lower: the rule's rounds on the kept map
+        loop["move_lower"] = best["resolved_lower"]
     return loop
 
 
@@ -590,6 +600,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
         None,
         move_groups=o.move_groups,
         resolve_best=o.resolve_best,
+        move_lower=o.move_lower,
     )
     chart = _map_chart(
         table,
@@ -621,10 +632,24 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
     _write_step_record(directory, record, mapper)
 
 
-def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Mapper) -> None:
+@dataclass(frozen=True)
+class MergedTables:
+    """A merge_all chain's tables merged and prepared for the optimiser: what its one step maps,
+    and what `af.chain.finish` re-derives to check that a published map's input is today's."""
+
+    merged: Chart  # as merged (merge.ace); the column-basis adjustments follow
+    chart: Chart  # with the adjustments: the chart the map's projections belong to
+    adjustments: list[dict]
+    arrays: dict
+    report: MergeReport | None
+    removed: dict[str, list[dict]]
+    dropped: list[dict]
+    sera: dict[str, dict]
+
+
+def merge_all_tables(cfg: ChainConfig) -> MergedTables:
     """Merge every table in order, as ae's download_full does (merge_type "simple": no layout is
-    carried, so the order changes only which preparation a cell's readings come from), then map
-    the merged chart from scratch."""
+    carried, so the order changes only which preparation a cell's readings come from)."""
     o = cfg.options
     options = dataclasses.replace(_merge_options(cfg), merge_type=MergeType.SIMPLE)
     tables: list[Chart] = []
@@ -646,12 +671,42 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
         merged = tables[0]
     else:
         merged, report = merge_many(tables, options)
-    write_chart(merged, directory / "merge.ace")  # as merged; the adjustments follow
-    merged, adjustments = adjust.apply(cfg.column_basis_adjustments, merged)
-    arrays = merged.optimiser_arrays(
+    chart, adjustments = adjust.apply(cfg.column_basis_adjustments, merged)
+    arrays = chart.optimiser_arrays(
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
     )
     arrays["scratch_precision"] = o.scratch_precision  # carried to split chunks in the problem file
+    return MergedTables(merged, chart, adjustments, arrays, report, removed, dropped, sera)
+
+
+def _merge_all_record(cfg: ChainConfig, m: MergedTables) -> dict[str, Any]:
+    """The parts of a merge_all step's record that describe its input."""
+    report = m.report
+    return {
+        "index": 0,
+        "table_id": cfg.tables[-1].table_id,
+        "merge_all": [
+            {"table_id": t.table_id, "table_sha256": sha256_path(t.path)} for t in cfg.tables
+        ],
+        "merge": {
+            "antigens": m.merged.n_antigens,
+            "sera": m.merged.n_sera,
+            "layers": len(m.merged.titres.layers),
+            "outcomes": {str(k): v for k, v in report.outcomes.items()} if report else {},
+        },
+        **({"removed": m.removed} if cfg.remove else {}),
+        **({"dropped_cells_by_rule": m.dropped} if m.dropped else {}),
+        **({"column_basis_adjustments": m.adjustments} if m.adjustments else {}),
+        "non_ferret_sera": m.sera,
+    }
+
+
+def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Mapper) -> None:
+    """Merge every table (merge_all_tables), then map the merged chart from scratch."""
+    o = cfg.options
+    m = merge_all_tables(cfg)
+    write_chart(m.merged, directory / "merge.ace")  # as merged; the adjustments follow
+    merged, arrays, report = m.chart, m.arrays, m.report
     seed = _step_seed(cfg, 0, [t.path for t in cfg.tables])
     all_maps = mapper.make(
         runner,
@@ -663,6 +718,7 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
         None,
         move_groups=o.move_groups,
         resolve_best=o.resolve_best,
+        move_lower=o.move_lower,
     )
     chart = _map_chart(
         merged,
@@ -672,28 +728,16 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
     )
     write_chart(chart, directory / "scratch.ace")
     shutil.copyfile(directory / "scratch.ace", directory / CHOSEN)
+    base = _merge_all_record(cfg, m)
     record = {
-        "index": 0,
-        "table_id": cfg.tables[-1].table_id,
-        "merge_all": [
-            {"table_id": t.table_id, "table_sha256": sha256_path(t.path)} for t in cfg.tables
-        ],
+        **{k: base[k] for k in ("index", "table_id", "merge_all")},
         "optimiser": mapper.optimiser.name,
         "chosen": "scratch",
         "stress": {"scratch": all_maps[0]["stress"]},
         "start_stresses": {"scratch": [r["stress"] for r in all_maps]},
         **_search(mapper.optimiser, {"scratch": all_maps}),
         "trapped_loop": {"scratch": _loop(all_maps)},
-        "merge": {
-            "antigens": merged.n_antigens,
-            "sera": merged.n_sera,
-            "layers": len(merged.titres.layers),
-            "outcomes": {str(k): v for k, v in report.outcomes.items()} if report else {},
-        },
-        **({"removed": removed} if cfg.remove else {}),
-        **({"dropped_cells_by_rule": dropped} if dropped else {}),
-        **({"column_basis_adjustments": adjustments} if adjustments else {}),
-        "non_ferret_sera": sera,
+        **{k: v for k, v in base.items() if k not in ("index", "table_id", "merge_all")},
     }
     diagnostics = step_diagnostics(chart, None, None, None, arrays, mapper.optimiser, cfg, report)
     # control_flags are the flags the step's own table newly completes: here that would be the
@@ -743,6 +787,7 @@ def _merge_step(
         start,
         move_groups=o.move_groups,
         resolve_best=o.resolve_best,
+        move_lower=o.move_lower,
     )
     all_scratch = mapper.make(
         runner,
@@ -754,6 +799,7 @@ def _merge_step(
         None,
         move_groups=o.move_groups,
         resolve_best=o.resolve_best,
+        move_lower=o.move_lower,
     )
     inc_chart = _map_chart(
         merged,
