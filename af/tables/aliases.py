@@ -10,6 +10,10 @@ more. Example: a virus written "B/..." on an H3 table, renamed "A/...", must act
 inhibited by the H3 ferret sera. A B virus against H3 antisera reads <10 or 20 at most, so
 a threshold of 40 (two twofold dilutions above the <10 floor) on at least half the sera
 separates the two. A rule whose titres disagree fails the run, loudly.
+
+A serum rule may leave both thresholds blank, as the loader allows (``af.tables.rules``);
+it then has no titre check. A serum's column measures the antigens against it, which says
+little about how its header spells the strain, so a respelling needs no threshold.
 """
 
 from __future__ import annotations
@@ -52,6 +56,8 @@ def check_titres(table: Table, rules: Rules) -> list[str]:
 
 
 def _check(table: Table, rule: Rule, name: str, cells: list[list[str]]) -> list[str]:
+    if not rule["min_titre"] and not rule["min_fraction"]:
+        return []  # a serum rule without thresholds (see the module docstring)
     min_titre, min_fraction = int(rule["min_titre"]), float(rule["min_fraction"])
     tested = [cell for cell in cells if cell]
     reacting = [cell for cell in tested if max(_value(t) for t in cell) >= min_titre]
