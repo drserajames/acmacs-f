@@ -358,16 +358,54 @@ class GroupMove:
 
 
 @dataclass(frozen=True)
+class MoveLowerRule:
+    """The rule :func:`resolve_trapped` applies with ``move_lower=True``, as one record.
+
+    A chain records it verbatim (``dataclasses.asdict``), so a map says which rule it got;
+    if a value here changes, ``name`` changes with it. The code reads its values from here.
+    """
+
+    name: str = "move-lower-1"
+    diagnoses: tuple[str, ...] = ("hemisphering", "trapped")  # grid-test verdicts moved...
+    other_position: str = "lower"  # ...when their other position lowers the stress (diff < 0)
+    order: str = "jointly; if the map's stress does not fall, one at a time, best gain first"
+    precision: Precision = "fine"  # one whole-map minimise per move tried
+    min_gain: float = 1e-3  # a round is kept only if the stress falls by more than this
+    rounds: str = "at most max_rounds (the resolve_trapped argument)"
+
+
+MOVE_LOWER_RULE = MoveLowerRule()
+
+MoveLowerStop = Literal["nothing lower", "stress did not fall", "round limit"]
+
+
+@dataclass(frozen=True)
+class MoveLowerRound:
+    """One round of the move-lower rule (:func:`resolve_trapped` with ``move_lower=True``)."""
+
+    round: int  # 1, 2, ...
+    candidates: tuple[int, ...]  # points whose other position is lower, best gain first
+    joint_stress: float  # the map's stress after moving all of them and minimising
+    how: Literal["jointly", "one at a time"]  # one at a time only when the joint move failed
+    moved: tuple[int, ...]  # the points whose move was kept; empty when the round is rejected
+    stress_before: float
+    stress_after: float  # equal to stress_before when the round is rejected
+    kept: bool
+
+
+@dataclass(frozen=True)
 class TrappedResolution:
     """Result of :func:`resolve_trapped`."""
 
     projection: Projection
-    rounds: int  # grid tests run
-    moved: int  # single-point moves applied in total
+    rounds: int  # grid tests run by the trapped loop (not counting the move-lower rounds)
+    moved: int  # single-point moves applied in total by the trapped loop
     last_grid: list[GridResult]  # the grid test of the returned map: no trapped points, unless
     # rounds ran out or the trapped points left all have a worse position (stress_diff > 0)
     groups: list[GroupMove] = field(default_factory=list)  # empty unless move_groups=True
     threads: int = 1  # threads the grid tests ran on (resolved from the `threads` argument)
+    move_lower: list[MoveLowerRound] = field(default_factory=list)  # empty unless move_lower
+    move_lower_stop: MoveLowerStop | None = None  # why the rule stopped; None when it is off
 
 
 GROUP_TOLERANCE = 0.5  # moves within this distance of each other form one group
@@ -384,6 +422,7 @@ def resolve_trapped(
     threads: int = 0,
     move_groups: bool = False,
     group_tolerance: float = GROUP_TOLERANCE,
+    move_lower: bool = False,
 ) -> TrappedResolution:
     """Grid-test, move the points that have a better place, re-minimise; repeat until no
     point is trapped or ``max_rounds`` grid tests have run (ae ``chart-relax-grid``: 20).
@@ -406,6 +445,21 @@ def resolve_trapped(
     other real maps; it costs about 0.1% of a chain step. Each group tried is reported as a
     :class:`GroupMove`, with ``mixed`` set when it holds both antigens and sera: allowed, but
     to be flagged for review (Sarah); every group measured so far was all antigens.
+
+    ``move_lower`` (off by default; Q195, 14 Oct 2026) runs after the loop above and before
+    the group pass, to close a gap the loop leaves by design. The loop ends once no point is
+    trapped, so the last grid test's hemisphering points stay where they are even when their
+    other position is lower: each gains less than 0.25, but several together can gain more
+    (MOVE_LOWER_RULE has the whole rule). Each round moves every such point, and any trapped
+    point with a lower position, jointly, and minimises the whole map once. If the stress does
+    not fall, it tries them one at a time, best gain first. A round is kept only if the stress
+    falls by more than ``MOVE_LOWER_RULE.min_gain``, so the stress falls strictly and no
+    layout can recur. It stops when nothing is lower, a round is rejected, or after
+    ``max_rounds`` rounds; each round is reported as a :class:`MoveLowerRound`. It needs no
+    starts: on a finished map, the loop above finds nothing trapped in one grid test, and the
+    rule starts from that test. Measured on the chosen layouts of 15 chain maps
+    (notes/optimiser/hemi-lower/): stress down 0.03-3.4 in 1-6 rounds; on 16 laptop threads 14
+    of them took under 2.5 minutes, and the largest (13,000 points) about 4 minutes a round.
     """
     _require_positive("max_rounds", max_rounds)
     if not group_tolerance > 0:
@@ -430,9 +484,24 @@ def resolve_trapped(
         current = optimise(problem, new_layout, method=method, precision="fine")
     else:
         grid_is_stale = True
+    lower: list[MoveLowerRound] = []
+    lower_stop: MoveLowerStop | None = None
+    if move_lower:
+        if grid_is_stale:
+            grid = grid_test(problem, current.layout, step=step, threads=threads)
+            grid_is_stale = False
+        current, grid, lower, lower_stop = _move_lower(
+            problem, current, grid, max_rounds=max_rounds, method=method, step=step, threads=threads
+        )
     if not move_groups:
         return TrappedResolution(
-            current, rounds, moved, grid, threads=threads_used("grid test", threads)
+            current,
+            rounds,
+            moved,
+            grid,
+            threads=threads_used("grid test", threads),
+            move_lower=lower,
+            move_lower_stop=lower_stop,
         )
     if grid_is_stale:
         grid = grid_test(problem, current.layout, step=step, threads=threads)
@@ -440,7 +509,82 @@ def resolve_trapped(
     if any(g.kept for g in groups):
         grid = grid_test(problem, current.layout, step=step, threads=threads)
     return TrappedResolution(
-        current, rounds, moved, grid, groups, threads_used("grid test", threads)
+        current,
+        rounds,
+        moved,
+        grid,
+        groups,
+        threads_used("grid test", threads),
+        move_lower=lower,
+        move_lower_stop=lower_stop,
+    )
+
+
+def _move_lower(
+    problem: MapProblem,
+    current: Projection,
+    grid: list[GridResult],
+    *,
+    max_rounds: int,
+    method: Method,
+    step: float,
+    threads: int,
+) -> tuple[Projection, list[GridResult], list[MoveLowerRound], MoveLowerStop]:
+    """The move-lower rounds (MOVE_LOWER_RULE). ``grid`` describes ``current`` on entry, and
+    the grid returned describes the projection returned."""
+    rule = MOVE_LOWER_RULE
+    rounds: list[MoveLowerRound] = []
+    for round_no in range(1, max_rounds + 1):
+        candidates = _lower_candidates(grid)
+        if not candidates:
+            return current, grid, rounds, "nothing lower"
+        trial = current.layout.copy()
+        for r in candidates:
+            trial[r.point] = r.position
+        joint = optimise(problem, trial, method=method, precision=rule.precision)
+        how: Literal["jointly", "one at a time"]
+        kept_points: list[int]
+        if joint.stress < current.stress - rule.min_gain:
+            after, how, kept_points = joint, "jointly", [r.point for r in candidates]
+        else:
+            after, how, kept_points = current, "one at a time", []
+            for r in candidates:
+                trial = after.layout.copy()
+                trial[r.point] = r.position
+                single = optimise(problem, trial, method=method, precision=rule.precision)
+                if single.stress < after.stress - rule.min_gain:
+                    after = single
+                    kept_points.append(r.point)
+        rounds.append(
+            MoveLowerRound(
+                round=round_no,
+                candidates=tuple(r.point for r in candidates),
+                joint_stress=joint.stress,
+                how=how,
+                moved=tuple(kept_points),
+                stress_before=current.stress,
+                stress_after=after.stress,
+                kept=bool(kept_points),
+            )
+        )
+        if not kept_points:
+            return current, grid, rounds, "stress did not fall"
+        current = after
+        grid = grid_test(problem, current.layout, step=step, threads=threads)
+    return current, grid, rounds, "round limit" if _lower_candidates(grid) else "nothing lower"
+
+
+def _lower_candidates(grid: list[GridResult]) -> list[GridResult]:
+    """The points MOVE_LOWER_RULE moves, best gain first (ties by point: a fixed order)."""
+    return sorted(
+        (
+            r
+            for r in grid
+            if r.position is not None
+            and r.stress_diff < 0.0
+            and r.diagnosis in MOVE_LOWER_RULE.diagnoses
+        ),
+        key=lambda r: (r.stress_diff, r.point),
     )
 
 
