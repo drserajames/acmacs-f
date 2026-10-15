@@ -44,6 +44,18 @@ ANTIGEN_COLUMNS = ("N", "R", "a", "P", "D", "l")
 SERUM_COLUMNS = ("N", "R", "a", "I", "P", "s")
 ANNOTATION_SEP = "; "  # several annotations in one cell: an annotation may itself hold spaces
 DATED_PASSAGE = re.compile(r"(.*?)\s*\((\d{4}-\d{2}-\d{2})\)")
+# ae's assay names -> af's assay codes, as af's own readers write them (the group name is
+# built from the code, and a workbook retires an import by group and date). ae names
+# FRA "FOCUS REDUCTION" on older charts, and Crick's neutralisation tables "NEUTRALISATION".
+ASSAYS = {
+    "HI": "HI",
+    "HINT": "HINT",
+    "FRA": "FRA",
+    "FOCUS REDUCTION": "FRA",
+    "PRN": "PRN",
+    "NEUTRALISATION": "PRN",
+}
+RED_CELL_ASSAYS = ("HI",)  # the only assay af names its red cells for (Table.rbc)
 
 
 def read(path: Path, rule: Rule, rules: Rules, *, lab: str) -> ReadResult:
@@ -79,17 +91,17 @@ def read(path: Path, rule: Rule, rules: Rules, *, lab: str) -> ReadResult:
     used = [j for j in range(len(sera)) if any(row[j] for row in titres)]
     dropped["sera: no readings"] = len(sera) - len(used)
     sera, titres = [sera[j] for j in used], [[row[j] for j in used] for row in titres]
-    group = "-".join(
-        (subtypes().group_prefix(subtype, lineage), info["A"].lower(), info["r"], lab.lower())
-    )
+    assay, rbc = _assay(path, info)
+    prefix = subtypes().group_prefix(subtype, lineage)
+    group = "-".join(p for p in (prefix, assay.lower(), rbc, lab.lower()) if p)
     table = Table(
         table_id="",
         group=group,
         lab=lab,
         subtype=subtype,
         lineage=lineage,
-        assay=info["A"],
-        rbc=info["r"],
+        assay=assay,
+        rbc=rbc,
         date=test_date.isoformat(),
         date_suffix=0,
         source_key=f"{lab} ace {path.name}",
@@ -109,6 +121,20 @@ def read(path: Path, rule: Rule, rules: Rules, *, lab: str) -> ReadResult:
     if problems := table.check() or aliases.check_titres(table, rules):
         result.errors.extend(f"{path.name}: {p}" for p in problems)
     return result
+
+
+def _assay(path: Path, info: dict[str, Any]) -> tuple[str, str]:
+    """af's assay code and red cells for the chart. ae writes no red-cell field ("r") on a
+    neutralisation chart, and on some FRA charts a stray one; af names red cells for HI
+    only, so an HI chart must have one and any other ignores it."""
+    assay = ASSAYS.get(info["A"])
+    if assay is None:
+        raise ValueError(f"{path}: ae assay {info['A']!r} has no af assay code (ASSAYS)")
+    if assay not in RED_CELL_ASSAYS:
+        return assay, ""
+    if not info.get("r"):
+        raise ValueError(f"{path}: an {assay} chart without its red-cell field ('r')")
+    return assay, info["r"]
 
 
 def _sheet(path: Path, name: str, items: list[dict[str, Any]], keys: tuple[str, ...]) -> Sheet:

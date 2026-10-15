@@ -146,3 +146,51 @@ def test_an_annotation_of_two_words_stays_one(tmp_path):
     assert t.antigens[0].annotations == ["ISOLATE 2", "EXAMPLE1X"]
     assert t.antigens[1].annotations == []
     assert t.sera[0].annotations == ["ISOLATE 2"]
+
+
+def neut_chart(assay: str, **info: str) -> dict:
+    """An invented neutralisation chart: ae writes no red-cell field ("r") on these."""
+    return {
+        "c": {
+            "i": {"A": assay, "D": "20300102", "V": "A(H3N2)", "l": "LABV", **info},
+            "a": [{"N": "A(H3N2)/EXAMPLETOWN/1/2029", "P": "SIAT1", "S": "R"}],
+            "s": [{"N": "A(H3N2)/EXAMPLETOWN/1/2029", "I": "F29-01", "P": "SIAT1"}],
+            "t": {"l": [["1280"]]},
+        }
+    }
+
+
+def read_neut(tmp_path: Path, chart: dict):  # noqa: ANN201
+    path = tmp_path / "labv-20300102.ace"
+    path.write_text(json.dumps(chart))
+    directory = write_rules(tmp_path / "rules", all_optional=True)
+    (directory / "ace_imports.tsv").write_text(
+        f"{HEADER}\nLABV\texact\tlabv-20300102.ace\tno workbook\ttest\t2030-01-01\t\n"
+    )
+    rules = Rules(directory)
+    return ace_import.read(path, rules.ace_imports.rules[0], rules, lab="LABV")
+
+
+@pytest.mark.parametrize(
+    ("assay", "info", "code"),
+    [
+        ("FOCUS REDUCTION", {}, "FRA"),
+        ("FRA", {}, "FRA"),
+        ("PRN", {}, "PRN"),
+        ("HINT", {}, "HINT"),
+        ("FOCUS REDUCTION", {"r": "turkey"}, "FRA"),  # a stray red-cell field on a neut chart
+    ],
+)
+def test_a_neutralisation_chart_reads_without_red_cells(tmp_path, assay, info, code):
+    (t,) = read_neut(tmp_path, neut_chart(assay, **info)).tables
+    assert (t.assay, t.rbc, t.group) == (code, "", f"h3-{code.lower()}-labv")
+
+
+def test_an_hi_chart_without_red_cells_is_an_error(tmp_path):
+    with pytest.raises(ValueError, match="red-cell"):
+        read_neut(tmp_path, neut_chart("HI"))
+
+
+def test_an_assay_af_has_no_code_for_is_an_error(tmp_path):
+    with pytest.raises(ValueError, match="EXAMPLE ASSAY"):
+        read_neut(tmp_path, neut_chart("EXAMPLE ASSAY"))
