@@ -2,6 +2,7 @@
 trapped-point loop under a named rule, without new starts, and only when the chain's input is
 still the map's own."""
 
+import functools
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -113,6 +114,7 @@ def test_a_finished_map_is_the_next_version_and_says_how_it_was_made(made, monke
     assert step["finish"]["rule"] == {
         "loop": "af.map.optimise.resolve_trapped",
         "move_groups": True,
+        "move_lower": False,
     }
     assert step["finish"]["stress_after"] == pytest.approx(step["finish"]["stress_before"] - 1.0)
     assert step["stress"]["source"] == source["stress"]["scratch"]
@@ -173,3 +175,48 @@ def test_a_finish_never_mixes_arithmetics(made):
 def test_the_stand_in_cannot_finish(made):
     with pytest.raises(ChainConfigError, match="needs the core optimiser"):
         _finish(made, "--move-groups", run=_run(made.root, None, "stub", "stub.toml"))
+
+
+def _finish_root(made) -> Path:
+    return made.root / "work/chains" / DATASET / "finish" / made.version
+
+
+def test_move_lower_runs_the_rule_and_records_it(made, monkeypatch):
+    import af.map.optimise as optimise
+
+    real = optimise.resolve_trapped
+    seen = {}
+
+    @functools.wraps(real)  # the rule's round cap is read from resolve_trapped's signature
+    def spy(problem, layout, **kwargs):
+        seen.update(kwargs)
+        return real(problem, layout, **kwargs)
+
+    monkeypatch.setattr(optimise, "resolve_trapped", spy)
+    assert _finish(made, "--move-lower") == 0
+    assert seen["move_lower"] is True and seen["move_groups"] is False
+    step = json.loads((_finish_root(made) / "steps/0000/step.json").read_text())
+    rule = step["finish"]["rule"]
+    assert rule["move_lower"] is True and rule["move_lower_rule"]["name"] == "move-lower-1"
+    assert rule["move_lower_rule"]["max_rounds"] == 20
+    lower = step["finish"]["move_lower"]
+    assert lower["stop"] in ("nothing lower", "stress did not fall", "round limit")
+    if not any(r["kept"] for r in lower["rounds"]):  # the synthetic map had nothing lower
+        assert _current(made.root) == made.version
+
+
+def test_a_layout_whose_stress_is_not_its_own_is_refused(made, monkeypatch):
+    import dataclasses
+
+    import af.chain.finish as finish
+
+    real = finish.check_source
+
+    def wrong(*a, **k):  # as if the arrays were not the problem the map was made for
+        source = real(*a, **k)
+        return dataclasses.replace(source, stress=source.stress * 1.01)
+
+    monkeypatch.setattr(finish, "check_source", wrong)
+    with pytest.raises(FinishError, match="not the arrays it was made from"):
+        _finish(made, "--move-lower")
+    assert _current(made.root) == made.version

@@ -30,7 +30,7 @@ def test_the_default_changes_no_parameters_and_k_is_bounded():
 def _fake_resolve(lower_by: dict[float, float], calls: list):
     """resolve_trapped standing in: the map whose stress is in `lower_by` drops by that much."""
 
-    def resolve(problem, layout, threads=0, move_groups=False):
+    def resolve(problem, layout, threads=0, move_groups=False, move_lower=False):
         key = round(float(layout[0, 0]), 6)
         calls.append(key)
         drop = lower_by.get(key, 0.0)

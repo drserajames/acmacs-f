@@ -1,7 +1,7 @@
 """Finish a published merged map: the next version of the dataset, made from the CURRENT
 version's chosen layout by the trapped-point loop under a named rule, without new starts.
 
-    python -m af.chain.finish <chain.toml> <run.toml> --version <id> --move-groups
+    python -m af.chain.finish <chain.toml> <run.toml> --version <id> [--move-groups] [--move-lower]
 
 Why: a published map can sit in a local minimum that the loop's own rule left, with a lower one a
 few moves away (Q195, 14 Oct 2026: a merged map whose block of points the loop could not move).
@@ -14,7 +14,8 @@ It refuses, before anything is computed, unless:
   parameters are the ones its build recorded (steps/0000/chosen.ace.provenance.json): the same
   chain, options, seed, tables and arithmetic. So a version made under the original arithmetic
   is finished only by a run config that says numerics = "original";
-- today's tables merge to its merge.ace byte for byte.
+- today's tables merge to its merge.ace byte for byte;
+- its chosen layout's stress, evaluated again in today's arrays, is the stress it recorded.
 A rule that leaves the layout unchanged makes no version. Otherwise the new version is published
 only when the run config says publish, with the finished version as its parent.
 """
@@ -177,7 +178,10 @@ def _finish(
         raise FinishError(f"{source.version}: the tables no longer merge to its merge.ace")
     src = read_chart(source.chosen)
     best = src.best()
-    finished = mapper.optimiser.finish(m.arrays, np.asarray(best.layout), rule)
+    try:
+        finished = mapper.optimiser.finish(m.arrays, np.asarray(best.layout), rule, source.stress)
+    except ValueError as e:
+        raise FinishError(f"{source.version}: {e}") from e
     rest = [p for p in src.projections if p is not best]  # the other basins kept, unchanged
     projections = [*_projections([finished], m.arrays, cfg.options.minimum_column_basis), *rest]
     chart = _map_chart(m.chart, projections)
@@ -237,9 +241,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--move-groups", action="store_true", help="the loop's group pass (resolve_trapped)"
     )
+    parser.add_argument(
+        "--move-lower",
+        action="store_true",
+        help="the loop's move-lower rule (af.map.optimise.MOVE_LOWER_RULE)",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    rule = FinishRule(move_groups=args.move_groups)
+    rule = FinishRule(move_groups=args.move_groups, move_lower=args.move_lower)
     dataset = dataset_from_path(args.chain)
     check_tables_dataset(args.chain, dataset)
     run = load_config(args.run, RunSettings)

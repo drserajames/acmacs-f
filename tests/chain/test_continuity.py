@@ -131,6 +131,9 @@ def store(tmp_path):
     _version(root, "v6", "v5", new, {"seed": 1, "numerics": "test-fp-2"})
     _version(root, "v7", "v2", new, {"seed": 1, "refine_best": 5})
     _version(root, "v8", "v7", new, {"seed": 1, "refine_best": 7})
+    lower = {"seed": 1, "options": {"move_lower": True}, "move_lower_rule": {"name": "rule-1"}}
+    _version(root, "v9", "v2", new, lower)
+    _version(root, "v10", "v9", new, {**lower, "move_lower_rule": {"name": "rule-2"}})
     (tmp_path / "t.toml").write_text(TOML)
     return tmp_path
 
@@ -226,6 +229,19 @@ def test_resolve_best_is_a_search_setting_not_a_new_problem(store):
     assert rec["search_differ"] == {"options.resolve_best": [1, 3]}
     assert "Only the search differs (options.resolve_best 1 -> 3)" in sentences(rec)[1]
     assert _run(store, "v2")["search_differ"] == {}
+
+
+def test_move_lower_and_its_rule_are_search_settings_not_a_new_problem(store):
+    rec = _run(store, "v9")  # v2 has no options: move_lower absent = off
+    assert rec["same_problem"] is True and rec["parameters_differ"] == []
+    assert rec["search_differ"] == {
+        "options.move_lower": [False, True],
+        "move_lower_rule": [None, {"name": "rule-1"}],
+    }
+    assert "move_lower_rule none -> rule-1" in sentences(rec)[1]
+    rec = _run(store, "v10")
+    assert rec["same_problem"] is True
+    assert rec["search_differ"] == {"move_lower_rule": [{"name": "rule-1"}, {"name": "rule-2"}]}
 
 
 def test_another_arithmetic_is_the_same_problem_and_is_said(store):

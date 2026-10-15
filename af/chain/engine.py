@@ -119,6 +119,7 @@ class Mapper:
         start_layout: np.ndarray | None,
         move_groups: bool = False,
         resolve_best: int = 1,
+        move_lower: bool = False,
     ) -> list[dict]:
         if self.split is None or self.split.chunks <= 1:
             return self.optimiser.optimise(
@@ -129,6 +130,7 @@ class Mapper:
                 start_layout,
                 move_groups=move_groups,
                 resolve_best=resolve_best,
+                move_lower=move_lower,
             )
         work = self.split.work_dir / label
         problem = work / "problem.npz"
@@ -214,6 +216,7 @@ class Mapper:
             incremental=start_layout is not None,
             move_groups=move_groups,
             resolve_best=resolve_best,
+            move_lower=move_lower,
         )
 
 
@@ -258,6 +261,11 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
     # optimiser that names one gets the key, so the others keep their steps.
     if mapper.optimiser.numerics is not None:
         common["numerics"] = mapper.optimiser.numerics
+    if cfg.options.move_lower:  # which rule: a map made under a later one is made again
+        rule = mapper.optimiser.move_lower_rule
+        if rule is None:
+            raise ChainError(f"{cfg.name}: move_lower needs an optimiser with the rule (the core)")
+        common["move_lower_rule"] = rule
     if cfg.remove:  # only a chain that selects points gets the key: others keep their steps
         common["select_remove"] = [r.to_json() for r in cfg.remove]
     if cfg.drop_cells:  # likewise
@@ -488,6 +496,8 @@ def _loop(maps: list[dict]) -> dict:
         ]  # fmt: skip
     if "resolved_groups" in best:
         loop["groups"] = best["resolved_groups"]
+    if "resolved_lower" in best:  # MapOptions.move_lower: the rule's rounds on the kept map
+        loop["move_lower"] = best["resolved_lower"]
     return loop
 
 
@@ -590,6 +600,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
         None,
         move_groups=o.move_groups,
         resolve_best=o.resolve_best,
+        move_lower=o.move_lower,
     )
     chart = _map_chart(
         table,
@@ -707,6 +718,7 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
         None,
         move_groups=o.move_groups,
         resolve_best=o.resolve_best,
+        move_lower=o.move_lower,
     )
     chart = _map_chart(
         merged,
@@ -775,6 +787,7 @@ def _merge_step(
         start,
         move_groups=o.move_groups,
         resolve_best=o.resolve_best,
+        move_lower=o.move_lower,
     )
     all_scratch = mapper.make(
         runner,
@@ -786,6 +799,7 @@ def _merge_step(
         None,
         move_groups=o.move_groups,
         resolve_best=o.resolve_best,
+        move_lower=o.move_lower,
     )
     inc_chart = _map_chart(
         merged,

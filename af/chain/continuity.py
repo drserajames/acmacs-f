@@ -50,7 +50,7 @@ from af.util.config import ConfigError, load_config
 
 # Options that change how hard the optimiser searches, not the map's problem: a pair differing
 # only in these is still the same problem, and its stresses compare (the lower found more).
-SEARCH_OPTIONS = ("resolve_best",)
+SEARCH_OPTIONS = ("resolve_best", "move_lower")
 REFINED_BEFORE_RECORDED = 5  # refine_best of every version published without the parameter
 
 FIELDS = (
@@ -283,6 +283,8 @@ def record(
     finish = [ap.pop("finish", None), an.pop("finish", None)]
     ap.pop("finished_from", None)
     an.pop("finished_from", None)
+    # the move-lower rule a map was made under (options.move_lower): a search setting with it
+    lower_rule = [ap.pop("move_lower_rule", None), an.pop("move_lower_rule", None)]
     keys = sorted(set(an) | set(ap))
     differ = [k for k in keys if an.get(k) != ap.get(k)]
     search = {f"options.{k}": [sp[k], sn[k]] for k in SEARCH_OPTIONS if sp[k] != sn[k]}
@@ -290,6 +292,8 @@ def record(
         search["refine_best"] = refined
     if finish[0] != finish[1]:
         search["finish"] = finish
+    if lower_rule[0] != lower_rule[1]:
+        search["move_lower_rule"] = lower_rule
     same = pn["inputs"] == pp["inputs"] and not differ
     drift = records / dataset / f"{parent}.tables-drift.json"
     from af.run.runtime import release_info
@@ -394,9 +398,12 @@ def sentences(rec: dict[str, Any], *, movers: int = 8) -> list[str]:
 
 
 def _setting(value: Any) -> str:
-    """A search setting as a reader wants it: a finish rule by what it turns on."""
+    """A search setting as a reader wants it: a named rule by its name, a finish rule by what it
+    turns on."""
     if value is None:
         return "none"
+    if isinstance(value, dict) and "name" in value:
+        return str(value["name"])
     if isinstance(value, dict):
         return ", ".join(k for k, v in value.items() if v is True) or "none"
     return str(value)
