@@ -15,7 +15,7 @@ from af.map.figure import (
     frame_around,
     reference_flags,
 )
-from af.map.render import DEFAULT_LOOK
+from af.map.render import DEFAULT_LOOK, draw_scene
 from af.map.style import ColourRow, ColourScheme
 
 pytest.importorskip("matplotlib")
@@ -183,11 +183,13 @@ def test_per_point_styles_are_opt_in() -> None:
             "ag1": PointStyle(outline="#000000", outline_width=3.0),
         },
     )
-    assert plain["sr0"].get_edgecolor() == to_rgba("#9a9a9a")  # the report's serum outline
-    assert plain["ag0"].get_alpha() is None and plain["grid"] == {"#dddddd"}
+    assert plain["sr0"].get_edgecolor() == to_rgba("#cccccc")  # the report's serum outline
+    assert plain["ag0"].get_alpha() is None and plain["grid"] == {"#cccccc"}
+    # the shipped maps outline antigens and sera alike, 1.0 page unit
+    assert plain["ag0"].get_linewidth() == pytest.approx(plain["sr0"].get_linewidth())
     assert styled["sr0"].get_edgecolor() == to_rgba("#ff0000", 0.8)  # own colour, global alpha
     assert styled["ag0"].get_alpha() == 0.2  # a point's own opacity beats the global one
-    assert styled["ag1"].get_linewidth() == pytest.approx(3 * plain["ag1"].get_linewidth() / 0.8)
+    assert styled["ag1"].get_linewidth() == pytest.approx(3 * plain["ag1"].get_linewidth())
     assert styled["grid"] == {"#e5e5e5"}
 
 
@@ -218,6 +220,31 @@ def test_window_greyed_and_uncoloured_antigens_are_two_greys() -> None:
     }
     assert patch["ag0"].get_facecolor() == patch["ag0"].get_edgecolor() == to_rgba("#bebebe")
     assert patch["ag1"].get_facecolor() == patch["ag1"].get_edgecolor() == to_rgba("#cccccc")
+
+
+def test_the_report_page_strokes_and_title_are_the_shipped_maps() -> None:
+    """On an 800-unit page (scale 1): grid #cccccc 1.0 wide, legend markers outlined 1.0, the
+    title's baseline 37.5 below the top and its left edge 19 from the left."""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle
+
+    from af.map.labels import Placed
+
+    scene = chart_scene(chart(), XY, COLOURS, title="T")
+    frame = frame_around(scene)
+    side = DEFAULT_LOOK.page_points / 72.0
+    fig = plt.figure(figsize=(side, side), dpi=72)
+    ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+    labels: dict[str, Placed] = {}
+    draw_scene(ax, scene, frame, labels, DEFAULT_LOOK)
+    grid = {(line.get_color(), line.get_linewidth()) for line in ax.lines}
+    legend = [p for p in ax.patches if isinstance(p, Circle) and p.get_zorder() == 11]
+    (title,) = [t for t in ax.texts if t.get_text() == "T"]
+    plt.close(fig)
+    assert grid == {("#cccccc", 1.0)}
+    assert legend and {p.get_linewidth() for p in legend} == {1.0}
+    assert title.get_position() == pytest.approx((19.0 / 800, 37.5 / 800))
+    assert title.get_va() == "baseline"
 
 
 def test_draw_axes_says_which_points_the_frame_clips() -> None:
