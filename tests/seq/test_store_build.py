@@ -9,8 +9,10 @@ import datetime
 import json
 import random
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import brotli
 import pytest
@@ -759,12 +761,14 @@ def test_a_far_record_is_held_whatever_its_label_claims() -> None:
     assert flags == Counter({processed.FAR_FROM_REFERENCE: 1})
 
 
-def test_a_held_record_keeps_its_problems_for_the_raw_pull() -> None:
+def test_a_held_record_keeps_its_problems_and_gains_the_hold_flag() -> None:
+    # the record's own problems survive, and the flag that held it is appended: a held
+    # dataset's reader cannot recover "why" from a count (Q196)
     rec = record(1, lineage="pdm09", problems=("name.fields",))
     _, held, _ = processed.hold_far_from_reference(
         [rec], {processed.seq_id(rec): _at(rec, 400)}, _ref_check()
     )
-    assert held[0].problems == ("name.fields",)
+    assert held[0].problems == ("name.fields", processed.FAR_FROM_REFERENCE)
 
 
 def test_a_short_fragment_under_the_count_is_held_by_its_rate() -> None:
@@ -831,11 +835,11 @@ def test_the_rate_is_recorded_in_the_counts_only_when_the_row_has_one(tmp_path: 
     plain = build.ReferenceCheckConfig("h3", 200, ["pdm09"], "why")
     with_rate = build.ReferenceCheckConfig("h3", 200, ["pdm09"], "why", 0.15)
     config = b_config(tmp_path, tmp_path, reference_check=[plain])
-    assert build._hold_far_records(config, {"h3": [near, fragment]}, results) == {
+    assert build._hold_far_records(config, {"h3": [near, fragment]}, results)[0] == {
         "h3": {"max_substitutions": 200, "held": 0}
     }
     config = b_config(tmp_path, tmp_path, reference_check=[with_rate])
-    assert build._hold_far_records(config, {"h3": [near, fragment]}, results) == {
+    assert build._hold_far_records(config, {"h3": [near, fragment]}, results)[0] == {
         "h3": {"max_substitutions": 200, "held": 1, processed.FAR_BY_RATE: 1,
                "max_substitution_rate": 0.15}
     }  # fmt: skip
@@ -859,3 +863,267 @@ def test_holding_every_record_of_a_dataset_stops_the_run(tmp_path: Path) -> None
         build._hold_far_records(
             config, {"h3": [rec]}, {"h3": {processed.seq_id(rec): _at(rec, 400)}}
         )
+
+
+# ---- held_dataset: keeping the held records instead of dropping them (Q196) -------------
+
+
+def _held_config(**over: object) -> build.SequencesConfig:
+    """A config with one reference_check row, and nothing else the hold needs."""
+    fields: dict[str, object] = dict(
+        paths=PathsConfig(store=Path("store"), work=Path("work")),
+        runner=RunnerSettings(kind="local"),
+        nextclade=build.NextcladeConfig(
+            binary=Path("nextclade"), version="9.9.9", max_unknown_aa=10, max_deleted_aa=6,
+            datasets={},
+        ),
+        placement=[],
+        sources={},
+    )  # fmt: skip
+    fields.update(over)
+    return build.SequencesConfig(**fields)  # type: ignore[arg-type]
+
+
+def _row(**over: object) -> build.ReferenceCheckConfig:
+    fields: dict[str, object] = dict(
+        dataset="h1", max_substitutions=200, expect_lineages=["pdm09"],
+        reason="example: this dataset's reference is a pandemic virus",
+    )  # fmt: skip
+    fields.update(over)
+    return build.ReferenceCheckConfig(**fields)  # type: ignore[arg-type]
+
+
+def _two(
+    near_subs: int, far_subs: int
+) -> tuple[dict[str, list[SequenceRecord]], dict[str, dict[str, Aligned]]]:
+    near, far = record(1, lineage="pdm09"), record(2, lineage="pdm09")
+    placed = {"h1": [near, far]}
+    alignments = {
+        "h1": {
+            processed.seq_id(near): aligned(near, substitutions=near_subs),
+            processed.seq_id(far): aligned(far, substitutions=far_subs),
+        }
+    }
+    return placed, alignments
+
+
+def test_without_held_dataset_the_held_records_are_dropped_as_before() -> None:
+    placed, alignments = _two(30, 300)
+    counts, held_groups = build._hold_far_records(
+        _held_config(reference_check=[_row()]), placed, alignments
+    )
+    assert held_groups == {}
+    assert [r.epi_isl for r in placed["h1"]] == ["EPI_ISL_1"]
+    assert counts["h1"] == {"max_substitutions": 200, "held": 1,
+                            processed.FAR_FROM_REFERENCE: 1}  # fmt: skip
+    assert "held_dataset" not in counts["h1"]
+
+
+def test_with_held_dataset_the_held_records_are_returned_for_publishing() -> None:
+    placed, alignments = _two(30, 300)
+    counts, held_groups = build._hold_far_records(
+        _held_config(reference_check=[_row(held_dataset="h1-other")]), placed, alignments
+    )
+    assert [r.epi_isl for r in placed["h1"]] == ["EPI_ISL_1"]
+    assert list(held_groups) == ["h1-other"]
+    assert held_groups["h1-other"].source == "h1"
+    assert [r.epi_isl for r in held_groups["h1-other"].records] == ["EPI_ISL_2"]
+    # the counts are the same facts either way, plus where the records went
+    assert counts["h1"]["held"] == 1
+    assert counts["h1"]["held_dataset"] == "h1-other"
+
+
+def test_a_held_dataset_with_nothing_held_is_not_published() -> None:
+    # an empty dataset would be a version that says the hold found something when it did not
+    placed, alignments = _two(30, 40)
+    _, held_groups = build._hold_far_records(
+        _held_config(reference_check=[_row(held_dataset="h1-other")]), placed, alignments
+    )
+    assert held_groups == {}
+
+
+def test_the_held_record_carries_the_flag_that_held_it() -> None:
+    placed, alignments = _two(30, 300)
+    _, held_groups = build._hold_far_records(
+        _held_config(reference_check=[_row(held_dataset="h1-other")]), placed, alignments
+    )
+    held = held_groups["h1-other"].records[0]
+    assert processed.FAR_FROM_REFERENCE in held.problems
+
+
+def test_a_record_held_by_the_rate_says_so_on_the_record() -> None:
+    # a reader of the held dataset must be able to tell a whole virus of another lineage
+    # from a short fragment, which is the whole point of the rate (Q137)
+    whole, fragment = record(1, lineage="pdm09"), record(2, lineage="pdm09")
+    placed = {"h1": [whole, fragment]}
+    alignments = {"h1": {
+        processed.seq_id(whole): aligned(whole, substitutions=70, nucleotides="ACGT" * 400),
+        processed.seq_id(fragment): aligned(
+            fragment, substitutions=70, nucleotides="ACGT" * 75 + "-" * 1300),
+    }}  # fmt: skip
+    _, held_groups = build._hold_far_records(
+        _held_config(
+            reference_check=[_row(held_dataset="h1-other", max_substitution_rate=0.15)]
+        ),
+        placed, alignments,
+    )  # fmt: skip
+    held = held_groups["h1-other"].records
+    assert [r.epi_isl for r in held] == [fragment.epi_isl]
+    assert processed.FAR_BY_RATE in held[0].problems
+    assert processed.FAR_FROM_REFERENCE not in held[0].problems
+
+
+def test_held_dataset_equal_to_its_own_dataset_is_refused() -> None:
+    with pytest.raises(build.ConfigError, match="the dataset it holds records out of"):
+        build._check_held_datasets(_held_config(reference_check=[_row(held_dataset="h1")]))
+
+
+def test_a_held_dataset_that_is_itself_checked_is_refused() -> None:
+    rows = [_row(held_dataset="h3"), _row(dataset="h3", held_dataset="h3-other")]
+    with pytest.raises(build.ConfigError, match="is itself a checked dataset"):
+        build._check_held_datasets(_held_config(reference_check=rows))
+
+
+def test_one_held_dataset_named_by_two_rows_is_refused() -> None:
+    rows = [_row(held_dataset="shared"), _row(dataset="h3", held_dataset="shared")]
+    with pytest.raises(build.ConfigError, match="named twice"):
+        build._check_held_datasets(_held_config(reference_check=rows))
+
+
+def test_a_held_dataset_that_is_also_a_placement_target_is_refused() -> None:
+    # a placement row would put kept records into it, so one dataset would hold both sides
+    config = _held_config(
+        reference_check=[_row(held_dataset="h1-other")],
+        placement=[build.PlacementConfig("A(H1N1)", "", "h1-other", "example")],
+    )
+    with pytest.raises(build.ConfigError, match="also a placement target"):
+        build._check_held_datasets(config)
+
+
+def test_a_key_both_kept_and_held_is_fatal() -> None:
+    # one virus cannot be of two lineages; it would land in both datasets unnoticed
+    rec = record(1, lineage="pdm09")
+    with pytest.raises(processed.StoreBuildError, match="both kept and held"):
+        build._check_split("h1", [rec], [rec])
+
+
+def test_the_split_of_distinct_keys_is_accepted() -> None:
+    build._check_split("h1", [record(1)], [record(2)])
+
+
+def _run_held_pull(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **row: object
+) -> tuple[Store, dict[str, StoreRef]]:
+    """A one-dataset pull where the check holds EPI_ISL_3, published to a held_dataset.
+
+    ``_align`` is replaced so the distances are chosen rather than invented by the stand-in
+    Nextclade, but the replacement still calls ``references.get``, because the reference it
+    fetches is what the published provenance must cite.
+    """
+    rng = random.Random(7)
+    root = extractor_set(tmp_path / "set", rng)
+    store = Store.create(tmp_path / "store")
+    Work.create(tmp_path / "work")
+    make_dataset(tmp_path / "ds", rng)
+    monkeypatch.setattr(
+        build.nc, "fetch_dataset", lambda pin, store: _dataset_ref(store, tmp_path / "ds")
+    )
+    rows = [
+        {"Isolate_Id": f"EPI_ISL_{i}", "Collection_Date": "2021-03-01", "Subtype": SUBTYPE,
+         "Lineage": "", "Host": "Human", "Passage_History": "MDCK1",
+         "Location": "Europe / Exampleland", "Submission_Date": "2021-04-01"}
+        for i in (1, 2, 3)
+    ]  # fmt: skip
+    monkeypatch.setattr(build, "read_workbook", lambda path: Workbook(rows=rows))
+
+    def fake_align(
+        settings: object,
+        references: object,
+        dataset: str,
+        group: Sequence[SequenceRecord],
+        area: object,
+        runner: object,
+    ) -> tuple[dict[str, Any], dict[str, Aligned]]:
+        references.get(dataset)  # type: ignore[attr-defined]
+        return (
+            {"example": dataset},
+            {processed.seq_id(r): aligned(r, substitutions=300 if r.epi_isl.endswith("3") else 30)
+             for r in group},
+        )  # fmt: skip
+
+    monkeypatch.setattr(build, "_align", fake_align)
+    fields: dict[str, object] = dict(
+        dataset="h3", max_substitutions=200, expect_lineages=[""],
+        reason="example: this dataset's reference is one lineage", held_dataset="h3-other",
+    )  # fmt: skip
+    fields.update(row)
+    config = build.SequencesConfig(
+        paths=PathsConfig(store=tmp_path / "store", work=tmp_path / "work"),
+        runner=RunnerSettings(kind="local"),
+        nextclade=build.NextcladeConfig(
+            binary=fake_binary(tmp_path),
+            version="9.9.9",
+            max_unknown_aa=10,
+            max_deleted_aa=6,
+            datasets={"h3": build.DatasetConfig("example/h3", "t1", "0" * 64, 597)},
+        ),  # fmt: skip
+        placement=[build.PlacementConfig(SUBTYPE, "", "h3", "no lineage for A(H3N2)")],
+        sources={"definitive": root},
+        source_subtypes={"h3n2": "A(H3N2)"},
+        reference_check=[build.ReferenceCheckConfig(**fields)],  # type: ignore[arg-type]
+    )
+    build.import_source(config, "definitive")
+    return store, build.store_pull(config, PULL, build.make_runner(config.runner))
+
+
+def test_a_held_dataset_is_published_beside_the_one_it_was_held_out_of(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, refs = _run_held_pull(tmp_path, monkeypatch)
+    assert sorted(refs) == ["h3", "h3-other"]
+    kept = processed.read_table(store, refs["h3"], "isolates", ["epi_isl"]).to_pylist()
+    held = processed.read_table(
+        store, refs["h3-other"], "isolates", ["epi_isl", "problems"]
+    ).to_pylist()
+    assert [r["epi_isl"] for r in kept] == ["EPI_ISL_1", "EPI_ISL_2"]
+    assert held == [{"epi_isl": "EPI_ISL_3", "problems": [processed.FAR_FROM_REFERENCE]}]
+    # the sequence came with it, so the dataset is queryable as sequences, not just as names
+    assert processed.read_table(store, refs["h3-other"], "sequences", ["seq_hash"]).num_rows == 1
+
+
+def test_a_held_dataset_records_what_held_it_and_the_reference_it_was_measured_against(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, refs = _run_held_pull(tmp_path, monkeypatch)
+    parameters = _provenance(store, refs["h3-other"])
+    assert parameters["held_from"] == "h3"
+    assert parameters["reference_check"] == {
+        "max_substitutions": 200, "held": 1, processed.FAR_FROM_REFERENCE: 1,
+        "held_dataset": "h3-other",
+    }  # fmt: skip
+    assert parameters["alignment"] == {"example": "h3"}
+    assert parameters["new_locations"] == {
+        "checked": False,
+        "reason": "held records: the new-locations review covers the datasets"
+        " that reach trees and maps",
+    }
+    # the distance that held the record was measured against the SOURCE dataset's reference:
+    # a version that did not cite it would not say what the record was compared with
+    assert (
+        "nextclade/example/h3/t1"
+        in (store.version_dir(refs["h3-other"]) / "PROVENANCE.json").read_text()
+    )
+
+
+def test_without_a_held_dataset_the_same_pull_publishes_only_the_kept_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the key absent must leave behaviour and provenance exactly as they were
+    store, refs = _run_held_pull(tmp_path, monkeypatch, held_dataset=None)
+    assert sorted(refs) == ["h3"]
+    assert processed.read_table(store, refs["h3"], "isolates", ["epi_isl"]).to_pylist() == [
+        {"epi_isl": "EPI_ISL_1"}, {"epi_isl": "EPI_ISL_2"},
+    ]  # fmt: skip
+    assert _provenance(store, refs["h3"])["reference_check"] == {
+        "max_substitutions": 200, "held": 1, processed.FAR_FROM_REFERENCE: 1,
+    }  # fmt: skip

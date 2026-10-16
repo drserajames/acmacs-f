@@ -255,6 +255,12 @@ class ReferenceCheck:
     ``expect_lineages`` are the GISAID lineage labels that should be within the threshold.
     The label never decides (it is blank or wrong too often); it is compared with the
     distance so a disagreement is flagged and counted.
+
+    ``held_dataset`` names a dataset the held records are published to instead of being
+    dropped, so they stay queryable as sequences rather than only as a raw pull (Sarah,
+    Q196). One row decides both sides deliberately: an inverted second row could carry a
+    different threshold, and then a record would land in both datasets or in neither, with
+    nothing to catch it. Absent, the held records are discarded exactly as before.
     """
 
     dataset: str
@@ -262,6 +268,7 @@ class ReferenceCheck:
     expect_lineages: tuple[str, ...]
     reason: str
     max_substitution_rate: float | None = None
+    held_dataset: str | None = None
 
 
 #: Held: too far from the dataset's reference to be its lineage.
@@ -289,6 +296,11 @@ def hold_far_from_reference(
 
     The count is tested first, so :data:`FAR_BY_RATE` counts only the records the rate
     adds, and a row without a rate gives the counts it always gave.
+
+    **A held record carries the flag that held it**, so a reader of a ``held_dataset`` can
+    tell a full-length virus of another lineage from a short fragment the rate caught. The
+    flag was only counted while held records were dropped, and a count cannot be read back
+    off a record.
     """
     kept: list[SequenceRecord] = []
     held: list[SequenceRecord] = []
@@ -301,10 +313,10 @@ def hold_far_from_reference(
             kept.append(replace(record, problems=(*record.problems, NO_DISTANCE)))
         elif distance > check.max_substitutions:
             flags[FAR_FROM_REFERENCE] += 1
-            held.append(record)
+            held.append(replace(record, problems=(*record.problems, FAR_FROM_REFERENCE)))
         elif _over_rate(result, check.max_substitution_rate):
             flags[FAR_BY_RATE] += 1
-            held.append(record)
+            held.append(replace(record, problems=(*record.problems, FAR_BY_RATE)))
         elif record.lineage not in check.expect_lineages:
             flags[LABEL_UNEXPECTED] += 1
             kept.append(replace(record, problems=(*record.problems, LABEL_UNEXPECTED)))

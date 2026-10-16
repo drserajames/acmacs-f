@@ -105,6 +105,9 @@ class ReferenceCheckConfig:
     reason: str
     #: Substitutions per aligned base; absent, only the count is tested.
     max_substitution_rate: float | None = None
+    #: Where the held records are published instead of being dropped; absent, they are
+    #: dropped exactly as before and stay in the raw pull only.
+    held_dataset: str | None = None
 
 
 @dataclass(frozen=True)
@@ -244,7 +247,7 @@ def store_pull(config: SequencesConfig, pull_id: str, runner: Runner) -> dict[st
             config.nextclade, references, dataset, group, area, runner
         )
     _merge(placed, unchecked)
-    held_counts = _hold_far_records(config, placed, alignments)
+    held_counts, held_groups = _hold_far_records(config, placed, alignments)
     new_locations = _check_new_locations(
         config.locations, placed, area.root / NEW_LOCATIONS, started
     )
@@ -270,24 +273,75 @@ def store_pull(config: SequencesConfig, pull_id: str, runner: Runner) -> dict[st
             },
             started=started,
         )
+    for dataset, held in sorted(held_groups.items()):
+        refs[dataset] = processed.publish_pull(
+            store,
+            dataset,
+            pull_id,
+            processed.isolates_table(held.records, dataset, pull_id),
+            # the alignment, its summary and the reference all belong to the source dataset:
+            # these records were measured against ITS reference, and that distance is what
+            # held them. refs_for knows only placement targets, so asking it for this
+            # dataset would cite no reference at all and the provenance would not say what
+            # the records were compared with.
+            processed.sequences_table(held.records, alignments[held.source], pull_id),
+            inputs=[raw.ref, *references.refs_for(held.source, checks)],
+            parameters={
+                "pull": pull_id,
+                "read": counts.to_json(),
+                "workbook_line_breaks": dict(workbook.line_breaks),
+                "held_from": held.source,
+                # the rules that placed these records before the check held them, so the
+                # provenance still says how they got into the subtype at all
+                "placement": _placement_used(config.placement, held.records, held.source),
+                "lineage_check": lineage_flags,
+                "reference_check": held_counts.get(held.source, {}),
+                "alignment": summaries[held.source],
+                "new_locations": {
+                    "checked": False,
+                    "reason": "held records: the new-locations review covers the datasets"
+                    " that reach trees and maps",
+                },
+            },
+            started=started,
+        )
     return refs
+
+
+@dataclass(frozen=True)
+class _HeldGroup:
+    """Records one ``reference_check`` held, and the dataset they were held out of.
+
+    ``source`` is needed at publish time and cannot be recovered from the held dataset's
+    name: the alignment, its summary and the Nextclade reference the distance was measured
+    against all belong to the source dataset.
+    """
+
+    source: str
+    records: list[SequenceRecord]
 
 
 def _hold_far_records(
     config: SequencesConfig,
     placed: dict[str, list[SequenceRecord]],
     alignments: Mapping[str, Mapping[str, nc.Aligned]],
-) -> dict[str, dict[str, int | float]]:
-    """Apply every ``reference_check`` to ``placed`` in place; returns the flag counts.
+) -> tuple[dict[str, dict[str, int | float]], dict[str, _HeldGroup]]:
+    """Apply every ``reference_check`` to ``placed`` in place.
 
-    Held records are removed from the dataset and so are never published: they stay in the
-    raw pull only. A dataset left with nothing is fatal rather than a silent no-op, so a
-    pull of another lineage stops the run instead of looking stored.
+    Returns the flag counts per checked dataset, and the held records per
+    ``held_dataset`` for the rows that name one. Held records are removed from the dataset
+    either way; without a ``held_dataset`` they are never published and stay in the raw
+    pull only. A dataset left with nothing is fatal rather than a silent no-op, so a pull
+    of another lineage stops the run instead of looking stored — that stays true with a
+    ``held_dataset``, because a whole pull of the wrong lineage is a mistake in the pull
+    list, not something to store quietly under another name.
     """
     seen = Counter(item.dataset for item in config.reference_check)
     if twice := sorted(d for d, n in seen.items() if n > 1):
         raise ConfigError("<config>", [f"reference_check: {twice} named twice"])
+    _check_held_datasets(config)
     counts: dict[str, dict[str, int | float]] = {}
+    held_groups: dict[str, _HeldGroup] = {}
     for item in config.reference_check:
         if item.dataset not in placed:
             continue
@@ -297,6 +351,7 @@ def _hold_far_records(
             tuple(item.expect_lineages),
             item.reason,
             item.max_substitution_rate,
+            item.held_dataset,
         )
         kept, held, flags = processed.hold_far_from_reference(
             placed[item.dataset], alignments[item.dataset], check
@@ -308,14 +363,65 @@ def _hold_far_records(
         }
         if item.max_substitution_rate is not None:
             counts[item.dataset]["max_substitution_rate"] = item.max_substitution_rate
+        if item.held_dataset is not None:
+            counts[item.dataset]["held_dataset"] = item.held_dataset  # type: ignore[assignment]
         if not kept:
             raise processed.StoreBuildError(
                 f"reference_check held every record of {item.dataset!r}"
                 f" ({len(held)} over {item.max_substitutions} substitutions):"
                 " exclude the pull or widen the rule, deliberately"
             )
+        _check_split(item.dataset, kept, held)
         placed[item.dataset] = kept
-    return counts
+        if item.held_dataset is not None and held:
+            held_groups[item.held_dataset] = _HeldGroup(item.dataset, held)
+    return counts, held_groups
+
+
+def _check_held_datasets(config: SequencesConfig) -> None:
+    """A ``held_dataset`` must be its own dataset, named once and placed into by nothing."""
+    problems: list[str] = []
+    named = Counter(
+        item.held_dataset for item in config.reference_check if item.held_dataset is not None
+    )
+    if twice := sorted(d for d, n in named.items() if n > 1 and d is not None):
+        problems.append(f"reference_check: held_dataset {twice} named twice")
+    checked = {item.dataset for item in config.reference_check}
+    placement_targets = {rule.dataset for rule in config.placement}
+    for item in config.reference_check:
+        held = item.held_dataset
+        if held is None:
+            continue
+        if held == item.dataset:
+            problems.append(
+                f"reference_check: held_dataset {held!r} is the dataset it holds records out of"
+            )
+        if held in checked:
+            problems.append(f"reference_check: held_dataset {held!r} is itself a checked dataset")
+        if held in placement_targets:
+            # a placement row would put kept records into it, so one dataset would hold both
+            # sides of the split and the hold would mean nothing
+            problems.append(f"reference_check: held_dataset {held!r} is also a placement target")
+    if problems:
+        raise ConfigError("<config>", problems)
+
+
+def _check_split(
+    dataset: str, kept: Sequence[SequenceRecord], held: Sequence[SequenceRecord]
+) -> None:
+    """No key may be both kept and held: one virus cannot be of two lineages (design rule 3).
+
+    This covers the split of one pull, which is where a logic error in the rule would show.
+    A key kept from one pull and held from another would put one virus in both datasets and
+    is NOT caught here: the within-dataset check (``_check_keys_across_pulls``) sees only one
+    dataset at a time. That needs a cross-dataset check over published versions; it is not in
+    this change.
+    """
+    keys = {(r.epi_isl, r.accession) for r in kept}
+    if both := sorted(keys & {(r.epi_isl, r.accession) for r in held}):
+        raise processed.StoreBuildError(
+            f"reference_check on {dataset!r}: {len(both)} keys both kept and held, first {both[0]}"
+        )
 
 
 def _check_new_locations(
