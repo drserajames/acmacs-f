@@ -64,6 +64,7 @@ class FigureConfig:
     marked_ids: frozenset[str] = frozenset()  # centre-marked variant (leaf ids)
     marked_name: str = ""
     geometry: Geometry = field(default_factory=Geometry)
+    clade_label_sizes: dict[str, float] = field(default_factory=dict)  # clade -> label size
     leaf_names: bool = False  # searchable name layer, one per drawn leaf (render.FigureSpec)
 
 
@@ -83,6 +84,10 @@ def make_figure(
     flagged leaf is drawn is a hide rule's decision, not the flag's.
     """
     layout, ts, selection, hz = arrange(tree, parents, config, flags)
+    shown = {cs.clade for cs in selection.shown}
+    unknown = sorted(set(config.clade_label_sizes) - shown)
+    if unknown:  # design rule 1: a size for a clade that is not drawn is a stale setting
+        raise SectionOverrideError(f"clade label size(s) for clade(s) not shown: {unknown}")
     bands = [(b.first, b.last) for cs in selection.shown for b in cs.bands]
     labels, label_counts = select_labels(tree, layout, bands, config.labels)
 
@@ -108,6 +113,7 @@ def make_figure(
         colour_by=config.colour_by,
         clade_colours=config.clade_colours,
         geometry=geometry,
+        clade_label_sizes=dict(config.clade_label_sizes),
         leaf_names=config.leaf_names,
     )
     drawn = render(spec, pdf)
@@ -153,6 +159,8 @@ def make_figure(
         "dash_bars": dash_bars,
         "strains": drawn.strains,
         "leaf_names": drawn.leaf_names,
+        "clade_label_sizes": dict(sorted(config.clade_label_sizes.items())),
+        "inset": [round(v, 2) for v in drawn.inset] if drawn.inset else None,
         "continents_not_in_legend": drawn.continents_not_in_legend,
         "flagged_drawn": _count_flags(
             flags or {}, [str(tree.leaf_id[i]) for i in layout.leaf_nodes]

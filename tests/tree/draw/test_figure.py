@@ -133,7 +133,9 @@ def test_clade_names_in_one_column_do_not_overlap():
     from af.tree.draw.render import _place_clade_names
 
     fig, ax = plt.subplots()
-    _place_clade_names(ax, [(10.0, 100.0, "X.1.1"), (10.0, 101.0, "X.1.2"), (20.0, 100.0, "X")])
+    _place_clade_names(
+        ax, [(10.0, 100.0, "X.1.1"), (10.0, 101.0, "X.1.2"), (20.0, 100.0, "X")], 7.0
+    )
     texts = sorted((t.get_position() for t in ax.texts), key=lambda p: (p[0], p[1]))
     (xa, ya), (xb, yb) = texts[0], texts[1]
     assert xa == xb and yb - ya >= 10  # the second name slid past the first
@@ -209,3 +211,61 @@ def test_leaf_name_layer_leaves_visible_labels_where_they_were(tmp_path):
     off = make_figure(standard_tree(), PARENTS, config(), tmp_path / "b.pdf", {})
     assert on["aa_label_placement"] == off["aa_label_placement"]
     assert on["strains"] == off["strains"]
+
+
+def test_inset_goes_in_clear_space_and_labels_keep_off_it(tmp_path, monkeypatch):
+    import af.tree.draw.figure as figure_module
+
+    drawn = []
+    real_render = figure_module.render
+
+    def capture(spec, pdf):
+        drawn.append(real_render(spec, pdf))
+        return drawn[-1]
+
+    monkeypatch.setattr(figure_module, "render", capture)
+    report = make_figure(standard_tree(), PARENTS, config(), tmp_path / "i.pdf", {})
+    x0, y0, x1, y1 = report["inset"]
+    assert x1 - x0 == pytest.approx(140.0)
+    assert y1 <= 975.0 - 7.5 + 1e-6  # Geometry.bottom - inset_gap: above the last row
+    assert drawn[0].placed  # the synthetic tree has labels to keep off the inset
+    for p in drawn[0].placed:
+        bx0, by0, bx1, by1 = p.box
+        assert min(bx1, x1) <= max(bx0, x0) or min(by1, y1) <= max(by0, y0)
+
+
+def test_place_inset_avoids_ink_and_prefers_low_then_left():
+    from af.tree.draw.place import Grid
+    from af.tree.draw.render import place_inset
+
+    g = Grid(300, 200)
+    g.add_box((0, 150, 100, 200))  # ink in the bottom-left corner
+    x0, y0, x1, y1 = place_inset(g, 50, 20, lowest=200, right=300)
+    assert (x0, y1) == (102.0, 200.0)  # as low as allowed, just right of the ink (pad 2)
+    assert g.cost((x0, y0, x1, y1)) == 0
+
+
+def test_place_inset_without_clear_space_is_an_error():
+    from af.tree.draw.place import Grid
+    from af.tree.draw.render import InsetPlacementError, place_inset
+
+    g = Grid(100, 100)
+    g.add_box((0, 0, 100, 100))
+    with pytest.raises(InsetPlacementError):
+        place_inset(g, 50, 20, lowest=100, right=100)
+
+
+def test_clade_label_size_for_a_clade_not_shown_is_an_error(tmp_path):
+    report = make_figure(standard_tree(), PARENTS, config(), tmp_path / "a.pdf", {})
+    shown = sorted(report["clades_shown"])
+    ok = config(clade_label_sizes={shown[0]: 7.0})
+    r = make_figure(standard_tree(), PARENTS, ok, tmp_path / "b.pdf", {})
+    assert r["clade_label_sizes"] == {shown[0]: 7.0}
+    with pytest.raises(SectionOverrideError, match="not shown"):
+        make_figure(
+            standard_tree(),
+            PARENTS,
+            config(clade_label_sizes={"NO.SUCH": 7.0}),
+            tmp_path / "c.pdf",
+            {},
+        )
