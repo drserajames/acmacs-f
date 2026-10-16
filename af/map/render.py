@@ -26,7 +26,7 @@ from af.map.viewport import Box, Frame
 
 GREY = "#cccccc"  # an antigen with no colour (unpainted, or unsequenced)
 GREY_WINDOW = "#bebebe"  # a painted antigen outside the map's window, greyed by it
-SERUM_OUTLINE = "#9a9a9a"
+SERUM_OUTLINE = "#cccccc"  # as the shipped report maps
 
 
 def grey_of(p: ScenePoint) -> str | None:
@@ -54,7 +54,7 @@ class Look:
     # Opt-in, for other figures than the report (pyacmapcheck draws in R's style); the defaults
     # are the report's look.
     alpha: float | None = None  # every point's fill and outline opacity; None: opaque
-    grid_colour: str = "#dddddd"
+    grid_colour: str = "#cccccc"  # 1.0 wide, as the shipped report maps
 
 
 DEFAULT_LOOK = Look()
@@ -74,8 +74,9 @@ class PointStyle:
     """One point's drawing, overriding the scene's (opt-in; None keeps the scene's own).
 
     ``outline_width`` is in points on the report page, scaled like every other line width
-    (the defaults are 0.8 for a point and 1.0 for a box). ``alpha`` is the opacity of the
-    point's fill and outline, over :attr:`Look.alpha`. ``scale`` multiplies the point's size
+    (the default is 1.0 for a point and for a box, as on the shipped report maps). ``alpha`` is
+    the opacity of the point's fill and outline, over :attr:`Look.alpha`. ``scale`` multiplies
+    the point's size
     (the Look's antigen radius or serum half-side, and a mark's enlargement on top), as R draws
     removed points larger.
     """
@@ -206,9 +207,9 @@ def draw_scene(
     for k in range(max(across, down) + 1):
         g = k / frame.size
         if k <= across:
-            ax.plot([g, g], [0, a], color=look.grid_colour, lw=0.8 * scale, zorder=0)
+            ax.plot([g, g], [0, a], color=look.grid_colour, lw=1.0 * scale, zorder=0)
         if k <= down:
-            ax.plot([0, 1], [g, g], color=look.grid_colour, lw=0.8 * scale, zorder=0)
+            ax.plot([0, 1], [g, g], color=look.grid_colour, lw=1.0 * scale, zorder=0)
     page = frame.page(scene.xy())
     drawn = page * [1.0, a]  # in width units: what the Axes draws
     styles = styles or {}
@@ -244,7 +245,7 @@ def draw_scene(
             style = {
                 "fc": own.fill or grey or p.colour,
                 "ec": own.outline or edge,
-                "lw": (own.outline_width if own.outline_width is not None else 0.8) * scale,
+                "lw": (own.outline_width if own.outline_width is not None else 1.0) * scale,
                 "zorder": z,
             }
         alpha = own.alpha if own.alpha is not None else look.alpha
@@ -262,13 +263,15 @@ def draw_scene(
             zorder=8,
         )
     if title:
+        # The shipped maps' title: baseline 37.5 and left edge 19 page units from the top-left
+        # corner. The title box (furniture) is unchanged: the title stays inside its 0.06.
         ax.text(
-            0.024,
-            0.015,
+            19.0 / look.page_points,
+            37.5 / look.page_points,
             scene.title,
             fontsize=look.title_size * scale,
             weight="bold",
-            va="top",
+            va="baseline",
             zorder=9,
         )
     if legend:
@@ -327,7 +330,7 @@ def _draw_legend(
                 h * 0.35,
                 fc=colour,
                 ec="black",
-                lw=0.6 * scale,
+                lw=1.0 * scale,
                 zorder=11,
             )
         )
