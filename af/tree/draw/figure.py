@@ -48,7 +48,7 @@ class Overrides:
 
 @dataclass
 class FigureConfig:
-    title: str
+    title: str  # the figure's name: I7 title, report heading and caption
     window_start: str  # 'YYYY-MM', inclusive
     window_end: str  # 'YYYY-MM', exclusive
     hide: HideRules = field(default_factory=HideRules)
@@ -66,6 +66,10 @@ class FigureConfig:
     geometry: Geometry = field(default_factory=Geometry)
     clade_label_sizes: dict[str, float] = field(default_factory=dict)  # clade -> label size
     leaf_names: bool = False  # searchable name layer, one per drawn leaf (render.FigureSpec)
+    # The title drawn on the figure, when it differs from ``title`` ("" = none). Separate, so
+    # matching the shipped page (no B/Vic title, "A(H1N1)" on H1) never renames the figure
+    # in the I7, the report heading or the caption.
+    drawn_title: str | None = None
 
 
 def make_figure(
@@ -115,6 +119,7 @@ def make_figure(
         geometry=geometry,
         clade_label_sizes=dict(config.clade_label_sizes),
         leaf_names=config.leaf_names,
+        drawn_title=config.drawn_title,
     )
     drawn = render(spec, pdf)
     write_i7(
@@ -160,6 +165,7 @@ def make_figure(
         "strains": drawn.strains,
         "leaf_names": drawn.leaf_names,
         "clade_label_sizes": dict(sorted(config.clade_label_sizes.items())),
+        "drawn_title": config.title if config.drawn_title is None else config.drawn_title,
         "inset": [round(v, 2) for v in drawn.inset] if drawn.inset else None,
         "continents_not_in_legend": drawn.continents_not_in_legend,
         "flagged_drawn": _count_flags(
