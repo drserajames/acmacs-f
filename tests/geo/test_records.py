@@ -205,3 +205,18 @@ def test_viruses_painted_by_placement_are_counted_per_month() -> None:
     assert january["unpainted"] == []
     alpha = next(loc for loc in january["locations"] if loc["name"] == "Alpha")
     assert alpha["points"] == [{"clade": "Clade R", "color": "#aa0000", "count": 2}]
+
+
+def test_a_placement_painted_preparation_abstains_beside_evidence() -> None:
+    """Q183 b: a virus whose preparations are painted alike, one by evidence and one by tree
+    placement alone, takes the evidence's dot (unflagged); it does not become a disagreement.
+    With only placement-painted preparations, the dot keeps the flag."""
+    from af.geo.colours import BASIS_PLACEMENT, BASIS_SUPPORTED_CLADE, DotStyle
+    from af.geo.records import AGREE, merged_style
+
+    placed = DotStyle("Clade R", "#aa0000", BASIS_PLACEMENT, tree_clade="R")
+    supported = DotStyle("Clade R", "#aa0000", BASIS_SUPPORTED_CLADE)
+    assert merged_style([(placed, "egg"), (supported, "egg"), (placed, "cell")]) == (
+        supported, AGREE
+    )  # fmt: skip
+    assert merged_style([(placed, "egg"), (placed, "cell")]) == (placed, AGREE)
