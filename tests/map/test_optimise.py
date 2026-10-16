@@ -581,7 +581,7 @@ def assert_move_lower_record(resolved: opt.TrappedResolution, problem: MapProble
     """What every move-lower result must say: kept rounds lower the stress by more than the
     rule's margin, one after another; a rejected round is the last and changes nothing; the
     last grid test describes the returned map."""
-    rule = opt.MOVE_LOWER_RULE
+    rule = resolved.move_lower_rule or opt.MOVE_LOWER_RULE
     stress = None
     for n, r in enumerate(resolved.move_lower, start=1):
         assert r.round == n
@@ -711,6 +711,156 @@ def test_move_lower_rule_is_a_record():
     assert json.loads(json.dumps(rule)) == {**rule, "diagnoses": list(rule["diagnoses"])}
     assert rule["name"] == "move-lower-1"
     assert set(rule["diagnoses"]) <= set(typing.get_args(opt.Diagnosis))
+
+
+# AD's last round (AD_LAST_ROUND, Q198): one joint round, kept if the stress falls at all
+
+
+def ad_last_round(problem: MapProblem, plain: opt.TrappedResolution) -> np.ndarray:
+    """AD chart-relax-grid's last round, written out independently of resolve_trapped
+    (acmacs-chart-2 grid-test.cc): on the map the trapped loop finished, move every trapped or
+    hemisphering point whose other position lowers the stress, minimise once (fine), and keep the
+    moved map only if its stress is lower (AD keeps both projections and sorts them by stress)."""
+    layout = plain.projection.layout
+    moves = [
+        r
+        for r in plain.last_grid
+        if r.diagnosis in ("trapped", "hemisphering")
+        and r.position is not None
+        and r.stress_diff < 0.0
+    ]
+    if not moves:
+        return layout
+    trial = layout.copy()
+    for r in moves:
+        trial[r.point] = r.position
+    moved = opt.optimise(problem, trial, precision="fine")
+    return moved.layout if moved.stress < plain.projection.stress else layout
+
+
+def ad_cases():
+    block, _, stuck, _ = stuck_block()
+    yield "block", block, stuck.layout
+    problem, _, reflected = reflected_antigen(seed=6)
+    yield "one point", problem, reflected.layout
+    for seed in (3, 5, 9):
+        problem, _ = synthetic_table(n_antigens=25, n_sera=6, noise=0.8, seed=seed)
+        for n, projection in enumerate(
+            opt.relax(problem, n_starts=12, seed=seed, keep=3).projections
+        ):
+            yield f"seed {seed} #{n}", problem, projection.layout
+
+
+def test_ad_last_round_is_ads_last_round():
+    tried = moved = 0
+    for name, problem, layout in ad_cases():
+        plain = opt.resolve_trapped(problem, layout)
+        ad = opt.resolve_trapped(
+            problem, layout, move_lower=True, move_lower_rule=opt.AD_LAST_ROUND
+        )
+        np.testing.assert_array_equal(
+            ad.projection.layout, ad_last_round(problem, plain), err_msg=name
+        )
+        assert ad.move_lower_rule is opt.AD_LAST_ROUND
+        assert len(ad.move_lower) <= 1 and ad.move_lower_stop is not None
+        assert_move_lower_record(ad, problem)
+        tried += 1
+        moved += any(r.kept for r in ad.move_lower)
+    assert tried >= 10 and moved >= 2  # the comparison saw moves kept, not only empty rounds
+
+
+def test_ad_last_round_is_the_first_round_of_move_lower():
+    # where move-lower-1's joint round 1 is kept, AD's round is that round; measured the same on
+    # 15 chain maps (notes/optimiser/hemi-lower/why-ae/)
+    for name in ("block", "one point"):
+        _, problem, layout = next(c for c in ad_cases() if c[0] == name)
+        default = opt.resolve_trapped(problem, layout, move_lower=True)
+        ad = opt.resolve_trapped(
+            problem, layout, move_lower=True, move_lower_rule=opt.AD_LAST_ROUND
+        )
+        assert default.move_lower[0].how == "jointly" and default.move_lower[0].kept
+        assert ad.move_lower[0] == default.move_lower[0]
+        assert ad.projection.stress == default.move_lower[0].stress_after
+
+
+def test_ad_last_round_never_tries_one_at_a_time(monkeypatch):
+    block, _, stuck, _ = stuck_block()
+    plain = opt.resolve_trapped(block, stuck.layout)
+    real = opt.optimise
+    calls = []
+
+    def joint_fails(problem, layout, **kwargs):
+        # the loop moves nothing here, so the first minimise asked for is the joint move
+        result = real(problem, layout, **kwargs)
+        calls.append(result.stress)
+        return dataclasses.replace(result, stress=math.inf) if len(calls) == 1 else result
+
+    monkeypatch.setattr(opt, "optimise", joint_fails)
+    ad = opt.resolve_trapped(
+        block, stuck.layout, move_lower=True, move_lower_rule=opt.AD_LAST_ROUND
+    )
+    assert len(calls) == 1
+    (only,) = ad.move_lower
+    assert (only.how, only.moved, only.kept) == ("jointly", (), False)
+    assert ad.move_lower_stop == "stress did not fall"
+    np.testing.assert_array_equal(ad.projection.layout, plain.projection.layout)
+
+
+def test_ad_last_round_keeps_any_fall_in_stress(monkeypatch):
+    # AD sorts its projections by stress, so a move that gains 1e-6 wins; move-lower-1 wants 1e-3
+    problem, _, reflected = reflected_antigen(seed=6)
+    plain = opt.resolve_trapped(problem, reflected.layout)
+    real = opt.optimise
+
+    def tiny_gain(problem, layout, **kwargs):
+        return dataclasses.replace(
+            real(problem, layout, **kwargs), stress=plain.projection.stress - 1e-6
+        )
+
+    monkeypatch.setattr(opt, "optimise", tiny_gain)
+    for rule, kept in ((opt.AD_LAST_ROUND, True), (opt.MOVE_LOWER_RULE, False)):
+        result = opt.resolve_trapped(
+            problem, reflected.layout, move_lower=True, move_lower_rule=rule
+        )
+        assert result.move_lower[0].kept is kept
+
+
+def test_ad_last_round_runs_one_round_whatever_max_rounds_says(monkeypatch):
+    # no small invented table needs a second round (the chain maps did: up to 6), so this checks
+    # the cap the rounds are given
+    block, _, stuck, _ = stuck_block()
+    real = opt._move_lower
+    caps = []
+
+    def capture(*args, max_rounds, **kwargs):
+        caps.append(max_rounds)
+        return real(*args, max_rounds=max_rounds, **kwargs)
+
+    monkeypatch.setattr(opt, "_move_lower", capture)
+    for rule in (opt.AD_LAST_ROUND, opt.MOVE_LOWER_RULE):
+        result = opt.resolve_trapped(
+            block, stuck.layout, max_rounds=7, move_lower=True, move_lower_rule=rule
+        )
+        assert len(result.move_lower) == 1
+    assert caps == [1, 7]
+
+
+def test_ad_last_round_rule_is_its_own_record():
+    rule = dataclasses.asdict(opt.AD_LAST_ROUND)
+    assert json.loads(json.dumps(rule)) == {**rule, "diagnoses": list(rule["diagnoses"])}
+    assert rule["name"] == "ad-last-round-1" != opt.MOVE_LOWER_RULE.name
+    assert (rule["max_rounds"], rule["min_gain"], rule["one_at_a_time"]) == (1, 0.0, False)
+    assert rule["diagnoses"] == opt.MOVE_LOWER_RULE.diagnoses
+    block, _, stuck, _ = stuck_block()
+    assert opt.resolve_trapped(block, stuck.layout).move_lower_rule is None
+    assert (
+        opt.resolve_trapped(block, stuck.layout, move_lower=True).move_lower_rule
+        is opt.MOVE_LOWER_RULE
+    )
+    with pytest.raises(ValueError, match="move_lower_rule.max_rounds"):
+        opt.resolve_trapped(
+            block, stuck.layout, move_lower=True, move_lower_rule=opt.MoveLowerRule(max_rounds=0)
+        )
 
 
 def test_group_tolerance_is_checked():
