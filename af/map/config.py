@@ -52,6 +52,29 @@ class FrameConfig:
 
 
 @dataclass(frozen=True)
+class LegendConfig:
+    """A subtype's legend, where it differs from the report's default (af.map.render.Look):
+    the shipped B/Vic maps drew larger legend text at a wider pitch. Sizes in points of the
+    800-point page. Like a frame size, set for a subtype (optionally one assay), never one map."""
+
+    subtype: str
+    text_size: float
+    row_pitch: float
+    text_left: float
+    padding: float
+    assay: str | None = None
+
+    def look(self) -> dict[str, float]:
+        """The Look fields this sets."""
+        return {
+            "legend_text_size": self.text_size,
+            "legend_row_pitch": self.row_pitch,
+            "legend_text_left": self.text_left,
+            "legend_padding": self.padding,
+        }
+
+
+@dataclass(frozen=True)
 class MoveConfig:
     """Move named antigens to the median of a colour-scheme row's points, then relax."""
 
@@ -295,6 +318,7 @@ class MapsConfig:
     # Required by the round config loader; the default (codes as they are, no assay words) only
     # for a config built in code.
     titles: TitlesConfig = TitlesConfig()
+    legends: tuple[LegendConfig, ...] = ()
 
     def __post_init__(self) -> None:
         store = [m for m in self.maps if self.colour_source(m) == "store"]
@@ -323,6 +347,16 @@ class MapsConfig:
             if f.subtype == subtype and f.assay is None:
                 return f.size
         raise ValueError(f"no frame size configured for subtype {subtype!r} assay {assay!r}")
+
+    def legend(self, subtype: str, assay: str) -> LegendConfig | None:
+        """Most specific legend rule wins, as for frames; None keeps the default legend."""
+        for g in self.legends:
+            if g.subtype == subtype and g.assay == assay:
+                return g
+        for g in self.legends:
+            if g.subtype == subtype and g.assay is None:
+                return g
+        return None
 
 
 @dataclass
