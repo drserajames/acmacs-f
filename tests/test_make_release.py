@@ -2,6 +2,7 @@
 
 import argparse
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -652,9 +653,17 @@ def test_the_release_file_names_the_arithmetics_and_the_comparison(
         (mr.Numerics("", ()), mr.Original("0123456789ab", "same", "f" * 40)),
         (mr.Numerics("", ()), mr.Original("", mr.NOT_COMPARED, "")),
     ]
+    fonts = mr.Fonts("https://example.org/fonts-9.zip", "e" * 64, "9.1")
     for numerics, original in cases:
-        mr.write_release_file(args, tmp_path, "0" * 40, "then", {"CXX": "c++"}, numerics, original)
+        mr.write_release_file(
+            args, tmp_path, "0" * 40, "then", {"CXX": "c++"}, numerics, original, fonts
+        )
         written = tomllib.loads((tmp_path / "RELEASE.toml").read_text())
+        assert (
+            written["fonts_archive_url"],
+            written["fonts_archive_sha256"],
+            written["fonts_version"],
+        ) == ("https://example.org/fonts-9.zip", "e" * 64, "9.1")
         assert written["numerics_default"] == numerics.default
         assert written["numerics_offered"] == list(numerics.offered)
         assert (
@@ -679,3 +688,56 @@ def test_the_imports_check_wants_every_core_the_install_has_inside_the_release(
         monkeypatch.setattr(mr, "capture", lambda command, env, lines=lines: "\n".join(lines))
         with pytest.raises(SystemExit, match="does not import from inside"):
             mr.verify_imports(release)
+
+
+# The figure fonts: fetched by the build, outside the package locks, so checked in the release.
+def probe_answering(
+    mr: ModuleType, monkeypatch: pytest.MonkeyPatch, stdout: str, returncode: int = 0
+) -> None:
+    done = subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="Boom: no fonts\n")
+    monkeypatch.setattr(mr.subprocess, "run", lambda *args, **kwargs: done)
+
+
+def test_a_release_records_the_fonts_installed_inside_it(
+    mr: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inside = {"url": "u", "sha256": "e" * 64, "version": "9.1", "directory": str(RELEASE / "f")}
+    probe_answering(mr, monkeypatch, json.dumps(inside))
+    assert mr.verify_fonts(RELEASE) == mr.Fonts("u", "e" * 64, "9.1")
+
+
+def test_a_commit_from_before_the_fonts_records_none(
+    mr: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probe_answering(mr, monkeypatch, "{}")
+    assert mr.verify_fonts(RELEASE) == mr.Fonts()
+    assert "predates the figure fonts" in capsys.readouterr().out
+
+
+def test_fonts_missing_or_outside_the_release_stop_it(
+    mr: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe_answering(mr, monkeypatch, "", returncode=1)
+    with pytest.raises(SystemExit, match="figure fonts are not usable: Boom: no fonts"):
+        mr.verify_fonts(RELEASE)
+    outside = {"url": "u", "sha256": "e" * 64, "version": "9.1", "directory": "/elsewhere/f"}
+    probe_answering(mr, monkeypatch, json.dumps(outside))
+    with pytest.raises(SystemExit, match="not inside"):
+        mr.verify_fonts(RELEASE)
+
+
+def test_the_fonts_probe_reads_this_environments_af(mr: ModuleType) -> None:
+    """The probe itself, run by this python as a release build runs it (-I): the fonts its af
+    was built with. -I drops PYTHONPATH, so under check-committed the probe's af is the
+    environment's own install, not the export: hence the archive, not the directory."""
+    import af.fonts
+
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", mr.FONTS_PROBE], capture_output=True, text=True, check=True
+    )
+    found = json.loads(done.stdout)
+    assert (found["sha256"], found["version"]) == (
+        af.fonts.source()["archive_sha256"],
+        af.fonts.source()["version"],
+    )
+    assert (Path(found["directory"]) / af.fonts.SOURCE_FILE).is_file()

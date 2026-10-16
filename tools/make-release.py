@@ -28,7 +28,7 @@ It makes ``<releases>/<sha12>/`` containing:
 - checks: af and its compiled optimisers import from inside the release; ``af.run.smoke
   --local`` passes; the optimisers built here keep their arithmetic (below); every tool test
   passes with ``--require-tools`` (pdflatex excepted);
-- ``RELEASE.toml`` (commit, compiler, arithmetic, versions, host, time),
+- ``RELEASE.toml`` (commit, compiler, arithmetic, figure fonts, versions, host, time),
   ``conda-explicit.txt`` and ``pip-freeze.txt``, written last. The whole tree is then made
   read-only;
 - ``CONTENTS.txt``: first, ``# packages:`` lines saying how the env was made (replayed or
@@ -61,6 +61,11 @@ tested, in two ways, and ``RELEASE.toml`` says what was found.
   ``original_reference`` and ``original_result`` say which release it was compared with and
   the answer; with no earlier release there, that it was not compared.
   ``original_tool_commit`` names the commit whose tool made the comparison.
+
+**The figure fonts.** The build fetches them itself (``fonts/CMakeLists.txt``, hash-checked), so
+they are not in the package locks either. A build with ``af.fonts`` must have them installed
+inside the release, or it stops; ``fonts_archive_url``, ``fonts_archive_sha256`` and
+``fonts_version`` record which. A commit from before them records the fields empty.
 
 A commit from before the contract declares no arithmetic and has no such tests: it still
 builds, the log says there was nothing to check, and the names are empty. Its optimiser is
@@ -235,6 +240,7 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
     verify_imports(release)
     verify_linkage(release)
     verify_one_openmp(python, build_env)
+    fonts = verify_fonts(release)
     with tempfile.TemporaryDirectory() as scratch:
         step("smoke test", "smoke")
         smoke = [python, "-m", "af.run.smoke", "--local", "--work-dir", scratch]
@@ -278,7 +284,7 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
         )
     packages = package_section(choice, previous, lock, pip)
     (release / "CONTENTS.txt").write_text(packages + contents(repo, sha))
-    write_release_file(args, release, sha, started, build_env, numerics, original)
+    write_release_file(args, release, sha, started, build_env, numerics, original, fonts)
     (release / "bin").symlink_to("env/bin")  # so <release>/bin/python, like o's env/bin/python
     make_read_only(release)
     step(f"release {sha[:12]} ready in {release}")
@@ -515,6 +521,48 @@ def verify_imports(release: Path) -> None:
     outside = [line for line in lines if not Path(line).resolve().is_relative_to(release)]
     if len(lines) not in (2, 3) or outside:
         raise SystemExit(f"af does not import from inside {release}: {lines}")
+
+
+FONTS_PROBE = """
+import importlib.util, json
+if importlib.util.find_spec("af.fonts") is None:  # a commit from before the fonts
+    print(json.dumps({}))
+else:
+    import af.fonts
+    source = af.fonts.source()
+    for name in af.fonts.names():
+        af.fonts.path(name)  # each one installed
+    print(json.dumps({"url": source["archive_url"], "sha256": source["archive_sha256"],
+                      "version": source["version"], "directory": str(af.fonts.directory())}))
+"""
+
+
+@dataclasses.dataclass(frozen=True)
+class Fonts:
+    """The figure fonts' archive, as the build recorded it; empty before af had fonts."""
+
+    url: str = ""
+    sha256: str = ""
+    version: str = ""
+
+
+def verify_fonts(release: Path) -> Fonts:
+    """A build with af.fonts must have its fonts, inside this release; where they came from."""
+    env = {"PATH": "/usr/bin:/bin"}
+    done = subprocess.run(
+        [python_of(release), "-I", "-c", FONTS_PROBE], env=env, capture_output=True, text=True
+    )
+    if done.returncode != 0:
+        tail = (done.stderr.strip().splitlines() or ["no output"])[-1]
+        raise SystemExit(f"the release's figure fonts are not usable: {tail}")
+    found = json.loads(done.stdout)
+    if not found:
+        print("   this commit predates the figure fonts (no af.fonts)", flush=True)
+        return Fonts()
+    if not Path(found["directory"]).resolve().is_relative_to(release):
+        raise SystemExit(f"the figure fonts are not inside {release}: {found['directory']}")
+    print(f"   figure fonts: TeX Gyre {found['version']} ({found['sha256'][:12]})", flush=True)
+    return Fonts(found["url"], found["sha256"], found["version"])
 
 
 def verify_linkage(release: Path) -> None:
@@ -831,6 +879,7 @@ def write_release_file(
     env: dict[str, str],
     numerics: Numerics,
     original: Original,
+    fonts: Fonts,
 ) -> None:
     python = python_of(release)
     af_version = capture([python, "-I", "-c", "import af; print(af.__version__)"], env).strip()
@@ -848,6 +897,9 @@ def write_release_file(
         "original_reference": original.reference,
         "original_result": original.result,
         "original_tool_commit": original.tool_commit,
+        "fonts_archive_url": fonts.url,
+        "fonts_archive_sha256": fonts.sha256,
+        "fonts_version": fonts.version,
         "micromamba": capture([str(args.micromamba), "--version"], env).strip(),
         "extras": args.extras,
         "host": platform.node(),
