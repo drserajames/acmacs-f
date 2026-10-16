@@ -648,7 +648,9 @@ def build_map(
     vlabels = {
         ids[m.antigen]: label_text(
             chart.antigens[m.antigen].name,
-            m.passage_class,
+            # the shipped maps label a reassortant vaccine "egg" (style 08-27); its reassortant
+            # name stays in the I7
+            "egg" if m.passage_class == "reassortant" else m.passage_class,
             chart.antigens[m.antigen].reassortant,
             abbreviations.table if abbreviations is not None else {},
         )

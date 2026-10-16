@@ -97,8 +97,9 @@ def test_label_text_rule() -> None:
     assert label_text(strain("A(H3N2)", "SOMEPLACE"), "cell", "", {}) == "So/21-cell"
     assert label_text(strain("B", "TWO WORDS"), "egg", "", {}) == "TW/21-egg"
     assert label_text(strain("A(H1N1)", "SOMEPLACE"), "egg", "", {"SOMEPLACE": "SP"}) == "SP/21-egg"
-    # a reassortant is labelled "egg", as the shipped maps label one
-    assert label_text(strain("A(H3N2)", "SOMEPLACE"), "reassortant", "XR-1", {}) == "So/21-egg"
+    assert label_text(strain("A(H3N2)", "SOMEPLACE"), "reassortant", "XR-1", {}) == "So/21-XR-1"
+    # the round's build passes a reassortant vaccine's passage word as egg (style 08-27)
+    assert label_text(strain("A(H3N2)", "SOMEPLACE"), "egg", "XR-1", {}) == "So/21-egg"
 
 
 def test_labels_avoid_furniture_and_each_other() -> None:

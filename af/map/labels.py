@@ -33,8 +33,9 @@ def label_text(
 
     The place abbreviation comes from ``abbreviations`` (curated data, keyed by the upper-case
     location: :class:`LabelAbbreviations`, CDC's codes for US places). Without an entry:
-    initials of a multi-word place, else its first two letters. A reassortant is labelled
-    "egg", as the shipped maps label one (style 08-27): its reassortant name is in the I7.
+    initials of a multi-word place, else its first two letters. The suffix is the passage word
+    the caller gives; a reassortant given as such is labelled by its reassortant name. (The
+    round's maps label a reassortant vaccine by its egg passage: af.map.build decides that.)
     """
     parts = strain_name(name).split("/")
     if len(parts) < 3:
@@ -44,7 +45,11 @@ def label_text(
     if abbr is None:
         words = [w for w in re.split(r"[ _-]+", place) if w]
         abbr = "".join(w[0] for w in words).upper() if len(words) > 1 else place[:2].title()
-    suffix = "egg" if passage_class == "reassortant" else passage_class
+    suffix = (
+        reassortant.strip()
+        if passage_class == "reassortant" and reassortant.strip()
+        else passage_class
+    )
     return f"{abbr}/{year[-2:]}-{suffix}"
 
 
