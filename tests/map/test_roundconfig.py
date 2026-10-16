@@ -13,6 +13,11 @@ af_data = "shared/acmacs-f-data"
 figures = "figures.toml"
 vaccine_defaults = "shared/vaccine-defaults.toml"
 
+[titles]
+labs = { LAB = "Lab" }
+assays = { HI = "HI", NEUT = "Neut" }
+assay_subtypes = ["A(H3N2)"]
+
 [defaults]
 must_show_since = 2025-09-01
 previous_round = "../previous"
@@ -242,6 +247,18 @@ def test_figures_is_required_and_resolves_against_the_file(tmp_path: Path) -> No
     assert config.figures == (tmp_path / "figures.toml").resolve()
     with pytest.raises(ConfigError, match="figures .* is required"):
         load_maps_config(write(tmp_path, GOOD.replace('figures = "figures.toml"\n', "")))
+
+
+def test_titles_are_required_and_read(tmp_path: Path) -> None:
+    config, _ = load_maps_config(write(tmp_path, GOOD))
+    assert config.titles.labs == {"LAB": "Lab"} and config.titles.assay_subtypes == ("A(H3N2)",)
+    block = '[titles]\nlabs = { LAB = "Lab" }\nassays = { HI = "HI", NEUT = "Neut" }\n'
+    without = GOOD.replace(block + 'assay_subtypes = ["A(H3N2)"]\n', "")
+    with pytest.raises(ConfigError, match=r"\[titles\] .* is required"):
+        load_maps_config(write(tmp_path, without))
+    typo = GOOD.replace("assay_subtypes =", "assay_subtype =")
+    with pytest.raises(ConfigError, match="unknown key"):
+        load_maps_config(write(tmp_path, typo))
 
 
 def test_colouring_may_not_carry_its_own_af_data(tmp_path: Path) -> None:

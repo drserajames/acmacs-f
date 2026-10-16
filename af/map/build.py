@@ -42,7 +42,7 @@ from af.chart.model import Chart
 from af.chart.sera import FERRET_ONLY, Marker, non_ferret, read_markers
 from af.geo.colours import DotStyle
 from af.map.colouring import MapColouringError, StoreColours
-from af.map.config import MapConfig, MapsConfig
+from af.map.config import MapConfig, MapsConfig, TitlesConfig
 from af.map.curate import (
     BlockOffset,
     CurationError,
@@ -178,14 +178,21 @@ def lineage_minority(chart: Chart, row: Subtype) -> dict[str, Any]:
     }
 
 
-def map_title(chart: Chart, configured: str | None) -> str:
+def map_title(chart: Chart, configured: str | None, titles: TitlesConfig | None = None) -> str:
+    """The map's own title (a map's configured one wins), named as the round's [titles] say."""
     if configured:
         return configured
+    titles = titles or TitlesConfig()
     info = chart.info
-    assay = {"HI": "", "HINT": " HINT", "PRN": " neut", "FOCUS REDUCTION+FRA": " neut"}.get(
-        info.get("A", ""), f" {info.get('A', '')}".rstrip()
-    )
-    return f"{info.get('l', '')} {chart_subtype(chart).name}{assay} by clade"
+    subtype = chart_subtype(chart).name
+    lab = titles.labs.get(info.get("l", ""), info.get("l", ""))
+    assay = ""
+    if subtype in titles.assay_subtypes:
+        code = info.get("A", "")
+        if code not in titles.assays:
+            raise BuildError(f"titles: assay {code!r} of a {subtype} map has no word in assays")
+        assay = f" {titles.assays[code]}"
+    return f"{lab} {subtype}{assay} by clade"
 
 
 # ---------------------------------------------------------------- steps
@@ -676,7 +683,7 @@ def build_map(
         decisions["painted_by_placement"] = placed
 
     size = config.frame_size(chart.info.get("V", ""), chart.info.get("A", ""))
-    title_base = map_title(chart, cfg.title)
+    title_base = map_title(chart, cfg.title, config.titles)
     if fonts is not None:  # the font files the figure is drawn in (rule 5)
         inputs.update(fonts.inputs())
     provenance: dict[str, Any] = {"inputs": inputs}

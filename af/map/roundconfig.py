@@ -28,6 +28,7 @@ from af.map.config import (
     MapsConfig,
     MoveConfig,
     RotationConfig,
+    TitlesConfig,
     VaccineChooseConfig,
     VaccineDisableConfig,
     WindowConfig,
@@ -84,6 +85,7 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
             "colouring",
             "af_data",
             "figures",
+            "titles",
         },
         str(path),
     )
@@ -138,6 +140,8 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
         )
     if "vaccine_list" not in data:
         raise ConfigError(f"{path}: vaccine_list (the curated list) is required")
+    if "titles" not in data:
+        raise ConfigError(f"{path}: [titles] (lab names and assay words in map titles) is required")
     if "figures" not in data:
         raise ConfigError(
             f"{path}: figures (the round's figures.toml, naming the font files) is required"
@@ -153,6 +157,7 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
             colouring=_colouring(data.get("colouring"), base),
             af_data=_path(data["af_data"], base) if "af_data" in data else None,
             figures=_path(data["figures"], base),
+            titles=_titles(data["titles"]),
         )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
@@ -380,6 +385,22 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
         vaccine_choose=tuple(choose),
         colouring=m.get("colouring"),
     )
+
+
+def _titles(t: Any) -> TitlesConfig:
+    if not isinstance(t, Mapping):
+        raise ConfigError("titles: expected a table")
+    _known(dict(t), {"labs", "assays", "assay_subtypes"}, "titles")
+    for key in ("labs", "assays"):
+        table = t.get(key, {})
+        if not isinstance(table, Mapping) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in table.items()
+        ):
+            raise ConfigError(f"titles.{key}: expected a table of strings")
+    subtypes = t.get("assay_subtypes", [])
+    if not isinstance(subtypes, list) or not all(isinstance(s, str) for s in subtypes):
+        raise ConfigError("titles.assay_subtypes: expected a list of subtype names")
+    return TitlesConfig(dict(t.get("labs", {})), dict(t.get("assays", {})), tuple(subtypes))
 
 
 def load_vaccine_list(path: Path) -> dict[str, list[Any]]:

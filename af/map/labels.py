@@ -100,20 +100,31 @@ def place_labels(
     drawn: Array,
     furniture: Sequence[Box],
     *,
+    sizes: Sequence[tuple[float, float]] | None = None,
+    mark_radius: float | None = None,
     char_width: float = 0.0155,
     height: float = 0.03,
-    radii: Sequence[float] = (0.022, 0.038, 0.056),
+    radii: Sequence[float] = (0.0275, 0.04, 0.056),
 ) -> list[Placed]:
     """Greedy placement, in order: try positions around each anchor at increasing distance and
     keep the one that (1) stays on the page, (2) overlaps fewest earlier labels and furniture,
-    (3) covers fewest drawn points, (4) is nearest. Deterministic: no randomness, fixed order.
+    (3) is nearest, (4) covers fewest drawn points. Deterministic: no randomness, fixed order.
+
+    Nearest before fewest covered, as the shipped maps place them: a label sits just clear of
+    its mark (the first radius is a marked point's 0.025 plus a little) even over other points,
+    which its white halo keeps readable; ranking covered points first floated labels 30-45 u
+    away (style 08-17). ``sizes`` are each label's measured (width, height); without them the
+    size is estimated from ``char_width`` and ``height``. With ``mark_radius``, every anchor's
+    mark (a circle of that radius) counts like furniture: a label over another vaccine's mark
+    hides it, which no halo mends.
     """
     placed: list[Placed] = []
     boxes: list[tuple[float, float, float, float]] = [
         (b.left, b.top, b.right, b.bottom) for b in furniture
     ]
-    for (x, y), text in zip(anchors, texts, strict=True):
-        w, h = char_width * len(text), height
+    if sizes is None:
+        sizes = [(char_width * len(t), height) for t in texts]
+    for (x, y), text, (w, h) in zip(anchors, texts, sizes, strict=True):
         best: tuple[tuple[float, ...], tuple[float, float, float, float], int, int] | None = None
         for r in radii:
             for step in range(12):
@@ -124,8 +135,10 @@ def place_labels(
                 box = (left, top, left + w, top + h)
                 off = box[0] < 0 or box[1] < 0 or box[2] > 1 or box[3] > 1
                 hits = sum(_overlap(box, other) for other in boxes)
+                if mark_radius is not None:
+                    hits += sum(_on_circle(box, m, mark_radius) for m in anchors)
                 covered = int(_inside(drawn, box).sum())
-                cost = (float(off), float(hits), float(covered), r)
+                cost = (float(off), float(hits), r, float(covered))
                 if best is None or cost < best[0]:
                     best = (cost, box, hits, covered)
         assert best is not None
@@ -133,6 +146,14 @@ def place_labels(
         boxes.append(box)
         placed.append(Placed(text, (float(x), float(y)), box, hits, covered))
     return placed
+
+
+def _on_circle(box: tuple[float, float, float, float], centre: Array, radius: float) -> bool:
+    """Whether ``box`` reaches into the circle (nearest point of the box inside it)."""
+    x, y = float(centre[0]), float(centre[1])
+    dx = max(box[0] - x, 0.0, x - box[2])
+    dy = max(box[1] - y, 0.0, y - box[3])
+    return dx * dx + dy * dy < radius * radius - 1e-12
 
 
 def _overlap(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
