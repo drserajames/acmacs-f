@@ -389,7 +389,7 @@ def test_meeting_dates_on_the_cover() -> None:
 
     assert (
         build._meeting(Meeting(dt.date(2026, 9, 21), dt.date(2026, 9, 24)))
-        == "21--24 September 2026"
+        == "21-24 September 2026"  # hyphen, as delivered
     )
     assert build._meeting(Meeting(dt.date(2026, 9, 30), dt.date(2026, 10, 2))) == (
         "30 September -- 2 October 2026"
@@ -640,3 +640,79 @@ def test_a_malformed_or_other_export_record_is_refused_never_a_pass(tmp_path: Pa
     _export_record(records, read, other)
     with pytest.raises(ProvenanceError, match="behind in content"):
         check()
+
+
+# ---- the delivered report's page (Q201 a, Q203 a) --------------------------------------
+
+SHIPPED_STYLE = VCM.replace(
+    'title = "Test consultation"\nsubtitle = "for a test hemisphere"',
+    'title = ["Test consultation", "on a test question"]\nsubtitle = "for a test hemisphere"\n'
+    'centre = ["Lab of X", "University of Y"]\ntimezone = "Europe/London"\nend_page = true',
+)
+
+
+def test_title_and_centre_may_be_given_as_cover_lines(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "v.toml"
+    cfg_path.write_text(SHIPPED_STYLE)
+    cfg = load(cfg_path)
+    cover = "\n".join(build._cover(cfg, 0, 0, T0))
+    assert r"\textbf{Test consultation\\ on a test question\\ for a test hemisphere}" in cover
+    assert r"Lab of X\par\vspace{10pt}University of Y\par" in cover
+    # Q203 a: the period, the data cutoff and the build time are not on the cover
+    for gone in ("Data up to", "Built", "November 2025", "titlepage"):
+        assert gone not in cover, gone
+
+
+def test_an_empty_cover_line_or_an_unknown_time_zone_is_refused(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "v.toml"
+    cfg_path.write_text(SHIPPED_STYLE.replace('"University of Y"', '""').replace(
+        "Europe/London", "Mars/Olympus"))  # fmt: skip
+    with pytest.raises(ConfigError) as err:
+        load(cfg_path)
+    assert "report.centre: an empty line" in str(err.value)
+    assert "report.timezone: 'Mars/Olympus' is not an IANA time zone" in str(err.value)
+
+
+def test_no_caption_under_a_real_figure_but_its_label_and_a_placeholder_mark_stay(
+    tmp_path: Path,
+) -> None:
+    cfg_path = tmp_path / "v.toml"
+    cfg_path.write_text(SHIPPED_STYLE)
+    root = tmp_path / "figs"
+    for slot in load(cfg_path).all_slots():
+        placeholder.make(root, slot, slot, T0)
+    figs = build.resolve_all(load(cfg_path), root)
+    slot = "map/a/all"
+    mark = build._figure_mark(figs[slot], slot, r"\scriptsize")
+    assert mark.endswith(r"\zlabel{fig:map-a-all}")
+    assert r"\textcolor{red}{PLACEHOLDER " in mark  # a stand-in stays marked on the page
+    real = build.Resolved.__new__(build.Resolved)  # the same figure, not a placeholder
+    object.__setattr__(real, "figure", type("F", (), {"placeholder": False,
+                                                      "title": "t"})())  # fmt: skip
+    assert build._figure_mark(real, slot, r"\scriptsize") == r"\zlabel{fig:map-a-all}"
+
+
+def test_provenance_goes_into_the_pdf_metadata(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "v.toml"
+    cfg_path.write_text(SHIPPED_STYLE)
+    meta = build._pdf_metadata(load(cfg_path), T0)
+    assert meta.startswith(r"\hypersetup{pdftitle={Test consultation on a test question for a")
+    assert "pdfsubject={vcm-test (vcm), period 2025-11 to 2026-02, data up to 2026-02-20}" in meta
+    assert "built 2026-09-01T12:00:00+00:00" in meta
+
+
+@needs_latex
+def test_the_delivered_page_style_builds(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "v.toml"
+    cfg_path.write_text(SHIPPED_STYLE)
+    root = tmp_path / "figs"
+    for slot in load(cfg_path).all_slots():
+        placeholder.make(root, slot, slot, T0)
+    build.build(cfg_path, root, tmp_path / "out")
+    tex = (tmp_path / "out" / "build" / "report.tex").read_text()
+    assert r"\documentclass[a4paper,12pt]{article}" in tex and r"\usepackage{times}" in tex
+    assert "hidelinks" not in tex and r"\contentsmargin{120pt}" in tex
+    assert "Report generated: 2026-" in tex and ("BST" in tex or "GMT" in tex)
+    record = json.loads((tmp_path / "out" / "vcm-test.build.json").read_text())
+    # cover (page 1, counted), contents, 2 geo pages, 1 map page, and the closing page
+    assert record["output"]["pages"] == 6
