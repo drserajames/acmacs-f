@@ -143,6 +143,7 @@ class FigureSpec:
     # tree) but searchable, so a reader can find a strain on the page. The Sep 2026 report's H1
     # and H3 tree pages carried the same layer.
     leaf_names: bool = False
+    drawn_title: str | None = None  # drawn instead of ``title`` ("" = no title); see FigureConfig
 
 
 @dataclass
@@ -642,7 +643,9 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid)
     placed, metrics = _draw_labels(ax, spec, pg, grid, strain_boxes)
     # The shipped pages start the title just left of the tree's root (H1 4, H3 4 units).
-    ax.text(g.tree_left - 4, 16, spec.title, fontsize=g.title_font, ha="left", va="center")
+    title = spec.title if spec.drawn_title is None else spec.drawn_title
+    if title:
+        ax.text(g.tree_left - 4, 16, title, fontsize=g.title_font, ha="left", va="center")
     names = _draw_leaf_names(ax, spec, pg) if spec.leaf_names else None
 
     # Type 42 fonts carry a Unicode map, so viewers can search the name layer; matplotlib's

@@ -341,3 +341,26 @@ def test_separator_rules_stop_at_the_bracket_that_ends_on_their_row(tmp_path, mo
             assert ends[round(pg.row_edge(r), 6)] == x
     assert all(c == g.rule_colour for c in (line.get_color() for line in ax.lines[n_lines:]))
     plt.close(fig)
+
+
+@pytest.mark.parametrize("drawn", [None, "", "SHORT"])
+def test_drawn_title_changes_the_page_only(tmp_path, monkeypatch, drawn):
+    from matplotlib.axes import Axes
+
+    texts: list[str] = []
+    real_text = Axes.text
+
+    def spy(self, x, y, s, *args, **kwargs):
+        texts.append(s)
+        return real_text(self, x, y, s, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "text", spy)
+    pdf = tmp_path / "t.pdf"
+    report = make_figure(standard_tree(), PARENTS, config(drawn_title=drawn), pdf, {})
+    i7 = json.loads(pdf.with_suffix(".i7.json").read_text())
+    assert i7["title"] == "TEST tree"  # the figure's name never changes
+    expected = "TEST tree" if drawn is None else drawn
+    assert report["drawn_title"] == expected
+    assert texts.count("TEST tree") == (1 if drawn is None else 0)
+    if drawn:
+        assert texts.count(drawn) == 1
