@@ -406,7 +406,9 @@ def test_vcm_layout_builds(tmp_path: Path) -> None:
     pdf = build.build(cfg, root, tmp_path / "out")
     tex = (tmp_path / "out" / "build" / "report.tex").read_text()
     assert r"\begin{landscape}" in tex and r"\setcounter{secnumdepth}{0}" in tex
-    assert tex.count(r"\makebox[0.327\linewidth]{}") == 3  # the three blank cells
+    # the three blank cells keep the panel width; panels framed as delivered
+    assert tex.count(r"\hspace*{\dimexpr(\textheight-70pt)/2\relax}") == 3
+    assert r"\includegraphics[width=\dimexpr\textheight*18/30\relax,frame]" in tex
     record = json.loads((tmp_path / "out" / "vcm-test.build.json").read_text())
     # cover, contents, 2 geo pages (4 months, 3 per page), 1 landscape map page
     assert record["output"]["pages"] == 5 and pdf.is_file()
