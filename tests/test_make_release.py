@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import os
 import shutil
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -83,34 +84,65 @@ def test_macos_rules(mr: ModuleType) -> None:
     ]
 
 
+def git_in(repo: Path, *args: str) -> str:
+    done = subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return done.stdout.strip()
+
+
+def repo_with_two_pull_requests(repo: Path) -> None:
+    """master: a first commit, then two pull requests merged as GitHub merges them."""
+    repo.mkdir(exist_ok=True)
+    git_in(repo, "init", "-q")
+    git_in(repo, "symbolic-ref", "HEAD", "refs/heads/master")  # not `init -b`: git 2.23 lacks it
+    git_in(repo, "commit", "-q", "--allow-empty", "-m", "start")
+    for number, branch, title in [(1, "first-thing", "Add a"), (2, "second-thing", "Add b")]:
+        git_in(repo, "checkout", "-q", "-b", branch)
+        git_in(repo, "commit", "-q", "--allow-empty", "-m", f"work on {branch}")
+        git_in(repo, "checkout", "-q", "master")
+        message = f"Merge pull request #{number} from someone/{branch}\n\n{title}"
+        git_in(repo, "merge", "-q", "--no-ff", branch, "-m", message)
+
+
 def test_contents_lists_merged_pull_requests_newest_first(mr: ModuleType, tmp_path: Path) -> None:
     """CONTENTS.txt: a consumer greps for a PR number instead of walking git."""
-    import subprocess
-
-    def git(*args: str) -> None:
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *args],
-            check=True,
-            capture_output=True,
-        )
-
-    git("init", "-q")
-    git("symbolic-ref", "HEAD", "refs/heads/master")  # not `init -b`: git 2.23 lacks it
-    git("commit", "-q", "--allow-empty", "-m", "start")
-    for number, branch, title in [(1, "first-thing", "Add a"), (2, "second-thing", "Add b")]:
-        git("checkout", "-q", "-b", branch)
-        git("commit", "-q", "--allow-empty", "-m", f"work on {branch}")
-        git("checkout", "-q", "master")
-        message = f"Merge pull request #{number} from someone/{branch}\n\n{title}"
-        git("merge", "-q", "--no-ff", branch, "-m", message)
+    repo_with_two_pull_requests(tmp_path)
     lines = mr.contents(tmp_path, "HEAD").splitlines()
     assert lines[0].startswith("# pull requests merged into HEAD")
     rows = [line.split("\t") for line in lines[1:]]
     assert [(r[0], r[1], r[4]) for r in rows] == [
         ("#2", "second-thing", "Add b"),
         ("#1", "first-thing", "Add a"),
+        ("-", "start", ""),  # the first commit was made on master itself
     ]
     assert all(len(r[3]) == 10 and r[3][4] == "-" for r in rows), "dates as YYYY-MM-DD"
+
+
+def test_contents_lists_a_release_branchs_cherry_picks_with_their_sources(
+    mr: ModuleType, tmp_path: Path
+) -> None:
+    """A release cut from an older commit plus picks: CONTENTS must not read as the older one."""
+    repo_with_two_pull_requests(tmp_path)
+    git_in(tmp_path, "checkout", "-q", "-b", "later", "master")
+    git_in(tmp_path, "commit", "-q", "--allow-empty", "-m", "fix one thing")
+    fix = git_in(tmp_path, "rev-parse", "HEAD")
+    git_in(tmp_path, "commit", "-q", "--allow-empty", "-m", "and another")
+    git_in(tmp_path, "checkout", "-q", "-b", "release", "master~1")  # #1 only
+    git_in(tmp_path, "cherry-pick", "-x", "--allow-empty", fix)
+    git_in(tmp_path, "commit", "-q", "--allow-empty", "-m", "a commit of the branch's own")
+    rows = [line.split("\t") for line in mr.contents(tmp_path, "HEAD").splitlines()[1:]]
+    assert [(r[0], r[1], r[4]) for r in rows] == [
+        ("-", "a commit of the branch's own", ""),
+        ("-", "fix one thing", f"cherry picked from {fix}"),
+        ("#1", "first-thing", "Add a"),
+        ("-", "start", ""),
+    ]
+    picked = git_in(tmp_path, "rev-parse", "--short", "HEAD~1")
+    assert rows[1][2] == picked, "the commit in the release, not its source"
 
 
 def test_stage_times_are_logged_and_summarised(
@@ -465,10 +497,12 @@ def compare(
     accept_change: bool = False,
 ) -> tuple[str, str]:
     src, scratch = commit_with(tmp_path, None, tool)
-    answer: tuple[str, str] = mr.compare_original(
-        sys.executable, src, dict(os.environ), scratch, previous, accept_change=accept_change
+    found = mr.Tool(src / mr.ORIGINAL_TOOL, "c" * 40)
+    answer = mr.compare_original(
+        sys.executable, found, dict(os.environ), scratch, previous, accept_change=accept_change
     )
-    return answer
+    assert answer.tool_commit == ("c" * 40 if previous else "")
+    return answer.reference, answer.result
 
 
 def test_the_same_original_bits_as_the_release_before_are_recorded_with_its_name(
@@ -528,10 +562,82 @@ def test_this_commits_own_tool_answers_the_gate_in_the_words_it_reads(
     must fail here, in CI, not in the next release build.
     """
     monkeypatch.setattr(mr, "python_of", lambda release: sys.executable)
+    tool = mr.Tool(REPO_ROOT / mr.ORIGINAL_TOOL, "c" * 40)
     result = mr.compare_original(
-        sys.executable, REPO_ROOT, dict(os.environ), tmp_path, BEFORE, accept_change=False
+        sys.executable, tool, dict(os.environ), tmp_path, BEFORE, accept_change=False
     )
-    assert result == ("0123456789ab", "same")
+    assert result == mr.Original("0123456789ab", "same", "c" * 40)
+
+
+def tools_repo(repo: Path, files: dict[str, str]) -> str:
+    """A clone whose one commit holds ``files``; its sha."""
+    for name, text in files.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    git_in(repo, "init", "-q")
+    git_in(repo, "add", ".")
+    git_in(repo, "commit", "-q", "-m", "tools")
+    return git_in(repo, "rev-parse", "HEAD")
+
+
+def test_a_commit_under_the_contract_is_compared_by_its_own_tool(
+    mr: ModuleType, tmp_path: Path
+) -> None:
+    src = tmp_path / "src"
+    tool = mr.original_tool(src, "a" * 40, mr.Numerics("invented-fp-9", BOTH), tmp_path, "x", src)
+    assert tool == mr.Tool(src / mr.ORIGINAL_TOOL, "a" * 40)  # no git asked: "x" is no rev
+
+
+def test_a_commit_from_before_the_contract_is_compared_by_the_tools_revs_tool_and_table(
+    mr: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both files, beside each other as in a checkout: the tool finds its table by its own path."""
+    repo, scratch = tmp_path / "clone", tmp_path / "scratch"
+    repo.mkdir()
+    scratch.mkdir()
+    tools_sha = tools_repo(repo, {mr.ORIGINAL_TOOL: SAME, mr.NUMERICS_TESTS: "TABLE = 1\n"})
+    tool = mr.original_tool(tmp_path / "src", "a" * 40, mr.Numerics("", ()), repo, "HEAD", scratch)
+    assert tool.commit == tools_sha
+    assert tool.path.read_text() == SAME
+    assert (tool.path.parents[1] / mr.NUMERICS_TESTS).read_text() == "TABLE = 1\n"
+    assert f"compared by {mr.ORIGINAL_TOOL} from HEAD ({tools_sha[:12]})" in capsys.readouterr().out
+    answer = mr.compare_original(
+        sys.executable, tool, dict(os.environ), scratch, BEFORE, accept_change=False
+    )
+    assert answer == mr.Original("0123456789ab", "same", tools_sha)
+
+
+def test_a_tools_rev_without_the_tool_and_table_stops_the_release(
+    mr: ModuleType, tmp_path: Path
+) -> None:
+    for name, files in [
+        ("neither", {"README": "x\n"}),
+        ("no-table", {"tools/check-original-arithmetic.py": SAME}),
+    ]:
+        repo = tmp_path / name
+        repo.mkdir()
+        tools_repo(repo, files)
+        scratch = tmp_path / f"scratch-{name}"
+        scratch.mkdir()
+        with pytest.raises(SystemExit, match=r"--tools-rev HEAD .* has no tools/check-original"):
+            mr.original_tool(tmp_path / "src", "a" * 40, mr.Numerics("", ()), repo, "HEAD", scratch)
+
+
+def test_the_real_tool_and_table_answer_the_gate_when_taken_from_a_tools_rev(
+    mr: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """This commit's tool and table, archived from a clone as a release build takes them."""
+    repo, scratch = tmp_path / "clone", tmp_path / "scratch"
+    repo.mkdir()
+    scratch.mkdir()
+    files = {name: (REPO_ROOT / name).read_text() for name in (mr.ORIGINAL_TOOL, mr.NUMERICS_TESTS)}
+    tools_sha = tools_repo(repo, files)
+    tool = mr.original_tool(tmp_path / "src", "a" * 40, mr.Numerics("", ()), repo, "HEAD", scratch)
+    monkeypatch.setattr(mr, "python_of", lambda release: sys.executable)
+    answer = mr.compare_original(
+        sys.executable, tool, dict(os.environ), scratch, BEFORE, accept_change=False
+    )
+    assert answer == mr.Original("0123456789ab", "same", tools_sha)
 
 
 def test_the_release_file_names_the_arithmetics_and_the_comparison(
@@ -541,15 +647,21 @@ def test_the_release_file_names_the_arithmetics_and_the_comparison(
     monkeypatch.setattr(mr, "_stages", [("record", mr.time.monotonic())])  # as within a build
     args = argparse.Namespace(rev="a-branch", micromamba=Path("micromamba"), extras="dev")
     cases = [
-        (mr.Numerics("invented-fp-9", BOTH), ("0123456789ab", "same")),
-        (mr.Numerics("", ()), ("", "")),  # a commit from before the contract
+        (mr.Numerics("invented-fp-9", BOTH), mr.Original("0123456789ab", "same", "0" * 40)),
+        # a commit from before the contract, compared by a later commit's tool
+        (mr.Numerics("", ()), mr.Original("0123456789ab", "same", "f" * 40)),
+        (mr.Numerics("", ()), mr.Original("", mr.NOT_COMPARED, "")),
     ]
     for numerics, original in cases:
         mr.write_release_file(args, tmp_path, "0" * 40, "then", {"CXX": "c++"}, numerics, original)
         written = tomllib.loads((tmp_path / "RELEASE.toml").read_text())
         assert written["numerics_default"] == numerics.default
         assert written["numerics_offered"] == list(numerics.offered)
-        assert (written["original_reference"], written["original_result"]) == original
+        assert (
+            written["original_reference"],
+            written["original_result"],
+            written["original_tool_commit"],
+        ) == (original.reference, original.result, original.tool_commit)
         assert written["commit"] == "0" * 40 and mr.finished_at(
             tmp_path
         )  # the old lines still read
