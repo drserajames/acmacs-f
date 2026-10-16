@@ -47,6 +47,9 @@ class Look:
     central_longitude: float = 11.762094  # ae's map spans 168.24 W to 191.76 E
     dot_diameter: float = 8.0  # ae point_size
     ring_step: float = 6.4  # ae point_size x density (0.8): ring r is r x ring_step out
+    # "ae-rings" (ae's, overlapping into discs) or "honeycomb" (6r per ring, no overlap; af's
+    # before 16 Oct): overlap hides minority colours on a big cluster's outer rings (Q208)
+    packing: str = "ae-rings"
     outline_colour: str = "#a1a1a1"
     outline_width: float = 0.5  # ae: width / 1600
     uncoloured_edge: str = "#a0a0a0"
@@ -126,6 +129,21 @@ def packed_offsets(n: int, step: float) -> list[tuple[float, float]]:
     return offsets[:n]
 
 
+def honeycomb_offsets(n: int, step: float) -> list[tuple[float, float]]:
+    """The centre, then hexagonal rings of 6r dots ``r * step`` out: no dot hides another."""
+    offsets = [(0.0, 0.0)]
+    ring = 1
+    while len(offsets) < n:
+        for i in range(6 * ring):
+            angle = 2 * math.pi * i / (6 * ring)
+            offsets.append((ring * step * math.cos(angle), ring * step * math.sin(angle)))
+        ring += 1
+    return offsets[:n]
+
+
+PACKINGS = {"ae-rings": packed_offsets, "honeycomb": honeycomb_offsets}
+
+
 def wrap_longitude(longitude: float, central: float) -> float:
     """Degrees east of the map's centre, in [-180, 180): a place west of the left edge is drawn
     at the right, never lost (ae drew it off the canvas)."""
@@ -164,6 +182,9 @@ def _render_period(
     matplotlib.use("pdf")
     import matplotlib.pyplot as plt
 
+    if look.packing not in PACKINGS:
+        raise GeoRenderError(f"unknown packing {look.packing!r}: one of {sorted(PACKINGS)}")
+    pack = PACKINGS[look.packing]
     plate = ccrs.PlateCarree()
     # Dots are placed in the map's own coordinates (degrees from its centre), so a cluster is
     # packed in one piece and an edge cuts it rather than splitting it across the map.
@@ -192,9 +213,7 @@ def _render_period(
                 continue
             x0 = wrap_longitude(where[0], look.central_longitude)
             xs, ys, fills, edges = [], [], [], []
-            for (dx, dy), point in zip(
-                packed_offsets(len(dots), look.ring_step), dots, strict=True
-            ):
+            for (dx, dy), point in zip(pack(len(dots), look.ring_step), dots, strict=True):
                 xs.append(x0 + dx * lon_per_point)
                 ys.append(where[1] + dy * lat_per_point)
                 coloured = point["color"] != "transparent"
