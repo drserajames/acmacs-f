@@ -118,3 +118,32 @@ def test_target_label_count_sets_the_size_threshold():
     assert len(three) == 3
     floor, _ = select_labels(t, lay, (), replace(D.labels, target_labels=3, min_rows_floor=15))
     assert len(floor) == 2  # the floor wins over the target
+
+
+def _crowded(seed: int):
+    """Many labels anchored close together beside random ink: where single moves stall."""
+    rng = np.random.default_rng(seed)
+    grid = Grid(400, 400)
+    for _ in range(120):
+        x, y = rng.uniform(120, 380), rng.uniform(0, 390)
+        grid.add_box((x, y, x + rng.uniform(5, 60), y + 0.5))
+    items = [
+        (k, f"A{k}B", (float(rng.uniform(150, 220)), float(rng.uniform(60, 340))))
+        for k in range(40)
+    ]
+    return grid, items
+
+
+@pytest.mark.parametrize("seed", [3, 4, 7])
+def test_pair_repair_untangles_what_single_moves_leave(seed):
+    def width(s: str) -> float:
+        return 6.0 * len(s)
+
+    def clashes(placed) -> int:
+        m = placement_metrics(placed, grid)
+        return m["leader_crossings"] + m["leaders_through_labels"] + m["box_overlaps"]
+
+    grid, items = _crowded(seed)
+    single = place_labels(items, grid, width, 10.0, search=Search(pair_candidates=0))
+    paired = place_labels(items, grid, width, 10.0, search=Search(pair_candidates=40))
+    assert clashes(paired) < clashes(single)  # when written: 7 -> 2, 6 -> 0, 13 -> 4
