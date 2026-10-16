@@ -20,6 +20,7 @@ from typing import Any
 
 from af.geo.figures import clade_key, write_geo_figures
 from af.geo.records import DotRule, Month
+from af.geo.style import read_geo_looks
 from af.map.colouring import StoreColours
 from af.map.config import ColouringConfig
 from af.seq.matching_rules import matching_rules
@@ -44,6 +45,7 @@ def build_geo(
     work: Path,
     schemes: Mapping[str, str],
     slots: Mapping[str, str],
+    figure_config: Path,
     *,
     ignore_busy: bool = False,
     created: dt.datetime | None = None,
@@ -60,7 +62,10 @@ def build_geo(
     ``schemes``: subtype row -> scheme name (``{"h3": "clades-v10", ...}``). ``slots``: table
     subtype -> report slot (``{"A(H3N2)": "h3", "B": "bvic", ...}``). A table subtype drawn
     without a slot is an error, as is a slot for one that has no dots (design rule 1).
+    ``figure_config``: the round's figure-style file; each slot is drawn with its
+    ``[geo.<slot>]`` look (:func:`af.geo.style.read_geo_looks`), read before the store is.
     """
+    looks = read_geo_looks(figure_config, set(slots.values()))
     with store.reading("geo-build", kinds=KINDS_READ, override=ignore_busy) as guard:
         # the maps' one read of the join and the user's tables (design rule 6): a virus is the
         # colour on a geo page that it is on a map
@@ -96,6 +101,7 @@ def build_geo(
         "matching_inputs": report.matching_inputs,
         "location_tables": report.location_tables,
         "coastline": {"path": str(coastline), "sha256": sha256_path(coastline)},
+        "figure_config": {"path": str(figure_config), "sha256": sha256_path(figure_config)},
         "dot_rule": report.geo_rule,
         "merges": report.geo_merges,
         "merged_preparations": report.geo_merged_preparations,
@@ -120,7 +126,7 @@ def build_geo(
             "store_refs": colours.store_refs(datasets),
         }
         written = write_geo_figures(
-            doc, slot, report.coordinates, coastline, figures, slot_provenance,
+            doc, slot, report.coordinates, coastline, figures, slot_provenance, look=looks[slot],
             scheme=", ".join(s.name for s in slot_schemes),
         )  # fmt: skip
         files += written.files
@@ -180,12 +186,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--work", type=Path, required=True, help="scratch for records and stat")
     parser.add_argument("--scheme", action="append", default=[], help="ROW=SCHEME, per row")
     parser.add_argument("--slot", action="append", default=[], help="TABLE_SUBTYPE=SLOT")
+    parser.add_argument(
+        "--figure-config", type=Path, required=True,
+        help="the round's figures.toml: [geo.<slot>] looks",
+    )  # fmt: skip
     parser.add_argument("--ignore-busy", action="store_true", help="diagnosis only")
     args = parser.parse_args(argv)
     record = build_geo(
         Store.open(args.store), args.af_data, args.clones, args.acmacs_data, args.coastline,
         args.first, args.last, args.figures, args.work, _pairs(args.scheme, "scheme"),
-        _pairs(args.slot, "slot"), ignore_busy=args.ignore_busy,
+        _pairs(args.slot, "slot"), args.figure_config, ignore_busy=args.ignore_busy,
     )  # fmt: skip
     for slot, info in record["slots"].items():
         print(f"{slot:6s} {sum(info['drawn'].values()):6d} dots  {info['drawn']}")

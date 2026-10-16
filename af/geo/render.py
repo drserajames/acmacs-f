@@ -53,6 +53,12 @@ class Look:
     outline_colour: str = "#a1a1a1"
     outline_width: float = 0.5  # ae: width / 1600
     uncoloured_edge: str = "#a0a0a0"
+    # per subtype in the shipped report (ae's geographic settings; :mod:`af.geo.style` reads
+    # them per slot): H1/H3 coloured dots "none" at 0, B/Vic "#808080" at 1.0; uncoloured
+    # rings 0.5 (H1/H3) or 0.3 (B/Vic)
+    coloured_edge: str = "#808080"  # or "none"
+    coloured_edge_width: float = 0.6
+    uncoloured_edge_width: float = 0.6
     title_size: float = 20.0  # ae: width / 40
     title_inset: float = 10.0  # ae: width x 0.0125, to the top-left of the title's ink
 
@@ -212,18 +218,19 @@ def _render_period(
                 no_coordinates[location["name"]] += len(dots)
                 continue
             x0 = wrap_longitude(where[0], look.central_longitude)
-            xs, ys, fills, edges = [], [], [], []
+            xs, ys, fills, edges, widths = [], [], [], [], []
             for (dx, dy), point in zip(pack(len(dots), look.ring_step), dots, strict=True):
                 xs.append(x0 + dx * lon_per_point)
                 ys.append(where[1] + dy * lat_per_point)
                 coloured = point["color"] != "transparent"
                 fills.append(point["color"] if coloured else "none")
-                edges.append("#808080" if coloured else look.uncoloured_edge)
+                edges.append(look.coloured_edge if coloured else look.uncoloured_edge)
+                widths.append(look.coloured_edge_width if coloured else look.uncoloured_edge_width)
             cut = sum(1 for x in xs if abs(x) + radius > 180.0)
             if cut:
                 clipped[location["name"]] += cut
             ax.scatter(
-                xs, ys, s=look.dot_diameter**2, c=fills, edgecolors=edges, linewidths=0.6,
+                xs, ys, s=look.dot_diameter**2, c=fills, edgecolors=edges, linewidths=widths,
                 transform=centred, zorder=3,
             )  # fmt: skip
             drawn += len(dots)

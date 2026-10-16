@@ -22,6 +22,7 @@ from typing import Any
 
 from af.geo.colours import placement_warning, unpainted_warning
 from af.geo.render import Coordinates, Look, render_period
+from af.geo.style import look_record
 from af.map.style import ColourScheme as MapColourScheme
 from af.report.i7 import I7_NAME, I7_VERSION, validate
 from af.util.artefacts import sha256_path
@@ -115,6 +116,7 @@ def write_geo_figures(
             "provenance": {
                 **provenance,
                 "producer": "af.geo.figures",
+                "look": look_record(look if look is not None else Look()),
                 "drawn": report.drawn[month],
                 "no_coordinates": dict(sorted(unplaced.items())),
                 # dots the map's edge cuts (a cluster at the seam, 168.24 W): drawn, but partly
