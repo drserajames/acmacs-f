@@ -13,6 +13,7 @@ period is ordered, map sections have windows, and every pin names a slot the rep
 from __future__ import annotations
 
 import datetime as dt
+import zoneinfo
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,13 +42,18 @@ class Meeting:
 class Report:
     id: str
     kind: str
-    title: str
+    # A string, or the cover's lines as a list (the delivered report breaks its title in fixed
+    # places and puts the subtitle on the title's last line).
+    title: str | list[str]
     period: Period
     data_cutoff: dt.date
-    centre: str = ""
+    centre: str | list[str] = ""  # a list: one cover line each, as the delivered report has
     subtitle: str = ""  # e.g. "Southern Hemisphere 2027": config, not derived from dates
     meeting: Meeting | None = None
     end_page: bool = False  # a closing "Report generated <time>" page, as the delivered report has
+    # IANA zone the closing page prints its time in (the delivered report: "Europe/London");
+    # empty prints UTC. The build record keeps UTC either way.
+    timezone: str = ""
 
 
 @dataclass(frozen=True)
@@ -173,6 +179,15 @@ def load(path: Path) -> ReportConfig:
         problems.append("report.period: last is before first")
     if r.meeting is not None and r.meeting.end < r.meeting.start:
         problems.append("report.meeting: end is before start")
+    for key in ("title", "centre"):
+        value = getattr(r, key)
+        if isinstance(value, list) and not all(line.strip() for line in value):
+            problems.append(f"report.{key}: an empty line in the list")
+    if r.timezone:
+        try:
+            zoneinfo.ZoneInfo(r.timezone)
+        except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+            problems.append(f"report.timezone: {r.timezone!r} is not an IANA time zone")
     if len(months) != 2:  # the rest needs a valid period
         raise ConfigError(path, problems)
     if not cfg.sections:
@@ -203,6 +218,11 @@ def load(path: Path) -> ReportConfig:
     if problems:
         raise ConfigError(path, problems)
     return cfg
+
+
+def lines(value: str | list[str]) -> list[str]:
+    """A config text that may be one string or a list of lines, as lines ("" is no line)."""
+    return list(value) if isinstance(value, list) else ([value] if value else [])
 
 
 def period_first(cfg: ReportConfig) -> dt.date:
