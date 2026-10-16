@@ -180,11 +180,49 @@ class TestPublish:
         store = Store.create(tmp_path / "store")
         assert publish(store, "p1", [record(1)]) == publish(store, "p1", [record(1)])
 
-    def test_a_key_in_two_pulls_is_refused(self, tmp_path: Path) -> None:
+    def test_an_identical_copy_in_a_second_pull_is_written_once(self, tmp_path: Path) -> None:
+        store = Store.create(tmp_path / "store")
+        publish(store, "p1", [record(1), record(2)])
+        second = publish(store, "p2", [record(2), record(3)])
+        table = processed.read_table(store, second, "isolates", ["epi_isl", "source_pull"])
+        assert sorted(zip(*table.to_pydict().values(), strict=True)) == [
+            ("EPI_ISL_1", "p1"), ("EPI_ISL_2", "p1"), ("EPI_ISL_3", "p2"),
+        ]  # fmt: skip
+        sequences = processed.read_table(store, second, "sequences", ["epi_isl"])
+        assert sorted(sequences["epi_isl"].to_pylist()) == ["EPI_ISL_1", "EPI_ISL_2", "EPI_ISL_3"]
+        assert _provenance(store, second)["already_published"] == {"p1": 1}
+
+    def test_nothing_already_published_is_recorded_as_none(self, tmp_path: Path) -> None:
+        store = Store.create(tmp_path / "store")
+        first = publish(store, "p1", [record(1)])
+        assert _provenance(store, first)["already_published"] == {}
+
+    def test_restoring_the_pull_that_repeated_a_record_is_stable(self, tmp_path: Path) -> None:
         store = Store.create(tmp_path / "store")
         publish(store, "p1", [record(1)])
-        with pytest.raises(processed.StoreBuildError, match="1 key.*in two pulls"):
-            publish(store, "p2", [record(1)])
+        once = publish(store, "p2", [record(1), record(2)])
+        assert publish(store, "p2", [record(1), record(2)]) == once
+
+    def test_a_copy_with_different_metadata_is_refused(self, tmp_path: Path) -> None:
+        store = Store.create(tmp_path / "store")
+        publish(store, "p1", [record(1)])
+        with pytest.raises(
+            processed.StoreBuildError, match=r"1 record.*different content.*isolates: passage"
+        ):
+            publish(store, "p2", [record(1, passage="SIAT2")])
+
+    def test_a_copy_with_a_different_sequence_is_refused(self, tmp_path: Path) -> None:
+        store = Store.create(tmp_path / "store")
+        publish(store, "p1", [record(1)])
+        with pytest.raises(processed.StoreBuildError, match=r"sequences: nuc_raw, seq_hash"):
+            publish(store, "p2", [record(1, nucleotides="ACGTACGA")])
+
+    def test_a_refused_copy_publishes_nothing(self, tmp_path: Path) -> None:
+        store = Store.create(tmp_path / "store")
+        first = publish(store, "p1", [record(1)])
+        with pytest.raises(processed.StoreBuildError):
+            publish(store, "p2", [record(1, passage="SIAT2"), record(2)])
+        assert store.current(processed.KIND, "h3") == first
 
 
 # ---- raw pulls and the whole step ------------------------------------------------------
