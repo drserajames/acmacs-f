@@ -8,7 +8,8 @@ and an H1 chain had to be rerun from scratch. A release can't change after it is
 
     python3 tools/make-release.py --repo <git clone> --rev <commit> \\
         --releases <dir> --micromamba <path> --mamba-root <dir> \\
-        [--cxx /usr/bin/g++] [--extras dev,geo] [--link <path>] [--resolve]
+        [--cxx /usr/bin/g++] [--extras dev,geo] [--link <path>] [--resolve] \\
+        [--tools-rev origin/master]
 
 It makes ``<releases>/<sha12>/`` containing:
 
@@ -36,7 +37,9 @@ It makes ``<releases>/<sha12>/`` containing:
   commit's history, newest first, one per line
   (``#182<TAB>maps-align<TAB><merge sha><TAB><date><TAB><title>``). A project that
   pins a release can see whether it has the change it needs with ``grep '^#182' CONTENTS.txt``,
-  without a clone or a git walk.
+  without a clone or a git walk. A commit made on that line directly, not through a pull
+  request (a release branch's cherry-picks), is listed too, in its place:
+  ``-<TAB><subject><TAB><sha><TAB><date><TAB>cherry picked from <source sha>``.
 
 **The optimiser's arithmetic.** The C++ compiler is the system's, outside the package locks:
 two releases with identical locks can hold optimisers built by different compilers, and an
@@ -57,9 +60,13 @@ tested, in two ways, and ``RELEASE.toml`` says what was found.
   compiler), ``--accept-original-change`` lets the build finish and the change is recorded.
   ``original_reference`` and ``original_result`` say which release it was compared with and
   the answer; with no earlier release there, that it was not compared.
+  ``original_tool_commit`` names the commit whose tool made the comparison.
 
 A commit from before the contract declares no arithmetic and has no such tests: it still
-builds, the log says nothing was checked, and the names are empty.
+builds, the log says there was nothing to check, and the names are empty. Its optimiser is
+the original, so it is still compared with the release before: by the tool, and the table the
+tool runs (``tests/map/test_numerics.py``), from ``--tools-rev`` in the same clone. That
+defaults to ``origin/master``, where the release steps take make-release itself from.
 
 The last line printed is the release's python, ``<release>/bin/python`` (``bin`` links
 to ``env/bin``). Launch runs with it, and every Python job
@@ -150,6 +157,13 @@ def parse_args() -> argparse.Namespace:
         "bits from the newest earlier release here (expected after a system compiler change); "
         "recorded in RELEASE.toml",
     )
+    parser.add_argument(
+        "--tools-rev",
+        default="origin/master",
+        help="for a commit from before the arithmetic contract, the commit in --repo whose "
+        "tools/check-original-arithmetic.py compares its optimiser with the release before "
+        "(recorded in RELEASE.toml); default %(default)s",
+    )
     return parser.parse_args()
 
 
@@ -231,17 +245,18 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
         shutil.copy2(src / "pyproject.toml", Path(scratch) / "pyproject.toml")
         step("the optimiser's arithmetic", "numerics")
         numerics = verify_numerics(python, src, build_env, Path(scratch))
-        original = ("", "")
-        if numerics.default:
-            step("the original arithmetic against the release before", "original")
-            original = compare_original(
-                python,
-                src,
-                build_env,
-                Path(scratch),
-                choice.previous,
-                accept_change=args.accept_original_change,
-            )
+        step("the original arithmetic against the release before", "original")
+        tool = None
+        if choice.previous:
+            tool = original_tool(src, sha, numerics, repo, args.tools_rev, Path(scratch))
+        original = compare_original(
+            python,
+            tool,
+            build_env,
+            Path(scratch),
+            choice.previous,
+            accept_change=args.accept_original_change,
+        )
         step("tool tests", "tool_tests")
         tool_tests = [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-m", "tool"]
         run([*tool_tests, "--require-tools", "--skip-tool", "pdflatex"], build_env, cwd=scratch)
@@ -262,7 +277,7 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
             (choice.previous / PIP_FILE).read_text(),
         )
     packages = package_section(choice, previous, lock, pip)
-    (release / "CONTENTS.txt").write_text(packages + contents(args.repo, sha))
+    (release / "CONTENTS.txt").write_text(packages + contents(repo, sha))
     write_release_file(args, release, sha, started, build_env, numerics, original)
     (release / "bin").symlink_to("env/bin")  # so <release>/bin/python, like o's env/bin/python
     make_read_only(release)
@@ -698,16 +713,69 @@ ORIGINAL_DIFFERENT = "original arithmetic: DIFFERENT bits"
 NOT_COMPARED = "not compared: no earlier release for this platform"
 
 
+@dataclasses.dataclass(frozen=True)
+class Tool:
+    """The check-original-arithmetic.py to run, and the commit it comes from."""
+
+    path: Path
+    commit: str
+
+
+@dataclasses.dataclass(frozen=True)
+class Original:
+    """What RELEASE.toml says of the original arithmetic: compared with which release, the
+    answer, and whose tool answered."""
+
+    reference: str
+    result: str
+    tool_commit: str
+
+
+def original_tool(
+    src: Path, sha: str, numerics: Numerics, repo: Path, tools_rev: str, scratch: Path
+) -> Tool:
+    """The tool that compares this build's original arithmetic with the release before.
+
+    A commit under the contract brings its own. One from before it has none, and has no
+    other arithmetic either: its optimiser is the original, so it is compared all the same,
+    by the tool and its table taken from ``tools_rev`` (they are found beside each other, as
+    in a checkout). Otherwise a release cut from an old commit, after the contract, would
+    have its optimiser held to nothing.
+    """
+    if numerics.default:
+        return Tool(src / ORIGINAL_TOOL, sha)
+    tools_sha = git(repo, "rev-parse", "--verify", f"{tools_rev}^{{commit}}")
+    archive = subprocess.run(
+        ["git", "-C", str(repo), "archive", tools_sha, ORIGINAL_TOOL, NUMERICS_TESTS],
+        capture_output=True,
+    )
+    if archive.returncode != 0:
+        raise SystemExit(
+            f"--tools-rev {tools_rev} ({tools_sha[:12]}) has no {ORIGINAL_TOOL} and "
+            f"{NUMERICS_TESTS} to compare a commit from before the arithmetic contract with: "
+            "not releasing it"
+        )
+    where = scratch / "original-tool"
+    where.mkdir()
+    subprocess.run(["tar", "-x", "-C", str(where)], input=archive.stdout, check=True)
+    print(
+        f"   the commit predates the contract, so its optimiser is the original: compared by "
+        f"{ORIGINAL_TOOL} from {tools_rev} ({tools_sha[:12]})",
+        flush=True,
+    )
+    return Tool(where / ORIGINAL_TOOL, tools_sha)
+
+
 def compare_original(
     python: str,
-    src: Path,
+    tool: Tool | None,
     env: dict[str, str],
     scratch: Path,
     previous: Path | None,
     *,
     accept_change: bool,
-) -> tuple[str, str]:
-    """The release the original arithmetic was compared with, and the answer.
+) -> Original:
+    """The release the original arithmetic was compared with, the answer, and whose tool.
 
     The original repeats only on the machine and compiler that built it, so the one thing
     to hold it to is the newest earlier release here. Different bits stop the release unless
@@ -716,11 +784,10 @@ def compare_original(
     """
     if previous is None:
         print(f"   {NOT_COMPARED}", flush=True)
-        return "", NOT_COMPARED
-    tool = src / ORIGINAL_TOOL
-    if not tool.is_file():
+        return Original("", NOT_COMPARED, "")
+    if tool is None or not tool.path.is_file():
         raise SystemExit(f"the commit has no {ORIGINAL_TOOL} to compare the original with")
-    command = [python, "-I", str(tool), "--reference", python_of(previous)]
+    command = [python, "-I", str(tool.path), "--reference", python_of(previous)]
     done = subprocess.run(command, env=env, cwd=scratch, capture_output=True, text=True)
     print(textwrap.indent(done.stdout + done.stderr, "   "), end="", flush=True)
     outcome = original_outcome(done.returncode, done.stdout)
@@ -730,7 +797,7 @@ def compare_original(
             f"(exit {done.returncode}): not releasing it"
         )
     if outcome == "same":
-        return previous.name, "same"
+        return Original(previous.name, "same", tool.commit)
     if not accept_change:
         raise SystemExit(
             f"the original arithmetic gives different bits from release {previous.name}: maps "
@@ -738,7 +805,7 @@ def compare_original(
             "system compiler), build again with --accept-original-change; it is recorded."
         )
     print(f"   DIFFERENT from {previous.name}: accepted (--accept-original-change)", flush=True)
-    return previous.name, "different: accepted with --accept-original-change"
+    return Original(previous.name, "different: accepted with --accept-original-change", tool.commit)
 
 
 def original_outcome(returncode: int, stdout: str) -> str | None:
@@ -763,7 +830,7 @@ def write_release_file(
     started: str,
     env: dict[str, str],
     numerics: Numerics,
-    original: tuple[str, str],
+    original: Original,
 ) -> None:
     python = python_of(release)
     af_version = capture([python, "-I", "-c", "import af; print(af.__version__)"], env).strip()
@@ -778,8 +845,9 @@ def write_release_file(
         "cxx_version": cxx_version,
         "numerics_default": numerics.default,
         "numerics_offered": list(numerics.offered),
-        "original_reference": original[0],
-        "original_result": original[1],
+        "original_reference": original.reference,
+        "original_result": original.result,
+        "original_tool_commit": original.tool_commit,
         "micromamba": capture([str(args.micromamba), "--version"], env).strip(),
         "extras": args.extras,
         "host": platform.node(),
@@ -858,26 +926,42 @@ def capture(command: list[str], env: dict[str, str]) -> str:
 
 
 MERGED_PR = re.compile(r"Merge pull request (#\d+) from [^/\s]+/(\S+)")
+CHERRY_PICKED = re.compile(r"\(cherry picked from commit ([0-9a-f]{7,40})\)")
 
 
 def contents(repo: Path, sha: str) -> str:
-    """The pull requests merged into ``sha``'s history: the merges on its first-parent line.
+    """Everything on ``sha``'s first-parent line: the pull requests merged, and any commit made
+    on it directly.
 
     Every change reaches master through a pull request merged with a merge commit, whose
-    subject names the PR and branch and whose body is the PR title.
+    subject names the PR and branch and whose body is the PR title. A release branch cut from
+    an older commit carries cherry-picks instead, made on its first-parent line: those are
+    listed in their place, with where each was picked from, or CONTENTS would read as the
+    older commit's.
     """
-    log = git(repo, "log", "--first-parent", "--merges", "--format=%h%x1f%ci%x1f%s%x1f%b%x1e", sha)
+    log = git(repo, "log", "--first-parent", "--format=%h%x1f%ci%x1f%P%x1f%s%x1f%b%x1e", sha)
     lines = []
     for record in filter(None, (part.strip() for part in log.split("\x1e"))):
-        short, committed, subject, body = (record.split("\x1f") + ["", "", "", ""])[:4]
+        short, committed, parents, subject, body = (record.split("\x1f") + [""] * 5)[:5]
         date = committed[:10]  # %ci, not %cs: older gits (o's) lack %cs
+        if len(parents.split()) < 2:  # made on this line, not merged into it
+            picked = ", ".join(CHERRY_PICKED.findall(body))
+            lines.append(
+                "\t".join(
+                    ("-", subject, short, date, f"cherry picked from {picked}" if picked else "")
+                )
+            )
+            continue
         title = body.strip().splitlines()[0] if body.strip() else ""
         found = MERGED_PR.match(subject)
         if found:
             lines.append("\t".join((found[1], found[2], short, date, title)))
         else:
             lines.append("\t".join(("-", subject, short, date, title)))
-    header = f"# pull requests merged into {sha} (newest first): pr, branch, merge, date, title\n"
+    header = (
+        f"# pull requests merged into {sha} (newest first): pr, branch, merge, date, title; "
+        "commits made on that line directly: -, subject, commit, date, cherry-picked source\n"
+    )
     return header + "\n".join(lines) + "\n"
 
 
