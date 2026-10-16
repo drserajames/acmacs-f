@@ -1,0 +1,106 @@
+"""Map titles and vaccine labels drawn as the shipped report draws them (style step 6)."""
+
+import matplotlib
+import numpy as np
+import pytest
+
+from af.chart.model import Antigen, Chart, Titres
+from af.map.build import BuildError, map_title
+from af.map.config import TitlesConfig
+from af.map.labels import Placed, place_labels
+from af.map.render import DEFAULT_LOOK, draw_scene, title_box
+from af.map.style import Scene, Window
+from af.map.viewport import Frame
+
+matplotlib.use("pdf")
+
+TITLES = TitlesConfig(
+    labs={"LABX": "Labx"}, assays={"HI": "HI", "NEUT": "Neut"}, assay_subtypes=("A(H3N2)",)
+)
+
+
+def chart(virus: str, assay: str) -> Chart:
+    antigens = [Antigen("/".join(("A", "OLDTOWN", "1", "2021")))]  # invented, joined for the gate
+    return Chart({"V": virus, "l": "LABX", "A": assay}, antigens, [], Titres([[]]))
+
+
+def test_titles_name_the_lab_and_the_assay_as_configured() -> None:
+    assert map_title(chart("A(H3N2)", "HI"), None, TITLES) == "Labx A(H3N2) HI by clade"
+    assert map_title(chart("A(H3N2)", "NEUT"), None, TITLES) == "Labx A(H3N2) Neut by clade"
+    assert map_title(chart("A(H1N1)", "HI"), None, TITLES) == "Labx A(H1N1) by clade"
+    assert map_title(chart("A(H3N2)", "HI"), "Own title", TITLES) == "Own title"
+    # without a round's [titles]: lab codes as they are, no assay words
+    assert map_title(chart("A(H3N2)", "HI"), None) == "LABX A(H3N2) by clade"
+
+
+def test_an_assay_with_no_title_word_is_refused() -> None:
+    with pytest.raises(BuildError, match="'OTHER' .* no word"):
+        map_title(chart("A(H3N2)", "OTHER"), None, TITLES)
+
+
+def test_labels_sit_next_to_their_mark_even_over_points() -> None:
+    """Nearest first: a label stays at the first radius although points lie under it there."""
+    anchor = np.array([[0.5, 0.5]])
+    ring = np.array(
+        [[0.5 + 0.06 * np.cos(a), 0.5 + 0.06 * np.sin(a)] for a in np.linspace(0, 6.2, 24)]
+    )
+    (placed,) = place_labels(anchor, ["Ex/21-cell"], ring, [], sizes=[(0.1, 0.035)])
+    left, top, right, bottom = placed.box
+    gap = np.hypot(max(left - 0.5, 0, 0.5 - right), max(top - 0.5, 0, 0.5 - bottom))
+    assert gap == pytest.approx(0.0275, abs=1e-6)  # just clear of the 0.025 mark
+    assert placed.covered_points > 0
+
+
+def scene(title: str) -> Scene:
+    return Scene(title=title, window=Window("all", None), scheme="none", points=[], legend=[])
+
+
+def test_the_title_box_is_the_drawn_title_measured() -> None:
+    """Same length, different letters: an estimate by character count could not tell them apart."""
+    wide, narrow = (
+        title_box(scene("W" * 20), DEFAULT_LOOK),
+        title_box(scene("i" * 20), DEFAULT_LOOK),
+    )
+    assert wide.right > 2 * narrow.right
+
+
+def test_labels_carry_a_white_halo() -> None:
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize=(4, 4), dpi=72)
+    ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+    from af.map.figure import chart_scene
+    from tests.map.test_figure import COLOURS, XY
+    from tests.map.test_figure import chart as invented_chart
+
+    label = Placed("Ex/21-cell", (0.5, 0.5), (0.5, 0.5, 0.6, 0.53), 0, 0)
+    drawn = chart_scene(invented_chart(), XY, COLOURS, title="T")
+    draw_scene(ax, drawn, Frame(-5.0, 5.0, 10.0), {"x": label}, DEFAULT_LOOK, legend=False)
+    text = next(t for t in ax.texts if t.get_text() == "Ex/21-cell")
+    (halo,) = text.get_path_effects()
+    assert halo._gc["foreground"] == "white"  # type: ignore[attr-defined]
+    assert text.get_fontsize() == DEFAULT_LOOK.label_size
+    plt.close(fig)
+
+
+def test_a_label_keeps_off_another_vaccines_mark() -> None:
+    """Two vaccines side by side: neither label may sit on the other's mark (no halo mends that)."""
+    from af.map.labels import _on_circle
+
+    anchors = np.array([[0.5, 0.5], [0.56, 0.5]])
+    placed = place_labels(
+        anchors,
+        ["Ex/21-cell", "Ex/22-cell"],
+        anchors,
+        [],
+        sizes=[(0.1, 0.035)] * 2,
+        mark_radius=0.025,
+    )
+    for p in placed:
+        assert not any(_on_circle(p.box, a, 0.025) for a in anchors)
+    unguarded = place_labels(
+        anchors, ["Ex/21-cell", "Ex/22-cell"], anchors, [], sizes=[(0.1, 0.035)] * 2
+    )
+    assert any(
+        _on_circle(p.box, a, 0.025) for p in unguarded for a in anchors
+    )  # the guard mattered

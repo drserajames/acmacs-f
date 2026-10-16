@@ -263,6 +263,21 @@ class ColouringConfig:
 
 
 @dataclass(frozen=True)
+class TitlesConfig:
+    """How a map's title names its lab and assay ("<lab> <subtype>[ <assay>] by clade").
+
+    ``labs`` maps a chart's lab code to the name the title uses; a code not listed is used as it
+    is. ``assay_subtypes`` are the subtypes whose maps come from more than one assay, so their
+    titles name it, every one ("HI" included), from ``assays`` (chart assay -> word); an assay
+    with no word there is an error (rule 1). Other subtypes' titles name no assay.
+    """
+
+    labs: dict[str, str] = field(default_factory=dict)
+    assays: dict[str, str] = field(default_factory=dict)
+    assay_subtypes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class MapsConfig:
     defaults: Defaults
     frames: tuple[FrameConfig, ...]
@@ -277,6 +292,9 @@ class MapsConfig:
     # Required by the round config loader; None only for a config built in code, which then
     # draws in matplotlib's own default font.
     figures: Path | None = None
+    # Required by the round config loader; the default (codes as they are, no assay words) only
+    # for a config built in code.
+    titles: TitlesConfig = TitlesConfig()
 
     def __post_init__(self) -> None:
         store = [m for m in self.maps if self.colour_source(m) == "store"]
