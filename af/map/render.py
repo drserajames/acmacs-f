@@ -24,8 +24,18 @@ from af.map.orient import rows_with_coordinates
 from af.map.style import MARKERS, Scene, ScenePoint
 from af.map.viewport import Box, Frame
 
-GREY = "#c8c8c8"
+GREY = "#cccccc"  # an antigen with no colour (unpainted, or unsequenced)
+GREY_WINDOW = "#bebebe"  # a painted antigen outside the map's window, greyed by it
 SERUM_OUTLINE = "#9a9a9a"
+
+
+def grey_of(p: ScenePoint) -> str | None:
+    """The grey a point is drawn in, or None for its own colour. The report draws two greys, as
+    the shipped maps did: a darker one for an antigen the window greys (it has a colour, the
+    window hides it) and a lighter one for an antigen with no colour at all."""
+    if p.greyed:
+        return GREY_WINDOW
+    return GREY if p.colour is None else None
 
 
 @dataclass(frozen=True)
@@ -226,13 +236,13 @@ def draw_scene(
                 "zorder": z,
             }
         else:
-            grey = p.greyed or p.colour is None
-            edge = "black" if p.mark else (GREY if grey else "black")
+            grey = grey_of(p)
+            edge = "black" if p.mark else (grey or "black")
             s = look.antigen_radius * (look.mark_scale if p.mark else 1.0)
             if own.scale is not None:
                 s *= own.scale
             style = {
-                "fc": own.fill or (GREY if grey else p.colour),
+                "fc": own.fill or grey or p.colour,
                 "ec": own.outline or edge,
                 "lw": (own.outline_width if own.outline_width is not None else 0.8) * scale,
                 "zorder": z,

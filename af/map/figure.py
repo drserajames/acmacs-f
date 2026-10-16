@@ -21,7 +21,8 @@ types those calls take, re-exported here so a caller pins to this module alone: 
 map's legend rows), ``ChartColours`` (what ``StoreColours.for_chart`` returns; imported only
 when asked for, so drawing with your own colours does not load the stores), ``Scene``, ``Window``
 and ``Frame``; and, for a legend drawn like the report's, the marker paths ``egg_path`` and
-``ugly_egg_path`` and the colours ``GREY`` (old antigens) and ``SERUM_OUTLINE``; and
+``ugly_egg_path`` and the colours ``GREY`` (an antigen with no colour), ``GREY_WINDOW`` (one
+the map's window greys) and ``SERUM_OUTLINE``; and
 ``PointStyle``, one point's fill, outline and opacity for :func:`draw_axes`.
 
 Displayed coordinates grow upwards, as in R (Q105): pass a chart's layout as stored, and the map
@@ -44,6 +45,7 @@ from af.chart.model import Chart
 from af.map.render import (
     DEFAULT_LOOK,
     GREY,
+    GREY_WINDOW,
     SERUM_OUTLINE,
     Look,
     PointStyle,
@@ -62,6 +64,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_LOOK",
     "GREY",
+    "GREY_WINDOW",
     "SERUM_OUTLINE",
     "ChartColours",
     "ColourRow",
