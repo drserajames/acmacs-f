@@ -244,7 +244,7 @@ def test_the_report_page_strokes_and_title_are_the_shipped_maps() -> None:
     assert grid == {("#cccccc", 1.0)}
     assert legend and {p.get_linewidth() for p in legend} == {1.0}
     assert title.get_position() == pytest.approx((19.0 / 800, 37.5 / 800))
-    assert title.get_va() == "baseline"
+    assert title.get_verticalalignment() == "baseline"
 
 
 def test_draw_axes_says_which_points_the_frame_clips() -> None:
