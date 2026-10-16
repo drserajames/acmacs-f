@@ -130,7 +130,8 @@ jobs:
       # pdflatex test, by name. man-db's trigger is switched off first (CI has no use for
       # man pages, and re-indexing them is slow on some runners); whether that shortens
       # the tail is unmeasured. apt retries downloads and waits a bounded time for the
-      # dpkg lock.
+      # dpkg lock. texlive-fonts-recommended: the report sets Times (psnfss times, ptmr8t), as the
+      # delivered report does; latex-extra alone has no Times metrics.
       - name: LaTeX (Linux)
         if: runner.os == 'Linux'
         timeout-minutes: 25
@@ -139,7 +140,8 @@ jobs:
           sudo rm -f /var/lib/man-db/auto-update
           apt="-o Acquire::Retries=3 -o DPkg::Lock::Timeout=120"
           sudo apt-get $apt update
-          sudo apt-get $apt install -y --no-install-recommends texlive-latex-extra
+          sudo apt-get $apt install -y --no-install-recommends texlive-latex-extra \
+            texlive-fonts-recommended
       # Apple clang on macOS: conda-forge's clang cannot link with recent Xcode linkers
       # (`-lto_library` rejected); Apple clang gives bit-identical optimiser results.
       - name: Install af into the environment
