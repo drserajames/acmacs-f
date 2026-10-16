@@ -319,6 +319,9 @@ class MapsConfig:
     # for a config built in code.
     titles: TitlesConfig = TitlesConfig()
     legends: tuple[LegendConfig, ...] = ()
+    # The place abbreviations vaccine labels use (af.map.labels.LabelAbbreviations); None: no
+    # table, every place is abbreviated by the fallback rule.
+    label_abbreviations: Path | None = None
 
     def __post_init__(self) -> None:
         store = [m for m in self.maps if self.colour_source(m) == "store"]
