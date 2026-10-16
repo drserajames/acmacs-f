@@ -16,6 +16,7 @@ style → frame (avoiding the legend it will draw) → labels → PDF → I7.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
 import hashlib
 import json
@@ -54,6 +55,7 @@ from af.map.figure import chart_points
 from af.map.finish import finish_map
 from af.map.labels import label_text
 from af.map.orient import Orientation, RotationOverride, drawn_pairs, orient
+from af.map.render import DEFAULT_LOOK
 from af.map.style import ColourRow, ColourScheme, PointIn, Window
 from af.map.vaccines import (
     MapAntigen,
@@ -683,6 +685,18 @@ def build_map(
         decisions["painted_by_placement"] = placed
 
     size = config.frame_size(chart.info.get("V", ""), chart.info.get("A", ""))
+    legend = config.legend(chart.info.get("V", ""), chart.info.get("A", ""))
+    look = DEFAULT_LOOK
+    if legend is not None:
+        look = dataclasses.replace(
+            DEFAULT_LOOK,
+            legend_text_size=legend.text_size,
+            legend_row_pitch=legend.row_pitch,
+            legend_text_left=legend.text_left,
+            legend_padding=legend.padding,
+        )
+    if legend is not None:  # the round's own legend for this subtype, recorded (rule 5)
+        decisions["legend"] = legend.look()
     title_base = map_title(chart, cfg.title, config.titles)
     if fonts is not None:  # the font files the figure is drawn in (rule 5)
         inputs.update(fonts.inputs())
@@ -713,6 +727,7 @@ def build_map(
             provenance=provenance,
             orientation=ori.report() if ori else None,
             flags=flags,
+            look=look,
         )
         figures.append(result.i7)
     return MapResult(
