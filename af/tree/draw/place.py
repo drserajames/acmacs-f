@@ -115,7 +115,7 @@ class Weights:
     overlap: float = 400.0  # per square point of overlap with another label or obstacle
     crossing: float = 3000.0  # leader crossing a leader, or passing through a label: hard
     length: float = 0.6  # per point of leader length
-    flat: float = 120.0  # leader within 8 degrees of horizontal reads as a branch
+    flat: float = 3000.0  # leader within 8 degrees of horizontal reads as a branch: hard
 
 
 @dataclass
@@ -126,6 +126,7 @@ class Search:
         *(-28, 28, -36, 36, -46, 46, -58, 58),
     )
     passes: int = 3
+    pair_candidates: int = 40  # per label, for the pair repair after the passes (0 = off)
     left: float = 0.0
     top: float = 0.0
     bottom: float = 1e9
@@ -212,6 +213,45 @@ def place_labels(
                     boxes[a], boxes[b] = ba, bb
         return swapped
 
+    def clashes() -> list[tuple[int, int]]:
+        """Pairs whose leaders cross, or where one leader runs through the other's label."""
+        out = []
+        for a_i, a in enumerate(order):
+            ea, aa = leader_end(boxes[a]), items[a][2]
+            for b in order[a_i + 1 :]:
+                eb, ab = leader_end(boxes[b]), items[b][2]
+                if (
+                    segments_cross(ea, aa, eb, ab)
+                    or segment_hits_box(ea, aa, boxes[b])
+                    or segment_hits_box(eb, ab, boxes[a])
+                ):
+                    out.append((a, b))
+        return out
+
+    def repair_pairs() -> bool:
+        """Move both labels of a clashing pair at once, over each one's cheapest candidates.
+
+        One label moving alone cannot get out of the way when its only clear spots are where
+        the other one sits (bigger labels on a crowded tree: leaders through labels); trying
+        the two together finds the arrangement the single moves stall short of."""
+        improved = False
+        for a, b in clashes():
+            keep_a, keep_b = boxes[a], boxes[b]
+            before = cost_of(a, keep_a) + cost_of(b, keep_b)
+            top_a = sorted(candidates(a), key=lambda c: cost_of(a, c))[: s.pair_candidates]
+            top_b = sorted(candidates(b), key=lambda c: cost_of(b, c))[: s.pair_candidates]
+            best_pair, best_cost = (keep_a, keep_b), before
+            for ca in top_a:
+                boxes[a] = ca
+                for cb in top_b:
+                    boxes[b] = cb
+                    c = cost_of(a, ca) + cost_of(b, cb)
+                    if c < best_cost - 1e-9:
+                        best_pair, best_cost = (ca, cb), c
+            boxes[a], boxes[b] = best_pair
+            improved |= best_pair != (keep_a, keep_b)
+        return improved
+
     for k in order:
         boxes[k] = best(k)[1]
     for _ in range(s.passes):
@@ -221,6 +261,8 @@ def place_labels(
             if b != boxes[k] and c < cost_of(k, boxes[k]) - 1e-9:
                 boxes[k], changed = b, True
         changed |= swap_crossed()
+        if s.pair_candidates:
+            changed |= repair_pairs()
         if not changed:
             break
     return [
