@@ -229,6 +229,14 @@ def _tree_pages(
         r = figs[slot]
         # One tree: the section title is its heading. Several: say which tree each page is.
         title = section.title if len(section.slots) == 1 else f"{section.title}: {r.figure.title}"
+        if not headed and len(section.slots) == 1 and not r.figure.placeholder:
+            # Under an intro page, as delivered: the tree is the whole page (pdfpages, scaled
+            # to fit and centred), unnumbered, with its page label on that page.
+            lines.append(
+                rf"\includepdf[pages={{1}},pagecommand={{\thispagestyle{{empty}}"
+                rf"\zlabel{{{_label(slot)}}}}}]{{{rel[slot]}}}"
+            )
+            continue
         if headed or len(section.slots) > 1:
             lines.append(rf"\{_level(section)}{{{tex_escape(title)}}}")
         lines += [
@@ -253,14 +261,22 @@ def _grid_pages(
 ) -> list[str]:  # fmt: skip
     """Map and geo pages: a columns x rows grid per page, blank cells left empty.
 
-    Landscape sections turn the page (pdflscape): the report's map grids are 3 x 2 across.
+    Placed as the delivered report's report.tex places them, each panel framed (0.4pt):
+    - landscape map grids (pdflscape; 3 x 2 across): square panels (\\textheight - 70pt)/rows
+      wide, 3pt column separation, 4pt between rows;
+    - portrait geo columns: panels \\textheight x 18/30 wide for 3 rows (scaled for others),
+      centred, rows 2.5 x stretched.
+    A blank cell keeps its width. A placeholder figure keeps a red PLACEHOLDER line under it.
     """
     cols, rows = section.grid
-    width = f"{0.98 / cols:.3f}\\linewidth"
-    # Fixed gaps, not \hfill: glue inside a centred paragraph shifts a row whose last cell is
-    # blank off the column grid (seen on the H3 map pages).
-    gap = f"{0.02 / (cols - 1):.4f}\\linewidth" if cols > 1 else "0pt"
-    height = f"{0.8 / rows:.3f}\\textheight"
+    if section.landscape:
+        width = rf"\dimexpr(\textheight-70pt)/{rows}\relax"
+        table = [r"\setlength{\tabcolsep}{3pt}\renewcommand{\arraystretch}{1.0}"]
+        row_end = r"\\[4pt]"
+    else:
+        width = rf"\dimexpr\textheight*18/{10 * rows}\relax"  # 18/30 for the delivered 3 rows
+        table = [r"\renewcommand{\arraystretch}{2.5}"]
+        row_end = r"\\"
     lines: list[str] = []
     for n, (heading, cells) in enumerate(section.pages(months)):
         if section.landscape:
@@ -270,20 +286,22 @@ def _grid_pages(
             lines.append(
                 rf"\{_level(section)}{{{tex_escape(f'{section.title} {heading}'.strip())}}}"
             )
+        lines += [r"\begin{center}", *table, r"\begin{tabular}{" + " ".join("c" * cols) + "}"]
         for start in range(0, len(cells), cols):
             row = []
             for slot in cells[start : start + cols]:
                 if slot is None:
-                    row.append(rf"\makebox[{width}]{{}}")  # a blank cell keeps its width
+                    row.append(rf"\hspace*{{{width}}}")  # a blank cell keeps its width
                     continue
-                row.append(
-                    rf"\begin{{minipage}}[t]{{{width}}}\centering"
-                    rf"\includegraphics[width=\linewidth,height={height},keepaspectratio]"
-                    rf"{{{rel[slot]}}}"
-                    + _figure_mark(figs[slot], slot, r"\scriptsize")
-                    + r"\end{minipage}"
-                )
-            lines.append(r"\noindent" + rf"\hspace{{{gap}}}".join(row) + r"\par\medskip")
+                image = rf"\includegraphics[width={width},frame]{{{rel[slot]}}}"
+                if figs[slot].figure.placeholder:
+                    image = (rf"\parbox[t]{{{width}}}{{\centering{image}"
+                             + _figure_mark(figs[slot], slot, r"\scriptsize") + "}")  # fmt: skip
+                else:
+                    image += _figure_mark(figs[slot], slot, r"\scriptsize")
+                row.append(image)
+            lines.append(" & ".join(row) + row_end)
+        lines += [r"\end{tabular}", r"\end{center}"]
         if section.landscape:
             lines.append(r"\end{landscape}")
         else:
@@ -311,7 +329,8 @@ def write_tex(
         r"\usepackage[T1]{fontenc}",
         r"\usepackage{times}",
         r"\usepackage[top=3em,bottom=5em,left=2.5em,right=2.5em]{geometry}",
-        r"\usepackage{graphicx,xcolor,pdflscape,zref-user,zref-abspage}",
+        r"\usepackage{graphicx,xcolor,pdflscape,pdfpages,zref-user,zref-abspage}",
+        r"\usepackage[export]{adjustbox}",  # the frame key on \includegraphics, as delivered
         # Physical page on every \zlabel: \label pages are logical.
         r"\makeatletter\zref@addprop{main}{abspage}\makeatother",
         r"\usepackage{titletoc}",
