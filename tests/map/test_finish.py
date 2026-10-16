@@ -51,7 +51,16 @@ def synthetic_points(seed: int = 2) -> list[PointIn]:
         )
     pts.append(PointIn("ag-noxy", "ag-noxy", "antigen", None, frozenset({"A"})))
     # sequenced, but carries only a label the scheme has no row for: must be counted
-    pts.append(PointIn("ag-new", "ag-new", "antigen", (0.5, 0.5), frozenset({"C"}), sequenced=True))
+    pts.append(
+        PointIn(
+            "ag-new", "ag-new", "antigen", (0.5, 0.5), frozenset({"C"}),
+            date=dt.date(2026, 1, 1), sequenced=True,
+        )
+    )  # fmt: skip
+    # a reference antigen with no colour, in the window: drawn open, as kateri drew it
+    pts.append(
+        PointIn("ag-ref", "ag-ref", "antigen", (0.6, 0.6), date=dt.date(2026, 1, 1), reference=True)
+    )
     pts.append(PointIn("ag-noseq", "ag-noseq", "antigen", (0.4, 0.4)))
     pts.append(
         PointIn("ag-hidden", "ag-hidden", "antigen", (0.0, 0.0), frozenset({"A"}), hide="rule-1")
@@ -119,13 +128,13 @@ def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
     assert doc["figure"]["sha256"] == hashlib.sha256(out.read_bytes()).hexdigest()
     assert doc["kind"] == "map" and doc["i7_version"] == 1
     assert doc["map"]["y_axis"] == "up"  # point xy are y-up displayed coordinates (Q105)
-    assert len(doc["map"]["antigens"]) == 124 and len(doc["map"]["sera"]) == 6  # complete list
+    assert len(doc["map"]["antigens"]) == 125 and len(doc["map"]["sera"]) == 6  # complete list
     assert doc["map"]["colour_coverage"] == {
-        "shown_antigens": 122,
+        "shown_antigens": 123,
         "sequenced": 121,
         "painted": 120,
         "sequenced_unpainted": 1,
-        "unsequenced": 1,
+        "unsequenced": 2,
         "vaccines_recoloured_from_cell": 0,
         "vaccines_without_cell_preparation": [],  # ag100 IS the cell preparation
     }
@@ -134,12 +143,14 @@ def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
     assert all(a["colour"] for a in doc["map"]["antigens"])  # never null
     assert {s["colour"] for s in doc["map"]["sera"]} == {"transparent"}
     by_id = {a["id"]: a for a in doc["map"]["antigens"]}
-    assert not by_id["ag-new"]["greyed"]  # unpainted: base grey, not the window rule
+    assert not by_id["ag-new"]["greyed"]  # unpainted, in the window: base grey
     assert by_id["ag-new"]["colour"] == "#cccccc"  # the lighter grey: no colour at all
+    assert by_id["ag-ref"]["colour"] == "transparent"  # an unpainted reference: an open ring
     assert by_id["ag0"]["greyed"] and by_id["ag0"]["colour"] == "#bebebe"  # the window's grey
     assert doc["map"]["flags"] == ["189R move refused: 4.499 u > cap 4.0 u"]
     vac = [a for a in doc["map"]["antigens"] if a["vaccine"]]
-    assert vac[0]["label"] == "Te/25-cell" and not vac[0]["greyed"]
+    # a vaccine dated before the window is greyed like any antigen, and keeps its label
+    assert vac[0]["label"] == "Te/25-cell" and vac[0]["greyed"] and vac[0]["colour"] == "#bebebe"
 
 
 def test_i7_refuses_naive_timestamp(tmp_path: Path) -> None:
