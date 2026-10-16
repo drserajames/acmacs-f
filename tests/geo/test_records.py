@@ -176,3 +176,47 @@ def test_unpainted_viruses_are_counted_per_month_and_clade_not_drawn_apart() -> 
     ]
     alpha = next(loc for loc in january["locations"] if loc["name"] == "Alpha")
     assert alpha["points"] == [{"color": "transparent", "count": 3}]  # one group, not two
+
+
+def test_viruses_painted_by_placement_are_counted_per_month() -> None:
+    """Q183 b: a dot painted by tree placement alone is drawn in its colour and counted for the
+    flag; a virus whose other preparation is painted by evidence is not flagged."""
+    from af.geo.colours import BASIS_PLACEMENT, DotStyle
+    from af.geo.records import DotRule
+
+    d = datetime.date
+    placed = DotStyle("Clade R", "#aa0000", BASIS_PLACEMENT, tree_clade="R")
+    red = DotStyle("Clade R", "#aa0000")
+    preps = [
+        prep("Alpha-1", "MDCK1", d(2021, 1, 9)),  # placed: flagged
+        prep("Alpha-2", "E3", d(2021, 1, 9)),  # egg placed, cell by evidence: cell chosen
+        prep("Alpha-2", "MDCK1", d(2021, 1, 9)),
+    ]
+    colour = {("Alpha-1", "MDCK1"): placed, ("Alpha-2", "E3"): placed,
+              ("Alpha-2", "MDCK1"): red}  # fmt: skip
+    result = geo_counts(
+        preps, Month(2021, 1), Month(2021, 1), place, DotRule.VIRUS,
+        lambda p: colour[p.name, p.passage], lambda p: "egg" if p.passage[0] == "E" else "cell",
+    )  # fmt: skip
+    (january,) = to_i7(result, "A(H3N2)")["periods"]
+    assert january["painted_by_placement"] == [
+        {"tree_clades": {"R": 1}, "points": 1, "preparations": 1}
+    ]
+    assert january["unpainted"] == []
+    alpha = next(loc for loc in january["locations"] if loc["name"] == "Alpha")
+    assert alpha["points"] == [{"clade": "Clade R", "color": "#aa0000", "count": 2}]
+
+
+def test_a_placement_painted_preparation_abstains_beside_evidence() -> None:
+    """Q183 b: a virus whose preparations are painted alike, one by evidence and one by tree
+    placement alone, takes the evidence's dot (unflagged); it does not become a disagreement.
+    With only placement-painted preparations, the dot keeps the flag."""
+    from af.geo.colours import BASIS_PLACEMENT, BASIS_SUPPORTED_CLADE, DotStyle
+    from af.geo.records import AGREE, merged_style
+
+    placed = DotStyle("Clade R", "#aa0000", BASIS_PLACEMENT, tree_clade="R")
+    supported = DotStyle("Clade R", "#aa0000", BASIS_SUPPORTED_CLADE)
+    assert merged_style([(placed, "egg"), (supported, "egg"), (placed, "cell")]) == (
+        supported, AGREE
+    )  # fmt: skip
+    assert merged_style([(placed, "egg"), (placed, "cell")]) == (placed, AGREE)

@@ -105,3 +105,35 @@ def test_unpainted_dots_get_the_warning_in_the_figure_and_the_key(
          "per_month": {"2021-01": 1}, "scheme": "h3 test", "warning": sentence}
     ]  # fmt: skip
     assert clade_key(_doc(), [scheme])["unpainted_clades"] == []
+
+
+def test_dots_painted_by_placement_get_their_flag_in_the_figure_and_the_key(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Q183 b: a month whose dots are painted by tree placement alone carries the flag's
+    sentence (geo's unit is the virus) in its figure; the key totals them over the window."""
+    from af.geo.colours import placement_warning
+
+    doc = _doc()
+    doc["periods"][0]["painted_by_placement"] = [
+        {"tree_clades": {"R": 2}, "points": 2, "preparations": 3}
+    ]
+    doc["periods"][1]["painted_by_placement"] = []
+    coastline = coastline_file(tmp_path)
+    write_geo_figures(doc, "h3", lambda _: (0.0, 0.0), coastline, tmp_path / "f", {})
+    sentence = placement_warning(2, {"R": 2}, unit=("virus", "viruses"))
+    folder = tmp_path / "f" / "geo" / "h3"
+    january = json.loads((folder / "2021-01" / "af" / "figure.i7.json").read_text())
+    validate(january)
+    assert january["provenance"]["decisions"]["painted_by_placement"] == [
+        {"tree_clades": {"R": 2}, "points": 2, "preparations": 3, "warning": sentence}
+    ]
+    february = json.loads((folder / "2021-02" / "af" / "figure.i7.json").read_text())
+    assert "decisions" not in february["provenance"]
+    assert sentence in capsys.readouterr().out
+    scheme = ColourScheme("h3 test", (ColourRow("Clade R", "#aa0000", frozenset({"R"})),))
+    assert clade_key(doc, [scheme])["painted_by_placement"] == [
+        {"tree_clades": {"R": 2}, "points": 2, "preparations": 3,
+         "per_month": {"2021-01": 2}, "warning": sentence}
+    ]  # fmt: skip
+    assert clade_key(_doc(), [scheme])["painted_by_placement"] == []
