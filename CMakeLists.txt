@@ -5,4 +5,5 @@
 cmake_minimum_required(VERSION 3.26)
 project(acmacs_f LANGUAGES NONE)
 
+add_subdirectory(fonts)   # the figure fonts, fetched (fonts/CMakeLists.txt)
 add_subdirectory(cpp)

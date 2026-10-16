@@ -33,6 +33,10 @@ and runs every check there, with no caches:
   ``AttributeError: 'af.map._core.Problem' object has no attribute ...``, on a committed
   HEAD and in files the branch never touched, so it read as someone else's broken
   branch (05-trees, twice, 1-2 Oct 2026).
+- The figure fonts (``af/fonts/*.otf`` and the build's ``SOURCE.toml``) are not in git either:
+  the build fetches them. They are copied in from the environment like the optimiser, and the
+  check stops when the environment has none, or ones from another archive than HEAD pins in
+  ``fonts/CMakeLists.txt``.
 
 Usage (from a checkout, with the dev environment's python):
 
@@ -84,11 +88,11 @@ def main() -> int:
             extras = ",".join(optional_extras(export))
             print(f"Install as CI does: pip install -e '.[{extras}]'")
             return 1
-        stale = stale_extension_reason(export)
+        stale = stale_extension_reason(export) or stale_fonts_reason(export)
         if stale:
             print(f"STOP: {stale}")
             return 1
-        copied = copy_compiled_extensions(export)
+        copied = copy_compiled_extensions(export) + copy_installed_fonts(export)
         shim = write_site_shim()
         env = check_environment(export, shim)
         wrong = child_af_outside_export(export, env)
@@ -99,7 +103,7 @@ def main() -> int:
         if dirty:
             print("note: uncommitted changes in the worktree are NOT checked")
         if copied:
-            print("compiled extensions copied in:", ", ".join(copied))
+            print("built files copied in:", ", ".join(copied))
         af_data = os.environ.get("AF_DATA") or str((repo.parent / "acmacs-f-data").resolve())
         print(
             f"AF_DATA={af_data}"
@@ -292,6 +296,51 @@ def copy_compiled_extensions(export: Path) -> list[str]:
             if target.parent.is_dir() and not target.exists():
                 shutil.copy2(built, target)
                 copied.append(str(relative))
+    return copied
+
+
+FONTS_PIN = re.compile(r'set\(AF_FONTS_SHA256 "([0-9a-f]{64})"\)')
+
+
+def installed_fonts() -> Path | None:
+    """This environment's installed af/fonts (where the build put SOURCE.toml), or None."""
+    for base in site.getsitepackages():
+        if Path(base, "af", "fonts", "SOURCE.toml").is_file():
+            return Path(base, "af", "fonts")
+    return None
+
+
+def stale_fonts_reason(export: Path) -> str | None:
+    """Why the environment's fonts would not be HEAD's, or None (also when HEAD has none)."""
+    recipe = export / "fonts" / "CMakeLists.txt"
+    if not recipe.is_file():
+        return None
+    pinned = FONTS_PIN.search(recipe.read_text())
+    if pinned is None:
+        return f"{recipe.relative_to(export)} pins no AF_FONTS_SHA256"
+    installed = installed_fonts()
+    rebuild = "Rebuild into this environment (pip install -e . here) and run the check again."
+    if installed is None:
+        return f"this environment's af was installed without the fonts HEAD fetches. {rebuild}"
+    have = tomllib.loads((installed / "SOURCE.toml").read_text()).get("archive_sha256")
+    if have != pinned[1]:
+        return (
+            f"this environment's fonts ({installed}) come from archive {have}, but HEAD pins "
+            f"{pinned[1]}. {rebuild}"
+        )
+    return None
+
+
+def copy_installed_fonts(export: Path) -> list[str]:
+    """Copy the fonts the build installed (not in git) into the export's af/fonts."""
+    installed, target = installed_fonts(), export / "af" / "fonts"
+    if installed is None or not target.is_dir():
+        return []
+    copied = []
+    for built in sorted(installed.iterdir()):
+        if built.is_file() and not (target / built.name).exists():
+            shutil.copy2(built, target / built.name)
+            copied.append(f"af/fonts/{built.name}")
     return copied
 
 
