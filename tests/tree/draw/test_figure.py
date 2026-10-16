@@ -3,6 +3,7 @@
 import hashlib
 import json
 from dataclasses import replace
+from typing import cast
 
 import pytest
 
@@ -10,6 +11,9 @@ pytest.importorskip("numpy", reason="numpy not installed: af.tree.draw needs it 
 pytest.importorskip(
     "matplotlib", reason="matplotlib not installed: the tree renderer needs it (pyproject, WS1)"
 )
+
+import numpy as np  # noqa: E402
+from matplotlib.collections import LineCollection  # noqa: E402
 
 from af.tree.draw.defaults import load_defaults  # noqa: E402
 from af.tree.draw.figure import DashBarError, FigureConfig, Overrides, make_figure  # noqa: E402
@@ -269,3 +273,71 @@ def test_clade_label_size_for_a_clade_not_shown_is_an_error(tmp_path):
             tmp_path / "c.pdf",
             {},
         )
+
+
+def _captured_spec(tmp_path, monkeypatch, cfg=None):
+    import af.tree.draw.figure as figure_module
+
+    specs = []
+    real_render = figure_module.render
+
+    def capture(spec, pdf):
+        specs.append(spec)
+        return real_render(spec, pdf)
+
+    monkeypatch.setattr(figure_module, "render", capture)
+    make_figure(standard_tree(), PARENTS, cfg or config(), tmp_path / "s.pdf", {})
+    return specs[0]
+
+
+def test_month_labels_stay_clear_of_the_matrix_and_ticks_are_centred(tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+
+    from af.tree.draw.render import _draw_matrix, _Page, row_colours
+
+    spec = _captured_spec(tmp_path, monkeypatch)
+    g, pg = spec.geometry, _Page(spec)
+    fig = plt.figure(figsize=(g.width / 72, g.height / 72))
+    ax = fig.add_axes((0, 0, 1, 1))
+    ax.set_xlim(0, g.width)
+    ax.set_ylim(g.height, 0)
+    _draw_matrix(ax, spec, pg, row_colours(spec))
+    fig.canvas.draw()
+    to_data = ax.transData.inverted()
+    for t in ax.texts:
+        (x0, y_a), (x1, y_b) = to_data.transform(t.get_window_extent())
+        top, bottom = min(y_a, y_b), max(y_a, y_b)
+        assert bottom <= g.top or top >= pg.bottom  # never inside the matrix
+        k = round((min(x0, x1) - g.ts_left) / g.ts_slot - 0.5)  # its slot, between two lines
+        assert (
+            g.ts_left + k * g.ts_slot < min(x0, x1)
+            and max(x0, x1) < g.ts_left + (k + 1) * g.ts_slot
+        )
+    ticks = cast(LineCollection, ax.collections[0]).get_segments()
+    starts = {round(((s[0][0] - g.ts_left) / g.ts_slot) % 1, 6) for s in ticks}
+    assert starts == {g.tick_start}
+    assert {round((s[1][0] - s[0][0]) / g.ts_slot, 6) for s in ticks} == {g.tick_length}
+    plt.close(fig)
+
+
+def test_separator_rules_stop_at_the_bracket_that_ends_on_their_row(tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+
+    from af.tree.draw.render import _draw_brackets, _draw_hz_rules, _Page
+
+    spec = _captured_spec(tmp_path, monkeypatch)
+    g, pg = spec.geometry, _Page(spec)
+    fig, ax = plt.subplots()
+    edges = _draw_brackets(ax, spec, pg, 500.0)
+    assert edges  # the synthetic tree has shown clades
+    n_lines = len(ax.lines)
+    _draw_hz_rules(ax, spec, pg, 480.0, edges)
+    ends = {
+        round(float(np.asarray(line.get_ydata())[0]), 6): float(np.asarray(line.get_xdata())[1])
+        for line in ax.lines[n_lines:]
+    }
+    for r, x in edges.items():
+        if 0 < r < spec.layout.n_rows:
+            assert ends[round(pg.row_edge(r), 6)] == x
+    assert all(c == g.rule_colour for c in (line.get_color() for line in ax.lines[n_lines:]))
+    plt.close(fig)
