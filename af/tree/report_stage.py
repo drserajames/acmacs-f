@@ -19,9 +19,11 @@ round's report tree says exactly which weekly tree it came from, and publishes t
   (af.seq.matching's key, the one editable copy).
 - Continent comes from acmacs-f-data's location tables (country spelling -> ISO3 -> scheme
   ``continent``). A leaf with none is kept and counted by reason, never guessed.
-- Clock direction and placement are re-measured on the pruned tree and refused as in the build:
-  pruning keeps every kept leaf's path, but spliced branches carry their net change, so the
-  numbers are measured again rather than inherited.
+- Clock direction, placement and the clock's own leaf flags are re-measured on the pruned tree
+  and refused as in the build: pruning keeps every kept leaf's path, but spliced branches carry
+  their net change, so the numbers are measured again rather than inherited. The thresholds the
+  flags use are the ones the SOURCE version recorded for its populate step, read back from its
+  provenance, so a report tree flags on its source's rule and never on one typed in here.
 - The source version is an input in PROVENANCE.json and in HISTORY.jsonl's publish event; the
   store's ``parent`` field is the previous version of this same dataset.
 """
@@ -45,7 +47,13 @@ from af.store.ref import ExternalInput
 from af.store.store import MANIFEST, Manifest
 from af.tables.model import Table
 from af.tables.store import current_tables, read_table
-from af.tree.clock import InvertedClockError, check_clock_direction
+from af.tree.clock import (
+    ClockSettings,
+    InvertedClockError,
+    apply_flags,
+    check_clock_direction,
+    find_outliers,
+)
 from af.tree.export import check_matches, read_export
 from af.tree.io import i6
 from af.tree.io.fasta import read_alignment
@@ -151,6 +159,49 @@ def checked_alignment(meta: dict[str, Any], export_dir: Path) -> tuple[dict[str,
     return read_alignment(export_dir / "alignment.fasta"), export_dir / "alignment.fasta"
 
 
+def source_clock_settings(version: Path) -> ClockSettings:
+    """The clock thresholds the source version recorded for its own populate step.
+
+    The flags on a report tree have to mean what the weekly tree's flags mean, so the thresholds
+    are not defaulted here and not passed on the command line: they are read back from the step
+    record the source wrote (``<file>.provenance.json``, step ``<subtype>.populate``), where
+    af.tree.stages records ``dataclasses.asdict(clock)``. A source that recorded none is refused,
+    because the alternative is to invent a threshold and call the result a measurement.
+    """
+    records = sorted(version.glob("*.provenance.json"))
+    for record in records:
+        try:
+            written = json.loads(record.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise ReportStageError(f"{record}: unreadable step record ({error})") from error
+        if not str(written.get("step", "")).endswith(".populate"):
+            continue
+        clock = (written.get("parameters") or {}).get("clock")
+        if not isinstance(clock, dict):
+            continue
+        try:
+            return ClockSettings(
+                z_threshold=float(clock["z_threshold"]),
+                branch_threshold=(
+                    None
+                    if clock.get("branch_threshold") is None
+                    else float(clock["branch_threshold"])
+                ),
+                earliest=datetime.date.fromisoformat(str(clock["earliest"])),
+                min_leaves=int(clock["min_leaves"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ReportStageError(
+                f"{record}: its populate step records clock settings this code cannot read "
+                f"({error}); the report tree would have to invent the thresholds it flags on"
+            ) from error
+    raise ReportStageError(
+        f"{version}: no populate step record carries clock settings "
+        f"(looked in {len(records)} *.provenance.json), so there is no recorded threshold to "
+        f"flag the report tree's leaves on"
+    )
+
+
 def derive(
     populated: PopulatedTree,
     cutoff: datetime.date,
@@ -158,6 +209,7 @@ def derive(
     continent_of: Callable[[LeafRecord], str | None],
     missing: Counter[str],
     placement_limits: Path,
+    clock: ClockSettings,
 ) -> PopulatedTree:
     """The report tree, re-checked. Refuses as the build would."""
     outgroup = populated.counts.get("outgroup")
@@ -177,6 +229,7 @@ def derive(
     except PlacementError as error:
         raise ReportStageError(str(error)) from error
     result.counts["placement"] = {**measured.to_json(), "limit": limit.to_json()}
+    apply_flags(result, find_outliers(result, clock))
     return result
 
 
@@ -257,7 +310,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     table_refs = sorted({ref for ref, _ in held.values()}, key=lambda r: r.dataset)
     titrated = TitratedIndex.from_tables(tables, report_name_key)
     continent_of, missing = continent_lookup(LocationTables.read(args.locations))
-    result = derive(populated, args.cutoff, titrated, continent_of, missing, args.placement_limits)
+    result = derive(
+        populated,
+        args.cutoff,
+        titrated,
+        continent_of,
+        missing,
+        args.placement_limits,
+        source_clock_settings(version),
+    )
     result.counts.update({f"report_{k}": v for k, v in table_counts.items()})
     extra_inputs: list[StoreRef | ExternalInput] = []
     if args.build_record is not None:
@@ -296,6 +357,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "titrated_by_name",
         "titre_index_tables",
         "titre_index_antigens",
+        "clock_flagged",
+        "clock_long_branches",
+        "clock_clock_outliers",
+        "clock_impossible_date",
+        "clock_branch_threshold",
+        "clock_z_threshold",
     ):
         print(f"  {key:<28} {report.get(key)}")
     print(f"  continents                   {result.counts.get('continents')}")
