@@ -107,8 +107,10 @@ def place_labels(
     radii: Sequence[float] = (0.0275, 0.04, 0.056),
 ) -> list[Placed]:
     """Greedy placement, in order: try positions around each anchor at increasing distance and
-    keep the one that (1) stays on the page, (2) overlaps fewest earlier labels and furniture,
-    (3) is nearest, (4) covers fewest drawn points. Deterministic: no randomness, fixed order.
+    keep the one that (1) stays on the page, (2) overlaps the furniture (legend, title) least,
+    (3) overlaps fewest earlier labels and marks, (4) is nearest, (5) covers fewest drawn
+    points. Deterministic: no randomness, fixed order. Furniture comes first because it is drawn
+    over the labels: a label half under the legend cannot be read (style 08-23).
 
     Nearest before fewest covered, as the shipped maps place them: a label sits just clear of
     its mark (the first radius is a marked point's 0.025 plus a little) even over other points,
@@ -122,6 +124,7 @@ def place_labels(
     boxes: list[tuple[float, float, float, float]] = [
         (b.left, b.top, b.right, b.bottom) for b in furniture
     ]
+    n_furniture = len(boxes)
     if sizes is None:
         sizes = [(char_width * len(t), height) for t in texts]
     for (x, y), text, (w, h) in zip(anchors, texts, sizes, strict=True):
@@ -134,13 +137,14 @@ def place_labels(
                 top = y + dy - (h if dy < -1e-9 else 0.0 if dy > 1e-9 else h / 2)
                 box = (left, top, left + w, top + h)
                 off = box[0] < 0 or box[1] < 0 or box[2] > 1 or box[3] > 1
-                hits = sum(_overlap(box, other) for other in boxes)
+                on_furniture = sum(_overlap(box, other) for other in boxes[:n_furniture])
+                hits = sum(_overlap(box, other) for other in boxes[n_furniture:])
                 if mark_radius is not None:
                     hits += sum(_on_circle(box, m, mark_radius) for m in anchors)
                 covered = int(_inside(drawn, box).sum())
-                cost = (float(off), float(hits), r, float(covered))
+                cost = (float(off), float(on_furniture), float(hits), r, float(covered))
                 if best is None or cost < best[0]:
-                    best = (cost, box, hits, covered)
+                    best = (cost, box, on_furniture + hits, covered)
         assert best is not None
         _, box, hits, covered = best
         boxes.append(box)
