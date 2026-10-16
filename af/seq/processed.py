@@ -14,8 +14,10 @@ The store keeps **facts**, not verdicts: alignment coverage, frameshifts, unknow
 acids and so on, never "passes QC". Thresholds are selection rules (R3), applied when a
 tree's sequences are chosen, so changing one never means rebuilding the store.
 
-No row is dropped here. A record that could not be aligned is kept with its error; a
-record whose metadata is odd keeps its ``problems`` flags (design rule 1b).
+No record is dropped here. A record that could not be aligned is kept with its error; a
+record whose metadata is odd keeps its ``problems`` flags (design rule 1b). The one row
+not written is a second, identical copy of a record another pull already holds
+(:func:`_drop_already_published`), and the version's provenance counts it.
 """
 
 from __future__ import annotations
@@ -469,8 +471,9 @@ def publish_pull(
     """Publish a version of ``sequences/<dataset>`` with this pull's partitions (re)written.
 
     Every other pull's partitions are hard-linked from the current version. A key in two
-    pulls is refused: which copy wins is the cross-pull dedup rule, and until that rule
-    runs, keeping both would make one virus two tree leaves.
+    pulls would make one virus two tree leaves, so a key another pull already holds is
+    written once: an identical copy is dropped from this pull and counted in the
+    provenance (``already_published``), and a copy that differs is refused.
     """
     if isolates.num_rows != sequences.num_rows:
         raise StoreBuildError(
@@ -478,6 +481,9 @@ def publish_pull(
         )
     with store.build(KIND, dataset) as builder:
         others = _link_other_pulls(builder, pull_id)
+        isolates, sequences, repeated = _drop_already_published(
+            builder.path, pull_id, isolates, sequences
+        )
         for name, table in zip(TABLES, (isolates, sequences), strict=True):
             path = builder.path / partition(name, pull_id)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -486,11 +492,16 @@ def publish_pull(
         provenance = Provenance(
             step="seq.store-pull",
             inputs=tuple(inputs),
-            parameters=dict(parameters),
+            parameters={**parameters, "already_published": repeated},
             started=started,
             finished=datetime.datetime.now(datetime.UTC),
         )
-        summary = {"pull": pull_id, "rows": isolates.num_rows, "other_pulls": others}
+        summary = {
+            "pull": pull_id,
+            "rows": isolates.num_rows,
+            "other_pulls": others,
+            "already_published": sum(repeated.values()),
+        }
         return builder.publish(provenance, summary=summary)
 
 
@@ -509,6 +520,85 @@ def _link_other_pulls(builder: VersionBuilder, pull_id: str) -> int:
     return len(pulls)
 
 
+#: Columns that say which pull delivered a row, not what the record is: two pulls' copies
+#: of one record differ in these and in nothing else.
+_DELIVERY_COLUMNS = frozenset({"source_pull"})
+
+Key = tuple[str, str]
+
+
+def _drop_already_published(
+    version: Path, pull_id: str, isolates: pa.Table, sequences: pa.Table
+) -> tuple[pa.Table, pa.Table, dict[str, int]]:
+    """This pull's tables without the records another pull already holds, and their count.
+
+    Pulls overlap: a targeted fetch can name a record that a later window pull also
+    returns. The copy already published is kept, so no other pull's partition is ever
+    rewritten, and when the two copies are identical apart from the delivering pull, which
+    one stays changes nothing a reader sees. Copies that differ in anything else (GISAID
+    edited the record between the two fetches) are refused: which edit wins is a rule
+    nobody has written, and guessing it would change data silently.
+
+    Returns ``{other pull: records dropped because it holds them}``, empty when none.
+    """
+    if not (version / "isolates").is_dir():
+        return isolates, sequences, {}  # the first pull of this dataset
+    incoming = set(_keys(isolates))
+    held = pq.read_table(version / "isolates", columns=["epi_isl", "accession", "source_pull"],
+                         partitioning=None)  # fmt: skip
+    holder: dict[Key, str] = {}
+    for epi_isl, accession, pull in zip(
+        *(held[c].to_pylist() for c in held.column_names), strict=True
+    ):
+        if (epi_isl, accession) in incoming:
+            holder[(epi_isl, accession)] = pull
+    if not holder:
+        return isolates, sequences, {}
+    differ = [
+        f"{epi_isl}/{accession} ({name}: {', '.join(columns)}) in {holder[(epi_isl, accession)]}"
+        for name, table in zip(TABLES, (isolates, sequences), strict=True)
+        for (epi_isl, accession), columns in _differences(version / name, table, holder).items()
+    ]
+    if differ:
+        raise StoreBuildError(
+            f"{pull_id}: {len(differ)} record(s) already published by another pull with "
+            f"different content; which copy wins is not decided: {sorted(differ)[:3]}"
+        )
+    return (
+        _without(isolates, holder),
+        _without(sequences, holder),
+        dict(sorted(Counter(holder.values()).items())),
+    )
+
+
+def _keys(table: pa.Table) -> list[Key]:
+    return list(zip(table["epi_isl"].to_pylist(), table["accession"].to_pylist(), strict=True))
+
+
+def _differences(stored: Path, table: pa.Table, keys: Mapping[Key, str]) -> dict[Key, list[str]]:
+    """Per key, the columns in which this pull's row and the stored row disagree."""
+    ids = sorted({epi_isl for epi_isl, _ in keys})
+    theirs = _rows_by_key(
+        pq.read_table(stored, partitioning=None, filters=[("epi_isl", "in", ids)])
+    )
+    mine = _rows_by_key(table)
+    found = {}
+    for key in keys:
+        row, other = mine[key], theirs[key]
+        columns = [c for c in row if c not in _DELIVERY_COLUMNS and row[c] != other.get(c)]
+        if columns:
+            found[key] = columns
+    return found
+
+
+def _rows_by_key(table: pa.Table) -> dict[Key, dict[str, Any]]:
+    return {(row["epi_isl"], row["accession"]): row for row in table.to_pylist()}
+
+
+def _without(table: pa.Table, keys: Mapping[Key, str]) -> pa.Table:
+    return table.filter(pa.array([key not in keys for key in _keys(table)], pa.bool_()))
+
+
 def _check_keys_across_pulls(version: Path) -> None:
     keys = pq.read_table(version / "isolates", columns=["epi_isl", "accession", "source_pull"],
                          partitioning=None)  # fmt: skip
@@ -522,7 +612,7 @@ def _check_keys_across_pulls(version: Path) -> None:
             clashes.append(f"{epi_isl}/{accession} in {other} and {pull}")
     if clashes:
         raise StoreBuildError(
-            f"{len(clashes)} key(s) in two pulls; cross-pull dedup is not implemented yet: "
+            f"{len(clashes)} key(s) in two pulls after dropping already-published copies: "
             f"{clashes[:3]}"
         )
 
