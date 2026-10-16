@@ -135,7 +135,8 @@ def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
     assert {s["colour"] for s in doc["map"]["sera"]} == {"transparent"}
     by_id = {a["id"]: a for a in doc["map"]["antigens"]}
     assert not by_id["ag-new"]["greyed"]  # unpainted: base grey, not the window rule
-    assert by_id["ag0"]["greyed"] and by_id["ag0"]["colour"] == "#c8c8c8"
+    assert by_id["ag-new"]["colour"] == "#cccccc"  # the lighter grey: no colour at all
+    assert by_id["ag0"]["greyed"] and by_id["ag0"]["colour"] == "#bebebe"  # the window's grey
     assert doc["map"]["flags"] == ["189R move refused: 4.499 u > cap 4.0 u"]
     vac = [a for a in doc["map"]["antigens"] if a["vaccine"]]
     assert vac[0]["label"] == "Te/25-cell" and not vac[0]["greyed"]

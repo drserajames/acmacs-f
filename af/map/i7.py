@@ -18,16 +18,19 @@ from typing import Any
 import numpy as np
 
 from af.map.labels import Placed
-from af.map.render import DEFAULT_LOOK, GREY, Look, PointStyle, look_opt_ins
+from af.map.render import DEFAULT_LOOK, Look, PointStyle, grey_of, look_opt_ins
 from af.map.style import Scene, ScenePoint
 from af.map.viewport import Frame
 
 
 def drawn_fill(p: ScenePoint) -> str:
-    """The fill actually drawn (I7 never has a null colour): sera are outline-only."""
+    """The fill actually drawn (I7 never has a null colour): sera are outline-only; a greyed or
+    uncoloured antigen records the grey it is drawn in (:func:`af.map.render.grey_of`)."""
     if p.kind == "serum":
         return "transparent"
-    return GREY if (p.greyed or p.colour is None) else p.colour
+    fill = grey_of(p) or p.colour
+    assert fill is not None  # grey_of returns a grey whenever the colour is None
+    return fill
 
 
 def check_provenance_inputs(inputs: Any) -> None:

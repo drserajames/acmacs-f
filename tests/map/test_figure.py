@@ -124,7 +124,11 @@ def test_the_public_types_are_re_exported_from_figure() -> None:
     assert figure.ColourScheme is style.ColourScheme and figure.ColourRow is style.ColourRow
     assert figure.ChartColours is colouring.ChartColours
     assert (figure.egg_path, figure.ugly_egg_path) == (render.egg_path, render.ugly_egg_path)
-    assert (figure.GREY, figure.SERUM_OUTLINE) == (render.GREY, render.SERUM_OUTLINE)
+    assert (figure.GREY, figure.GREY_WINDOW, figure.SERUM_OUTLINE) == (
+        render.GREY,
+        render.GREY_WINDOW,
+        render.SERUM_OUTLINE,
+    )
     assert figure.Scene is style.Scene and figure.Window is style.Window
     assert all(hasattr(figure, name) for name in figure.__all__)
     # Drawing with your own colours does not load the stores: ChartColours is imported on use.
@@ -185,6 +189,35 @@ def test_per_point_styles_are_opt_in() -> None:
     assert styled["ag0"].get_alpha() == 0.2  # a point's own opacity beats the global one
     assert styled["ag1"].get_linewidth() == pytest.approx(3 * plain["ag1"].get_linewidth() / 0.8)
     assert styled["grid"] == {"#e5e5e5"}
+
+
+def test_window_greyed_and_uncoloured_antigens_are_two_greys() -> None:
+    """As the shipped maps: a painted antigen the window greys is drawn darker (#bebebe) than one
+    with no colour at all (#cccccc); both are outlined in their own grey."""
+    import datetime as dt
+
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgba
+
+    from af.map.style import Window
+
+    scene = chart_scene(chart(), XY, COLOURS, title="T", window=Window("w", dt.date(2022, 1, 1)))
+    by_id = {p.id: p for p in scene.points}
+    assert by_id["ag0"].greyed and by_id["ag1"].colour is None and not by_id["ag1"].greyed
+    frame = frame_around(scene)
+    page = frame.page(scene.xy())
+    fig = plt.figure(figsize=(4, 4), dpi=72)
+    ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+    draw_axes(ax, scene, frame, legend=False, title=False)
+    drawn = _points_drawn(ax)
+    plt.close(fig)
+    patch = {
+        p.id: drawn[(round(float(page[i, 0]), 4), round(float(page[i, 1]), 4))]
+        for i, p in enumerate(scene.points)
+        if p.xy is not None and p.kind == "antigen"
+    }
+    assert patch["ag0"].get_facecolor() == patch["ag0"].get_edgecolor() == to_rgba("#bebebe")
+    assert patch["ag1"].get_facecolor() == patch["ag1"].get_edgecolor() == to_rgba("#cccccc")
 
 
 def test_draw_axes_says_which_points_the_frame_clips() -> None:
