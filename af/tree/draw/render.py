@@ -9,6 +9,7 @@ draw report; the caller writes those.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
@@ -65,10 +66,17 @@ MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", 
 
 @dataclass
 class Geometry:
+    """Figure layout in figure units (1/72 in before the report scales the page).
+
+    Defaults are the Sep 2026 report's H3 page (ae tal-draw), measured from the shipped PDF;
+    a round sets the per-subtype values (H1's wider canvas, each tree's width, text sizes) in
+    its config. Text sizes are in figure units too.
+    """
+
     width: float = 700.952
     height: float = 1000.0
-    top: float = 27.0
-    bottom: float = 976.0
+    top: float = 25.0
+    bottom: float = 975.0
     tree_left: float = 22.0
     tree_right: float = 372.0
     centre_col: float = 0.0  # width of the centre-marks column; 0 = none
@@ -78,8 +86,13 @@ class Geometry:
     clade_slot: float = 9.0
     bar_width: float = 9.0
     bar_gap: float = 4.5
-    label_font: float = 6.8
-    strain_font: float = 6.2
+    label_font: float = 9.5  # aa-substitution labels
+    strain_font: float = 6.8
+    clade_font: float = 10.0  # clade names beside the brackets (per clade: FigureSpec)
+    month_font: float = 5.8  # month labels above and below the matrix
+    legend_font: float = 6.1  # dash-bar legend
+    title_font: float = 15.0
+    inset_gap: float = 7.5  # continent inset: its lowest edge sits this far above the last row
     # Fixed scales, for figures compared side by side (e.g. a tree before and after pruning):
     # the branch length drawn across the tree's width, and the rows the page height holds.
     # None = fit this tree.
@@ -113,6 +126,9 @@ class FigureSpec:
     colour_by: str = "continent"  # or "clade": matrix and branches by lettered band
     clade_colours: dict[str, str] = field(default_factory=dict)
     geometry: Geometry = field(default_factory=Geometry)
+    # Clade name -> label size, for clades drawn at other than ``geometry.clade_font`` (the
+    # shipped H1 page draws the D sub-clades smaller). Every name must be a shown clade.
+    clade_label_sizes: dict[str, float] = field(default_factory=dict)
     # Every drawn leaf's name as text at its row: too small to read (a row is ~0.01 pt on a big
     # tree) but searchable, so a reader can find a strain on the page. The Sep 2026 report's H1
     # and H3 tree pages carried the same layer.
@@ -128,6 +144,7 @@ class Drawn:
     strains: list[dict]
     continents_not_in_legend: dict[str, int]  # value -> rows drawn grey for it
     leaf_names: int | None = None  # names written (None: layer off)
+    inset: Box | None = None  # continent inset (x0, y0, x1, y1), figure units; None: clade key
 
 
 class _Page:
@@ -267,7 +284,14 @@ def _draw_matrix(ax: Axes, spec: FigureSpec, pg: _Page, colours: np.ndarray) -> 
         text = f"{MONTHS[m - 1]} {y % 100:02d}"
         for yy, va in ((g.top - 2, "bottom"), (pg.bottom + 2, "top")):
             ax.text(
-                x, yy, text, rotation=-90, ha="center", va=va, fontsize=5.8, rotation_mode="anchor"
+                x,
+                yy,
+                text,
+                rotation=-90,
+                ha="center",
+                va=va,
+                fontsize=g.month_font,
+                rotation_mode="anchor",
             )
     rows = np.flatnonzero(ts.in_window)
     x0 = g.ts_left + (ts.column[rows] + 0.15) * g.ts_slot
@@ -299,21 +323,28 @@ def _draw_brackets(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> float:
             for yy in (y0, y1):
                 ax.plot([x - 2.5, x], [yy, yy], color="black", lw=0.5)
             names.append((x, (y0 + y1) / 2, cs.clade))
-    _place_clade_names(ax, names)
+    _place_clade_names(ax, names, g.clade_font, spec.clade_label_sizes)
     return left + (max(sel.slots.values(), default=0) + 1) * g.clade_slot + 8
 
 
-def _place_clade_names(ax: Axes, names: list[tuple[float, float, str]], size: float = 7) -> None:
+def _place_clade_names(
+    ax: Axes,
+    names: list[tuple[float, float, str]],
+    size: float,
+    sizes: Mapping[str, float] | None = None,
+) -> None:
     """Write each clade's name beside its bracket, centred on the band.
 
     Two small bands next to each other in one column would print their names on top of each
     other; a name that would overlap the one above slides down just past it, with a thin
     leader back to its band's middle, so every name stays readable.
     """
-    width = _text_width(FontProperties(size=size))
+    sizes = sizes or {}
+    widths = {s: _text_width(FontProperties(size=s)) for s in {size, *sizes.values()}}
     last_end: dict[float, float] = {}
     for x, mid, text in sorted(names, key=lambda t: (t[0], t[1])):
-        half = width(text) / 2 + 3  # a clear gap between stacked names
+        text_size = sizes.get(text, size)
+        half = widths[text_size](text) / 2 + 3  # a clear gap between stacked names
         centre = max(mid, last_end.get(x, -1e9) + half)
         last_end[x] = centre + half
         if centre != mid:
@@ -325,7 +356,7 @@ def _place_clade_names(ax: Axes, names: list[tuple[float, float, str]], size: fl
             rotation=-90,
             ha="center",
             va="bottom",
-            fontsize=size,
+            fontsize=text_size,
             rotation_mode="anchor",
         )
 
@@ -364,7 +395,7 @@ def _draw_dash_bars(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> None:
                 g.top - 16 + k * 6.5,
                 text,
                 color=colour,
-                fontsize=5,
+                fontsize=g.legend_font,
                 ha="center",
                 va="bottom",
             )
@@ -445,7 +476,18 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
         (lab.node, "\n".join(lab.subs), (float(pg.nx[lab.node]), float(pg.ny[lab.node])))
         for lab in spec.labels
     ]
-    search = Search(left=2.0, top=g.top - 4, bottom=pg.bottom + 2)
+    # The candidate offsets were tuned for 6.8-unit labels; bigger labels also get the same
+    # search in proportion (the tuned offsets stay, so a label near the margin keeps its
+    # tight positions).
+    k = max(1.0, g.label_font / 6.8)
+    base = Search()
+    search = Search(
+        dxs=sorted({*base.dxs, *(d * k for d in base.dxs)}),
+        dys=sorted({*base.dys, *(d * k for d in base.dys)}, key=lambda d: (abs(d), d)),
+        left=2.0,
+        top=g.top - 4,
+        bottom=pg.bottom + 2,
+    )
     placed = place_labels(items, grid, _text_width(font), g.label_font * 1.2, search=search)
     for p in placed:
         x0, y0, x1, y1 = p.box
@@ -464,18 +506,16 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
     return placed, placement_metrics(placed, grid)
 
 
-def _draw_key(ax: Axes, spec: FigureSpec, pg: _Page) -> None:
-    """Continent inset (doubles as the continent legend), or a clade key in the clade style."""
-    g = pg.g
-    if spec.colour_by == "clade":
-        scheme = clade_colour_scheme(spec)
-        for k, (clade, colour) in enumerate(scheme.items()):
-            y = g.bottom - 12 * (len(scheme) - k)
-            ax.add_patch(plt.Rectangle((22, y), 8, 8, color=colour))
-            ax.text(34, y + 4, clade, fontsize=7, va="center")
-        return
+class InsetPlacementError(ValueError):
+    """No clear space on the tree side of the page for the continent inset."""
+
+
+def _inset_polygons() -> tuple[dict[str, list[list[tuple[float, float]]]], float, float]:
+    """Continent outlines scaled to the inset's 140-unit width, origin at the inset's corner;
+    plus the inset's width and height."""
     data = json.loads(resources.files(__package__).joinpath("continents.json").read_text())
-    x0, y0, scale = 22.0, g.bottom - 80, 140.0 / data["size"][0]
+    scale = 140.0 / data["size"][0]
+    out: dict[str, list[list[tuple[float, float]]]] = {}
     for continent in INSET_CONTINENTS:
         path = data["paths"][continent]
         polys: list[list[tuple[float, float]]] = []
@@ -486,12 +526,70 @@ def _draw_key(ax: Axes, spec: FigureSpec, pg: _Page) -> None:
                 polys.append(cur)
             if px < 0:
                 cur = []
-            cur.append((x0 + abs(px) * scale, y0 + abs(py) * scale))
+            cur.append((abs(px) * scale, abs(py) * scale))
         if len(cur) > 2:
             polys.append(cur)
+        out[continent] = polys
+    return out, data["size"][0] * scale, data["size"][1] * scale
+
+
+def place_inset(
+    grid: Grid, w: float, h: float, lowest: float, right: float, pad: float = 2.0
+) -> Box:
+    """The lowest, then leftmost, ``w`` x ``h`` box with no ink under it (``pad`` around it),
+    whose bottom is at most ``lowest`` and right edge at most ``right``.
+
+    A fixed corner put the inset over the tree whenever the tree's lower clades reached the
+    left margin (the af H1 page drew 3,723 branch strokes under it); the shipped pages always
+    found it clear space beside the lower tree. No clear space at all is an error, never an
+    overlap drawn silently.
+    """
+    c = grid.cell
+    occupied = (grid.ink > 0).astype(np.int64)
+    sat = np.zeros((occupied.shape[0] + 1, occupied.shape[1] + 1), dtype=np.int64)
+    sat[1:, 1:] = occupied.cumsum(0).cumsum(1)
+    bw, bh = int(np.ceil((w + 2 * pad) / c)), int(np.ceil((h + 2 * pad) / c))
+    i_last = min(int((lowest + pad) / c) - bh, occupied.shape[0] - bh)
+    j_last = min(int((right + pad) / c) - bw, occupied.shape[1] - bw)
+    if i_last < 0 or j_last < 0:
+        raise InsetPlacementError(f"no room for a {w:.0f} x {h:.0f} inset")
+    i = np.arange(i_last + 1)[:, None]
+    j = np.arange(j_last + 1)[None, :]
+    inked = sat[i + bh, j + bw] - sat[i, j + bw] - sat[i + bh, j] + sat[i, j]
+    clear_rows = np.flatnonzero((inked == 0).any(axis=1))
+    if not len(clear_rows):
+        raise InsetPlacementError(f"no clear {w:.0f} x {h:.0f} space left of x {right:.0f}")
+    bi = int(clear_rows[-1])
+    bj = int(np.flatnonzero(inked[bi] == 0)[0])
+    x0, y0 = bj * c + pad, bi * c + pad
+    return (x0, y0, x0 + w, y0 + h)
+
+
+def _draw_key(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid) -> Box | None:
+    """Continent inset (doubles as the continent legend), or a clade key in the clade style.
+
+    The inset goes in clear space beside the lower tree and is then inked on the grid, so the
+    strain and aa labels placed after it keep off it."""
+    g = pg.g
+    if spec.colour_by == "clade":
+        scheme = clade_colour_scheme(spec)
+        for k, (clade, colour) in enumerate(scheme.items()):
+            y = g.bottom - 12 * (len(scheme) - k)
+            ax.add_patch(plt.Rectangle((22, y), 8, 8, color=colour))
+            ax.text(34, y + 4, clade, fontsize=7, va="center")
+        return None
+    polys, w, h = _inset_polygons()
+    box = place_inset(grid, w, h, lowest=pg.bottom - g.inset_gap, right=pg.tree_right)
+    for continent, parts in polys.items():
         ax.add_collection(
-            PolyCollection(polys, facecolors=CONTINENT_COLOURS[continent], edgecolors="none")
+            PolyCollection(
+                [[(box[0] + x, box[1] + y) for x, y in poly] for poly in parts],
+                facecolors=CONTINENT_COLOURS[continent],
+                edgecolors="none",
+            )
         )
+    grid.add_box(box)
+    return box
 
 
 def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
@@ -512,10 +610,11 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     brackets_right = _draw_brackets(ax, spec, pg, matrix_right + g.clade_gap)
     _draw_hz_rules(ax, spec, pg, brackets_right)
     _draw_dash_bars(ax, spec, pg, brackets_right)
+    inset = _draw_key(ax, spec, pg, grid)
     strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid)
     placed, metrics = _draw_labels(ax, spec, pg, grid, strain_boxes)
-    _draw_key(ax, spec, pg)
-    ax.text(g.tree_left + 30, 16, spec.title, fontsize=15, ha="left", va="center")
+    # The shipped pages start the title just left of the tree's root (H1 4, H3 4 units).
+    ax.text(g.tree_left - 4, 16, spec.title, fontsize=g.title_font, ha="left", va="center")
     names = _draw_leaf_names(ax, spec, pg) if spec.leaf_names else None
 
     # Type 42 fonts carry a Unicode map, so viewers can search the name layer; matplotlib's
@@ -523,7 +622,7 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     with plt.rc_context({"pdf.fonttype": 42} if spec.leaf_names else {}):
         fig.savefig(pdf_path, metadata={"CreationDate": None, "Creator": "acmacs-f"})
     plt.close(fig)
-    return Drawn(placed, metrics, strain_report, continents_not_in_legend(spec), names)
+    return Drawn(placed, metrics, strain_report, continents_not_in_legend(spec), names, inset)
 
 
 def with_centre_column(g: Geometry, width: float = 14.0) -> Geometry:
