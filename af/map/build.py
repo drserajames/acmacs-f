@@ -65,6 +65,7 @@ from af.map.viewport import from_y_down
 from af.store.busy import ReadGuard
 from af.store.ref import StoreError, StoreRef
 from af.store.store import Store
+from af.util.fonts import FigureFonts, load_fonts
 from af.util.subtypes import Subtype
 
 FloatArray = NDArray[np.float64]
@@ -438,6 +439,7 @@ def build_map(
     colours: StoreColours | None = None,
     sera_markers: list[Marker] | None = None,
     guard: ReadGuard | None = None,
+    fonts: FigureFonts | None = None,
 ) -> MapResult:
     """Build every window of one map. Raises :class:`BuildError` with the folder named.
 
@@ -675,6 +677,8 @@ def build_map(
 
     size = config.frame_size(chart.info.get("V", ""), chart.info.get("A", ""))
     title_base = map_title(chart, cfg.title)
+    if fonts is not None:  # the font files the figure is drawn in (rule 5)
+        inputs.update(fonts.inputs())
     provenance: dict[str, Any] = {"inputs": inputs}
     if decisions:
         provenance["decisions"] = decisions
@@ -906,6 +910,10 @@ def build(
         markers = (
             read_markers(config.af_data / SERA_MARKERS) if config.af_data is not None else None
         )
+        # The whole drawing, label placement included, runs in the round's fonts (af.util.fonts).
+        fonts = load_fonts(config.figures) if config.figures is not None else None
+        if fonts is not None:
+            stack.enter_context(fonts.context())
         results = []
         for cfg in wanted:
             result = build_map(
@@ -919,6 +927,7 @@ def build(
                 colours=colours if config.colour_source(cfg) == "store" else None,
                 sera_markers=markers,
                 guard=guard,
+                fonts=fonts,
             )
             results.append(result)
             flags = f" flags={len(result.flags)}" if result.flags else ""
@@ -963,7 +972,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             only=args.only,
             ignore_busy=args.ignore_busy,
         )
-    except (BuildError, StoreError, ValueError, OSError) as exc:
+    except (BuildError, StoreError, ValueError, OSError) as exc:  # FontError is a ValueError
         print(f"af.map.build: {exc}", file=sys.stderr)
         return 1
     print(f"{len(results)} map(s), {sum(len(r.figures) for r in results)} figures -> {args.out}")

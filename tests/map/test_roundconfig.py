@@ -10,6 +10,7 @@ from af.map.roundconfig import ConfigError, load_maps_config
 GOOD = """
 vaccine_list = "vaccines.py"
 af_data = "shared/acmacs-f-data"
+figures = "figures.toml"
 vaccine_defaults = "shared/vaccine-defaults.toml"
 
 [defaults]
@@ -233,6 +234,14 @@ def test_af_data_is_required(tmp_path: Path) -> None:
     text = GOOD.replace('af_data = "shared/acmacs-f-data"\n', "")
     with pytest.raises(ConfigError, match="af_data .* is required"):
         load_maps_config(write(tmp_path, text))
+
+
+def test_figures_is_required_and_resolves_against_the_file(tmp_path: Path) -> None:
+    """The round's figures.toml names the font files every map is drawn in."""
+    config, _ = load_maps_config(write(tmp_path, GOOD))
+    assert config.figures == (tmp_path / "figures.toml").resolve()
+    with pytest.raises(ConfigError, match="figures .* is required"):
+        load_maps_config(write(tmp_path, GOOD.replace('figures = "figures.toml"\n', "")))
 
 
 def test_colouring_may_not_carry_its_own_af_data(tmp_path: Path) -> None:
