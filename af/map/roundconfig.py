@@ -88,6 +88,7 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
             "figures",
             "titles",
             "legends",
+            "label_abbreviations",
         },
         str(path),
     )
@@ -177,6 +178,9 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
             figures=_path(data["figures"], base),
             titles=_titles(data["titles"]),
             legends=tuple(legends),
+            label_abbreviations=_path(data["label_abbreviations"], base)
+            if "label_abbreviations" in data
+            else None,
         )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
