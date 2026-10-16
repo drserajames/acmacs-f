@@ -46,8 +46,9 @@ class Look:
     antigen_radius: float = 0.0125
     mark_scale: float = 2.0  # a marked point's size over a plain one's
     serum_half_side: float = 0.0125
-    title_size: float = 25.0
-    label_size: float = 22.0
+    title_size: float = 25.5
+    label_size: float = 30.0
+    label_halo: float = 1.22  # width of the white outline round each label's glyphs
     legend_row_height: float = 0.0275
     legend_char_width: float = 0.0105
     legend_pad: float = 0.0125
@@ -145,9 +146,22 @@ def legend_box(scene: Scene, look: Look) -> Box:
     )
 
 
+def text_size(text: str, size: float, *, bold: bool = False) -> tuple[float, float]:
+    """Width and height of ``text`` at ``size`` points in the CURRENT matplotlib font (the
+    figure fonts' context while a map is built, af.util.fonts), as matplotlib lays it out."""
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import text_to_path
+
+    prop = FontProperties(size=size, weight="bold" if bold else "normal")
+    width, height, _ = text_to_path.get_text_width_height_descent(text, prop, ismath=False)
+    return float(width), float(height)
+
+
 def title_box(scene: Scene, look: Look) -> Box:
-    width = min(0.95, 0.024 + len(scene.title) * look.title_size * 0.6 / look.page_points)
-    return Box("title", 0.0, 0.0, width, 0.06)
+    """The title's room, measured in the figure font: an estimate from the character count
+    ran up to 13 u short of the drawn title, which then sat on points (style 08-20)."""
+    width, _ = text_size(scene.title, look.title_size, bold=True)
+    return Box("title", 0.0, 0.0, min(0.95, 0.024 + width / look.page_points), 0.06)
 
 
 def draw_pdf(
@@ -252,6 +266,8 @@ def draw_scene(
         if alpha is not None:
             style["alpha"] = alpha
         ax.add_patch(_marker_patch(p.marker, x, y, s, style))
+    from matplotlib import patheffects
+
     for lab in labels.values():
         ax.text(
             lab.box[0],
@@ -261,6 +277,9 @@ def draw_scene(
             va="bottom",
             ha="left",
             zorder=8,
+            path_effects=[
+                patheffects.withStroke(linewidth=look.label_halo * scale, foreground="white")
+            ],
         )
     if title:
         # The shipped maps' title: baseline 37.5 and left edge 19 page units from the top-left

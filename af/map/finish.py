@@ -24,6 +24,7 @@ from af.map.render import (
     draw_pdf,
     legend_box,
     recent_hidden,
+    text_size,
     title_box,
 )
 from af.map.style import ColourScheme, PointIn, Scene, Window, style_points
@@ -96,11 +97,15 @@ def finish_map(
     page = frame.page(xy)
     ids = [p.id for p in scene.points if p.mark is not None and p.shown]
     rows = [i for i, p in enumerate(scene.points) if p.mark is not None and p.shown]
+    texts = [scene.points[i].mark or "" for i in rows]
+    sizes = [text_size(t, look.label_size) for t in texts]  # in the figure font
     placed = place_labels(
         page[rows],
-        [scene.points[i].mark or "" for i in rows],
+        texts,
         page[shown],
         furniture,
+        sizes=[(w / look.page_points, h / look.page_points) for w, h in sizes],
+        mark_radius=look.antigen_radius * look.mark_scale,
     )
     labels = dict(zip(ids, placed, strict=True))
     draw_pdf(scene, frame, labels, out_pdf, look, styles)
