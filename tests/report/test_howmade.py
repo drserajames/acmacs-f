@@ -415,6 +415,9 @@ def test_the_map_steps_warnings_are_listed_verbatim_per_window_and_counted(tmp_p
     flagged["provenance"]["decisions"]["painted_by_placement"] = [placed]
     flagged["provenance"]["decisions"]["unpainted_clades"] = [{"warning": WARNING}]
     assert howmade.figure_warnings(flagged) == [WARNING, "WARNING: placed."]
+    vaccines = [{"name": "kept", "warning": "WARNING: kept."}, {"name": "recoloured"}]  # Q184
+    flagged["provenance"]["decisions"]["vaccine_colours"] = vaccines
+    assert howmade.figure_warnings(flagged) == [WARNING, "WARNING: placed.", "WARNING: kept."]
     del figures[1]["map"]["window"]  # a window the figure doesn't name is counted, never "?"
     note = howmade.map_note("labx-hi", figures, store, None, [])
     assert "the warned figure's window" in note.missing

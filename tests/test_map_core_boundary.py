@@ -89,7 +89,8 @@ MIXED: dict[str, tuple[set[str], set[str], str]] = {
 
 AF_SIDE = {
     "af/map/build.py", "af/map/colouring.py", "af/map/config.py", "af/map/i7.py",
-    "af/map/matching.py", "af/map/roundconfig.py", "af/map/vaccines.py",
+    "af/map/matching.py", "af/map/roundconfig.py", "af/map/vaccine_colours.py",
+    "af/map/vaccines.py",
 }  # fmt: skip
 
 

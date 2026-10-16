@@ -646,6 +646,24 @@ def build_map(
         decisions["vaccine_rules_unused_optional"] = list(vrep.unused_optional_rules)
     if disable or choose:
         decisions["vaccines"] = vaccine_rule_records(disable, choose, n_defaults, vrep.used_rules)
+    vaccine_flags: list[str] = []
+    if colours is not None and vrep.marks:
+        # Sarah, Q184: a vaccine is coloured by its named strain's original clade, before
+        # passage mutation. Store colours only: a stand-in chart's rows are the round's own.
+        # Recoloured after the layout's curation, which reads the colours before vaccines exist.
+        try:
+            found = colours.for_vaccines(
+                chart, [(m.antigen, m.passage_class) for m in vrep.marks], dots, cfg.clade_scheme
+            )
+        except (MapColouringError, ValueError) as exc:
+            raise BuildError(f"{cfg.folder}: vaccine colours: {exc}") from exc
+        recoloured = list(dots)
+        for v in found:
+            recoloured[v.antigen], labels[v.antigen] = v.style, v.labels
+            sequenced[v.antigen] = sequenced[v.antigen] or v.style.colour is not None
+        dots = recoloured
+        decisions["vaccine_colours"] = [v.record() for v in found]
+        vaccine_flags = [v.warning for v in found if v.warning]
 
     points = chart_points(chart, xy, labels=labels, sequenced=sequenced, hidden=hidden)
     unpainted = unpainted_clades(chart, points, dots, scheme.name)
@@ -693,7 +711,7 @@ def build_map(
         time.monotonic() - started,
         dict(decisions.get("lineage_minority", {}).get("other", {})),
         non_ferret_count,
-        tuple(u["warning"] for u in [*unpainted, *placed]),
+        (*(u["warning"] for u in [*unpainted, *placed]), *vaccine_flags),
     )
 
 
