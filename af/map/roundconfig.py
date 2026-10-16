@@ -24,6 +24,7 @@ from af.map.config import (
     Defaults,
     FrameConfig,
     HideConfig,
+    LegendConfig,
     MapConfig,
     MapsConfig,
     MoveConfig,
@@ -86,6 +87,7 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
             "af_data",
             "figures",
             "titles",
+            "legends",
         },
         str(path),
     )
@@ -126,6 +128,22 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
         frames.append(FrameConfig(f["subtype"], float(f["size"]), f.get("assay")))
     if not frames:
         raise ConfigError("frames: at least one frame size is needed")
+    legends = []
+    for i, g in enumerate(data.get("legends", ())):
+        keys = ("text_size", "row_pitch", "text_left", "padding")  # LegendConfig's order
+        _known(g, {"subtype", "assay", *keys}, f"legends[{i}]")
+        if missing := [k for k in keys if k not in g]:
+            raise ConfigError(f"legends[{i}]: missing {', '.join(missing)}")
+        legends.append(
+            LegendConfig(
+                g["subtype"],
+                text_size=float(g["text_size"]),
+                row_pitch=float(g["row_pitch"]),
+                text_left=float(g["text_left"]),
+                padding=float(g["padding"]),
+                assay=g.get("assay"),
+            )
+        )
 
     maps = []
     for m in data.get("maps", ()):
@@ -158,6 +176,7 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
             af_data=_path(data["af_data"], base) if "af_data" in data else None,
             figures=_path(data["figures"], base),
             titles=_titles(data["titles"]),
+            legends=tuple(legends),
         )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc

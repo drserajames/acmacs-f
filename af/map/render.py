@@ -49,9 +49,21 @@ class Look:
     title_size: float = 25.5
     label_size: float = 30.0
     label_halo: float = 1.22  # width of the white outline round each label's glyphs
-    legend_row_height: float = 0.0275
-    legend_char_width: float = 0.0105
-    legend_pad: float = 0.0125
+    legend_pad: float = 0.0125  # the legend box's distance from the page's left and bottom
+    # The legend, in points of the 800-point page, as the shipped report draws it (style 08-07/08,
+    # measured from its figures): text size and row pitch, the text's and the marker's distance
+    # from the box's left edge, the marker's size and outline, the gap before the count column
+    # (in units of the text size), the count column's inset from the box's right edge, and the
+    # box height beyond its rows. B/Vic's legend is larger; a round sets that per subtype.
+    legend_text_size: float = 12.23
+    legend_row_pitch: float = 24.5
+    legend_text_left: float = 43.0
+    legend_marker_left: float = 17.5
+    legend_marker_size: float = 15.0
+    legend_marker_outline: float = 1.0
+    legend_count_gap: float = 1.0
+    legend_count_inset: float = 10.0
+    legend_padding: float = 2.26
     # Opt-in, for other figures than the report (pyacmapcheck draws in R's style); the defaults
     # are the report's look.
     alpha: float | None = None  # every point's fill and outline opacity; None: opaque
@@ -129,14 +141,14 @@ def egg_path(x: float, y: float, r: float) -> Any:
 
 
 def legend_box(scene: Scene, look: Look) -> Box:
-    """Where the legend will be drawn, bottom-left; the frame search and label placer avoid it."""
-    rows = len(scene.legend)
-    text = max((len(t) for t, _, _ in scene.legend), default=0)
-    count = max((len(str(n)) for _, _, n in scene.legend), default=0)
-    width = (
-        look.legend_pad * 4 + look.legend_row_height + (text + count + 2) * look.legend_char_width
-    )
-    height = rows * look.legend_row_height + 2 * look.legend_pad
+    """Where the legend will be drawn, bottom-left; the frame search and label placer avoid it.
+    Its width is the widest row text and the widest count, measured in the figure font."""
+    size, pts = look.legend_text_size, look.page_points
+    text = max((text_size(t, size)[0] for t, _, _ in scene.legend), default=0.0)
+    count = max((text_size(str(n), size)[0] for _, _, n in scene.legend), default=0.0)
+    gap = look.legend_count_gap * size
+    width = (look.legend_text_left + text + gap + count + look.legend_count_inset) / pts
+    height = (len(scene.legend) * look.legend_row_pitch + look.legend_padding) / pts
     return Box(
         "legend",
         look.legend_pad,
@@ -339,23 +351,26 @@ def _draw_legend(
             zorder=10,
         )
     )
-    h = look.legend_row_height
-    font = h * look.page_points * 0.62 * scale
+    pts = look.page_points
+    font = look.legend_text_size * scale
+    first = box.top + (look.legend_padding / 2 + look.legend_row_pitch / 2) / pts
     for k, (text, colour, count) in enumerate(scene.legend):
-        y = box.top + look.legend_pad + h * (k + 0.5)
+        y = first + k * look.legend_row_pitch / pts
         ax.add_patch(
             Circle(
-                (box.left + look.legend_pad + h / 2, y),
-                h * 0.35,
+                (box.left + look.legend_marker_left / pts, y),
+                look.legend_marker_size / 2 / pts,
                 fc=colour,
                 ec="black",
-                lw=1.0 * scale,
+                lw=look.legend_marker_outline * scale,
                 zorder=11,
             )
         )
-        ax.text(box.left + 2 * look.legend_pad + h, y, text, fontsize=font, va="center", zorder=11)
         ax.text(
-            box.right - look.legend_pad,
+            box.left + look.legend_text_left / pts, y, text, fontsize=font, va="center", zorder=11
+        )
+        ax.text(
+            box.right - look.legend_count_inset / pts,
             y,
             str(count),
             fontsize=font,
