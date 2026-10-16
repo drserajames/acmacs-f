@@ -683,15 +683,51 @@ def _same_content(note: Note, folder: str, store_use: dict[str, Any] | None) -> 
             )
 
 
+DECLARATION_FIELDS = ("ruling", "dataset", "version", "text", "file")
+
+
+def load_declarations(path: Path) -> list[dict[str, Any]]:
+    """The round's declarations about chain versions: TOML ``[[declaration]]`` tables with
+    ``ruling``, ``dataset``, ``version``, ``text`` and ``file`` (where it is set out in full)."""
+    declarations = tomllib.loads(path.read_text()).get("declaration", [])
+    for n, entry in enumerate(declarations, 1):
+        if lacking := [k for k in DECLARATION_FIELDS if not entry.get(k)]:
+            raise ValueError(f"{path}: declaration {n} lacks {', '.join(lacking)}")
+    return declarations
+
+
+def _declarations(
+    note: Note, chain_input: dict[str, Any] | None, declarations: list[dict[str, Any]]
+) -> None:
+    """What the round declared about this map's chain, quoted with the file that sets it out.
+    A declaration made about another version of the chain is not applied, and the declaration
+    this version lacks is counted MISSING."""
+    if not chain_input:
+        return
+    mine = [d for d in declarations if d["dataset"] == chain_input.get("dataset")]
+    if not mine:
+        return
+    note.section("Declared")
+    for d in mine:
+        if d["version"] == chain_input.get("version"):
+            note.item(f"{d['ruling']}: {d['text']} (in full: {d['file']})")
+        else:
+            gap = note.gap(f"the {d['ruling']} declaration for this version", d["file"])
+            note.item(f"{d['ruling']}: declared for version {d['version']}, not for this map's "
+                      f"{chain_input.get('version')}, so not applied; {gap}")  # fmt: skip
+
+
 def map_note(
     folder: str, figures: list[dict[str, Any]], store: Store | None,
     cfg: dict[str, Any] | None, rows: list[dict[str, Any]],
     reference_records: Path | None = None, dates: VaccineDates | None = None,
     store_use: dict[str, Any] | None = None, drawn_by: dict[str, Any] | None = None,
+    declarations: list[dict[str, Any]] | None = None,
 ) -> Note:  # fmt: skip
     """The note for one map: ``figures`` are its window figures' I7 documents; ``store_use`` is
     the build record's ``store`` (what the report's provenance check found); ``drawn_by`` its
-    ``af`` (the af that drew the figures)."""
+    ``af`` (the af that drew the figures); ``declarations`` the round's
+    (:func:`load_declarations`)."""
     note = Note(folder)
     note.lines += [
         f"# {folder}: how this map was made",
@@ -754,6 +790,7 @@ def map_note(
     _comparison(note, rows)
     note.section("Against the previous version")
     _continuity(note, store, files, reference_records)
+    _declarations(note, chain_input, declarations or [])
     _warnings(note, figures)
     note.lines += ["", f"_{len(note.missing)} fact(s) MISSING"
                    + (f": {'; '.join(note.missing)}._" if note.missing else "._")]  # fmt: skip
@@ -764,6 +801,7 @@ def write_notes(
     record: dict[str, Any], store: Store | None, maps_config: dict[str, Any] | None,
     comparison: list[dict[str, Any]], out: Path, *, ignore_busy: bool = False,
     reference_records: Path | None = None, dates: VaccineDates | None = None,
+    declarations: list[dict[str, Any]] | None = None,
 ) -> list[Note]:  # fmt: skip
     """One note per map folder in the build record, and an index; returns the notes.
 
@@ -796,6 +834,7 @@ def write_notes(
                 dates,
                 record.get("store"),
                 record.get("af"),
+                declarations,
             )  # fmt: skip
             for folder in sorted(by_folder)
         ]
@@ -840,6 +879,11 @@ def main(argv: list[str] | None = None) -> int:
         "--ignore-busy", action="store_true",
         help="read the store even while a batch is publishing (diagnosis only; the index says so)",
     )  # fmt: skip
+    parser.add_argument(
+        "--declarations", type=Path,
+        help="the round's declarations about chain versions (TOML [[declaration]] tables: ruling, "
+        "dataset, version, text, file); each map's note quotes those about its chain",
+    )  # fmt: skip
     args = parser.parse_args(argv)
     record = json.loads(args.record.read_text())
     store = Store.open(args.store) if args.store else None
@@ -856,6 +900,7 @@ def main(argv: list[str] | None = None) -> int:
     notes = write_notes(
         record, store, maps_config, comparison, args.out, ignore_busy=args.ignore_busy,
         reference_records=args.reference_records, dates=dates,
+        declarations=load_declarations(args.declarations) if args.declarations else None,
     )  # fmt: skip
     print(f"{len(notes)} notes, {sum(len(n.missing) for n in notes)} fact(s) MISSING -> "
           f"{args.out}", file=sys.stderr)  # fmt: skip
