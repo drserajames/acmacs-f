@@ -18,6 +18,7 @@ from af.report.config import load
 from af.report.provenance import ProvenanceError
 from af.serology.outputs import OutputsReport
 from af.store import Provenance, Store, StoreRef, read_manifest
+from af.util.artefacts import sha256_path
 
 from .test_render import _coastline as coastline_file  # the renderer tests' invented shapefile
 
@@ -64,6 +65,22 @@ def _doc() -> dict[str, Any]:
     }  # fmt: skip
 
 
+H3_LOOK = """
+[geo.h3]
+packing = "ae-rings"
+coloured_edge = "none"
+coloured_edge_width = 0
+uncoloured_edge_width = 0.5
+"""
+
+
+def _style(tmp_path: Path, tables: str = H3_LOOK) -> Path:
+    """The round's figure-style file with the geo looks (an empty [geo] for no slots)."""
+    path = tmp_path / "figures.toml"
+    path.write_text(tables or "[geo]\n")
+    return path
+
+
 def _geo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Store, list[StoreRef], Path]:
     """Run build_geo over a test store, its reads stood in for: serology, h3 sequences and the
     h3 clades labelled from them, as StoreColours' join would have read them."""
@@ -89,7 +106,7 @@ def _geo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Store, list[S
     geo_build.build_geo(
         store, tmp_path, tmp_path, tmp_path, coastline_file(tmp_path),
         geo_build.Month(2021, 1), geo_build.Month(2021, 2), figures, tmp_path / "work",
-        {"h3": "h3 test"}, {"A(H3N2)": "h3"}, created=T0,
+        {"h3": "h3 test"}, {"A(H3N2)": "h3"}, _style(tmp_path), created=T0,
     )  # fmt: skip
     return store, [serology, sequences, clades], figures
 
@@ -103,12 +120,16 @@ def test_geo_figures_carry_created_and_the_store_versions_read(
     for month in ("2021-01", "2021-02"):
         i7 = json.loads((figures / "geo" / "h3" / month / "af" / "figure.i7.json").read_text())
         assert i7["provenance"]["created"] == T0.isoformat()
+        # drawn with its slot's look from the figure-style file, both recorded (rule 5)
+        assert i7["provenance"]["look"]["coloured_edge"] == "none"
+        assert i7["provenance"]["look"]["uncoloured_edge_width"] == 0.5
+        assert i7["provenance"]["figure_config"]["sha256"] == sha256_path(tmp_path / "figures.toml")
         assert i7["provenance"]["store_refs"] == [r.to_json() for r in refs]
     with pytest.raises(ValueError, match="time zone"):
         geo_build.build_geo(
             Store.open(tmp_path / "store"), tmp_path, tmp_path, tmp_path, tmp_path,
             geo_build.Month(2021, 1), geo_build.Month(2021, 1), figures, tmp_path / "work",
-            {}, {}, created=dt.datetime(2026, 9, 1),  # noqa: DTZ001 (the case refused)
+            {}, {}, _style(tmp_path, ""), created=dt.datetime(2026, 9, 1),  # noqa: DTZ001
         )  # fmt: skip
 
 
