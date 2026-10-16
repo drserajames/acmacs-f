@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from af.report import howmade
 from af.store import Provenance, Store, StoreRef
 
@@ -523,3 +525,65 @@ def test_figures_drawn_by_a_working_tree_say_it_is_not_a_release(tmp_path: Path)
         "Figures drawn by af `0123456789ab` (NOT a release, with uncommitted changes)"
         in "\n".join(note.lines)
     )
+
+
+def _declarations_file(tmp_path: Path, version: str) -> Path:
+    path = tmp_path / "declarations.toml"
+    path.write_text(
+        "[[declaration]]\n"
+        'ruling = "Q1 a"\n'
+        'dataset = "labx/hi/merged"\n'
+        f'version = "{version}"\n'
+        'text = "3 of 5 points sit where a lower position exists; furthest an antigen, 2.50 u"\n'
+        'file = "declarations/a-declaration.md"\n'
+        "\n[[declaration]]\n"
+        'ruling = "Q1 a"\n'
+        'dataset = "laby/hi/merged"\n'
+        f'version = "{"2" * 16}"\n'
+        'text = "another map"\n'
+        'file = "declarations/a-declaration.md"\n'
+    )
+    return path
+
+
+def test_a_declaration_about_the_maps_chain_version_is_quoted_with_its_file(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "store")
+    ref = _chain(store, full=True)
+    declarations = howmade.load_declarations(_declarations_file(tmp_path, ref.version))
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [],
+                            declarations=declarations)  # fmt: skip
+    text = "\n".join(note.lines)
+    assert "## Declared" in text
+    assert ("- Q1 a: 3 of 5 points sit where a lower position exists; furthest an antigen, 2.50 "
+            "u (in full: declarations/a-declaration.md)") in text  # fmt: skip
+    assert "another map" not in text
+    assert not [m for m in note.missing if "declaration" in m]
+
+
+def test_a_declaration_about_another_version_is_not_applied_and_counted_missing(
+    tmp_path: Path,
+) -> None:
+    store = Store.create(tmp_path / "store")
+    ref = _chain(store, full=True)
+    declarations = howmade.load_declarations(_declarations_file(tmp_path, "3" * 16))
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [],
+                            declarations=declarations)  # fmt: skip
+    text = "\n".join(note.lines)
+    other = "3" * 16
+    assert f"declared for version {other}, not for this map's {ref.version}, so not applied" in text
+    assert "points sit where" not in text
+    assert "the Q1 a declaration for this version" in note.missing
+
+
+def test_a_map_with_no_declaration_has_no_declared_section(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "store")
+    ref = _chain(store, full=True)
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [])
+    assert "## Declared" not in "\n".join(note.lines)
+
+
+def test_a_declaration_lacking_a_field_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "declarations.toml"
+    path.write_text('[[declaration]]\nruling = "Q1 a"\ndataset = "labx/hi/merged"\ntext = "t"\n')
+    with pytest.raises(ValueError, match="declaration 1 lacks version, file"):
+        howmade.load_declarations(path)
