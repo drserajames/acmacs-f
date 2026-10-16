@@ -104,3 +104,17 @@ def test_a_label_keeps_off_another_vaccines_mark() -> None:
     assert any(
         _on_circle(p.box, a, 0.025) for p in unguarded for a in anchors
     )  # the guard mattered
+
+
+def test_furniture_outranks_a_neighbouring_mark() -> None:
+    """The legend is drawn over labels: a label rather touches another vaccine's mark than hides
+    under the legend."""
+    from af.map.viewport import Box
+
+    legend = Box("legend", 0.0, 0.0, 0.47, 1.0)  # everything left of the vaccine
+    anchors = np.array([[0.5, 0.5], [0.56, 0.5], [0.5, 0.56], [0.5, 0.44]])  # boxed in on 3 sides
+    texts = ["Ex/21-cell", "Ex/22-cell", "Ex/23-cell", "Ex/24-cell"]
+    (first, *_) = place_labels(
+        anchors, texts, anchors, [legend], sizes=[(0.1, 0.035)] * 4, mark_radius=0.025
+    )
+    assert first.box[0] >= legend.right
