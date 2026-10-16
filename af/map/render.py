@@ -25,17 +25,21 @@ from af.map.style import MARKERS, Scene, ScenePoint
 from af.map.viewport import Box, Frame
 
 GREY = "#cccccc"  # an antigen with no colour (unpainted, or unsequenced)
-GREY_WINDOW = "#bebebe"  # a painted antigen outside the map's window, greyed by it
+GREY_WINDOW = "#bebebe"  # an antigen outside the map's window, greyed by it (vaccines too)
+OPEN = "transparent"  # no fill, GREY outline: a reference antigen with no colour
 SERUM_OUTLINE = "#cccccc"  # as the shipped report maps
 
 
 def grey_of(p: ScenePoint) -> str | None:
-    """The grey a point is drawn in, or None for its own colour. The report draws two greys, as
-    the shipped maps did: a darker one for an antigen the window greys (it has a colour, the
-    window hides it) and a lighter one for an antigen with no colour at all."""
+    """The grey a point is drawn in, or None for its own colour. As the shipped maps (kateri's
+    default point specs and its window style): a darker grey for an antigen the window greys,
+    a lighter one for a test antigen with no colour, and no fill (:data:`OPEN`, a GREY ring) for
+    a reference antigen with no colour. A vaccine with no colour is filled, as it was marked."""
     if p.greyed:
         return GREY_WINDOW
-    return GREY if p.colour is None else None
+    if p.colour is None:
+        return OPEN if p.reference and not p.mark else GREY
+    return None
 
 
 @dataclass(frozen=True)
@@ -238,12 +242,13 @@ def draw_scene(
             }
         else:
             grey = grey_of(p)
-            edge = "black" if p.mark else (grey or "black")
+            fill = "none" if grey == OPEN else (grey or p.colour)
+            edge = "black" if p.mark else (GREY if grey == OPEN else (grey or "black"))
             s = look.antigen_radius * (look.mark_scale if p.mark else 1.0)
             if own.scale is not None:
                 s *= own.scale
             style = {
-                "fc": own.fill or grey or p.colour,
+                "fc": own.fill or fill,
                 "ec": own.outline or edge,
                 "lw": (own.outline_width if own.outline_width is not None else 1.0) * scale,
                 "zorder": z,
