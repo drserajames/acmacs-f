@@ -272,6 +272,62 @@ def test_clade_tables_behind_the_sequence_store_are_reported(tmp_path: Path, syn
     assert counts.clades_behind == {"h3": (None, current)}
 
 
+def test_a_serum_is_matched_as_an_antigen_row_is(tmp_path: Path, syn: Any) -> None:
+    """match_row and indexes_from_store are the join's own matcher (07-chains, Q166/Q176): an
+    antigen row gets what the join gave it, and a serum row is put to the matcher the same way."""
+    from af.seq.matching import read_passage_rules
+    from af.seq.matching_rules import MatchingRules
+    from af.serology import query
+    from af.serology.joins import (
+        indexes_from_store,
+        link_from_store,
+        match_row,
+        passage_class_column,
+    )
+
+    store = Store.create(tmp_path / "store")
+    serum = {"name": syn.virus("EXAMPLETOWN", 2), "serum_id": "S-1", "passage": "SIAT1",
+             "passage_class": "cell"}  # fmt: skip
+    nothing = {"name": syn.virus("NEVERTOWN", 3), "serum_id": "S-2"}
+    here = {"name": syn.virus("EXAMPLETOWN", 1), "passage": "MDCK1", "passage_class": "cell",
+            "date": "2021-01-05"}  # fmt: skip
+    tables = [syn.table("h3-hi-labx-20210304", [here], [serum, nothing], [[["80"], ["40"]]])]
+    publish(store, tables, Manifest.from_tables(tables, inputs=[]), _provenance("tables-test"))
+    update(store, syn.rules)
+    _sequences(store, tmp_path)
+    passages = tmp_path / "passage_classes.tsv"
+    passages.write_text("pattern\tclass\treason\nSIAT\tcell\ttest\n")
+    rules = MatchingRules(
+        tuple(read_passage_rules(passages)), frozenset({"LABX"}), {}, {}, (), (),
+        passage_matcher(tmp_path),
+    )  # fmt: skip
+    con = query.connect(store.resolve(store.current("serology", "all")))
+    counts = link_from_store(con, store, rules, with_clades=False)
+    indexes, read = indexes_from_store(store, rules)
+    assert {d: ref.to_json() for d, ref in read.items()} == counts.refs["sequences"]
+
+    def rows(sql: str) -> list[dict[str, Any]]:
+        cursor = con.execute(sql)
+        names = [d[0] for d in cursor.description]
+        return [dict(zip(names, v, strict=True)) for v in cursor.fetchall()]
+
+    (antigen,) = rows("SELECT a.*, t.subtype, t.lab AS table_lab FROM antigens a JOIN tables t "
+                      "USING (table_id)")  # fmt: skip
+    (joined,) = rows("SELECT epi_isl, accession FROM antigen_sequences")
+    found = match_row(antigen, indexes, passage_class_column)
+    assert found is not None and found.chosen is not None
+    chosen = found.chosen
+    assert {"epi_isl": chosen.epi_isl, "accession": chosen.accession} == joined
+    assert joined == {"epi_isl": "EPI_ISL_1", "accession": "ACC1"}
+
+    sera = rows("SELECT s.*, t.subtype, t.lab AS table_lab FROM sera s JOIN tables t "
+                "USING (table_id) ORDER BY s.position")  # fmt: skip
+    matched, unmatched = (match_row(r, indexes, passage_class_column) for r in sera)
+    assert matched is not None and matched.chosen is not None
+    assert (matched.method, matched.chosen.epi_isl) == ("name", "EPI_ISL_2")
+    assert unmatched is not None and unmatched.chosen is None  # no sequence: none, never a guess
+
+
 def test_rule_tables_reach_the_matcher(tmp_path: Path, syn: Any) -> None:
     """make_geo_and_stat must pass its rule tables on, not accept and drop them: a location
     equivalent whose GISAID spelling no stored sequence has is refused by the join, so it can
