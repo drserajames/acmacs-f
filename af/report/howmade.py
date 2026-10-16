@@ -435,11 +435,12 @@ def _vaccines(
 
 def figure_warnings(doc: dict[str, Any]) -> list[str]:
     """The warnings the map step recorded in a figure, verbatim (Sarah: unpainted points, and
-    points painted by tree placement alone, Q183 b)."""
+    points painted by tree placement alone, Q183 b; vaccines that kept their own colour, Q184)."""
     decisions = doc.get("provenance", {}).get("decisions", {})
     records = [
         *(decisions.get("unpainted_clades") or []),
         *(decisions.get("painted_by_placement") or []),
+        *(decisions.get("vaccine_colours") or []),  # only a vaccine that kept its colour (Q184)
     ]
     return [str(r["warning"]) for r in records if r.get("warning")]
 
