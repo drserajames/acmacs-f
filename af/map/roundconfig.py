@@ -75,7 +75,16 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
         data = tomllib.load(f)
     _known(
         data,
-        {"defaults", "frames", "maps", "vaccine_list", "vaccine_defaults", "colouring", "af_data"},
+        {
+            "defaults",
+            "frames",
+            "maps",
+            "vaccine_list",
+            "vaccine_defaults",
+            "colouring",
+            "af_data",
+            "figures",
+        },
         str(path),
     )
 
@@ -129,6 +138,10 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
         )
     if "vaccine_list" not in data:
         raise ConfigError(f"{path}: vaccine_list (the curated list) is required")
+    if "figures" not in data:
+        raise ConfigError(
+            f"{path}: figures (the round's figures.toml, naming the font files) is required"
+        )
     try:
         config = MapsConfig(
             defaults=defaults,
@@ -139,6 +152,7 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
             else None,
             colouring=_colouring(data.get("colouring"), base),
             af_data=_path(data["af_data"], base) if "af_data" in data else None,
+            figures=_path(data["figures"], base),
         )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc

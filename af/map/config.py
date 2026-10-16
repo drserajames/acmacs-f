@@ -273,6 +273,10 @@ class MapsConfig:
     # matcher's rule tables for store colouring, the non-ferret sera markers). Required by the
     # round config loader; None only for a config built in code that reads nothing from it.
     af_data: Path | None = None
+    # The round's figures.toml (af.util.fonts): the font files every figure is drawn in.
+    # Required by the round config loader; None only for a config built in code, which then
+    # draws in matplotlib's own default font.
+    figures: Path | None = None
 
     def __post_init__(self) -> None:
         store = [m for m in self.maps if self.colour_source(m) == "store"]
