@@ -209,6 +209,11 @@ def merged_style(styles: list[tuple[DotStyle, str]]) -> tuple[DotStyle, str]:
     """One virus's dot from its preparations' (style, passage class), and how it was decided."""
     if len(styles) == 1:
         return styles[0][0], SINGLE
+    # A preparation painted by tree placement alone (Q183 b) abstains when another of the
+    # virus's preparations is painted by evidence: like "observed record wins" (Q135), the
+    # evidence decides, and a flag never makes agreeing preparations disagree.
+    if any(s.colour is not None and s.basis != BASIS_PLACEMENT for s, _ in styles):
+        styles = [(s, k) for s, k in styles if s.basis != BASIS_PLACEMENT]
     coloured = {s for s, _ in styles if s.colour is not None}
     if len(coloured) == 1:
         (only,) = coloured
