@@ -10,6 +10,7 @@ import shapefile  # pyshp, a cartopy dependency
 from af.geo.render import (
     GeoRenderError,
     Look,
+    honeycomb_offsets,
     packed_offsets,
     render_geo,
     render_period,
@@ -96,3 +97,14 @@ def test_figure_is_ae_size_and_a_cluster_at_the_seam_is_counted(tmp_path: Path) 
     assert cut == {"Edge": 4}
     box = re.search(rb"/MediaBox \[ *0 +0 +([\d.]+) +([\d.]+)", pdf.read_bytes())
     assert box is not None and (float(box[1]), round(float(box[2]), 2)) == (800.0, 401.23)
+
+
+def test_honeycomb_packing_is_a_look_choice(tmp_path: Path) -> None:
+    """Q208 is a config line: af's earlier packing stays available, and a typo is an error."""
+    offsets = honeycomb_offsets(1 + 6 + 12, 1.0)
+    radii = Counter(round((x * x + y * y) ** 0.5) for x, y in offsets)
+    assert radii == {0: 1, 1: 6, 2: 12}
+    period = {"period": "2021-01", "title": "January 2021", "locations": []}
+    with pytest.raises(GeoRenderError, match="unknown packing"):
+        render_period(period, lambda n: None, _coastline(tmp_path), tmp_path / "m.pdf",
+                      Look(packing="hexagons"))  # fmt: skip
