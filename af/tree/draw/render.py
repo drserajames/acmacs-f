@@ -476,13 +476,14 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
         (lab.node, "\n".join(lab.subs), (float(pg.nx[lab.node]), float(pg.ny[lab.node])))
         for lab in spec.labels
     ]
-    # The candidate offsets were tuned for 6.8-unit labels; bigger labels need the same search
-    # in proportion, or they pile up in the nearest columns with leaders through each other.
-    k = g.label_font / 6.8
+    # The candidate offsets were tuned for 6.8-unit labels; bigger labels also get the same
+    # search in proportion (the tuned offsets stay, so a label near the margin keeps its
+    # tight positions).
+    k = max(1.0, g.label_font / 6.8)
     base = Search()
     search = Search(
-        dxs=[d * k for d in base.dxs],
-        dys=[d * k for d in base.dys],
+        dxs=sorted({*base.dxs, *(d * k for d in base.dxs)}),
+        dys=sorted({*base.dys, *(d * k for d in base.dys)}, key=lambda d: (abs(d), d)),
         left=2.0,
         top=g.top - 4,
         bottom=pg.bottom + 2,
