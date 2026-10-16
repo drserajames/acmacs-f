@@ -49,6 +49,7 @@ def test_every_month_is_its_own_report_figure(tmp_path: Path) -> None:
         validate(i7)
         assert i7["kind"] == "geo" and i7["geo"]["month"] == month
         assert i7["provenance"]["serology"] == "v-test"
+        assert i7["provenance"]["clipped_at_edge"] == {}  # counted every month, even at 0
         assert (folder / "figure.pdf").stat().st_size > 0
 
 

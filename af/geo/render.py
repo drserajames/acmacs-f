@@ -1,9 +1,11 @@
 """Draw geo maps: one PDF per month, dots packed around each location.
 
 Input is the I7 ``geo`` document (:func:`af.geo.records.to_i7`), so what is drawn and what
-the comparison reads are the same data. Look follows today's ``geo/<st>-YYYY-MM.pdf``:
-an equirectangular world outline with no frame, the month top-left, and at each location
-its dots packed in hexagonal rings, the largest colour group at the centre.
+the comparison reads are the same data. The look is ae's ``geo-draw`` (the shipped report's
+``geo/<st>-YYYY-MM.pdf``): an equirectangular world centred at 11.76 E with no frame, the month
+top-left, and at each location its dots packed in ae's rings, the largest colour group at the
+centre. Sizes are in the figure's own points at ae's map width, so a panel set at the shipped
+width shows ae's sizes at ae's scale.
 
 Two inputs are explicit rather than fetched or guessed:
 
@@ -37,21 +39,35 @@ class GeoRenderError(RuntimeError):
 
 @dataclass(frozen=True)
 class Look:
-    """Drawing parameters; the defaults follow today's maps."""
+    """Drawing parameters, in the figure's points. The defaults are ae geo-draw's
+    (ae cc/geo/geographic-map.cc, geo-draw-main.cc and the report's geographic settings)."""
 
-    width_inches: float = 10.0
-    dot_size: float = 46.0  # matplotlib scatter size, points^2
-    spacing_degrees: float = 3.0  # between dot centres in a packed cluster
+    width_points: float = 800.0  # ae's time-series width
+    aspect: float = 632.591 / 1261.3  # ae's world outline, height / width
+    central_longitude: float = 11.762094  # ae's map spans 168.24 W to 191.76 E
+    dot_diameter: float = 8.0  # ae point_size
+    ring_step: float = 6.4  # ae point_size x density (0.8): ring r is r x ring_step out
+    # "ae-rings" (ae's, overlapping into discs) or "honeycomb" (6r per ring, no overlap; af's
+    # before 16 Oct): overlap hides minority colours on a big cluster's outer rings (Q208)
+    packing: str = "ae-rings"
     outline_colour: str = "#a1a1a1"
-    outline_width: float = 0.5
+    outline_width: float = 0.5  # ae: width / 1600
     uncoloured_edge: str = "#a0a0a0"
-    title_size: float = 16.0
+    # per subtype in the shipped report (ae's geographic settings; :mod:`af.geo.style` reads
+    # them per slot): H1/H3 coloured dots "none" at 0, B/Vic "#808080" at 1.0; uncoloured
+    # rings 0.5 (H1/H3) or 0.3 (B/Vic)
+    coloured_edge: str = "#808080"  # or "none"
+    coloured_edge_width: float = 0.6
+    uncoloured_edge_width: float = 0.6
+    title_size: float = 20.0  # ae: width / 40
+    title_inset: float = 10.0  # ae: width x 0.0125, to the top-left of the title's ink
 
 
 @dataclass
 class RenderReport:
     drawn: dict[str, int] = field(default_factory=dict)  # period -> dots drawn
     no_coordinates: Counter[str] = field(default_factory=Counter)  # location -> dots
+    clipped: Counter[str] = field(default_factory=Counter)  # location -> dots cut by the edge
     files: list[Path] = field(default_factory=list)
 
 
@@ -71,7 +87,7 @@ def render_geo(
     for period in doc["periods"]:
         path = out_dir / f"{prefix}-{period['period']}.pdf"
         report.drawn[period["period"]] = _render_period(
-            period, coordinates, shapes, path, look, report.no_coordinates
+            period, coordinates, shapes, path, look, report.no_coordinates, report.clipped
         )
         report.files.append(path)
     return report
@@ -84,27 +100,60 @@ def render_period(
     path: Path,
     look: Look | None = None,
     no_coordinates: Counter[str] | None = None,
+    clipped: Counter[str] | None = None,
 ) -> int:
     """Draw one period of an I7 ``geo`` document to ``path``; the number of dots drawn.
 
     For a caller that files each month separately (the report's one figure per folder).
-    Locations it cannot place are added to ``no_coordinates``.
+    Locations it cannot place are added to ``no_coordinates``; dots the map's edge cuts, to
+    ``clipped``.
     """
     unplaced = no_coordinates if no_coordinates is not None else Counter()
+    cut = clipped if clipped is not None else Counter()
     look = look if look is not None else Look()
-    return _render_period(period, coordinates, _coastline(coastline), path, look, unplaced)
+    return _render_period(period, coordinates, _coastline(coastline), path, look, unplaced, cut)
 
 
-def packed_offsets(n: int, spacing: float) -> list[tuple[float, float]]:
-    """Centre first, then hexagonal rings of 6k points: dense, and the same for every n."""
+def ring_capacity(ring: int) -> int:
+    """Dots on ring ``ring`` in ae's packing: floor(2 pi ring^2), so 6, 25, 56, 100 ... From ring 2
+    on they overlap (about 0.4 of a diameter apart), which is what makes a big cluster a disc."""
+    return int(2.0 * math.pi * ring * ring)
+
+
+def packed_offsets(n: int, step: float) -> list[tuple[float, float]]:
+    """ae's packing (geo-draw ``pack_colored_points``, a port of AD's): the centre first, then
+    ring r at ``r * step`` holding :func:`ring_capacity` dots, evenly spaced from angle 0; the
+    last ring holds what is left. The same for every n, in the units of ``step``."""
+    offsets = [(0.0, 0.0)]
+    ring = 1
+    while len(offsets) < n:
+        k = min(ring_capacity(ring), n - len(offsets))
+        for i in range(k):
+            angle = 2 * math.pi * i / k
+            offsets.append((ring * step * math.cos(angle), ring * step * math.sin(angle)))
+        ring += 1
+    return offsets[:n]
+
+
+def honeycomb_offsets(n: int, step: float) -> list[tuple[float, float]]:
+    """The centre, then hexagonal rings of 6r dots ``r * step`` out: no dot hides another."""
     offsets = [(0.0, 0.0)]
     ring = 1
     while len(offsets) < n:
         for i in range(6 * ring):
             angle = 2 * math.pi * i / (6 * ring)
-            offsets.append((ring * spacing * math.cos(angle), ring * spacing * math.sin(angle)))
+            offsets.append((ring * step * math.cos(angle), ring * step * math.sin(angle)))
         ring += 1
     return offsets[:n]
+
+
+PACKINGS = {"ae-rings": packed_offsets, "honeycomb": honeycomb_offsets}
+
+
+def wrap_longitude(longitude: float, central: float) -> float:
+    """Degrees east of the map's centre, in [-180, 180): a place west of the left edge is drawn
+    at the right, never lost (ae drew it off the canvas)."""
+    return (longitude - central + 180.0) % 360.0 - 180.0
 
 
 def _coastline(path: Path) -> list[Any]:
@@ -131,6 +180,7 @@ def _render_period(
     path: Path,
     look: Look,
     no_coordinates: Counter[str],
+    clipped: Counter[str],
 ) -> int:
     import cartopy.crs as ccrs
     import matplotlib
@@ -138,13 +188,24 @@ def _render_period(
     matplotlib.use("pdf")
     import matplotlib.pyplot as plt
 
+    if look.packing not in PACKINGS:
+        raise GeoRenderError(f"unknown packing {look.packing!r}: one of {sorted(PACKINGS)}")
+    pack = PACKINGS[look.packing]
     plate = ccrs.PlateCarree()
-    fig = plt.figure(figsize=(look.width_inches, look.width_inches / 2))
+    # Dots are placed in the map's own coordinates (degrees from its centre), so a cluster is
+    # packed in one piece and an edge cuts it rather than splitting it across the map.
+    centred = ccrs.PlateCarree(central_longitude=look.central_longitude)
+    height = look.width_points * look.aspect
+    fig = plt.figure(figsize=(look.width_points / 72.0, height / 72.0))
+    # figure points to degrees: the map fills the figure, as ae's does
+    lon_per_point, lat_per_point = 360.0 / look.width_points, 180.0 / height
+    radius = look.dot_diameter / 2.0 * lon_per_point
     try:
         # A GeoAxes: matplotlib's stubs type add_axes as plain Axes.
-        ax: Any = fig.add_axes((0.0, 0.0, 1.0, 1.0), projection=plate)
+        ax: Any = fig.add_axes((0.0, 0.0, 1.0, 1.0), projection=centred)
         ax.spines["geo"].set_visible(False)
-        ax.set_extent((-180.0, 180.0, -90.0, 90.0), crs=plate)
+        ax.set_extent((-180.0, 180.0, -90.0, 90.0), crs=centred)
+        ax.set_aspect("auto")  # ae's outline is 0.3 % taller than 2:1; fill the figure as it does
         ax.add_geometries(
             shapes, crs=plate, facecolor="none", edgecolor=look.outline_colour,
             linewidth=look.outline_width,
@@ -156,27 +217,42 @@ def _render_period(
             if where is None:
                 no_coordinates[location["name"]] += len(dots)
                 continue
-            xs, ys, fills, edges = [], [], [], []
-            for (dx, dy), point in zip(
-                packed_offsets(len(dots), look.spacing_degrees), dots, strict=True
-            ):
-                xs.append(where[0] + dx)
-                ys.append(where[1] + dy)
+            x0 = wrap_longitude(where[0], look.central_longitude)
+            xs, ys, fills, edges, widths = [], [], [], [], []
+            for (dx, dy), point in zip(pack(len(dots), look.ring_step), dots, strict=True):
+                xs.append(x0 + dx * lon_per_point)
+                ys.append(where[1] + dy * lat_per_point)
                 coloured = point["color"] != "transparent"
                 fills.append(point["color"] if coloured else "none")
-                edges.append("#808080" if coloured else look.uncoloured_edge)
+                edges.append(look.coloured_edge if coloured else look.uncoloured_edge)
+                widths.append(look.coloured_edge_width if coloured else look.uncoloured_edge_width)
+            cut = sum(1 for x in xs if abs(x) + radius > 180.0)
+            if cut:
+                clipped[location["name"]] += cut
             ax.scatter(
-                xs, ys, s=look.dot_size, c=fills, edgecolors=edges, linewidths=0.6,
-                transform=plate, zorder=3,
+                xs, ys, s=look.dot_diameter**2, c=fills, edgecolors=edges, linewidths=widths,
+                transform=centred, zorder=3,
             )  # fmt: skip
             drawn += len(dots)
-        ax.text(
-            0.01, 0.985, period.get("title", period["period"]), transform=ax.transAxes,
-            fontsize=look.title_size, va="top",
-        )  # fmt: skip
+        _title(fig, ax, period.get("title", period["period"]), look)
         fig.savefig(path)
     finally:
         plt.close(fig)
     if not path.is_file() or path.stat().st_size == 0:
         raise GeoRenderError(f"no map written: {path}")
     return drawn
+
+
+def _title(fig: Any, ax: Any, title: str, look: Look) -> None:
+    """The month, as ae places it: the top-left of its ink at ``title_inset`` from the map's
+    top-left corner, whatever the font's side bearing and ascent."""
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextPath
+    from matplotlib.transforms import offset_copy
+
+    ink = TextPath((0, 0), title, size=look.title_size, prop=FontProperties()).get_extents()
+    at = offset_copy(
+        ax.transAxes, fig=fig, x=look.title_inset - ink.x0,
+        y=-(look.title_inset + ink.y1), units="points",
+    )  # fmt: skip
+    ax.text(0.0, 1.0, title, transform=at, fontsize=look.title_size, ha="left", va="baseline")
