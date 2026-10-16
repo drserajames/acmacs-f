@@ -71,6 +71,24 @@ for colour, comparing the candidates' colours rather than their clades (two clad
 colour row); anything that needs a clade per antigen should call `preparation_clade` rather than
 re-derive it.
 
+## A serum's strain
+
+A serum is not a preparation and has no row in `antigen_sequences`. To find its strain's
+sequence, put its row to the same matcher the join uses, so there is one copy of the rule:
+
+```python
+from af.serology.joins import indexes_from_store, match_row, passage_class_column
+
+indexes, read = indexes_from_store(store, rules)  # CURRENT, or pinned with sequences=
+sera = con.execute(
+    "SELECT s.*, t.subtype, t.lab AS table_lab FROM sera s JOIN tables t USING (table_id)"
+)
+found = match_row(row, indexes, passage_class_column)  # one row as a dict; .chosen or None
+```
+
+Its name, lineage, passage, passage class and lab are used as an antigen's are; a serum gives
+no EPI_ISL. A serum from a table that records no serum passage has class `unknown`.
+
 ## Reproducing a result
 
 `link_from_store` reads CURRENT unless told otherwise. To repeat a result after CURRENT moves,

@@ -179,7 +179,7 @@ def _match_rows(
     methods: Counter[str] = Counter()
     for values in cursor.fetchall():
         row = dict(zip(columns, values, strict=True))
-        match = _match_row(row, indexes, class_of)
+        match = match_row(row, indexes, class_of)
         chosen = match.chosen if match is not None else None
         flags = list(match.flags) if match is not None else [NO_DATASET]
         flags_seen.update(flags)
@@ -220,10 +220,17 @@ def _match_name(raw: str) -> str:
     return normalised.name if normalised.ok else raw
 
 
-def _match_row(
+def match_row(
     row: Mapping[str, Any], indexes: Mapping[str, SequenceIndex], class_of: ClassOf
 ) -> Match | None:
-    """The matcher's answer for one antigen row; None if no dataset covers its subtype."""
+    """The matcher's answer for one antigen row; None if no dataset covers its subtype.
+
+    The one copy of how a table row is put to the matcher: its name as the sequence store
+    spells it, the datasets its subtype and lineage are matched within, its EPI_ISL, lab and
+    passage. Public so that a serum's strain is matched the same way (07-chains, Q166/Q176):
+    a serum row gives its own name, passage, passage class, lineage and lab, and no EPI_ISL.
+    ``indexes`` come from :func:`indexes_from_store`.
+    """
     # the sequence datasets an antigen is matched within, from the subtype table
     # (af/subtypes.toml), in table order: a B antigen of unknown lineage is matched across both
     # B datasets, B/Vic first. A subtype or lineage the table does not list is counted
@@ -660,6 +667,47 @@ def _tied_clade(found: tuple[str | None, dict[str, Any]] | None) -> tuple[Any, .
     return (clade, *evidence.values())
 
 
+def indexes_from_store(
+    store: Any, rules: MatchingRules, sequences: Mapping[str, StoreRef] | None = None
+) -> tuple[dict[str, SequenceIndex], dict[str, StoreRef]]:
+    """The matcher's index for every sequence dataset, with the matching rules attached, and
+    the versions read: CURRENT, or ``sequences`` (dataset -> ref, one for every dataset) when
+    pinned. What :func:`link_from_store` matches antigens against, and :func:`match_row`
+    takes; one copy, so a serum is matched against exactly what an antigen is.
+
+    Every submitter named must submit something in the sequence store, and every location
+    equivalent's GISAID spelling must be held by a stored sequence unless the row is marked
+    optional (Sarah, Q44): a rule that matches nothing would silently do nothing.
+    """
+    from af.seq.matching import (
+        check_equivalents,
+        check_lab_submitters,
+        equivalents_table,
+        index_from_store,
+        sequences_ref,
+    )
+
+    datasets = sorted(subtypes().keys())
+    if sequences is None:
+        present = {ref.dataset for ref in store.list_datasets("sequences")}
+        missing = [d for d in datasets if d not in present]
+        if missing:
+            raise StoreError(f"sequence datasets missing from the store: {', '.join(missing)}")
+    read = {d: sequences_ref(store, d, sequences) for d in datasets}
+    if rules.submitters:
+        # a submitter name that no longer appears in the store would silently stop breaking ties
+        check_lab_submitters(store, datasets, dict(rules.submitters), read)
+    if rules.equivalents:
+        # a GISAID spelling no stored sequence has would silently do nothing
+        check_equivalents(store, datasets, list(rules.equivalents), read)
+    indexes = {d: index_from_store(store, [d], rules.passage, read) for d in datasets}
+    for index in indexes.values():
+        index.submitters = dict(rules.submitters)
+        index.number_rules = dict(rules.number_rules)
+        index.equivalents = equivalents_table(rules.equivalents)
+    return indexes, read
+
+
 def link_from_store(
     con: Any,
     store: Any,
@@ -684,35 +732,12 @@ def link_from_store(
     submit something in the sequence store, and the submitters must be keyed by labs the
     serology store holds, or the own-lab tie-break would silently never apply. Every
     location equivalent's GISAID spelling must be held by a stored sequence unless the row is
-    marked optional (Sarah, Q44).
+    marked optional (Sarah, Q44); see :func:`indexes_from_store`.
     """
-    from af.seq.matching import (
-        check_equivalents,
-        check_lab_submitters,
-        equivalents_table,
-        index_from_store,
-        sequences_ref,
-    )
-
-    datasets = sorted(subtypes().keys())
-    if sequences is None:
-        present = {ref.dataset for ref in store.list_datasets("sequences")}
-        missing = [d for d in datasets if d not in present]
-        if missing:
-            raise StoreError(f"sequence datasets missing from the store: {', '.join(missing)}")
-    read = {d: sequences_ref(store, d, sequences) for d in datasets}
     if rules.submitters:
-        # a submitter name that no longer appears in the store would silently stop breaking ties
-        check_lab_submitters(store, datasets, dict(rules.submitters), read)
         _check_submitter_labs(con, rules.submitters)
-    if rules.equivalents:
-        # a GISAID spelling no stored sequence has would silently do nothing
-        check_equivalents(store, datasets, list(rules.equivalents), read)
-    indexes = {d: index_from_store(store, [d], rules.passage, read) for d in datasets}
-    for index in indexes.values():
-        index.submitters = dict(rules.submitters)
-        index.number_rules = dict(rules.number_rules)
-        index.equivalents = equivalents_table(rules.equivalents)
+    indexes, read = indexes_from_store(store, rules, sequences)
+    datasets = sorted(read)
     isolates = [
         path
         for d in datasets
