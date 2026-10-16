@@ -26,12 +26,19 @@ import json
 import re
 import shutil
 import sys
+import zoneinfo
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 from af.report import text
-from af.report.config import Meeting, ReportConfig, Section, load, period_first, period_last
+from af.report.config import (
+    Meeting,
+    ReportConfig,
+    Section,
+    lines,
+    load,
+)
 from af.report.figures import FigureError, Resolved, resolve
 from af.report.howmade import figure_warnings
 from af.report.provenance import (
@@ -96,46 +103,77 @@ def _label(slot: str) -> str:
     return "fig:" + re.sub(r"[^A-Za-z0-9]+", "-", slot)
 
 
-def _caption(r: Resolved) -> str:
-    when = r.created.strftime("%d %b %Y %H:%M %Z")
-    tag = r"\textcolor{red}{PLACEHOLDER} " if r.figure.placeholder else ""
-    return tag + tex_escape(f"{r.figure.title} ({r.version}, {when})")
+def _figure_mark(r: Resolved, slot: str, size: str) -> str:
+    """What goes under a figure: its page label, and a red PLACEHOLDER line for a stand-in.
+
+    No caption and no "(version, time)" stamp under a real figure (Sarah, Q201 a, 16 Oct 2026):
+    the delivered report has none, and a figure's provenance is in its I7, the build record, the
+    report manifest, the how-made notes and the PDF metadata. The ``\\zlabel`` stays: it is how
+    :func:`check_output` proves every figure was typeset.
+    """
+    label = rf"\zlabel{{{_label(slot)}}}"
+    if not r.figure.placeholder:
+        return label
+    return rf"\\ {size} \textcolor{{red}}{{PLACEHOLDER {tex_escape(r.figure.title)}}}" + label
+
+
+def _pdf_metadata(cfg: ReportConfig, built_at: dt.datetime) -> str:
+    """Provenance in the PDF's own metadata (Q201 a: it leaves the pages, it stays in the PDF):
+    title, the report id and period, and which af built it when. The report manifest is written
+    after the PDF (it records the PDF's hash), so the PDF cannot carry the manifest's."""
+    r = cfg.report
+    source = af_source()
+    commit = (source.get("commit") or "unknown")[:12]
+    release = ((source.get("release") or {}).get("commit") or "none")[:12]
+    period = f"{r.period.first} to {r.period.last}"
+    fields = {
+        "pdftitle": " ".join([*lines(r.title), *lines(r.subtitle)]),
+        "pdfsubject": f"{r.id} ({r.kind}), period {period}, data up to {r.data_cutoff.isoformat()}",
+        "pdfkeywords": f"af {commit}; release {release}; built {built_at.isoformat()}",
+        "pdfcreator": "af.report.build",
+    }
+    body = ", ".join(f"{k}={{{tex_escape(v)}}}" for k, v in fields.items())
+    return rf"\hypersetup{{{body}}}"
 
 
 def _meeting(meeting: Meeting) -> str:
-    """ "21-24 September 2026" (one month), "30 September - 3 October 2026" (two), from config."""
+    """ "21-24 September 2026" (one month), "30 September -- 3 October 2026" (two), from config.
+
+    One month uses a hyphen, as the delivered report prints it."""
     a, b = meeting.start, meeting.end
     if a == b:
         return f"{a.day} {a.strftime('%B %Y')}"
     if (a.year, a.month) == (b.year, b.month):
-        return f"{a.day}--{b.day} {b.strftime('%B %Y')}"
+        return f"{a.day}-{b.day} {b.strftime('%B %Y')}"
     return f"{a.day} {a.strftime('%B')} -- {b.day} {b.strftime('%B %Y')}"
 
 
 def _cover(
     cfg: ReportConfig, n_placeholders: int, n_not_from_store: int, built_at: dt.datetime
 ) -> list[str]:
+    """The cover as the delivered report sets it (its report.tex): bold title lines with the
+    subtitle as the last, the meeting, then the centre's lines; page 1, unnumbered.
+
+    The period, data cutoff and build time are not on the cover (Sarah, Q203 a, 16 Oct 2026):
+    the build record and the PDF metadata carry them, and the closing page the build time."""
     r = cfg.report
-    first, last = period_first(cfg), period_last(cfg)
-    period = first.strftime("%B %Y")
-    if last != first:
-        period += " -- " + last.strftime("%B %Y")
-    lines = [
-        r"\begin{titlepage}\centering\vspace*{60mm}",
-        rf"{{\Huge {tex_escape(r.title)}\par}}\vspace{{12mm}}",
-        rf"{{\Large {tex_escape(r.centre)}\par}}\vspace{{8mm}}",
-        rf"{{\Large {tex_escape(r.subtitle)}\par}}\vspace{{6mm}}" if r.subtitle else "",
-        rf"{{\Large {_meeting(r.meeting)}\par}}\vspace{{6mm}}" if r.meeting else "",
-        rf"{{\Large {period}\par}}\vspace{{20mm}}",
-        rf"Data up to {r.data_cutoff.day} {r.data_cutoff.strftime('%B %Y')}\par",
-        rf"Built {built_at.strftime('%d %B %Y %H:%M %Z')}\par",
+    title = [tex_escape(t) for t in [*lines(r.title), *lines(r.subtitle)]]
+    out = [
+        r"\thispagestyle{empty}",
+        r"\begin{quotation}",
+        r"\vspace*{130pt}",
+        r"{\fontsize{22}{26}\selectfont\noindent\textbf{" + r"\\ ".join(title) + r"}\par}",
+        r"\vspace{90pt}{\fontsize{19}{24}\selectfont\vspace{60pt}",
+        rf"{_meeting(r.meeting)}\par}}" if r.meeting else r"\par}",
+        r"\vspace{180pt}{\large",
+        r"\par\vspace{10pt}".join(tex_escape(c) for c in lines(r.centre)) + r"\par}",
     ]
     if n_placeholders or n_not_from_store:
-        lines.append(
+        out.append(
             rf"\vspace{{10mm}}{{\Large\color{{red}} DRAFT: {n_placeholders} placeholder "
             rf"figure(s), {n_not_from_store} not drawn from the store\par}}"
         )
-    return [*lines, r"\end{titlepage}", r"\tableofcontents", r"\newpage"]
+    return [*out, r"\end{quotation}", r"\newpage", r"\tableofcontents", r"\newpage"]
 
 
 Intro = tuple[list[str], list[str]]  # (paragraphs, gaps: facts no artefact records)
@@ -169,13 +207,18 @@ def intro_texts(
 
 
 def _intro_page(section: Section, intro: Intro) -> list[str]:
-    """The section heading, its paragraphs, and any unrecorded fact in red; then a new page."""
+    """The section heading, its paragraphs, and any unrecorded fact in red; then a new page.
+
+    Spaced as the delivered report: 3em under the heading, 1em between paragraphs. A tree
+    intro page has no page number there (the tree follows as a whole page), a geo one has."""
     paragraphs, gaps = intro
-    lines = [rf"\{_level(section)}{{{tex_escape(section.title)}}}"]
-    lines += [tex_escape(p) + r"\par\medskip" for p in paragraphs]
-    lines += [rf"{{\small\raggedright\textcolor{{red}}{{NOT RECORDED: {tex_escape(g)}}}\par}}"
-              for g in gaps]  # fmt: skip
-    return [*lines, r"\newpage"]
+    out = [rf"\{_level(section)}{{{tex_escape(section.title)}}}", r"\vspace*{3em}"]
+    if section.kind == "trees":
+        out.append(r"\thispagestyle{empty}")
+    out.append(r"\par\vspace{1em}".join(tex_escape(p) for p in paragraphs) + r"\par")
+    out += [rf"{{\small\raggedright\textcolor{{red}}{{NOT RECORDED: {tex_escape(g)}}}\par}}"
+            for g in gaps]  # fmt: skip
+    return [*out, r"\newpage"]
 
 
 def _tree_pages(
@@ -189,10 +232,10 @@ def _tree_pages(
         if headed or len(section.slots) > 1:
             lines.append(rf"\{_level(section)}{{{tex_escape(title)}}}")
         lines += [
+            r"\thispagestyle{empty}",  # a tree page is unnumbered, as delivered
             r"\begin{center}",
             r"\includegraphics[width=\textwidth,height=0.88\textheight,keepaspectratio]"
-            rf"{{{rel[slot]}}}",
-            rf"\\ \small {_caption(r)}\zlabel{{{_label(slot)}}}",
+            rf"{{{rel[slot]}}}" + _figure_mark(r, slot, r"\small"),
             r"\end{center}",
             r"\newpage",
         ]
@@ -236,8 +279,9 @@ def _grid_pages(
                 row.append(
                     rf"\begin{{minipage}}[t]{{{width}}}\centering"
                     rf"\includegraphics[width=\linewidth,height={height},keepaspectratio]"
-                    rf"{{{rel[slot]}}}\\ \scriptsize {_caption(figs[slot])}"
-                    rf"\zlabel{{{_label(slot)}}}\end{{minipage}}"
+                    rf"{{{rel[slot]}}}"
+                    + _figure_mark(figs[slot], slot, r"\scriptsize")
+                    + r"\end{minipage}"
                 )
             lines.append(r"\noindent" + rf"\hspace{{{gap}}}".join(row) + r"\par\medskip")
         if section.landscape:
@@ -260,12 +304,22 @@ def write_tex(
         shutil.copyfile(r.figure.pdf, fig_dir / name)
         rel[slot] = f"figures/{name}"
     lines = [
-        r"\documentclass[a4paper,11pt]{article}",
-        r"\usepackage[margin=15mm]{geometry}",
+        # The delivered report's page (its report.tex): 12pt Times, T1, 2.5em side margins, 3em
+        # top, 5em bottom; contents set with titletoc, groups bold and unnumbered, entries with
+        # their page at a 120pt contents margin; hyperref's default link boxes (screen only).
+        r"\documentclass[a4paper,12pt]{article}",
+        r"\usepackage[T1]{fontenc}",
+        r"\usepackage{times}",
+        r"\usepackage[top=3em,bottom=5em,left=2.5em,right=2.5em]{geometry}",
         r"\usepackage{graphicx,xcolor,pdflscape,zref-user,zref-abspage}",
-        # Physical page on every \zlabel: \label pages are logical and the title page resets them.
+        # Physical page on every \zlabel: \label pages are logical.
         r"\makeatletter\zref@addprop{main}{abspage}\makeatother",
-        r"\usepackage[hidelinks]{hyperref}",
+        r"\usepackage{titletoc}",
+        r"\titlecontents{section}[0cm]{\bfseries}{\\}{\\}{}",
+        r"\titlecontents{subsection}[1em]{}{}{}{\titlerule*[5pc]{}\vspace{0.8ex}\thecontentspage}",
+        r"\contentsmargin{120pt}",
+        r"\usepackage{hyperref}",
+        _pdf_metadata(cfg, built_at),
         r"\setlength{\parindent}{0pt}",
         # Grouped reports (subtype > figure) are unnumbered, like the delivered VCM report.
         r"\setcounter{secnumdepth}{0}" if any(sec.group for sec in cfg.sections) else "",
@@ -285,8 +339,10 @@ def write_tex(
             lines += _tree_pages(section, figs, rel, headed=i not in intros)
         else:
             lines += _grid_pages(section, cfg.months(), figs, rel, headed=i not in intros)
-    if cfg.report.end_page:
-        lines.append(rf"Report generated: {built_at.strftime('%Y-%m-%d %H:%M %Z')}")
+    if cfg.report.end_page:  # at the foot of the last page, tiny, in the round's zone
+        zone = zoneinfo.ZoneInfo(cfg.report.timezone) if cfg.report.timezone else dt.UTC
+        when = built_at.astimezone(zone).strftime("%Y-%m-%d %H:%M %Z")
+        lines.append(rf"\par\vspace*{{\fill}}\hspace*{{1.5em}}{{\tiny Report generated: {when}}}")
     lines.append(r"\end{document}")
     tex = build / "report.tex"
     tex.write_text("\n".join(lines) + "\n")
