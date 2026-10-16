@@ -22,6 +22,7 @@ import numpy as np  # noqa: E402
 from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.collections import LineCollection, PolyCollection  # noqa: E402
 from matplotlib.font_manager import FontProperties  # noqa: E402
+from matplotlib.patches import ArrowStyle, FancyArrowPatch  # noqa: E402
 from matplotlib.textpath import TextPath  # noqa: E402
 
 from .aa_labels import AALabel  # noqa: E402
@@ -82,10 +83,19 @@ class Geometry:
     centre_col: float = 0.0  # width of the centre-marks column; 0 = none
     ts_left: float = 382.0
     ts_slot: float = 7.5
-    clade_gap: float = 10.0
-    clade_slot: float = 9.0
-    bar_width: float = 9.0
-    bar_gap: float = 4.5
+    clade_gap: float = 11.4  # matrix's right edge -> first bracket column (+2)
+    clade_slot: float = 15.0  # bracket column pitch
+    clade_name_offset: float = 4.5  # bracket -> clade name baseline
+    bracket_width: float = 1.0
+    bars_gap: float = 16.3  # last bracket column -> first dash bar
+    bar_width: float = 8.7
+    bar_gap: float = 5.8
+    row_stroke: float = 0.15  # matrix ticks and dash-bar rows (a row is thinner on big trees)
+    branch_stroke: float = 0.5  # branch line width, as a fraction of the row height
+    tick_start: float = 0.25  # matrix tick: where it starts in its month slot, and its length
+    tick_length: float = 0.5
+    month_gap: float = 1.5  # month labels end this far above the matrix (start below it)
+    rule_colour: str = "#bebebe"  # separators between clade bands
     label_font: float = 9.5  # aa-substitution labels
     strain_font: float = 6.8
     clade_font: float = 10.0  # clade names beside the brackets (per clade: FigureSpec)
@@ -171,8 +181,9 @@ class _Page:
 
     @property
     def dash_width(self) -> float:
-        """A row is far thinner than a printable line on a big tree; never go below 0.25 pt."""
-        return max(0.25, self.row_h)
+        """A row is far thinner than a printable line on a big tree; never go below the
+        geometry's row stroke (the shipped pages draw 0.15 units whatever the row count)."""
+        return max(self.g.row_stroke, self.row_h)
 
 
 def _text_width(font: FontProperties):
@@ -238,7 +249,10 @@ def _draw_tree(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, colours: np.nd
         seg_colours = [colours[a] if colours[a] == colours[b] else "black" for a, b in seg_rows]
     else:
         seg_colours = ["black"] * len(segs)
-    ax.add_collection(LineCollection(segs, colors=seg_colours, linewidths=0.12))
+    # Hairlines in proportion to the row height, as on the shipped pages (0.005 units on a
+    # 100,000-leaf tree): a fixed width painted big trees solid black.
+    width = min(spec.geometry.branch_stroke * pg.row_h, 0.5)  # small trees: a normal line
+    ax.add_collection(LineCollection(segs, colors=seg_colours, linewidths=width))
     for (x0, y0), (x1, y1) in segs:
         if y0 == y1:
             grid.add_hline(x0, x1, y0)
@@ -282,49 +296,56 @@ def _draw_matrix(ax: Axes, spec: FigureSpec, pg: _Page, colours: np.ndarray) -> 
     for k, (y, m) in enumerate(ts.months):
         x = g.ts_left + (k + 0.5) * g.ts_slot
         text = f"{MONTHS[m - 1]} {y % 100:02d}"
-        for yy, va in ((g.top - 2, "bottom"), (pg.bottom + 2, "top")):
+        # Rotated to read downwards: the top label ends just above the matrix, the bottom one
+        # starts just below it, each centred in its slot, clear of the slot's lines.
+        for yy, ha in ((g.top - g.month_gap, "right"), (pg.bottom + g.month_gap, "left")):
             ax.text(
                 x,
                 yy,
                 text,
                 rotation=-90,
-                ha="center",
-                va=va,
+                ha=ha,
+                va="center",
                 fontsize=g.month_font,
                 rotation_mode="anchor",
             )
     rows = np.flatnonzero(ts.in_window)
-    x0 = g.ts_left + (ts.column[rows] + 0.15) * g.ts_slot
+    x0 = g.ts_left + (ts.column[rows] + g.tick_start) * g.ts_slot
     ys = pg.row_y(rows)
-    segs = [((a, y), (a + 0.7 * g.ts_slot, y)) for a, y in zip(x0, ys, strict=True)]
+    segs = [((a, y), (a + g.tick_length * g.ts_slot, y)) for a, y in zip(x0, ys, strict=True)]
     ax.add_collection(LineCollection(segs, colors=list(colours[rows]), linewidths=pg.dash_width))
     return right
 
 
-def _draw_brackets(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> float:
+def _draw_brackets(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> dict[int, float]:
+    """One double-headed arrow per band, filled heads touching the band's edges (the shipped
+    style: 5.76 x 2.88 units). Returns, per band-edge row, the x of the outermost bracket that
+    ends there, so the separator rule at that row can stop at it."""
     g, sel = pg.g, spec.selection
     names: list[tuple[float, float, str]] = []
+    edges: dict[int, float] = {}
+    style = ArrowStyle("<|-|>", head_length=5.76, head_width=1.44)
     for cs in sel.shown:
         x = left + sel.slots[cs.clade] * g.clade_slot + 2
         for b in cs.bands:
             y0, y1 = pg.row_edge(b.first), pg.row_edge(b.last + 1)
-            ax.annotate(
-                "",
-                xy=(x, y0),
-                xytext=(x, y1),
-                arrowprops={
-                    "arrowstyle": "<->",
-                    "lw": 0.6,
-                    "shrinkA": 0,
-                    "shrinkB": 0,
-                    "mutation_scale": 4,
-                },
+            ax.add_patch(
+                FancyArrowPatch(
+                    (x, y1),
+                    (x, y0),
+                    arrowstyle=style,
+                    mutation_scale=1,
+                    lw=g.bracket_width,
+                    color="black",
+                    shrinkA=0,
+                    shrinkB=0,
+                )
             )
-            for yy in (y0, y1):
-                ax.plot([x - 2.5, x], [yy, yy], color="black", lw=0.5)
-            names.append((x, (y0 + y1) / 2, cs.clade))
+            for r in (b.first, b.last + 1):
+                edges[r] = max(edges.get(r, x), x)
+            names.append((x + g.clade_name_offset, (y0 + y1) / 2, cs.clade))
     _place_clade_names(ax, names, g.clade_font, spec.clade_label_sizes)
-    return left + (max(sel.slots.values(), default=0) + 1) * g.clade_slot + 8
+    return edges
 
 
 def _place_clade_names(
@@ -348,25 +369,30 @@ def _place_clade_names(
         centre = max(mid, last_end.get(x, -1e9) + half)
         last_end[x] = centre + half
         if centre != mid:
-            ax.plot([x, x + 3.2], [mid, centre - half + 1], color="#7f7f7f", lw=0.3)
+            ax.plot([x - 3, x], [mid, centre - half + 1], color="#7f7f7f", lw=0.3)
         ax.text(
-            x + 1.2,
+            x,
             centre,
             text,
             rotation=-90,
             ha="center",
-            va="bottom",
+            va="baseline",
             fontsize=text_size,
             rotation_mode="anchor",
         )
 
 
-def _draw_hz_rules(ax: Axes, spec: FigureSpec, pg: _Page, right: float) -> None:
-    rows = sorted({h.first for h in spec.hz} | {h.last + 1 for h in spec.hz})
+def _draw_hz_rules(
+    ax: Axes, spec: FigureSpec, pg: _Page, matrix_right: float, edges: Mapping[int, float]
+) -> None:
+    """A rule across the matrix at every band edge; where a clade bracket ends at that row the
+    rule carries on to that bracket and stops there, as on the shipped pages."""
+    g = pg.g
+    rows = sorted({h.first for h in spec.hz} | {h.last + 1 for h in spec.hz} | set(edges))
     for r in rows:
         if 0 < r < spec.layout.n_rows:
             y = pg.row_edge(r)
-            ax.plot([pg.g.ts_left, right - 6], [y, y], color="#7f7f7f", lw=0.5)
+            ax.plot([g.ts_left, edges.get(r, matrix_right)], [y, y], color=g.rule_colour, lw=0.5)
 
 
 def _draw_dash_bars(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> None:
@@ -607,9 +633,11 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     _draw_tree(ax, spec, pg, grid, colours)
     _draw_marks(ax, spec, pg)
     matrix_right = _draw_matrix(ax, spec, pg, colours)
-    brackets_right = _draw_brackets(ax, spec, pg, matrix_right + g.clade_gap)
-    _draw_hz_rules(ax, spec, pg, brackets_right)
-    _draw_dash_bars(ax, spec, pg, brackets_right)
+    bracket_left = matrix_right + g.clade_gap
+    edges = _draw_brackets(ax, spec, pg, bracket_left)
+    _draw_hz_rules(ax, spec, pg, matrix_right, edges)
+    last_column = bracket_left + max(spec.selection.slots.values(), default=0) * g.clade_slot + 2
+    _draw_dash_bars(ax, spec, pg, last_column + g.bars_gap)
     inset = _draw_key(ax, spec, pg, grid)
     strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid)
     placed, metrics = _draw_labels(ax, spec, pg, grid, strain_boxes)
