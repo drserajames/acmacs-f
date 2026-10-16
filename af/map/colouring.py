@@ -41,7 +41,8 @@ from af.util.subtypes import Subtype
 if TYPE_CHECKING:
     from af.clades.groups import GroupSet
     from af.clades.nomenclature import CladeSet
-    from af.serology.outputs import SubtypeColouring
+    from af.map.vaccine_colours import StrainRecord, VaccineColour
+    from af.serology.outputs import AlignedSequences, SubtypeColouring
 
 
 class MapColouringError(ValueError):
@@ -284,6 +285,7 @@ class StoreColours:
         self._clade_refs = {
             ref.dataset: ref for ref in (StoreRef.from_json(r) for r in self.links.refs["clades"])
         }
+        self._con = con  # its clade_rows view also serves vaccines' strain records (Q184)
         self._sequences = preparation_sequences(con, rules.passages)
         self._aligned = aligned_sequences(store, con, self.links)
         self._user = read_clade_tables(
@@ -291,6 +293,8 @@ class StoreColours:
         )
         self._colourings: dict[tuple[str, str], SubtypeColouring] = {}
         self._sets: dict[str, tuple[CladeSet, GroupSet | None]] = {}
+        # sequence dataset -> name key -> (epi_isl, accession, passage), read on first need
+        self._strains: dict[str, dict[tuple[str, str, str], list[tuple[str, str, str]]]] = {}
 
     def _colouring(self, row: str, scheme_name: str) -> SubtypeColouring:
         from af.serology.outputs import subtype_colouring
@@ -520,6 +524,146 @@ class StoreColours:
         tell which subtype row a B preparation of unknown lineage is, from the record it matched."""
         return MappingProxyType(self._sequences)
 
+    def for_vaccines(
+        self,
+        chart: Chart,
+        vaccines: Sequence[tuple[int, str]],
+        own: Sequence[DotStyle],
+        scheme: str | CladeColourScheme,
+        *,
+        groups: GroupSet | None = None,
+    ) -> list[VaccineColour]:
+        """Each vaccine antigen's colour from its named strain's original record, else its cell
+        record, never an egg one (Sarah, Q184; :mod:`af.map.vaccine_colours`).
+
+        ``vaccines`` are (antigen index, the vaccine's passage class) as the map marked them;
+        ``own`` is every antigen's style from :meth:`for_chart`, kept when the strain's records
+        cannot colour it. The records are the sequence version and clade table this run's join
+        read, styled exactly as a preparation matched to each would be.
+        """
+        from af.geo.colours import dot_styles
+        from af.map.vaccine_colours import (
+            VaccineColour,
+            original_records,
+            resolve,
+            vaccine_warning,
+        )
+        from af.seq.matching import passage_class
+
+        row = chart_subtype(chart).key
+        if isinstance(scheme, str):
+            colouring = self._colouring(row, scheme)
+        else:
+            colouring = self._caller_colouring(row, scheme, groups)
+        legend_keys = key_for_legend(colouring.scheme)
+        strains = self._strain_index(row)
+        out = []
+        for antigen, vaccine_class in vaccines:
+            name = chart.antigens[antigen].name
+            key = _strain_key(name)
+            found = strains.get(key, []) if key is not None else []
+            records = self._strain_records(
+                [(e, a, passage_class(p, self.rules.passage)) for e, a, p in found]
+            )
+            source, chosen = original_records(records)
+            style, reason = None, "its strain has no original or cell sequence record"
+            if chosen:
+                fake = {
+                    _record_key(i): PreparationSequence(
+                        r.epi_isl, r.accession, r.clade, "exact", False,
+                        clade_evidence=r.clade_evidence, supported_clade=r.supported_clade,
+                    )
+                    for i, r in enumerate(chosen)
+                }  # fmt: skip
+                style_of, _ = dot_styles(
+                    fake,
+                    self._strain_aligned(row, chosen).get_pair,
+                    colouring.scheme,
+                    colouring.clade_set,
+                    colouring.group_set,
+                )
+                styled = [(r, style_of(_record_key(i))) for i, r in enumerate(chosen)]
+                style, why = resolve(styled)
+                reason = f"its strain's {source} {why}"
+            before = own[antigen]
+            if style is None:
+                out.append(
+                    VaccineColour(
+                        antigen, name, vaccine_class, before,
+                        labels_for(before.label, legend_keys), "", len(chosen), False,
+                        vaccine_warning(name, vaccine_class, reason),
+                    )
+                )  # fmt: skip
+                continue
+            changed = (style.label, style.colour) != (before.label, before.colour)
+            out.append(
+                VaccineColour(
+                    antigen, name, vaccine_class, style, labels_for(style.label, legend_keys),
+                    source, len(chosen), changed,
+                )
+            )  # fmt: skip
+        return out
+
+    def _strain_index(self, row: str) -> dict[tuple[str, str, str], list[tuple[str, str, str]]]:
+        """Every record of the row's sequence version the join read, by strain name key."""
+        import duckdb
+
+        if row not in self._strains:
+            ref = StoreRef.from_json(self.links.refs["sequences"][row])
+            files = sorted((self._store.resolve(ref) / "isolates").glob("*/*.parquet"))
+            if not files:
+                raise MapColouringError(f"sequences/{row}@{ref.version}: no isolates to read")
+            rows = duckdb.execute(
+                "SELECT epi_isl, accession, name, coalesce(passage, '') "
+                "FROM read_parquet(?, union_by_name = true)",
+                [[f.as_posix() for f in files]],
+            ).fetchall()
+            index: dict[tuple[str, str, str], list[tuple[str, str, str]]] = {}
+            for epi_isl, accession, name, passage in rows:
+                key = _strain_key(name or "")
+                if key is not None:
+                    index.setdefault(key, []).append((epi_isl, accession, passage))
+            self._strains[row] = index
+        return self._strains[row]
+
+    def _strain_records(self, found: Sequence[tuple[str, str, str]]) -> list[StrainRecord]:
+        """The records with their clade rows (and evidence), from the clade tables the join read."""
+        from af.map.vaccine_colours import StrainRecord
+
+        if not found:
+            return []
+        pairs = [f"{e}|{a}" for e, a, _ in found]
+        clades = {
+            (e, a): (c, x, s)
+            for e, a, c, x, s in self._con.execute(
+                "SELECT epi_isl, accession, clade, clade_evidence, supported_clade "
+                "FROM clade_rows WHERE list_contains(?, epi_isl || '|' || accession)",
+                [pairs],
+            ).fetchall()
+        }
+        return [
+            StrainRecord(e, a, cls, *clades.get((e, a), (None, None, None))) for e, a, cls in found
+        ]
+
+    def _strain_aligned(self, row: str, records: Sequence[StrainRecord]) -> AlignedSequences:
+        """The records' aligned amino acids, from the sequence version the join read."""
+        import duckdb
+
+        from af.clades.sequence import AlignedSequence, GapSupport
+        from af.serology.outputs import AlignedSequences
+
+        ref = StoreRef.from_json(self.links.refs["sequences"][row])
+        files = sorted((self._store.resolve(ref) / "sequences").glob("*/*.parquet"))
+        pairs = [f"{r.epi_isl}|{r.accession}" for r in records]
+        rows = duckdb.execute(
+            "SELECT epi_isl, accession, aa_aligned FROM read_parquet(?, union_by_name = true) "
+            "WHERE aa_aligned IS NOT NULL AND list_contains(?, epi_isl || '|' || accession)",
+            [[f.as_posix() for f in files], pairs],
+        ).fetchall()
+        return AlignedSequences(
+            {(e, a): AlignedSequence(aa, gaps=GapSupport.OBSERVED) for e, a, aa in rows}
+        )
+
     def store_refs(self, datasets: Collection[str] | None = None) -> list[dict[str, str]]:
         """The store versions a store-coloured figure was drawn from: exactly the ones READ
         (serology, and the sequences and clades the join read), never CURRENT at the time of
@@ -589,3 +733,18 @@ def chart_subtype(chart: Chart) -> Subtype:
 def chart_row(chart: Chart) -> str:
     """The subtype row key (``af/subtypes.toml``) a chart is coloured by: :func:`chart_subtype`."""
     return chart_subtype(chart).key
+
+
+def _strain_key(name: str) -> tuple[str, str, str] | None:
+    """A strain's location/isolate/year key, the same for a table's antigen name and a sequence
+    record's name (af.seq.names normalises both as the matcher does)."""
+    from af.seq.matching import name_key
+    from af.seq.names import normalise
+
+    return name_key(normalise(name).name)
+
+
+def _record_key(i: int) -> PreparationKey:
+    """A stand-in preparation key for the i-th record of a vaccine's strain, styled as if a
+    preparation had matched it (af.geo.colours.dot_styles takes preparations)."""
+    return ("vaccine strain", f"record {i}", "", (), "")
