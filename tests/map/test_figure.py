@@ -194,8 +194,9 @@ def test_per_point_styles_are_opt_in() -> None:
 
 
 def test_window_greyed_and_uncoloured_antigens_are_two_greys() -> None:
-    """As the shipped maps: a painted antigen the window greys is drawn darker (#bebebe) than one
-    with no colour at all (#cccccc); both are outlined in their own grey."""
+    """As the shipped maps: an antigen the window greys is drawn darker (#bebebe) than one with
+    no colour at all (#cccccc); both are outlined in their own grey. The window greys every
+    antigen dated before it, painted or not."""
     import datetime as dt
 
     import matplotlib.pyplot as plt
@@ -203,9 +204,12 @@ def test_window_greyed_and_uncoloured_antigens_are_two_greys() -> None:
 
     from af.map.style import Window
 
-    scene = chart_scene(chart(), XY, COLOURS, title="T", window=Window("w", dt.date(2022, 1, 1)))
+    old = chart_scene(chart(), XY, COLOURS, title="T", window=Window("w", dt.date(2022, 1, 1)))
+    assert all(p.greyed for p in old.points if p.kind == "antigen")  # painted or not
+    scene = chart_scene(chart(), XY, COLOURS, title="T", window=Window("w", dt.date(2021, 1, 1)))
     by_id = {p.id: p for p in scene.points}
-    assert by_id["ag0"].greyed and by_id["ag1"].colour is None and not by_id["ag1"].greyed
+    assert not by_id["ag0"].greyed and by_id["ag1"].colour is None and not by_id["ag1"].greyed
+    scene = old
     frame = frame_around(scene)
     page = frame.page(scene.xy())
     fig = plt.figure(figsize=(4, 4), dpi=72)
@@ -219,7 +223,7 @@ def test_window_greyed_and_uncoloured_antigens_are_two_greys() -> None:
         if p.xy is not None and p.kind == "antigen"
     }
     assert patch["ag0"].get_facecolor() == patch["ag0"].get_edgecolor() == to_rgba("#bebebe")
-    assert patch["ag1"].get_facecolor() == patch["ag1"].get_edgecolor() == to_rgba("#cccccc")
+    assert patch["ag1"].get_facecolor() == patch["ag1"].get_edgecolor() == to_rgba("#bebebe")
 
 
 def test_the_report_page_strokes_and_title_are_the_shipped_maps() -> None:
