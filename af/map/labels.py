@@ -10,10 +10,12 @@ Coordinates are page fractions: (0, 0) top-left, (1, 1) bottom-right.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
@@ -27,11 +29,13 @@ Array = NDArray[np.float64]
 def label_text(
     name: str, passage_class: str, reassortant: str, abbreviations: Mapping[str, str]
 ) -> str:
-    """Short label ``<place>/<yy>-<class>``, as on today's maps.
+    """Short label ``<place>/<yy>-<class>``, as on the shipped maps (ae's rule).
 
     The place abbreviation comes from ``abbreviations`` (curated data, keyed by the upper-case
-    location). Without an entry: initials of a multi-word place, else its first two letters.
-    A reassortant is labelled by its reassortant name, since that is how vaccines are known.
+    location: :class:`LabelAbbreviations`, CDC's codes for US places). Without an entry:
+    initials of a multi-word place, else its first two letters. The suffix is the passage word
+    the caller gives; a reassortant given as such is labelled by its reassortant name. (The
+    round's maps label a reassortant vaccine by its egg passage: af.map.build decides that.)
     """
     parts = strain_name(name).split("/")
     if len(parts) < 3:
@@ -47,6 +51,36 @@ def label_text(
         else passage_class
     )
     return f"{abbr}/{year[-2:]}-{suffix}"
+
+
+@dataclass(frozen=True)
+class LabelAbbreviations:
+    """A round's place abbreviations for vaccine labels: a TSV with ``location`` and
+    ``abbreviation`` columns (``#`` lines are its header notes), named in maps.toml. Its hash
+    goes into each figure's provenance (rule 5)."""
+
+    path: Path
+    sha256: str
+    table: dict[str, str]
+
+    @classmethod
+    def read(cls, path: Path) -> LabelAbbreviations:
+        data = path.read_bytes()
+        lines = [ln for ln in data.decode().splitlines() if ln.strip() and not ln.startswith("#")]
+        if not lines or lines[0].split("\t") != ["location", "abbreviation"]:
+            raise ValueError(f"{path}: expected a header line 'location<TAB>abbreviation'")
+        table: dict[str, str] = {}
+        for n, line in enumerate(lines[1:], 2):
+            cells = line.split("\t")
+            if len(cells) != 2 or not all(c.strip() == c and c for c in cells):
+                raise ValueError(f"{path}: row {n}: expected two non-empty cells, got {cells}")
+            if cells[0] in table:
+                raise ValueError(f"{path}: row {n}: {cells[0]!r} has two rows")
+            table[cells[0]] = cells[1]
+        return cls(path, hashlib.sha256(data).hexdigest(), table)
+
+    def input(self) -> dict[str, str]:
+        return {"path": str(self.path), "sha256": self.sha256}
 
 
 @dataclass(frozen=True)

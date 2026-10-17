@@ -53,7 +53,7 @@ from af.map.curate import (
 )
 from af.map.figure import chart_points
 from af.map.finish import finish_map
-from af.map.labels import label_text
+from af.map.labels import LabelAbbreviations, label_text
 from af.map.orient import Orientation, RotationOverride, drawn_pairs, orient
 from af.map.render import DEFAULT_LOOK
 from af.map.style import ColourRow, ColourScheme, PointIn, Window
@@ -449,6 +449,7 @@ def build_map(
     sera_markers: list[Marker] | None = None,
     guard: ReadGuard | None = None,
     fonts: FigureFonts | None = None,
+    abbreviations: LabelAbbreviations | None = None,
 ) -> MapResult:
     """Build every window of one map. Raises :class:`BuildError` with the folder named.
 
@@ -647,12 +648,16 @@ def build_map(
     vlabels = {
         ids[m.antigen]: label_text(
             chart.antigens[m.antigen].name,
-            m.passage_class,
+            # the shipped maps label a reassortant vaccine "egg" (style 08-27); its reassortant
+            # name stays in the I7
+            "egg" if m.passage_class == "reassortant" else m.passage_class,
             chart.antigens[m.antigen].reassortant,
-            {},
+            abbreviations.table if abbreviations is not None else {},
         )
         for m in vrep.marks
     }
+    if abbreviations is not None:  # the place abbreviations the labels used (rule 5)
+        inputs["label_abbreviations"] = abbreviations.input()
     if vrep.unused_optional_rules:
         decisions["vaccine_rules_unused_optional"] = list(vrep.unused_optional_rules)
     if disable or choose:
@@ -936,6 +941,11 @@ def build(
         fonts = load_fonts(config.figures) if config.figures is not None else None
         if fonts is not None:
             stack.enter_context(fonts.context())
+        abbreviations = (
+            LabelAbbreviations.read(config.label_abbreviations)
+            if config.label_abbreviations is not None
+            else None
+        )
         results = []
         for cfg in wanted:
             result = build_map(
@@ -950,6 +960,7 @@ def build(
                 sera_markers=markers,
                 guard=guard,
                 fonts=fonts,
+                abbreviations=abbreviations,
             )
             results.append(result)
             flags = f" flags={len(result.flags)}" if result.flags else ""
