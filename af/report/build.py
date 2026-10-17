@@ -54,6 +54,8 @@ from af.util.artefacts import Artefact, sha256_path
 from af.util.config import ConfigError
 
 LATEX = "pdflatex"
+GEO_CLADE_KEY = Path("geo") / "clade-key.json"  # written by af.geo.build beside its figures
+HEX = re.compile(r"#[0-9a-fA-F]{6}")
 MAX_PASSES = 4
 BUILD_RECORD_VERSION = 1
 
@@ -177,6 +179,67 @@ def _cover(
 
 
 Intro = tuple[list[str], list[str]]  # (paragraphs, gaps: facts no artefact records)
+Key = list[tuple[str, str]]  # a clade key's rows as printed: (label, colour as 6 hex digits)
+
+
+def clade_keys(
+    cfg: ReportConfig, figs: dict[str, Resolved], root: Path
+) -> tuple[dict[int, Key], dict[str, Any] | None]:
+    """The clade colour key of each geo section that shows one, and what the build record keeps.
+
+    The key is the geo build's (one file beside its figures), so it is checked against the
+    figures the report places: every coloured dot's clade must be in the key in the colour it
+    is drawn in, or the key belongs to another geo build. Rows are printed newest first, as the
+    delivered report lists them (the key file is in scheme order), then the uncoloured row."""
+    shown = {i: section for i, section in enumerate(cfg.sections) if section.clade_key}
+    if not shown:
+        return {}, None
+    path = root / GEO_CLADE_KEY
+    if not path.is_file():
+        raise BuildError(f"{path}: missing, and {len(shown)} geo section(s) show its clade key")
+    doc = json.loads(path.read_text())
+    keys: dict[int, Key] = {}
+    errors: list[str] = []
+    for i, section in shown.items():
+        where = f"sections[{i}] ({section.title})"
+        if section.clade_key not in doc:
+            errors.append(f"{where}: {section.clade_key!r} is not in {path} (has {sorted(doc)})")
+            continue
+        entries = doc[section.clade_key]["entries"]
+        colours = {e["legend"]: e["colour"] for e in entries}
+        errors += [f"{where}: {e['legend']!r} has colour {e['colour']!r}, not #rrggbb"
+                   for e in entries if not HEX.fullmatch(e["colour"])]  # fmt: skip
+        for _, cells in section.pages(cfg.months()):
+            for slot in (c for c in cells if c is not None):
+                for loc in figs[slot].figure.doc.get("geo", {}).get("locations", []):
+                    for dot in loc["points"]:
+                        clade, colour = dot.get("clade"), dot["color"]
+                        if clade is not None and colours.get(clade) != colour:
+                            errors.append(
+                                f"{slot}: {clade!r} drawn {colour}, key has "
+                                f"{colours.get(clade)} (a key from another geo build?)"
+                            )
+        rows = [(e["legend"], e["colour"][1:]) for e in reversed(entries)]
+        if section.clade_key_uncoloured:
+            rows.append((section.clade_key_uncoloured, "FFFFFF"))
+        keys[i] = rows
+    if errors:
+        found = sorted(set(errors))
+        raise BuildError(f"{len(found)} clade key problem(s):\n  " + "\n  ".join(found))
+    record = {
+        "path": str(path), "sha256": sha256_path(path),
+        "sections": {cfg.sections[i].title: cfg.sections[i].clade_key for i in shown},
+    }  # fmt: skip
+    return keys, record
+
+
+def _key_table(key: Key, n: int) -> list[str]:
+    """A clade key as the delivered report draws it: a ring-and-fill swatch, then the label.
+    Colours get generated names (labels hold spaces and parentheses)."""
+    out = [rf"\definecolor{{afkey{n}x{j}}}{{HTML}}{{{rgb}}}" for j, (_, rgb) in enumerate(key)]
+    out.append(r"\begin{tabular}{l l}")
+    out += [rf"\cbox[afkey{n}x{j}] & {tex_escape(label)} \\" for j, (label, _) in enumerate(key)]
+    return [*out, r"\end{tabular}"]
 
 
 def intro_texts(
@@ -206,16 +269,22 @@ def intro_texts(
     return out
 
 
-def _intro_page(section: Section, intro: Intro) -> list[str]:
+def _intro_page(section: Section, intro: Intro, key: Key | None = None, n: int = 0) -> list[str]:
     """The section heading, its paragraphs, and any unrecorded fact in red; then a new page.
 
     Spaced as the delivered report: 3em under the heading, 1em between paragraphs. A tree
-    intro page has no page number there (the tree follows as a whole page), a geo one has."""
+    intro page has no page number there (the tree follows as a whole page), a geo one has.
+    A clade key sits after the first paragraph (the period sentence), 1em above and below."""
     paragraphs, gaps = intro
     out = [rf"\{_level(section)}{{{tex_escape(section.title)}}}", r"\vspace*{3em}"]
     if section.kind == "trees":
         out.append(r"\thispagestyle{empty}")
-    out.append(r"\par\vspace{1em}".join(tex_escape(p) for p in paragraphs) + r"\par")
+    if key and paragraphs:
+        out.append(tex_escape(paragraphs[0]) + r"\par\vspace*{1em}")
+        out += [*_key_table(key, n), r"\par\vspace*{1em}"]
+        paragraphs = paragraphs[1:]
+    if paragraphs:
+        out.append(r"\par\vspace{1em}".join(tex_escape(p) for p in paragraphs) + r"\par")
     out += [rf"{{\small\raggedright\textcolor{{red}}{{NOT RECORDED: {tex_escape(g)}}}\par}}"
             for g in gaps]  # fmt: skip
     return [*out, r"\newpage"]
@@ -312,6 +381,7 @@ def _grid_pages(
 def write_tex(
     cfg: ReportConfig, figs: dict[str, Resolved], build: Path, built_at: dt.datetime,
     n_not_from_store: int = 0, intros: dict[int, Intro] | None = None,
+    keys: dict[int, Key] | None = None,
 ) -> Path:  # fmt: skip
     """Copy figures in by content hash and write ``report.tex`` (relative paths only)."""
     fig_dir = build / "figures"
@@ -331,6 +401,9 @@ def write_tex(
         r"\usepackage[top=3em,bottom=5em,left=2.5em,right=2.5em]{geometry}",
         r"\usepackage{graphicx,xcolor,pdflscape,pdfpages,zref-user,zref-abspage}",
         r"\usepackage[export]{adjustbox}",  # the frame key on \includegraphics, as delivered
+        r"\usepackage{tikz}",  # the clade key's swatches, drawn as the delivered report's \cbox
+        r"\newcommand\cbox[1][black]{\tikz[baseline=-0.5ex]"
+        r"\draw[black,fill=#1,radius=0.3em] (0,0) circle ;}",
         # Physical page on every \zlabel: \label pages are logical.
         r"\makeatletter\zref@addprop{main}{abspage}\makeatother",
         r"\usepackage{titletoc}",
@@ -346,14 +419,14 @@ def write_tex(
         *_cover(cfg, sum(r.figure.placeholder for r in figs.values()), n_not_from_store, built_at),
     ]
     group = None
-    intros = intros or {}
+    intros, keys = intros or {}, keys or {}
     for i, section in enumerate(cfg.sections):
         if section.group and section.group != group:
             lines.append(rf"\section*{{{tex_escape(section.group)}}}")
             lines.append(rf"\addcontentsline{{toc}}{{section}}{{{tex_escape(section.group)}}}")
         group = section.group
         if i in intros:
-            lines += _intro_page(section, intros[i])
+            lines += _intro_page(section, intros[i], keys.get(i), i)
         if section.kind == "trees":
             lines += _tree_pages(section, figs, rel, headed=i not in intros)
         else:
@@ -560,6 +633,7 @@ def build(
             cfg, figs, store_root, manifest_path, deep=deep, export_records=export_records
         )
         intros = intro_texts(cfg, figs, Store.open(store_root) if store_root else None)
+        keys, key_record = clade_keys(cfg, figs, figures_root)
         gaps = [g for _, section_gaps in intros.values() for g in section_gaps]
         if gaps and not cfg.figures.allow_placeholders:
             raise BuildError(
@@ -569,7 +643,7 @@ def build(
         if build_dir.exists():
             shutil.rmtree(build_dir)  # never reuse a stale .aux/.toc or an old figure
         build_dir.mkdir(parents=True)
-        tex = write_tex(cfg, figs, build_dir, built_at, len(use.not_from_store), intros)
+        tex = write_tex(cfg, figs, build_dir, built_at, len(use.not_from_store), intros, keys)
         passes = run_latex(tex, LocalRunner())
         pages = check_output(tex, cfg.all_slots(), 1 if cfg.report.end_page else 0)
     final = out_dir / f"{cfg.report.id}.pdf"
@@ -584,6 +658,7 @@ def build(
     for item in record["warnings"]:
         print(f"{item['slot']}: {item['warning']}", file=sys.stderr)
     record["text_gaps"] = gaps
+    record["clade_key"] = key_record
     (out_dir / f"{cfg.report.id}.build.json").write_text(json.dumps(record, indent=1))
     return final
 
