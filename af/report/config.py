@@ -80,6 +80,12 @@ class Section:
     # An intro page before the figures (geo and trees): the report's words; facts are
     # placeholders filled from recorded artefacts (af.report.text). Paragraphs: blank lines.
     intro: str = ""
+    # geo: the subtype in the geo build's clade key (<figures>/geo/clade-key.json) whose colours
+    # the intro page lists, as the delivered report does; the key comes with the figures.
+    clade_key: str = ""
+    # The key's last row, for dots no clade colours (the delivered report: "sequenced"): the
+    # report's words. Empty: no such row.
+    clade_key_uncoloured: str = ""
 
     def pages(self, months: list[str]) -> list[tuple[str, list[str | None]]]:
         """(heading, cells) per page for a grid section; a blank cell is None.
@@ -208,6 +214,10 @@ def load(path: Path) -> ReportConfig:
             problems.append(f"{where}.grid: expected [columns, rows], both >= 1")
         if section.intro:
             problems += _intro_problems(where, section)
+        if section.clade_key and (section.kind != "geo" or not section.intro):
+            problems.append(f"{where}.clade_key: only for a geo section with an intro page")
+        if section.clade_key_uncoloured and not section.clade_key:
+            problems.append(f"{where}.clade_key_uncoloured: needs clade_key")
     slots = cfg.all_slots()
     duplicates = sorted({s for s in slots if slots.count(s) > 1})
     if duplicates:
