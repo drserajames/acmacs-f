@@ -79,6 +79,17 @@ STATE_NO_SCHEME_ROW = "supported clade not in the colour scheme"
 EVIDENCE_MIXED = "mixed"
 #: A tie whose observed candidates disagree while ae's ranked one is unobserved (it abstains).
 TIE_RANKED_UNOBSERVED = "tie: observed sequences disagree, the ranked one is unobserved"
+#: Geo only (Sarah, Q215): the preparation reached no sequence at all (no record, rows naming
+#: different ones, or a tie), so its dot is "not sequenced", not "clade not defined". Set by the
+#: geo build on top of these styles (af.serology.outputs), never by dot_styles, so maps keep
+#: drawing every uncoloured antigen alike.
+STATE_NO_SEQUENCE = "no sequence"
+#: Geo only (Q215), likewise: why a sequenced preparation shows no clade where dot_styles leaves no
+#: state: its record has no clade row, the nomenclature names no clade for it, or its rows or tied
+#: candidates were not resolved to one record.
+STATE_NO_ASSIGNMENT = "no clade assignment"
+STATE_NOMENCLATURE_NONE = "nomenclature names no clade"
+STATE_UNRESOLVED = "rows or tied sequences not resolved"
 
 
 @dataclass(frozen=True)
@@ -103,6 +114,7 @@ class DotStyle:
 
 
 UNCOLOURED = DotStyle(label="", colour=None)
+NOT_SEQUENCED = DotStyle(label="", colour=None, state=STATE_NO_SEQUENCE)
 
 
 @dataclass

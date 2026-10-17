@@ -36,7 +36,16 @@ from af.clades.groups import GroupSet
 from af.clades.importer import UserClades
 from af.clades.nomenclature import CladeSet
 from af.clades.sequence import AlignedSequence, GapSupport
-from af.geo.colours import UNCOLOURED, ColourCounts, DotStyle, dot_styles
+from af.geo.colours import (
+    NOT_SEQUENCED,
+    STATE_NO_ASSIGNMENT,
+    STATE_NOMENCLATURE_NONE,
+    STATE_UNRESOLVED,
+    UNCOLOURED,
+    ColourCounts,
+    DotStyle,
+    dot_styles,
+)
 from af.geo.records import DotRule, Month, geo_counts, to_i7
 from af.geo.render import render_geo
 from af.seq import locations
@@ -256,6 +265,9 @@ def _store_styles(
 
     def style(prep: Preparation) -> DotStyle:
         key = prep.key()
+        return sequence_state(styled(prep, key), links.get(key))
+
+    def styled(prep: Preparation, key: Any) -> DotStyle:
         row = rows[key]
         if row is None:
             if key not in counted:
@@ -271,6 +283,27 @@ def _store_styles(
         return uncoloured(row, "no colour scheme given", key)
 
     return style
+
+
+def sequence_state(dot: DotStyle, linked: PreparationSequence | None) -> DotStyle:
+    """``dot``, or :data:`NOT_SEQUENCED` when it is uncoloured and its preparation reached no
+    sequence: no matched record, no rows naming different ones, no tie (Sarah, Q215: "mark
+    unsequenced & clade not defined on different lines"). An uncoloured dot that did reach one
+    is a clade not defined; where its style gives no reason, the record's own is added (no clade
+    row, the nomenclature names none, not resolved to one record), so the key can say why."""
+    if dot.colour is not None or dot.state:
+        return dot
+    if linked is None or not (
+        linked.epi_isl is not None or linked.conflict or linked.tied or linked.alternatives
+    ):
+        return NOT_SEQUENCED
+    if linked.epi_isl is None:
+        return DotStyle("", None, state=STATE_UNRESOLVED)
+    if linked.clade is None:
+        return DotStyle("", None, state=STATE_NO_ASSIGNMENT)
+    if linked.clade == "":
+        return DotStyle("", None, state=STATE_NOMENCLATURE_NONE)
+    return dot  # another reason (no aligned sequence, proxy pairing unused, no labels)
 
 
 def _styles(
@@ -308,6 +341,9 @@ def _styles(
 
     def style(prep: Preparation) -> DotStyle:
         key = prep.key()
+        return sequence_state(styled(prep, key), links.get(key))
+
+    def styled(prep: Preparation, key: Any) -> DotStyle:
         row = rows[key]
         if row is None:
             if key not in seen:

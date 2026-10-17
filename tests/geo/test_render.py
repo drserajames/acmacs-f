@@ -108,3 +108,11 @@ def test_honeycomb_packing_is_a_look_choice(tmp_path: Path) -> None:
     with pytest.raises(GeoRenderError, match="unknown packing"):
         render_period(period, lambda n: None, _coastline(tmp_path), tmp_path / "m.pdf",
                       Look(packing="hexagons"))  # fmt: skip
+
+
+def test_an_unknown_uncoloured_class_is_an_error(tmp_path: Path) -> None:
+    doc = {"period": "2021-01", "title": "January 2021", "locations": [
+        {"name": "Here", "points": [{"color": "transparent", "count": 1, "uncoloured": "grey"}]},
+    ]}  # fmt: skip
+    with pytest.raises(GeoRenderError, match="unknown uncoloured class 'grey'"):
+        render_period(doc, lambda name: (1.0, 2.0), _coastline(tmp_path), tmp_path / "f.pdf")

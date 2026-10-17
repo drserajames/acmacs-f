@@ -136,7 +136,7 @@ def build_geo(
                 look=looks[slot], scheme=", ".join(s.name for s in slot_schemes),
             )  # fmt: skip
         files += written.files
-        key[slot] = clade_key(doc, slot_schemes)
+        key[slot] = clade_key(doc, slot_schemes, looks[slot])
         record["slots"][slot] = {
             "subtype": subtype,
             "store_refs": slot_provenance["store_refs"],
