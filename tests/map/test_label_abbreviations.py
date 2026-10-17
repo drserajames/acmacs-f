@@ -40,7 +40,8 @@ def test_a_bad_table_is_refused(tmp_path: Path, text: str, match: str) -> None:
 
 
 def test_the_round_names_its_table(tmp_path: Path) -> None:
-    text = GOOD.replace("[defaults]", 'label_abbreviations = "abbr.tsv"\n\n[defaults]', 1)
+    # a top-level key, so it goes before the config's first table, whichever that is
+    text = 'label_abbreviations = "abbr.tsv"\n' + GOOD
     config, _ = load_maps_config(write(tmp_path, text))
     assert config.label_abbreviations == (tmp_path / "abbr.tsv").resolve()
     assert load_maps_config(write(tmp_path, GOOD))[0].label_abbreviations is None
