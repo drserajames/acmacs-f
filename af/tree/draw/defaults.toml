@@ -54,3 +54,17 @@ backbone_reversion = 0.9
 stem_overlap = 0.9
 # Substitutions to or from these residues are never labels.
 hide_aa = "X"
+# af's own filters above (leaf consensus, partial reversions). A round reproducing the old
+# renderer's rule (AD acmacs-tal DrawAATransitions) turns them off and uses the three below.
+leaf_filters = true
+# Position -> smallest subtree labelled for a change there (< 1: share of the drawn rows), the
+# .tal's minimum-number-leaves-in-subtree-per-pos: a node passes the size rule when its rows reach
+# the lower of the global minimum and any of its positions'. Only with target_labels = 0.
+min_rows_per_pos = {}
+# AD eu-20200915 stage 3: a change reverted by its descendants close below is a back-and-forth,
+# removed with its reverts. Close below: the nearest revert fewer than flip_max_levels inode
+# levels down, and the reverting subtrees holding more than flip_min_share of the change's rows
+# (AD's values: 3 and 0.005).
+flip_removal = false
+flip_max_levels = 3
+flip_min_share = 0.005

@@ -8,7 +8,13 @@ np = pytest.importorskip(
     "numpy", reason="numpy not installed: af.tree.draw needs it (pyproject, WS1)"
 )
 
-from af.tree.draw.aa_labels import leaf_consensus, select_labels  # noqa: E402
+from af.tree.draw.aa_labels import (  # noqa: E402
+    LabelHide,
+    LabelRuleError,
+    hide_labels,
+    leaf_consensus,
+    select_labels,
+)
 from af.tree.draw.defaults import load_defaults  # noqa: E402
 from af.tree.draw.layout import compute_layout  # noqa: E402
 from af.tree.draw.place import (  # noqa: E402
@@ -118,6 +124,84 @@ def test_target_label_count_sets_the_size_threshold():
     assert len(three) == 3
     floor, _ = select_labels(t, lay, (), replace(D.labels, target_labels=3, min_rows_floor=15))
     assert len(floor) == 2  # the floor wins over the target
+
+
+def test_a_position_minimum_lets_a_smaller_subtree_through():
+    # stems: K2N 20 rows, A6S 20, L7F 10 (of 50); a 15-row minimum keeps only the first two
+    texts, _ = labels_of(standard_tree(), min_share=0.3)
+    assert texts == {"K2N", "A6S"}
+    texts, counts = labels_of(standard_tree(), min_share=0.3, min_rows_per_pos={"7": 5})
+    assert texts == {"K2N", "A6S", "L7F"}
+    assert counts["kept by a position's own minimum"] == 1
+    texts, _ = labels_of(standard_tree(), min_share=0.3, min_rows_per_pos={"7": 0.1})  # 5 rows
+    assert "L7F" in texts
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"min_rows_per_pos": {"7": 5}, "target_labels": 3},  # a share rule only, as in AD
+        {"min_rows_per_pos": {"x7": 5}},
+        {"min_rows_per_pos": {"7": 0}},
+    ],
+)
+def test_a_position_minimum_that_cannot_apply_is_an_error(kw):
+    with pytest.raises(LabelRuleError):
+        labels_of(standard_tree(), **kw)
+
+
+def flip_tree(levels: int):
+    """S8N on a 40-row node; 10 of its rows revert (N8S) ``levels`` inode levels below it, and
+    5 others change on (N8T)."""
+    fwd, on = mutate(BASE, "S8N"), mutate(BASE, "S8T")
+    back = inner(*[leaf(100 + k, "X", aa=BASE) for k in range(10)], subs=("N8S",))
+    for _ in range(levels):
+        back = inner(back)
+    kept = inner(*[leaf(200 + k, "X", aa=fwd) for k in range(25)])
+    onward = inner(*[leaf(300 + k, "X", aa=on) for k in range(5)], subs=("N8T",))
+    return build(inner(inner(back, kept, onward, subs=("S8N",)), *clade_block(400, 20, "X")))
+
+
+def test_a_close_revert_removes_the_change_and_the_revert():
+    kw = {"leaf_filters": False, "flip_removal": True, "min_share": 0.05}
+    texts, counts = labels_of(flip_tree(levels=0), **kw)
+    # the onward change is re-anchored to the residue above the removed one
+    assert texts == {"S8T"} and counts["removed subs: back-and-forth (flip)"] == 2
+    texts, _ = labels_of(flip_tree(levels=0), **{**kw, "flip_removal": False})
+    assert texts == {"S8N", "N8S", "N8T"}
+
+
+def test_a_revert_far_below_or_on_few_rows_is_not_a_flip():
+    kw = {"leaf_filters": False, "flip_removal": True, "min_share": 0.05}
+    texts, _ = labels_of(flip_tree(levels=3), **kw)  # 3 levels below: AD's limit is < 3
+    assert texts == {"S8N", "N8S", "N8T"}
+    texts, _ = labels_of(flip_tree(levels=0), **{**kw, "flip_min_share": 0.5})  # 10 of 40 rows
+    assert texts == {"S8N", "N8S", "N8T"}
+
+
+def test_leaf_filters_off_keeps_a_partial_reversion():
+    texts, _ = labels_of(reversion_tree(back_rows=25), leaf_filters=False)
+    assert texts == {"S8N", "N8S"}
+
+
+def test_named_hide_drops_its_label_and_must_match_one():
+    t = standard_tree()
+    lay = compute_layout(t)
+    labels, _ = select_labels(t, lay, (), LOW)
+    l7f = next(lab for lab in labels if lab.subs == ["L7F"])
+    hide = LabelHide(l7f.first, l7f.last, "L7F", "invented")
+    kept, n = hide_labels(t, lay, labels, [hide])
+    assert n == 1 and {" ".join(lab.subs) for lab in kept} == {"K2N", "A6S"}
+    # any two leaves under the node name it: the common ancestor is the labelled node
+    inside = LabelHide("EPI_ISL_0000012", "EPI_ISL_0000017", "L7F", "invented")
+    assert hide_labels(t, lay, labels, [inside])[1] == 1
+    for bad in (
+        LabelHide(l7f.first, l7f.last, "L7A", "text differs"),
+        LabelHide("EPI_ISL_0000000", "EPI_ISL_0000045", "L7F", "node has no label"),
+        LabelHide("EPI_ISL_9999999", l7f.last, "L7F", "leaf not on the tree"),
+    ):
+        with pytest.raises(LabelRuleError):
+            hide_labels(t, lay, labels, [bad])
 
 
 def _crowded(seed: int):

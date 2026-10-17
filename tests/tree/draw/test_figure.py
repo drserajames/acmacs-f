@@ -15,6 +15,7 @@ pytest.importorskip(
 import numpy as np  # noqa: E402
 from matplotlib.collections import LineCollection  # noqa: E402
 
+from af.tree.draw.aa_labels import LabelHide  # noqa: E402
 from af.tree.draw.defaults import load_defaults  # noqa: E402
 from af.tree.draw.figure import DashBarError, FigureConfig, Overrides, make_figure  # noqa: E402
 from af.tree.draw.render import DashBar  # noqa: E402
@@ -69,6 +70,29 @@ def test_same_input_same_pdf_bytes(tmp_path):
     make_figure(standard_tree(), PARENTS, config(), a, {})
     make_figure(standard_tree(), PARENTS, config(), b, {})
     assert a.read_bytes() == b.read_bytes()
+
+
+def test_named_label_hides_are_counted_in_the_draw_report(tmp_path):
+    labels = replace(load_defaults().labels, target_labels=0, min_share=0.05)
+    hide = LabelHide("EPI_ISL_0000010", "EPI_ISL_0000019", "L7F", "invented: not wanted")
+    report = make_figure(
+        standard_tree(),
+        PARENTS,
+        config(labels=labels, hide_labels=[hide]),
+        tmp_path / "figure.pdf",
+        {"tree": "sha256:0"},
+    )
+    assert report["aa_label_filter"]["hidden by name"] == 1
+    assert {" ".join(lab["subs"]) for lab in report["aa_labels"]} == {"K2N", "A6S"}
+    assert report["aa_label_filter"]["labels"] == 2
+    assert report["aa_label_hides"] == [
+        {
+            "first": "EPI_ISL_0000010",
+            "last": "EPI_ISL_0000019",
+            "text": "L7F",
+            "reason": "invented: not wanted",
+        }
+    ]
 
 
 def test_centre_marks_and_overrides_are_counted(tmp_path):
