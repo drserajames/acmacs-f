@@ -718,3 +718,83 @@ def test_the_delivered_page_style_builds(tmp_path: Path) -> None:
     record = json.loads((tmp_path / "out" / "vcm-test.build.json").read_text())
     # cover (page 1, counted), contents, 2 geo pages, 1 map page, and the closing page
     assert record["output"]["pages"] == 6
+
+
+# ---- the geo intro page's clade key (style step 16) ---------------------------------------
+
+GEO_KEY = VCM.replace(
+    'slots = ["geo/x"]\ngrid = [1, 3]',
+    'slots = ["geo/x"]\ngrid = [1, 3]\nintro = "Months {period}\\n\\nEach dot is a test strain."\n'
+    'clade_key = "x"\nclade_key_uncoloured = "no colour"',
+)
+KEY = {"x": {"entries": [
+    {"legend": "Old (q1)", "keys": ["Old"], "colour": "#112233", "per_month": {}, "window": 0},
+    {"legend": "New 9Z", "keys": ["New"], "colour": "#a0b0c0", "per_month": {}, "window": 3},
+]}}  # fmt: skip
+
+
+def _geo_key_setup(tmp: Path, key: dict[str, Any] | None = KEY) -> tuple[Path, Path]:
+    cfg = tmp / "v.toml"
+    cfg.write_text(GEO_KEY)
+    root = tmp / "figs"
+    for slot in load(cfg).all_slots():
+        placeholder.make(root, slot, slot, T0)
+    if key is not None:
+        (root / "geo").mkdir(parents=True, exist_ok=True)
+        (root / build.GEO_CLADE_KEY).write_text(json.dumps(key))
+    return cfg, root
+
+
+def test_the_clade_key_is_listed_newest_first_with_the_uncoloured_row_last(tmp_path: Path) -> None:
+    cfg_path, root = _geo_key_setup(tmp_path)
+    cfg = load(cfg_path)
+    keys, record = build.clade_keys(cfg, build.resolve_all(cfg, root), root)
+    assert keys == {0: [("New 9Z", "a0b0c0"), ("Old (q1)", "112233"), ("no colour", "FFFFFF")]}
+    assert record is not None and record["sha256"] == sha256_path(root / build.GEO_CLADE_KEY)
+    assert record["sections"] == {"X geographic data": "x"}
+    page = "\n".join(build._intro_page(cfg.sections[0], (["Months a", "Each dot"], []), keys[0]))
+    # as delivered: the period sentence, the key, then the description
+    assert page.index("Months a") < page.index(r"\begin{tabular}{l l}") < page.index("Each dot")
+    assert r"\cbox[afkey0x1] & Old (q1) \\" in page
+
+
+def test_a_clade_key_from_another_geo_build_is_refused(tmp_path: Path) -> None:
+    cfg_path, root = _geo_key_setup(tmp_path)
+    cfg = load(cfg_path)
+    figs = build.resolve_all(cfg, root)
+    dots = [{"color": "#a0b0c0", "count": 2, "clade": "New 9Z"},
+            {"color": "#ffffff", "count": 1, "clade": "Other"},
+            {"color": "transparent", "count": 4, "clade": None}]  # fmt: skip
+    figs["geo/x/2026-01"].figure.doc["geo"] = {"locations": [{"name": "P", "points": dots}]}
+    with pytest.raises(build.BuildError, match="'Other' drawn #ffffff, key has None"):
+        build.clade_keys(cfg, figs, root)
+
+
+def test_a_missing_clade_key_or_subtype_is_refused(tmp_path: Path) -> None:
+    cfg_path, root = _geo_key_setup(tmp_path, key=None)
+    cfg = load(cfg_path)
+    with pytest.raises(build.BuildError, match="clade-key.json: missing"):
+        build.clade_keys(cfg, build.resolve_all(cfg, root), root)
+    (root / "geo").mkdir(parents=True, exist_ok=True)
+    (root / build.GEO_CLADE_KEY).write_text(json.dumps({"y": KEY["x"]}))
+    with pytest.raises(build.BuildError, match="'x' is not in"):
+        build.clade_keys(cfg, build.resolve_all(cfg, root), root)
+
+
+def test_a_clade_key_only_on_a_geo_intro_page(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "v.toml"
+    cfg_path.write_text(GEO_KEY.replace("grid = [3, 2]", 'grid = [3, 2]\nclade_key = "x"'))
+    with pytest.raises(ConfigError, match=r"sections\[1\].clade_key: only for a geo section"):
+        load(cfg_path)
+
+
+@needs_latex
+def test_the_geo_intro_page_with_its_clade_key_builds(tmp_path: Path) -> None:
+    cfg_path, root = _geo_key_setup(tmp_path)
+    build.build(cfg_path, root, tmp_path / "out")
+    tex = (tmp_path / "out" / "build" / "report.tex").read_text()
+    assert r"\definecolor{afkey0x0}{HTML}{a0b0c0}" in tex and r"\usepackage{tikz}" in tex
+    record = json.loads((tmp_path / "out" / "vcm-test.build.json").read_text())
+    assert record["clade_key"]["sections"] == {"X geographic data": "x"}
+    # cover, contents, the geo intro page, 2 geo pages, 1 map page
+    assert record["output"]["pages"] == 6
