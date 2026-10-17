@@ -5,8 +5,8 @@ preparation by its clade through the same join and user tables as the maps, and 
 subtype and month ``<figures>/geo/<slot>/<YYYY-MM>/af/figure.{pdf,i7.json}``, the clade key
 ``<figures>/geo/clade-key.json`` for the report's geo intro page, and the run record
 ``<figures>/geo/af-build.json``. Every input is an explicit argument (design rule 4): the
-stores, the data checkouts, the coastline, the window, the scheme per subtype row and the
-report slot per table subtype.
+stores, the data checkouts, the coastline, the window, the scheme per subtype row, the
+report slot per table subtype, and the round's figure-style file (fonts and per-slot looks).
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from af.seq.matching_rules import matching_rules
 from af.serology.outputs import make_geo_and_stat
 from af.store import Store
 from af.util.artefacts import sha256_path
+from af.util.fonts import load_fonts
 from af.util.subtypes import subtypes
 
 # what a geo build reads: tables (the serology staleness guard), serology, sequences, clades
@@ -62,10 +63,13 @@ def build_geo(
     ``schemes``: subtype row -> scheme name (``{"h3": "clades-v10", ...}``). ``slots``: table
     subtype -> report slot (``{"A(H3N2)": "h3", "B": "bvic", ...}``). A table subtype drawn
     without a slot is an error, as is a slot for one that has no dots (design rule 1).
-    ``figure_config``: the round's figure-style file; each slot is drawn with its
-    ``[geo.<slot>]`` look (:func:`af.geo.style.read_geo_looks`), read before the store is.
+    ``figure_config``: the round's figure-style file, read before the store is. Each slot is
+    drawn with its ``[geo.<slot>]`` look (:func:`af.geo.style.read_geo_looks`), and every
+    figure in the round's ``[fonts]`` (:func:`af.util.fonts.load_fonts`), as the maps are; the
+    font files go into each figure's provenance.
     """
     looks = read_geo_looks(figure_config, set(slots.values()))
+    fonts = load_fonts(figure_config)
     with store.reading("geo-build", kinds=KINDS_READ, override=ignore_busy) as guard:
         # the maps' one read of the join and the user's tables (design rule 6): a virus is the
         # colour on a geo page that it is on a map
@@ -102,6 +106,7 @@ def build_geo(
         "location_tables": report.location_tables,
         "coastline": {"path": str(coastline), "sha256": sha256_path(coastline)},
         "figure_config": {"path": str(figure_config), "sha256": sha256_path(figure_config)},
+        "fonts": fonts.inputs(),
         "dot_rule": report.geo_rule,
         "merges": report.geo_merges,
         "merged_preparations": report.geo_merged_preparations,
@@ -125,10 +130,11 @@ def build_geo(
             "created": created.isoformat(),
             "store_refs": colours.store_refs(datasets),
         }
-        written = write_geo_figures(
-            doc, slot, report.coordinates, coastline, figures, slot_provenance, look=looks[slot],
-            scheme=", ".join(s.name for s in slot_schemes),
-        )  # fmt: skip
+        with fonts.context():  # the whole drawing: the title's placement measures its ink
+            written = write_geo_figures(
+                doc, slot, report.coordinates, coastline, figures, slot_provenance,
+                look=looks[slot], scheme=", ".join(s.name for s in slot_schemes),
+            )  # fmt: skip
         files += written.files
         key[slot] = clade_key(doc, slot_schemes)
         record["slots"][slot] = {
@@ -188,7 +194,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--slot", action="append", default=[], help="TABLE_SUBTYPE=SLOT")
     parser.add_argument(
         "--figure-config", type=Path, required=True,
-        help="the round's figures.toml: [geo.<slot>] looks",
+        help="the round's figures.toml: [fonts] and [geo.<slot>] looks",
     )  # fmt: skip
     parser.add_argument("--ignore-busy", action="store_true", help="diagnosis only")
     args = parser.parse_args(argv)

@@ -19,7 +19,10 @@ from af.report.provenance import ProvenanceError
 from af.serology.outputs import OutputsReport
 from af.store import Provenance, Store, StoreRef, read_manifest
 from af.util.artefacts import sha256_path
+from af.util.config import ConfigError
+from af.util.fonts import load_fonts
 
+from ..util.test_fonts import bundled, fonts_toml  # matplotlib's own fonts stand in for af's
 from .test_render import _coastline as coastline_file  # the renderer tests' invented shapefile
 
 T0 = dt.datetime(2026, 9, 1, 12, tzinfo=dt.UTC)
@@ -74,10 +77,11 @@ uncoloured_edge_width = 0.5
 """
 
 
-def _style(tmp_path: Path, tables: str = H3_LOOK) -> Path:
-    """The round's figure-style file with the geo looks (an empty [geo] for no slots)."""
+def _style(tmp_path: Path, tables: str = H3_LOOK, fonts: str | None = None) -> Path:
+    """The round's figure-style file: its fonts and the geo looks (an empty [geo] for no
+    slots)."""
     path = tmp_path / "figures.toml"
-    path.write_text(tables or "[geo]\n")
+    path.write_text((fonts_toml() if fonts is None else fonts) + (tables or "[geo]\n"))
     return path
 
 
@@ -102,6 +106,7 @@ def _geo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Store, list[S
     monkeypatch.setattr(geo_build, "StoreColours", lambda *args, **kwargs: colours)
     monkeypatch.setattr(geo_build, "matching_rules", lambda _: None)
     monkeypatch.setattr(geo_build, "make_geo_and_stat", lambda *args, **kwargs: report)
+    monkeypatch.setattr(geo_build, "load_fonts", lambda path: load_fonts(path, bundled))
     figures = tmp_path / "figures"
     geo_build.build_geo(
         store, tmp_path, tmp_path, tmp_path, coastline_file(tmp_path),
@@ -125,12 +130,34 @@ def test_geo_figures_carry_created_and_the_store_versions_read(
         assert i7["provenance"]["look"]["uncoloured_edge_width"] == 0.5
         assert i7["provenance"]["figure_config"]["sha256"] == sha256_path(tmp_path / "figures.toml")
         assert i7["provenance"]["store_refs"] == [r.to_json() for r in refs]
+        fonts = i7["provenance"]["fonts"]  # the font files it was drawn in, hashed (rule 5)
+        assert fonts == load_fonts(tmp_path / "figures.toml", bundled).inputs()
+        assert Path(fonts["font_sans"]["path"]).name == "STIXGeneral.ttf"
     with pytest.raises(ValueError, match="time zone"):
         geo_build.build_geo(
             Store.open(tmp_path / "store"), tmp_path, tmp_path, tmp_path, tmp_path,
             geo_build.Month(2021, 1), geo_build.Month(2021, 1), figures, tmp_path / "work",
             {}, {}, _style(tmp_path, ""), created=dt.datetime(2026, 9, 1),  # noqa: DTZ001
         )  # fmt: skip
+
+
+def test_geo_figures_are_drawn_in_the_rounds_fonts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Style step 3 for geo: the month title is set in the round's [fonts] sans, not
+    matplotlib's DejaVu fallback, and a figure-style file without [fonts] is refused before
+    the store is read."""
+    _, _, figures = _geo(tmp_path, monkeypatch)
+    pdf = (figures / "geo" / "h3" / "2021-01" / "af" / "figure.pdf").read_bytes()
+    assert b"STIXGeneral" in pdf and b"DejaVu" not in pdf
+    store = Store.open(tmp_path / "store")
+    with pytest.raises(ConfigError, match="fonts: required table missing"):
+        geo_build.build_geo(
+            store, tmp_path, tmp_path, tmp_path, tmp_path,
+            geo_build.Month(2021, 1), geo_build.Month(2021, 1), tmp_path / "unwritten",
+            tmp_path / "work", {}, {}, _style(tmp_path, "", fonts=""), created=T0,
+        )  # fmt: skip
+    assert not (tmp_path / "unwritten").exists()
 
 
 def test_the_report_checks_a_geo_slot_against_the_store(
