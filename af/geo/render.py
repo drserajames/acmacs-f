@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from af.geo.records import CLADE_NOT_DEFINED, CLADE_NOT_IN_SCHEME, NOT_SEQUENCED, UNCOLOURED_CLASSES
+
 Coordinates = Callable[[str], "tuple[float, float] | None"]
 
 
@@ -59,6 +61,11 @@ class Look:
     coloured_edge: str = "#808080"  # or "none"
     coloured_edge_width: float = 0.6
     uncoloured_edge_width: float = 0.6
+    # Q215: a sequenced virus whose clade is not defined, told apart from an unsequenced one (the
+    # ring above, no fill); per slot too. Its fill is "#rrggbb" or "none".
+    clade_not_defined_fill: str = "#ffffff"
+    clade_not_defined_edge: str = "#606060"
+    clade_not_defined_edge_width: float = 0.6
     title_size: float = 20.0  # ae: width / 40
     title_inset: float = 10.0  # ae: width x 0.0125, to the top-left of the title's ink
 
@@ -150,6 +157,22 @@ def honeycomb_offsets(n: int, step: float) -> list[tuple[float, float]]:
 PACKINGS = {"ae-rings": packed_offsets, "honeycomb": honeycomb_offsets}
 
 
+def uncoloured_style(look: Look, cls: str) -> tuple[str, str, float]:
+    """(fill, ring colour, ring width) of an uncoloured dot of class ``cls`` (Q215); a fill of
+    "none" is a ring only. A class with no clade (not sequenced) keeps ae's uncoloured ring; one
+    that was sequenced has its own look, and a supported clade missing from the scheme is drawn
+    as one whose clade is not defined (it is keyed apart, and warned about)."""
+    if cls == NOT_SEQUENCED:
+        return "none", look.uncoloured_edge, look.uncoloured_edge_width
+    if cls in (CLADE_NOT_DEFINED, CLADE_NOT_IN_SCHEME):
+        return (
+            look.clade_not_defined_fill,
+            look.clade_not_defined_edge,
+            look.clade_not_defined_edge_width,
+        )
+    raise GeoRenderError(f"unknown uncoloured class {cls!r}: one of {list(UNCOLOURED_CLASSES)}")
+
+
 def wrap_longitude(longitude: float, central: float) -> float:
     """Degrees east of the map's centre, in [-180, 180): a place west of the left edge is drawn
     at the right, never lost (ae drew it off the canvas)."""
@@ -222,10 +245,15 @@ def _render_period(
             for (dx, dy), point in zip(pack(len(dots), look.ring_step), dots, strict=True):
                 xs.append(x0 + dx * lon_per_point)
                 ys.append(where[1] + dy * lat_per_point)
-                coloured = point["color"] != "transparent"
-                fills.append(point["color"] if coloured else "none")
-                edges.append(look.coloured_edge if coloured else look.uncoloured_edge)
-                widths.append(look.coloured_edge_width if coloured else look.uncoloured_edge_width)
+                if "uncoloured" in point:
+                    fill, edge, width = uncoloured_style(look, point["uncoloured"])
+                elif point["color"] == "transparent":  # no class: colours not joined
+                    fill, edge, width = uncoloured_style(look, NOT_SEQUENCED)
+                else:
+                    fill, edge, width = point["color"], look.coloured_edge, look.coloured_edge_width
+                fills.append(fill)
+                edges.append(edge)
+                widths.append(width)
             cut = sum(1 for x in xs if abs(x) + radius > 180.0)
             if cut:
                 clipped[location["name"]] += cut

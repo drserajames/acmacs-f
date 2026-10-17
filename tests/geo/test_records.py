@@ -120,7 +120,8 @@ def test_one_dot_per_virus_merges_its_preparations_and_says_how() -> None:
     assert result.dots == {
         ("A(H3N2)", Month(2021, 1), "Alpha", red): 1,
         ("A(H3N2)", Month(2021, 2), "Beta", blue): 1,
-        ("A(H3N2)", Month(2021, 2), "Gamma", UNCOLOURED): 1,
+        # sequenced preparations that disagree: drawn as a clade not defined (Q215)
+        ("A(H3N2)", Month(2021, 2), "Gamma", DotStyle("", None, state="clade_not_defined")): 1,
         ("A(H3N2)", Month(2021, 3), "Delta", blue): 1,
         ("A(H3N2)", Month(2021, 3), "Eps", red): 1,
     }
@@ -137,7 +138,7 @@ def test_unpainted_viruses_are_counted_per_month_and_clade_not_drawn_apart() -> 
     Counted per virus dot: a virus is unpainted when none of its preparations is coloured and
     at least one was left so by clade evidence; its other preparations are not counted as such.
     On the map an unpainted dot looks like any uncoloured one, so they are one point group."""
-    from af.geo.colours import STATE_NO_SCHEME_ROW, STATE_NO_SUPPORTED, DotStyle
+    from af.geo.colours import NOT_SEQUENCED, STATE_NO_SCHEME_ROW, STATE_NO_SUPPORTED, DotStyle
     from af.geo.records import DotRule
 
     d = datetime.date
@@ -154,13 +155,15 @@ def test_unpainted_viruses_are_counted_per_month_and_clade_not_drawn_apart() -> 
         prep("Beta-4", "MDCK1", d(2021, 1, 9)),
         prep("Beta-5", "MDCK1", d(2021, 2, 9)),  # no supported clade, in February
         prep("Nowhere-6", "MDCK1", d(2021, 2, 9)),  # not drawn: not counted
+        prep("Gamma-7", "MDCK1", d(2021, 1, 9)),  # sequenced, no clade and no reason: "other"
     ]
     colour = {
         ("Alpha-1", "E3"): gap, ("Alpha-1", "MDCK1"): gap,
-        ("Alpha-2", "MDCK1"): gap, ("Alpha-2", "E3"): UNCOLOURED,
-        ("Alpha-3", "MDCK1"): UNCOLOURED,
+        ("Alpha-2", "MDCK1"): gap, ("Alpha-2", "E3"): NOT_SEQUENCED,
+        ("Alpha-3", "MDCK1"): NOT_SEQUENCED,
         ("Beta-4", "E3"): gap, ("Beta-4", "MDCK1"): red,
         ("Beta-5", "MDCK1"): none, ("Nowhere-6", "MDCK1"): gap,
+        ("Gamma-7", "MDCK1"): UNCOLOURED,
     }  # fmt: skip
     result = geo_counts(
         preps, Month(2021, 1), Month(2021, 2), place, DotRule.VIRUS,
@@ -168,6 +171,10 @@ def test_unpainted_viruses_are_counted_per_month_and_clade_not_drawn_apart() -> 
     )  # fmt: skip
     doc = to_i7(result, "A(H3N2)")
     january, february = doc["periods"]
+    # why the clade-not-defined dots are so (Q215), per month: Beta-5's has no supported clade
+    assert (january["clade_not_defined"], february["clade_not_defined"]) == (
+        {"other": 1}, {"no_supported_clade": 1}
+    )  # fmt: skip
     assert january["unpainted"] == [
         {"clade": "Q.1", "tree_clades": {"Q.1.2": 2}, "points": 2, "preparations": 3}
     ]
@@ -175,7 +182,11 @@ def test_unpainted_viruses_are_counted_per_month_and_clade_not_drawn_apart() -> 
         {"clade": None, "tree_clades": {"Q.3": 1}, "points": 1, "preparations": 1}
     ]
     alpha = next(loc for loc in january["locations"] if loc["name"] == "Alpha")
-    assert alpha["points"] == [{"color": "transparent", "count": 3}]  # one group, not two
+    # drawn by class (Q215), not by evidence state: Alpha-1 and -2 are a clade the scheme lacks
+    assert alpha["points"] == [
+        {"color": "transparent", "count": 2, "uncoloured": "clade_not_in_scheme"},
+        {"color": "transparent", "count": 1, "uncoloured": "not_sequenced"},
+    ]
 
 
 def test_viruses_painted_by_placement_are_counted_per_month() -> None:
@@ -220,3 +231,39 @@ def test_a_placement_painted_preparation_abstains_beside_evidence() -> None:
         supported, AGREE
     )  # fmt: skip
     assert merged_style([(placed, "egg"), (placed, "cell")]) == (placed, AGREE)
+
+
+def test_an_uncoloured_virus_is_not_sequenced_or_its_clade_not_defined() -> None:
+    """Sarah, Q215: a virus none of whose preparations reached a sequence is "not sequenced";
+    one that was sequenced but shows no clade is "clade not defined", whatever the reason; a
+    supported clade with no scheme row is its own class (already warned about)."""
+    from af.geo.colours import NOT_SEQUENCED, STATE_NO_SCHEME_ROW, STATE_UNOBSERVED, DotStyle
+    from af.geo.records import (
+        CLADE_NOT_DEFINED,
+        CLADE_NOT_IN_SCHEME,
+        uncoloured_class,
+    )
+    from af.geo.records import (
+        NOT_SEQUENCED as NOT_SEQUENCED_CLASS,
+    )
+
+    unobserved = DotStyle("", None, state=STATE_UNOBSERVED)
+    gap = DotStyle("", None, state=STATE_NO_SCHEME_ROW, clade="Q.1")
+    assert uncoloured_class([NOT_SEQUENCED, NOT_SEQUENCED]) == NOT_SEQUENCED_CLASS
+    assert uncoloured_class([NOT_SEQUENCED, unobserved]) == CLADE_NOT_DEFINED
+    assert uncoloured_class([UNCOLOURED]) == CLADE_NOT_DEFINED  # sequenced, no clade row
+    assert uncoloured_class([NOT_SEQUENCED, gap, unobserved]) == CLADE_NOT_IN_SCHEME
+
+
+def test_why_a_clade_is_not_defined_has_a_stable_id() -> None:
+    """11-reports guards its sentence by these ids: the first reason a virus's preparations
+    give, preparations that disagree on a colour, or "other"."""
+    from af.geo.colours import STATE_NO_ASSIGNMENT, STATE_UNOBSERVED, DotStyle
+    from af.geo.records import undefined_state
+
+    unobserved = DotStyle("", None, state=STATE_UNOBSERVED)
+    unassigned = DotStyle("", None, state=STATE_NO_ASSIGNMENT)
+    assert undefined_state([unassigned, unobserved]) == "not_observable"
+    assert undefined_state([unassigned]) == "no_assignment"
+    assert undefined_state([DotStyle("Clade R", "#aa0000"), unobserved]) == "preparations_disagree"
+    assert undefined_state([UNCOLOURED]) == "other"

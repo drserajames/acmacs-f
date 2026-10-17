@@ -1,11 +1,13 @@
 """Report geo figures: one figure.{pdf,i7.json} per month, and the clade key as data."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
 from af.geo.figures import clade_key, write_geo_figures
+from af.geo.render import Look
 from af.map.style import ColourRow, ColourScheme
 from af.report.i7 import validate
 
@@ -138,3 +140,53 @@ def test_dots_painted_by_placement_get_their_flag_in_the_figure_and_the_key(
          "per_month": {"2021-01": 2}, "warning": sentence}
     ]  # fmt: skip
     assert clade_key(_doc(), [scheme])["painted_by_placement"] == []
+
+
+def test_uncoloured_classes_are_drawn_and_keyed_apart(tmp_path: Path) -> None:
+    """Sarah, Q215: "mark unsequenced & clade not defined on different lines". Each uncoloured
+    point carries its class with the fill and ring it is drawn in, the PDF draws them so, and the
+    key lists the classes in print order with the same swatches (11-reports checks one against
+    the other); a supported clade the scheme lacks is listed only when drawn."""
+    import matplotlib
+
+    doc = _doc()
+    doc["periods"][0]["locations"][0]["points"] = [
+        {"color": "#aa0000", "count": 2, "clade": "Clade R"},
+        {"color": "transparent", "count": 3, "uncoloured": "not_sequenced"},
+        {"color": "transparent", "count": 1, "uncoloured": "clade_not_defined"},
+    ]
+    doc["periods"][0]["clade_not_defined"] = {"not_observable": 1}  # why, from the records
+    look = Look(uncoloured_edge_width=0.5, clade_not_defined_edge="#404040")
+    with matplotlib.rc_context({"pdf.compression": 0}):
+        write_geo_figures(
+            doc, "h3", lambda name: (10.0, 20.0), coastline_file(tmp_path), tmp_path / "figures",
+            {}, look=look,
+        )  # fmt: skip
+    folder = tmp_path / "figures" / "geo" / "h3" / "2021-01" / "af"
+    points = json.loads((folder / "figure.i7.json").read_text())["geo"]["locations"][0]["points"]
+    assert points[1:] == [
+        {"color": "transparent", "count": 3, "uncoloured": "not_sequenced",
+         "edge": "#a0a0a0", "edge_width": 0.5},
+        {"color": "#ffffff", "count": 1, "uncoloured": "clade_not_defined",
+         "edge": "#404040", "edge_width": 0.6},
+    ]  # fmt: skip
+    pdf = (folder / "figure.pdf").read_bytes()
+    assert re.search(rb"\s0\.25098\d* G\s", pdf)  # the #404040 ring (a grey: one value)
+    assert re.search(rb"\s0\.62745\d* G\s", pdf)  # the #a0a0a0 ring
+    scheme = ColourScheme("h3 test", (ColourRow("Clade R", "#aa0000", frozenset({"R"})),))
+    key = clade_key(doc, [scheme], look)
+    assert key["uncoloured_classes"] == [
+        {"class": "not_sequenced", "fill": "transparent", "edge": "#a0a0a0", "edge_width": 0.5,
+         "per_month": {"2021-01": 3}, "window": 3},
+        {"class": "clade_not_defined", "fill": "#ffffff", "edge": "#404040", "edge_width": 0.6,
+         "per_month": {"2021-01": 1}, "window": 1, "states": {"not_observable": 1}},
+    ]  # fmt: skip
+    assert key["uncoloured"]["window"] == 4  # the total, as before
+    doc["periods"][0]["locations"][0]["points"].append(
+        {"color": "transparent", "count": 2, "uncoloured": "clade_not_in_scheme"}
+    )
+    classes = clade_key(doc, [scheme], look)["uncoloured_classes"]
+    assert [(c["class"], c["window"]) for c in classes] == [
+        ("not_sequenced", 3), ("clade_not_defined", 1), ("clade_not_in_scheme", 2)
+    ]  # fmt: skip
+    assert classes[2]["fill"] == "#ffffff"  # drawn as a clade not defined, keyed apart

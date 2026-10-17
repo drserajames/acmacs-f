@@ -29,8 +29,13 @@ from typing import Any
 
 from af.geo.colours import (
     BASIS_PLACEMENT,
+    STATE_NO_ASSIGNMENT,
     STATE_NO_SCHEME_ROW,
+    STATE_NO_SEQUENCE,
     STATE_NO_SUPPORTED,
+    STATE_NOMENCLATURE_NONE,
+    STATE_UNOBSERVED,
+    STATE_UNRESOLVED,
     UNCOLOURED,
     DotStyle,
 )
@@ -55,6 +60,25 @@ VirusKey = tuple[str, str, str, tuple[str, ...]]
 # Uncoloured because of tree-clade evidence and the scheme, not for want of a sequence: each such
 # drawn dot is warned about (Sarah, 8 Oct 2026; af.geo.colours.unpainted_warning)
 UNPAINTED_STATES = frozenset({STATE_NO_SCHEME_ROW, STATE_NO_SUPPORTED})
+
+# What kind of uncoloured dot a virus is, drawn and keyed apart (Sarah, Q215, 17 Oct 2026: "mark
+# unsequenced & clade not defined on different lines"), in the key's order. The third is neither:
+# its supported clade is known but the scheme has no row for it (already a WARNING).
+NOT_SEQUENCED = "not_sequenced"  # none of its preparations reached a sequence
+CLADE_NOT_DEFINED = "clade_not_defined"  # sequenced, but no clade can be shown
+CLADE_NOT_IN_SCHEME = "clade_not_in_scheme"
+UNCOLOURED_CLASSES = (NOT_SEQUENCED, CLADE_NOT_DEFINED, CLADE_NOT_IN_SCHEME)
+# Why a dot's clade is not defined, by stable id (11-reports guards its sentence with them), in
+# the order a virus with several reasons is filed under: the first its preparations have.
+UNDEFINED_STATES = {
+    STATE_UNOBSERVED: "not_observable",
+    STATE_NO_SUPPORTED: "no_supported_clade",
+    STATE_NO_ASSIGNMENT: "no_assignment",
+    STATE_NOMENCLATURE_NONE: "nomenclature_none",
+    STATE_UNRESOLVED: "unresolved_match",
+}
+PREPARATIONS_DISAGREE = "preparations_disagree"  # coloured preparations, merged uncoloured
+OTHER_UNDEFINED = "other"  # no aligned sequence, proxy pairing unused, no clade labels
 
 
 @dataclass(frozen=True)
@@ -100,6 +124,8 @@ class GeoCounts:
     # drawn dots painted by tree placement alone, flagged (Q183 b): (subtype, month) -> Unpainted
     # (the same counts: dots, their placement-painted preparations, the tree's labels)
     placement: dict[tuple[str, Month], Unpainted] = field(default_factory=dict)
+    # drawn dots whose clade is not defined (Q215): (subtype, month, why: UNDEFINED_STATES id)
+    undefined: Counter[tuple[str, Month, str]] = field(default_factory=Counter)
 
 
 @dataclass
@@ -134,11 +160,14 @@ def geo_counts(
     window = months(first, last)
     result = GeoCounts(months=window)
     style = style_of if style_of is not None else (lambda _: UNCOLOURED)
+    drawn = _classed if style_of is not None else (lambda dot, _: dot)
     if rule is DotRule.PREPARATION:
         for prep in preparations:
             dot = style(prep)
-            if _place(result, prep.subtype, prep.name, prep.collection_date, dot, location_of):
+            shown = drawn(dot, [dot])
+            if _place(result, prep.subtype, prep.name, prep.collection_date, shown, location_of):
                 _note_unpainted(result, prep.subtype, prep.collection_date, dot, [dot])
+                _note_undefined(result, prep.subtype, prep.collection_date, shown, [dot])
         return result
     if rule is not DotRule.VIRUS:
         raise NotImplementedError(rule)
@@ -152,7 +181,9 @@ def geo_counts(
         first_date = min(dates) if dates else None
         styles = [(style(p), class_of(p)) for p in preps]
         dot, case = merged_style(styles)
-        if _place(result, subtype, name, first_date, dot, location_of):
+        shown = drawn(dot, [s for s, _ in styles])
+        if _place(result, subtype, name, first_date, shown, location_of):
+            _note_undefined(result, subtype, first_date, shown, [s for s, _ in styles])
             result.merges.setdefault(subtype, Counter())[case] += 1
             result.merged_preparations[subtype] += len(preps)
             _note_unpainted(result, subtype, first_date, dot, [s for s, _ in styles])
@@ -203,6 +234,44 @@ def _note_placement(
 def virus_key(prep: Preparation) -> VirusKey:
     """A virus: its preparations without their passage (Sarah, 7 Oct: egg and cell merge)."""
     return (prep.subtype, prep.name, prep.reassortant, prep.annotations)
+
+
+def uncoloured_class(styles: Iterable[DotStyle]) -> str:
+    """Which kind of uncoloured dot a virus is, from its preparations' styles (Q215): not
+    sequenced when none of them reached a sequence; clade not in the scheme when one's supported
+    clade has no row; otherwise clade not defined (not observable, contradicted with nothing
+    supported, no assignment, the nomenclature names none, or its preparations disagree)."""
+    states = {s.state for s in styles}
+    if states == {STATE_NO_SEQUENCE}:
+        return NOT_SEQUENCED
+    if STATE_NO_SCHEME_ROW in states:
+        return CLADE_NOT_IN_SCHEME
+    return CLADE_NOT_DEFINED
+
+
+def undefined_state(styles: Iterable[DotStyle]) -> str:
+    """Why a virus's clade is not defined, as a stable id: its preparations disagree on a
+    colour, else the first reason of :data:`UNDEFINED_STATES` they have, else "other"."""
+    styles = list(styles)
+    if any(s.colour is not None for s in styles):
+        return PREPARATIONS_DISAGREE
+    states = {s.state for s in styles}
+    return next((i for s, i in UNDEFINED_STATES.items() if s in states), OTHER_UNDEFINED)
+
+
+def _note_undefined(
+    result: GeoCounts, subtype: str, date: datetime.date | None, shown: DotStyle,
+    styles: list[DotStyle],
+) -> None:  # fmt: skip
+    if date is not None and shown.colour is None and shown.state == CLADE_NOT_DEFINED:
+        result.undefined[subtype, Month.of(date), undefined_state(styles)] += 1
+
+
+def _classed(dot: DotStyle, styles: list[DotStyle]) -> DotStyle:
+    """The dot as counted for drawing: an uncoloured one carries its class as its state."""
+    if dot.colour is not None:
+        return dot
+    return DotStyle("", None, state=uncoloured_class(styles))
 
 
 def merged_style(styles: list[tuple[DotStyle, str]]) -> tuple[DotStyle, str]:
@@ -275,6 +344,14 @@ def to_i7(counts: GeoCounts, subtype: str) -> dict[str, Any]:
                 ],
                 "unpainted": _unpainted(counts, subtype, month),
                 "painted_by_placement": _placement(counts, subtype, month),
+                # why each clade-not-defined dot is so (Q215), by UNDEFINED_STATES id
+                "clade_not_defined": dict(
+                    sorted(
+                        (why, n)
+                        for (s, m, why), n in counts.undefined.items()
+                        if s == subtype and m == month
+                    )
+                ),
             }
             for month, locations in by_month.items()
         ],
@@ -313,14 +390,18 @@ def _placement(counts: GeoCounts, subtype: str, month: Month) -> list[dict[str, 
 
 def _points(styles: Counter[DotStyle]) -> list[dict[str, Any]]:
     """Point groups at one location, the largest first (drawn at the centre). Dots that look
-    the same are one group: an uncoloured dot's evidence state is not drawn."""
+    the same are one group: an uncoloured dot's class (Q215) is drawn, its evidence state is
+    not. The class's own fill and ring are the figure's look's (af.geo.figures adds them)."""
     looks: Counter[DotStyle] = Counter()
     for style, n in styles.items():
-        looks[DotStyle(style.label, style.colour)] += n
+        cls = style.state if style.colour is None and style.state in UNCOLOURED_CLASSES else ""
+        looks[DotStyle(style.label, style.colour, state=cls)] += n
     points = []
-    for style, n in sorted(looks.items(), key=lambda kv: (-kv[1], kv[0].label)):
+    for style, n in sorted(looks.items(), key=lambda kv: (-kv[1], kv[0].label, kv[0].state)):
         point: dict[str, Any] = {"color": style.colour or "transparent", "count": n}
         if style.label:
             point["clade"] = style.label
+        if style.state:
+            point["uncoloured"] = style.state
         points.append(point)
     return points

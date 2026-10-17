@@ -74,6 +74,9 @@ packing = "ae-rings"
 coloured_edge = "none"
 coloured_edge_width = 0
 uncoloured_edge_width = 0.5
+clade_not_defined_fill = "#ffffff"
+clade_not_defined_edge = "#606060"
+clade_not_defined_edge_width = 0.6
 """
 
 
