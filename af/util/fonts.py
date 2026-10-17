@@ -54,10 +54,10 @@ class FontNames:
                 raise FontError(f"figure font {role}: {name!r} is a path; name an installed file")
         if path_of is None:
             try:
-                from af.fonts import path as installed  # type: ignore[import-not-found,unused-ignore]
+                import af.fonts as fonts  # type: ignore[import-not-found,unused-ignore]
             except ImportError as exc:
                 raise FontError("af.fonts is missing: this af build installed no fonts") from exc
-            path_of = installed
+            path_of = fonts.path
         return FontFiles(path_of(self.sans), path_of(self.sans_bold), path_of(self.mono))
 
 
