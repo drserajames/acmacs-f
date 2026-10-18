@@ -40,7 +40,12 @@ from af.chain.__main__ import (
     dataset_from_path,
     measure_references,
 )
-from af.chain.backend import FinishRule, Optimiser
+from af.chain.backend import (
+    DEFAULT_MOVE_LOWER_RULE,
+    MOVE_LOWER_RULES,
+    FinishRule,
+    Optimiser,
+)
 from af.chain.config import ChainConfig, ChainConfigError, load_chain_config
 from af.chain.diagnostics import step_diagnostics
 from af.chain.engine import (
@@ -246,9 +251,20 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="the loop's move-lower rule (af.map.optimise.MOVE_LOWER_RULE)",
     )
+    parser.add_argument(
+        "--move-lower-rule",
+        choices=sorted(MOVE_LOWER_RULES),
+        default=DEFAULT_MOVE_LOWER_RULE,
+        help="which move-lower rule, with --move-lower: ad-last-round-1 is AD's one joint round"
+        f" (Q198); default {DEFAULT_MOVE_LOWER_RULE}",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    rule = FinishRule(move_groups=args.move_groups, move_lower=args.move_lower)
+    rule = FinishRule(
+        move_groups=args.move_groups,
+        move_lower=args.move_lower,
+        move_lower_rule=args.move_lower_rule,
+    )
     dataset = dataset_from_path(args.chain)
     check_tables_dataset(args.chain, dataset)
     run = load_config(args.run, RunSettings)

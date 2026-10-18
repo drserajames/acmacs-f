@@ -50,7 +50,7 @@ from af.util.config import ConfigError, load_config
 
 # Options that change how hard the optimiser searches, not the map's problem: a pair differing
 # only in these is still the same problem, and its stresses compare (the lower found more).
-SEARCH_OPTIONS = ("resolve_best", "move_lower")
+SEARCH_OPTIONS = ("resolve_best", "move_lower", "move_lower_rule")
 REFINED_BEFORE_RECORDED = 5  # refine_best of every version published without the parameter
 
 FIELDS = (

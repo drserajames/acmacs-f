@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from af.chain.adjust import ColumnBasisAdjustment
+from af.chain.backend import DEFAULT_MOVE_LOWER_RULE, MOVE_LOWER_RULES
 from af.chain.select import DropCell, RemoveRule, Selection, SeraPolicy
 from af.chart.merge import ColumnBasisConvention
 from af.chart.sera import read_markers
@@ -87,6 +88,11 @@ class MapOptions:
     # alone leaves hemisphering points that each gain little but together gain more (06, Q195,
     # 14 Oct 2026). A search setting: the problem is unchanged. Opt-in; using it is Q195, Sarah's.
     move_lower: bool = False
+    # Which move-lower rule, by the name it records (af.chain.backend.MOVE_LOWER_RULES):
+    # "move-lower-1" (rounds until nothing is lower, at most 20) or "ad-last-round-1", AD's one
+    # joint round after every map's trapped-point loop (Sarah, Q198 a, 16 Oct 2026: the chains
+    # move to it once reports A and B are final). Only with move_lower. A search setting.
+    move_lower_rule: str = DEFAULT_MOVE_LOWER_RULE
 
     def __post_init__(self) -> None:
         ColumnBasisConvention(self.column_bases)  # raises on an unknown convention
@@ -96,6 +102,16 @@ class MapOptions:
             )
         if not 1 <= self.resolve_best <= 5:
             raise ChainConfigError(f"resolve_best must be 1 to 5: {self.resolve_best!r}")
+        if self.move_lower_rule not in MOVE_LOWER_RULES:
+            raise ChainConfigError(
+                f"move_lower_rule must be one of {sorted(MOVE_LOWER_RULES)}:"
+                f" {self.move_lower_rule!r}"
+            )
+        if self.move_lower_rule != DEFAULT_MOVE_LOWER_RULE and not self.move_lower:
+            raise ChainConfigError(
+                f"move_lower_rule = {self.move_lower_rule!r} needs move_lower = true: alone it"
+                " would change nothing"
+            )
 
 
 # Options added after chains were first published, with the value that reproduces them. They
@@ -107,6 +123,7 @@ LATER_OPTIONS = {
     "scratch_precision": "fine",
     "resolve_best": 1,
     "move_lower": False,
+    "move_lower_rule": DEFAULT_MOVE_LOWER_RULE,
 }
 
 
