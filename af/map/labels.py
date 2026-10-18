@@ -139,6 +139,7 @@ def place_labels(
     char_width: float = 0.0155,
     height: float = 0.03,
     radii: Sequence[float] = (0.0275, 0.04, 0.056),
+    gap: float = 0.0,
 ) -> list[Placed]:
     """Greedy placement, in order: try positions around each anchor at increasing distance and
     keep the one that (1) stays on the page, (2) overlaps the furniture (legend, title) least,
@@ -152,7 +153,9 @@ def place_labels(
     away (style 08-17). ``sizes`` are each label's measured (width, height); without them the
     size is estimated from ``char_width`` and ``height``. With ``mark_radius``, every anchor's
     mark (a circle of that radius) counts like furniture: a label over another vaccine's mark
-    hides it, which no halo mends.
+    hides it, which no halo mends. ``gap`` (page fraction) is the room kept between two labels:
+    boxes that merely touch count as clear, and two labels stacked edge to edge read as one block
+    with one's descenders on the other's capitals (R4 review, 18 Oct 2026).
     """
     placed: list[Placed] = []
     boxes: list[tuple[float, float, float, float]] = [
@@ -172,7 +175,7 @@ def place_labels(
                 box = (left, top, left + w, top + h)
                 off = box[0] < 0 or box[1] < 0 or box[2] > 1 or box[3] > 1
                 on_furniture = sum(_overlap(box, other) for other in boxes[:n_furniture])
-                hits = sum(_overlap(box, other) for other in boxes[n_furniture:])
+                hits = sum(_overlap(_grown(box, gap), other) for other in boxes[n_furniture:])
                 if mark_radius is not None:
                     hits += sum(_on_circle(box, m, mark_radius) for m in anchors)
                 covered = int(_inside(drawn, box).sum())
@@ -192,6 +195,10 @@ def _on_circle(box: tuple[float, float, float, float], centre: Array, radius: fl
     dx = max(box[0] - x, 0.0, x - box[2])
     dy = max(box[1] - y, 0.0, y - box[3])
     return dx * dx + dy * dy < radius * radius - 1e-12
+
+
+def _grown(box: tuple[float, float, float, float], by: float) -> tuple[float, float, float, float]:
+    return (box[0] - by, box[1] - by, box[2] + by, box[3] + by)
 
 
 def _overlap(a: tuple[float, ...], b: tuple[float, ...]) -> bool:

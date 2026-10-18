@@ -23,6 +23,7 @@ from af.map.render import (
     PointStyle,
     draw_pdf,
     legend_box,
+    marker_extent,
     recent_hidden,
     text_size,
     title_box,
@@ -61,9 +62,10 @@ def finish_map(
 ) -> FinishedMap:
     """Produce ``out_pdf`` and its I7 for one chart and window.
 
-    ``must_show_since``: antigens isolated on or after this date must all be visible (not off the
-    page, not under the legend or title) in *every* window, including "all", where nothing is
-    greyed and older antigens may fall off the edge if the frame is too small for them. Raises
+    ``must_show_since``: antigens isolated on or after this date must all be visible, the whole
+    marker (not off the page, not under the legend or title), in *every* window, including
+    "all", where nothing is greyed and older antigens may fall off the edge if the frame is too
+    small for them. Raises
     ``FrameError`` rather than writing a map that hides one. Vaccines come next: shown if at all
     possible, but an old vaccine far from today's viruses may not fit (the I7 records
     ``in_viewport`` for each), then antigens in the window, sera, and everything else."""
@@ -90,8 +92,14 @@ def finish_map(
         Priority("sera", shown & ~antigen),
         Priority("all antigens", shown & antigen),
     )
+    own = styles or {}
+    radii = np.array([marker_extent(p, look, own.get(p.id)) for p in scene.points])
     choice = choose_frame(
-        np.where(shown[:, None], xy, np.nan), priorities, size=frame_size, furniture=furniture
+        np.where(shown[:, None], xy, np.nan),
+        priorities,
+        size=frame_size,
+        furniture=furniture,
+        radii=radii,
     )
     frame: Frame = choice.frame
     page = frame.page(xy)
@@ -106,6 +114,7 @@ def finish_map(
         furniture,
         sizes=[(w / look.page_points, h / look.page_points) for w, h in sizes],
         mark_radius=look.antigen_radius * look.mark_scale,
+        gap=look.label_gap / look.page_points,
     )
     labels = dict(zip(ids, placed, strict=True))
     draw_pdf(scene, frame, labels, out_pdf, look, styles)
@@ -124,5 +133,10 @@ def finish_map(
     )
     i7 = write_i7(doc, out_pdf)
     return FinishedMap(
-        scene, choice, labels, out_pdf, i7, recent_hidden(scene, frame, furniture, must_show_since)
+        scene,
+        choice,
+        labels,
+        out_pdf,
+        i7,
+        recent_hidden(scene, frame, furniture, must_show_since, radii),
     )

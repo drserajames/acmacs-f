@@ -124,6 +124,19 @@ def test_labels_avoid_furniture_and_each_other() -> None:
     assert all(p.overlaps == 0 for p in placed)
 
 
+def test_labels_keep_a_gap_between_them() -> None:
+    # Two marks one above the other: without a gap the second label may sit edge to edge on the
+    # first (touching counts as clear); with one, every pair of label boxes is at least that far
+    # apart in x or in y.
+    anchors = np.array([[0.5, 0.5], [0.5, 0.53]])
+    gap = 2.0 / 800
+    placed = place_labels(anchors, ["AAA/21-cell", "BBB/22-egg"], np.zeros((0, 2)), [], gap=gap)
+    (a, b) = (p.box for p in placed)
+    apart = max(b[0] - a[2], a[0] - b[2], b[1] - a[3], a[1] - b[3])
+    assert apart >= gap - 1e-12
+    assert all(p.overlaps == 0 for p in placed)
+
+
 def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
     out = tmp_path / "map" / "figure.pdf"
     result = finish_map(
