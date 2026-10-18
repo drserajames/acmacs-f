@@ -388,3 +388,30 @@ def test_drawn_title_changes_the_page_only(tmp_path, monkeypatch, drawn):
     assert texts.count("TEST tree") == (1 if drawn is None else 0)
     if drawn:
         assert texts.count(drawn) == 1
+
+
+def test_a_clipped_axis_starts_at_the_window_leaves_and_keeps_the_tree(tmp_path):
+    t = standard_tree()
+    window = {"window_start": "2026-01", "window_end": "2026-10"}  # only X.1.1 (rows 10-19)
+    plain = make_figure(t, PARENTS, replace(config(), **window), tmp_path / "p.pdf", {})
+    cfg = replace(config(clip_stem=True), **window)
+    clipped = make_figure(t, PARENTS, cfg, tmp_path / "c.pdf", {})
+    assert "x_axis" not in plain
+    axis = clipped["x_axis"]
+    assert (axis["start"]["first"], axis["start"]["last"]) == ("EPI_ISL_0000010", "EPI_ISL_0000019")
+    assert axis["rows_outside_start"] == 40
+    assert 0 < axis["left_out_share"] < 1
+    assert axis["start_depth"] == pytest.approx(axis["left_out_share"] * axis["deepest_depth"])
+    assert axis["points_per_unit"]["clipped"] > axis["points_per_unit"]["unclipped"]
+    assert axis["hide_flags"] == [] and axis["flagged_rows_outside_start"] == {}
+    # a drawing choice only: the rows and the I7's depths are the tree's
+    assert clipped["rows"] == plain["rows"]
+    depths = [json.loads((tmp_path / f"{n}.i7.json").read_text())["tree"]["leaves"] for n in "pc"]
+    assert depths[0] == depths[1]
+    assert (tmp_path / "c.pdf").read_bytes() != (tmp_path / "p.pdf").read_bytes()
+
+
+def test_the_clip_off_draws_the_same_bytes_as_before(tmp_path):
+    make_figure(standard_tree(), PARENTS, config(), tmp_path / "a.pdf", {})
+    make_figure(standard_tree(), PARENTS, config(clip_stem=False), tmp_path / "b.pdf", {})
+    assert (tmp_path / "a.pdf").read_bytes() == (tmp_path / "b.pdf").read_bytes()

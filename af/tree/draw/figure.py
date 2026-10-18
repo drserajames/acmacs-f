@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from af.store import StoreRef
 
 from .aa_labels import LabelHide, LabelParams, hide_labels, select_labels
@@ -72,6 +74,12 @@ class FigureConfig:
     # matching the shipped page (no B/Vic title, "A(H1N1)" on H1) never renames the figure
     # in the I7, the report heading or the caption.
     drawn_title: str | None = None
+    # Start the drawn x axis at the MRCA of the rows with a time-series bar, the stem above it
+    # compressed behind a break mark (05 and 00, 18 Oct 2026: a tree rooted on an old outgroup
+    # otherwise spends a third of the width on its stem). A drawing choice: the tree's rooting,
+    # its depths in the layout and the I7, its dates and its flags are unchanged. The draw
+    # report records where the axis starts and how much depth it leaves out.
+    clip_stem: bool = False
 
 
 def make_figure(
@@ -104,6 +112,7 @@ def make_figure(
 
     dash_bars = dash_bar_counts(tree, layout.leaf_nodes, config.dash_bars)
 
+    start = axis_start(tree, layout, ts) if config.clip_stem else None
     marked = None
     geometry = config.geometry
     if config.marked_ids:
@@ -127,6 +136,7 @@ def make_figure(
         clade_label_sizes=dict(config.clade_label_sizes),
         leaf_names=config.leaf_names,
         drawn_title=config.drawn_title,
+        x_start_node=start,
     )
     drawn = render(spec, pdf)
     write_i7(
@@ -183,8 +193,63 @@ def make_figure(
         "overrides": {k: len(v) for k, v in asdict(config.overrides).items() if k != "reasons"},
         "override_reasons": dict(config.overrides.reasons),
     }
+    if start is not None:  # only then, so a figure without the clip keeps its bytes
+        report["x_axis"] = _x_axis(tree, layout, geometry, start, config, flags or {})
     pdf.with_suffix(".draw.json").write_text(json.dumps(report, indent=1, default=str))
     return report
+
+
+def axis_start(tree: DrawTree, layout: Layout, ts: TimeSeries) -> int:
+    """The MRCA of the rows with a time-series bar: where a clipped x axis starts. Rows are in
+    pre-order, so the MRCA of the first and last such row holds every one between."""
+    rows = np.flatnonzero(ts.in_window)
+    if len(rows) == 0:
+        raise ValueError("clip_stem: no drawn leaf is in the time-series window")
+    first, node = int(layout.leaf_nodes[rows[0]]), int(layout.leaf_nodes[rows[-1]])
+    up = {first, *tree.ancestors(first)}
+    while node not in up:
+        node = tree.parent[node]
+    return node
+
+
+def _x_axis(
+    tree: DrawTree,
+    layout: Layout,
+    geometry: Geometry,
+    start: int,
+    config: FigureConfig,
+    flags: Mapping[str, list[str]],
+) -> dict[str, Any]:
+    """Where the clipped axis starts and what it leaves out (05, 18 Oct 2026). The start node
+    depends on which leaves are drawn, so the hide flags in force are recorded with it."""
+    deepest = geometry.x_max or float(np.nanmax(layout.node_x[layout.leaf_nodes]))
+    x0 = float(layout.node_x[start])
+    width = geometry.tree_right - geometry.centre_col - geometry.tree_left
+    first, last = int(layout.first_row[start]), int(layout.last_row[start])
+    outside = [
+        str(tree.leaf_id[i]) for r, i in enumerate(layout.leaf_nodes) if not first <= r <= last
+    ]
+    flagged: dict[str, int] = {}
+    for leaf in outside:
+        for reason in flags.get(leaf, []):
+            flagged[reason] = flagged.get(reason, 0) + 1
+    return {
+        "start": {
+            "first": tree.leaf_id[layout.leaf_nodes[first]],
+            "last": tree.leaf_id[layout.leaf_nodes[last]],
+        },
+        "start_depth": x0,
+        "deepest_depth": deepest,
+        "left_out_share": round(x0 / deepest, 4),
+        "points_per_unit": {
+            "clipped": round((width - geometry.axis_break) / (deepest - x0), 3),
+            "unclipped": round(width / deepest, 3),
+        },
+        "break_band_pt": geometry.axis_break,
+        "rows_outside_start": len(outside),
+        "flagged_rows_outside_start": dict(sorted(flagged.items())),
+        "hide_flags": sorted(config.hide.flag_reasons),
+    }
 
 
 def arrange(

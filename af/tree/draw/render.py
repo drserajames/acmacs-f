@@ -22,7 +22,7 @@ import numpy as np  # noqa: E402
 from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.collections import LineCollection, PolyCollection  # noqa: E402
 from matplotlib.font_manager import FontProperties  # noqa: E402
-from matplotlib.patches import ArrowStyle, FancyArrowPatch  # noqa: E402
+from matplotlib.patches import ArrowStyle, FancyArrowPatch, Rectangle  # noqa: E402
 from matplotlib.textpath import TextPath  # noqa: E402
 
 from .aa_labels import AALabel  # noqa: E402
@@ -108,6 +108,9 @@ class Geometry:
     # None = fit this tree.
     x_max: float | None = None
     row_capacity: int | None = None
+    # A clipped x axis (FigureSpec.x_start_node): everything shallower than the start node is
+    # drawn compressed into this many points at the tree's left, behind a break mark.
+    axis_break: float = 12.0
 
 
 @dataclass
@@ -144,6 +147,9 @@ class FigureSpec:
     # and H3 tree pages carried the same layer.
     leaf_names: bool = False
     drawn_title: str | None = None  # drawn instead of ``title`` ("" = no title); see FigureConfig
+    # The node where the drawn x axis starts (FigureConfig.clip_stem); None: at the root. A
+    # drawing choice only: the layout's depths, and the I7's, stay the tree's.
+    x_start_node: int | None = None
 
 
 @dataclass
@@ -171,7 +177,16 @@ class _Page:
         self.bottom = g.top + lay.n_rows * self.row_h  # where the drawn rows end
         self.tree_right = g.tree_right - g.centre_col
         xmax = g.x_max or float(np.nanmax(lay.node_x[lay.leaf_nodes])) or 1.0
-        self.nx = g.tree_left + lay.node_x / xmax * (self.tree_right - g.tree_left)
+        width = self.tree_right - g.tree_left
+        x0 = 0.0 if spec.x_start_node is None else float(lay.node_x[spec.x_start_node])
+        if x0 > 0:  # from the start node on, the full scale; before it, the break band
+            band = g.axis_break
+            after = g.tree_left + band + (lay.node_x - x0) / (xmax - x0) * (width - band)
+            before = g.tree_left + lay.node_x / x0 * band
+            self.nx = np.where(lay.node_x >= x0, after, before)
+        else:
+            self.nx = g.tree_left + lay.node_x / xmax * width
+        self.x_start = x0
         self.ny = g.top + (lay.node_y + 0.5) * self.row_h
 
     def row_y(self, rows: np.ndarray | int) -> np.ndarray:
@@ -254,6 +269,35 @@ def _draw_tree(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, colours: np.nd
     # 100,000-leaf tree): a fixed width painted big trees solid black.
     width = min(spec.geometry.branch_stroke * pg.row_h, 0.5)  # small trees: a normal line
     ax.add_collection(LineCollection(segs, colors=seg_colours, linewidths=width))
+    if pg.x_start > 0 and spec.x_start_node is not None:  # the break: "//" on the clipped stem
+        # Every line in the band is compressed, not only the stem (the rows outside the start
+        # node and their branches too), so the whole band is shaded and labelled (05).
+        g = pg.g
+        ax.add_patch(
+            Rectangle(
+                (g.tree_left, g.top),
+                g.axis_break,
+                pg.bottom - g.top,
+                color="#ececec",
+                lw=0,
+                zorder=0,
+            )
+        )
+        ax.text(
+            g.tree_left + g.axis_break / 2,
+            pg.bottom - 2,
+            "not to scale",
+            fontsize=4.5,
+            rotation=90,
+            ha="center",
+            va="bottom",
+            color="#606060",
+        )
+        xb, yb = g.tree_left + g.axis_break - 3.0, float(pg.ny[spec.x_start_node])
+        for dx in (-1.0, 1.0):
+            (x0, y0), (x1, y1) = (xb + dx - 1.0, yb + 2.5), (xb + dx + 1.0, yb - 2.5)
+            ax.plot([x0, x1], [y0, y1], color="black", lw=0.6, solid_capstyle="butt")
+            segs.append(((x0, y0), (x1, y1)))  # kept off by the label placement, like branches
     for (x0, y0), (x1, y1) in segs:
         if y0 == y1:
             grid.add_hline(x0, x1, y0)
