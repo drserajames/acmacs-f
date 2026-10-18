@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import datetime
 import re
 from pathlib import Path
 
+import duckdb
 import pytest
 
 from af.seq import matching as M
+from af.store import Provenance, Store
 
 RULES = [
     M.PassageRule(re.compile(r"(^|[^A-Z])E\s*[0-9]", re.I), M.EGG, "egg step"),
@@ -601,3 +604,138 @@ class TestCellAntigenEggSequence:
         match = index(self.cand(1, "E5", M.EGG)).match("A(H3N2)/EXAMPLETOWN/7/2024", M.CELL)
         assert match.doubtful
         assert M.CELL_FROM_EGG in M.DOUBTFUL and M.CELL_FROM_EGG in M.USABLE_DOUBTS
+
+
+class TestCopies:
+    """OWED 45: several records of one sequence are one sequence, and the record is chosen by
+    the order that settles a tie: own lab, the very passage, ae's closest passage, the key."""
+
+    LAB_A, LAB_B = "Example Centre A", "Example Centre B"
+
+    def copy(self, n: int, passage: str, lab: str = "") -> M.Candidate:
+        return M.Candidate(f"EPI_ISL_{n}", f"EPI{n}", "h3", "A/EXAMPLETOWN/7/2024", passage,
+                           M.passage_class(passage, RULES), "same", lab)  # fmt: skip
+
+    def match(self, *copies: M.Candidate, passage: str, lab: str = "") -> M.Match:
+        idx = index(*copies)
+        idx.submitters = {"LAB-A": frozenset({self.LAB_A})}
+        return idx.match(ANTIGEN, M.passage_class(passage, RULES), lab=lab, passage=passage)
+
+    def test_the_antigens_own_lab_copy_is_taken(self) -> None:
+        other, own = self.copy(1, "SIAT1", self.LAB_B), self.copy(2, "MDCK1", self.LAB_A)
+        match = self.match(other, own, passage="SIAT1", lab="LAB-A")
+        assert match.chosen == own  # before the very passage, as for a tie
+        assert match.flags == (M.IDENTICAL_DUPLICATES, M.OWN_LAB) and not match.doubtful
+
+    def test_the_copy_with_the_very_passage_is_taken(self) -> None:
+        a, b = self.copy(1, "MDCK1"), self.copy(2, "SIAT2")
+        match = self.match(a, b, passage="SIAT2")
+        assert match.chosen == b
+        assert match.flags == (M.IDENTICAL_DUPLICATES, M.PASSAGE_EXACT)
+
+    def test_then_aes_closest_passage_unflagged(self) -> None:
+        a, b = self.copy(1, "MDCK1"), self.copy(2, "SIAT3")
+        match = self.match(a, b, passage="MDCK1/SIAT2")
+        assert match.chosen == b  # same last step name (20) beats same class (50)
+        assert match.flags == (M.IDENTICAL_DUPLICATES,)
+
+    def test_then_the_lowest_key_whatever_the_order(self) -> None:
+        copies = [self.copy(n, "SIAT1") for n in (5, 3, 4)]
+        for order in (copies, copies[::-1]):
+            assert self.match(*order, passage="SIAT1").chosen == copies[1]
+
+    def test_a_steps_flag_only_when_it_narrowed_the_copies(self) -> None:
+        a, b = self.copy(1, "SIAT1", self.LAB_A), self.copy(2, "SIAT1", self.LAB_A)
+        match = self.match(a, b, passage="SIAT1", lab="LAB-A")
+        assert (match.chosen, match.flags) == (a, (M.IDENTICAL_DUPLICATES,))
+
+    @pytest.mark.parametrize("passage", ["unknown", "N/A"])
+    def test_text_that_is_no_passage_is_not_the_very_passage(self, passage: str) -> None:
+        # both of unknown class, so both in the antigen's tier; the text still ranks closest
+        same, other = self.copy(2, passage), self.copy(1, "not provided")
+        match = self.match(same, other, passage=passage)
+        assert (match.chosen, match.flags) == (same, (M.IDENTICAL_DUPLICATES,))
+
+    def test_copies_left_by_the_passage_tie_break_are_chosen_alike(self) -> None:
+        other = M.Candidate("EPI_ISL_9", "EPI9", "h3", "A/EXAMPLETOWN/7/2024", "MDCK1", M.CELL,
+                            "different")  # fmt: skip
+        a, own = self.copy(1, "SIAT1", self.LAB_B), self.copy(2, "SIAT1", self.LAB_A)
+        match = self.match(other, a, own, passage="SIAT1", lab="LAB-A")
+        assert match.chosen == own  # own lab names one sequence, which settles it first
+        b = self.copy(3, "SIAT1", self.LAB_B)
+        match = self.match(other, a, b, passage="SIAT1", lab="LAB-A")
+        assert match.chosen == a
+        assert match.flags == (M.IDENTICAL_DUPLICATES, M.PASSAGE_EXACT)
+
+
+class TestIdentitySql:
+    """The identity matching tells sequences apart by (identity_sql), over synthetic rows."""
+
+    HA = "ACGT" * 6
+
+    def identities(self, *rows: tuple[bool, str, int, int, str]) -> list[str]:
+        con = duckdb.connect()
+        con.execute("create table s (covers_mature boolean, nuc_aligned varchar, "
+                    "inserted_aa integer, frameshifts integer, seq_hash varchar)")  # fmt: skip
+        con.executemany("insert into s values (?, ?, ?, ?, ?)", rows)
+        return [r for (r,) in con.execute(f"select {M.identity_sql('s')} from s").fetchall()]
+
+    def test_differently_trimmed_copies_are_one_sequence(self) -> None:
+        a, b = self.identities((True, self.HA, 0, 0, "raw1"), (True, self.HA, 0, 0, "raw2"))
+        assert a == b and a.startswith("aligned:")
+
+    def test_a_read_difference_is_a_different_sequence(self) -> None:
+        unread = "N" + self.HA[1:]  # an unread base is not the base
+        a, b = self.identities((True, self.HA, 0, 0, "r1"), (True, unread, 0, 0, "r2"))
+        assert a != b
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            (False, "ACGT", 0, 0, "r"),  # does not cover mature HA
+            (True, "ACGT" * 6, 1, 0, "r"),  # an insertion the alignment drops
+            (True, "ACGT" * 6, 0, 1, "r"),  # a frameshift
+        ],
+    )
+    def test_otherwise_the_raw_sequence(self, row: tuple[bool, str, int, int, str]) -> None:
+        assert self.identities(row) == ["raw:r"]
+
+
+class TestIdentityFromStore:
+    """index_from_store keys candidates by identity_sql; a version without the alignment
+    columns (built before them) keeps raw identities, counted."""
+
+    def build(self, tmp_path: Path, aligned: bool) -> Store:
+        store = Store.create(tmp_path / "store")
+        name = "A/EXAMPLETOWN/7/2024"
+        isolates, sequences = tmp_path / "i.parquet", tmp_path / "s.parquet"
+        duckdb.execute(
+            f"COPY (SELECT * FROM (VALUES ('EPI_ISL_1', 'A1', '{name}', 'SIAT1'), "
+            f"('EPI_ISL_2', 'A2', '{name}', 'SIAT1')) v(epi_isl, accession, name, passage)) "
+            f"TO '{isolates.as_posix()}' (FORMAT parquet)"
+        )
+        extra = ", true, 'ACGT', 0, 0" if aligned else ""
+        columns = ", covers_mature, nuc_aligned, inserted_aa, frameshifts" if aligned else ""
+        duckdb.execute(
+            f"COPY (SELECT * FROM (VALUES ('EPI_ISL_1', 'A1', 'trimmed'{extra}), "
+            f"('EPI_ISL_2', 'A2', 'untrimmed'{extra})) v(epi_isl, accession, seq_hash{columns})) "
+            f"TO '{sequences.as_posix()}' (FORMAT parquet)"
+        )
+        now = datetime.datetime(2026, 10, 18, tzinfo=datetime.UTC)
+        with store.build("sequences", "h3") as builder:
+            builder.copy(isolates, "isolates/pull=test/part-0.parquet")
+            builder.copy(sequences, "sequences/pull=test/part-0.parquet")
+            builder.publish(Provenance("test", (), {}, now, now))
+        return store
+
+    def test_differently_trimmed_copies_match_as_one(self, tmp_path: Path) -> None:
+        idx = M.index_from_store(self.build(tmp_path, aligned=True), ["h3"], RULES)
+        match = idx.match(ANTIGEN, M.CELL, passage="SIAT1")
+        assert match.chosen is not None and match.chosen.epi_isl == "EPI_ISL_1"
+        assert idx.counts["identity.aligned"] == 2
+
+    def test_a_version_without_alignment_columns_keeps_raw_identities(self, tmp_path: Path) -> None:
+        idx = M.index_from_store(self.build(tmp_path, aligned=False), ["h3"], RULES)
+        assert idx.match(ANTIGEN, M.CELL, passage="SIAT1").chosen is None  # still a tie
+        assert idx.counts["identity.raw"] == 2
+        assert idx.counts["identity.version-without-alignment"] == 1
