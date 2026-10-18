@@ -320,14 +320,15 @@ def _key_table(key: Key, n: int) -> list[str]:
     """A clade key as the delivered report draws it: a ring-and-fill swatch, then the label.
     Colours get generated names (labels hold spaces and parentheses). A clade's swatch has the
     delivered black ring; an uncoloured class's has its dots' fill (or none) and ring, the ring
-    as wide in points as on the geo figure."""
+    as wide in points as on the geo figure. The table is indented 1.5em, as delivered: there it
+    started a paragraph and took the 12pt article's indent, which this report sets to 0."""
     out = []
     for j, row in enumerate(key):
         if row.fill:
             out.append(rf"\definecolor{{afkey{n}x{j}}}{{HTML}}{{{row.fill}}}")
         if row.edge:
             out.append(rf"\definecolor{{afkey{n}x{j}e}}{{HTML}}{{{row.edge}}}")
-    out.append(r"\begin{tabular}{l l}")
+    out.append(r"\hspace*{1.5em}\begin{tabular}{l l}")
     for j, row in enumerate(key):
         if row.edge:
             fill = f"afkey{n}x{j}" if row.fill else "none"
