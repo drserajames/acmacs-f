@@ -117,6 +117,24 @@ class TestJoin:
         assert "date.excel-serial" in records[0].problems
         assert counts.excel_serial_date == 1
 
+    def test_a_two_digit_name_year_takes_the_collection_years_century(self) -> None:
+        defline = DEFLINE.replace("A/EXAMPLETOWN/7/2021", "A/EXAMPLETOWN/7/21", 1)
+        records, counts = join([(defline, "ACGT")], [row()])
+        assert records[0].name == "A/EXAMPLETOWN/7/2021"
+        assert records[0].gisaid_name == "A/EXAMPLETOWN/7/21"  # as submitted, kept
+        assert gisaid.NAME_YEAR_TWO_DIGIT in records[0].problems
+        assert not any(p.startswith("name.") for p in records[0].problems)
+        assert counts.name_two_digit_year == 1
+        assert counts.to_json()["name_two_digit_year"] == 1
+
+    def test_an_excel_serial_date_does_not_choose_a_century(self) -> None:
+        # 1905 is no collection year: "05" must not become 1905
+        defline = DEFLINE.replace("A/EXAMPLETOWN/7/2021", "A/EXAMPLETOWN/7/05", 1)
+        records, counts = join([(defline, "ACGT")], [row(Collection_Date="1905-07-16")])
+        assert records[0].name == "A/EXAMPLETOWN/7/05"
+        assert "name.year" in records[0].problems
+        assert counts.name_two_digit_year == 0
+
     def test_uracil_is_converted_and_counted(self) -> None:
         """Nextclade drops a sequence containing U from every output while exiting 0."""
         records, counts = join([(DEFLINE, "ACGU")], [row()])
