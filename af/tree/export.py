@@ -31,6 +31,17 @@ by the process that wrote the bytes, so no later re-export has to reproduce them
 is not byte-reproducible across pyarrow versions). ``--records ROOT`` says where; ``--no-record
 REASON`` is the only way to export without one.
 
+**The selection's own inputs (FORMAT 3).** The sequences version alone does not say which leaves a
+tree holds: the same version selected under an edited rule file gives a different tree. So
+``export.json`` carries ``selection``: the sha256 of the selection config and of every file a rule
+reads (host overrides, include and exclude lists), each once, with the ids of the rules that name
+it. Paths are relative to the config's directory, because the laptop and o hold the data at
+different absolute paths; the bytes are hashed, because o's copy of the data is an extract with no
+git metadata, so a byte hash is the one fact both hosts can compute. ``cut`` is reserved for a
+cut pin (af.tree.cut) and is null until an export passes one. The tree carries all of this:
+``build.json``'s source and the published ``tree.json`` hold the block, and the tree's provenance
+cites ``export.json`` by hash. FORMAT 2 exports are still read; their ``selection`` is None.
+
 **Embargo.** Embargoed sequences may be used in WHO reports, not in publications. Nothing here
 drops them; the flag travels with each leaf into the tree store, and the count is in
 ``export.json``, so every consumer can tell.
@@ -48,6 +59,7 @@ import argparse
 import dataclasses
 import datetime
 import json
+import os
 import random
 import sys
 import tomllib
@@ -72,7 +84,10 @@ the order, and a run that wants to prove that can pass ``shuffle_seed``."""
 ALIGNMENT_FILE = "alignment.fasta"
 LEAVES_FILE = "leaves.parquet"
 EXPORT_FILE = "export.json"
-FORMAT = 2  # 1 had no alignment_order: its alignment was written in selection (date) order
+FORMAT = 3  # 2 had no selection inputs; 1 had no alignment_order (selection, i.e. date, order)
+READABLE_FORMATS = (2, 3)
+"""Formats :func:`read_export` accepts: records already written never move (workstream 11 reads
+them), so a FORMAT 2 export stays readable and builds as before."""
 
 
 class ExportError(RuntimeError):
@@ -103,6 +118,31 @@ class ExportRecord:
     test_only: str | None  # the reason, or None for a real export
     counts: list[dict[str, Any]]
     shuffle_seed: int  # the seed the alignment order was shuffled with
+    selection: dict[str, Any] | None = None  # FORMAT 3's selection inputs; None for FORMAT 2
+
+
+def selection_inputs(config: Path, rules: SubtypeRules) -> dict[str, Any]:
+    """The hashes of the selection config and of each file its rules read, for ``export.json``.
+
+    A file named by several rules (a subtype's include and exclude lists share one) is hashed once
+    and lists every rule that names it, in rule order. A missing file is fatal, as it is to
+    :func:`af.seq.select.select`.
+    """
+    config = Path(config)
+    base = config.resolve().parent
+    named: dict[Path, list[str]] = {}
+    for rule in rules.rules:
+        if rule.file is not None:
+            named.setdefault(Path(rule.file).resolve(), []).append(rule.id)
+    files = [
+        {"path": os.path.relpath(path, base), "sha256": sha256_path(path), "rules": ids}
+        for path, ids in sorted(named.items())
+    ]
+    return {
+        "config": {"path": config.name, "sha256": sha256_path(config)},
+        "files": files,
+        "cut": None,
+    }
 
 
 def export(
@@ -111,11 +151,25 @@ def export(
     rules: SubtypeRules,
     directory: Path,
     *,
+    config: Path,
+    sequences: StoreRef | None = None,
     test_only: TestOnly | None = None,
     shuffle_seed: int = SHUFFLE_SEED,
 ) -> ExportRecord:
-    """Select, then write the three files into ``directory`` (created; must be empty)."""
+    """Select, then write the three files into ``directory`` (created; must be empty).
+
+    ``config`` is the selection config ``rules`` were read from. It is hashed into
+    ``export.json``, so ``rules`` must be exactly what it holds for ``subtype``: rules that
+    differ from the file the record names would make the record vouch for a selection it never
+    saw. ``sequences`` names the version to select from; the default is the dataset's CURRENT.
+    """
     directory = Path(directory)
+    if load_rules(config, subtype) != rules:
+        raise ExportError(
+            f"{config}: its [{subtype}] rules are not the ones given; an export records the "
+            "config it selected with, so the two must be the same"
+        )
+    inputs = selection_inputs(config, rules)
     directory.mkdir(parents=True, exist_ok=True)
     if any(directory.iterdir()):
         raise ExportError(f"{directory}: not empty; an export never mixes with another")
@@ -124,26 +178,27 @@ def export(
         if not test_only.reason.strip():
             raise ExportError("a test-only export needs its reason")
         rules = dataclasses.replace(rules, outgroup=test_only.outgroup)
-    selection = select(store, rules)
-    sequences, leaves = _load(store, selection)
+    selection = select(store, rules, sequences=sequences)
+    aligned, leaves = _load(store, selection)
 
     from af.tree.stages import write_leaves  # stages imports this module's reader
 
     alignment_path = directory / ALIGNMENT_FILE
     leaves_path = directory / LEAVES_FILE
-    write_alignment(alignment_path, _shuffled(sequences, selection.outgroup, shuffle_seed))
+    write_alignment(alignment_path, _shuffled(aligned, selection.outgroup, shuffle_seed))
     write_leaves(leaves, leaves_path)
     record = ExportRecord(
         subtype=subtype,
         sequences=selection.store,
         outgroup=leaf_key(*selection.outgroup),
-        leaves=len(sequences),
+        leaves=len(aligned),
         embargoed=sum(1 for leaf in leaves.values() if leaf.embargoed),
         alignment_sha256=sha256_path(alignment_path),
         leaves_sha256=sha256_path(leaves_path),
         test_only=None if test_only is None else test_only.reason,
         counts=[dataclasses.asdict(count) for count in selection.counts],
         shuffle_seed=shuffle_seed,
+        selection=inputs,
     )
     meta = _to_json(record, selection)
     if test_only is not None:
@@ -174,8 +229,12 @@ def read_export(path: Path) -> ExportRecord:
     if path.is_dir():
         path = path / EXPORT_FILE
     data = json.loads(path.read_text())
-    if data.get("format") != FORMAT:
-        raise ExportError(f"{path}: format {data.get('format')!r}, this reader expects {FORMAT}")
+    if data.get("format") not in READABLE_FORMATS:
+        raise ExportError(
+            f"{path}: format {data.get('format')!r}, this reader reads {list(READABLE_FORMATS)}"
+        )
+    if data["format"] >= 3 and not isinstance(data.get("selection"), dict):
+        raise ExportError(f"{path}: format {data['format']} without its selection inputs")
     test_only = data.get("test_only")
     return ExportRecord(
         subtype=data["subtype"],
@@ -188,6 +247,7 @@ def read_export(path: Path) -> ExportRecord:
         test_only=None if test_only is None else test_only["reason"],
         counts=data["counts"],
         shuffle_seed=data["alignment_order"]["shuffled_with_seed"],
+        selection=data.get("selection"),
     )
 
 
@@ -226,6 +286,7 @@ def _to_json(record: ExportRecord, selection: Selection) -> dict[str, Any]:
             "notes/trees/H3-OLD-LINEAGE-PLACEMENT.md",
         },
         "files": {ALIGNMENT_FILE: record.alignment_sha256, LEAVES_FILE: record.leaves_sha256},
+        "selection": record.selection,
     }
 
 
@@ -330,6 +391,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.subtype,
         load_rules(args.selection, args.subtype),
         args.out,
+        config=args.selection,
         test_only=test_only,
     )
     seconds = (datetime.datetime.now(datetime.UTC) - started).total_seconds()

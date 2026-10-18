@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -15,16 +16,19 @@ from af.tree import export as E
 from af.tree import stages
 from af.tree.io import i6
 from af.tree.io.fasta import read_alignment
+from af.util.artefacts import sha256_path
 
 from .test_stages import (
     FIXTURE_PURPOSE,
     OUTGROUP,
     TREE_STEPS,
+    export_with,
     exported_project,
     fill,
     rules,
     statuses,
     with_clades,
+    write_selection,
 )
 from .tree_fixtures import KEYS, LEAF_SEQ
 
@@ -37,7 +41,7 @@ def store(tmp_path: Path) -> Store:
 
 
 def test_export_writes_the_selection_with_its_store_version(store: Store, tmp_path: Path) -> None:
-    rec = E.export(store, "h3", rules(), tmp_path / "out")
+    rec = export_with(store, rules(), tmp_path / "out")
     alignment = read_alignment(tmp_path / "out" / E.ALIGNMENT_FILE)
     assert list(alignment)[0] == KEYS["o"]  # outgroup first
     assert alignment == {KEYS[n]: LEAF_SEQ[n] for n in "oabcd"}
@@ -48,7 +52,7 @@ def test_export_writes_the_selection_with_its_store_version(store: Store, tmp_pa
 
 
 def test_leaves_carry_embargo_and_date_precision(store: Store, tmp_path: Path) -> None:
-    E.export(store, "h3", rules(), tmp_path / "out")
+    export_with(store, rules(), tmp_path / "out")
     rows = {r["leaf_id"]: r for r in pq.read_table(tmp_path / "out" / E.LEAVES_FILE).to_pylist()}
     assert [k for k, r in rows.items() if r["embargoed"]] == [KEYS["c"]]
     year_only = rows[KEYS["b"]]
@@ -63,7 +67,7 @@ def test_an_export_never_writes_into_a_used_directory(store: Store, tmp_path: Pa
     (tmp_path / "out").mkdir()
     (tmp_path / "out" / "stray").write_text("x")
     with pytest.raises(E.ExportError, match="not empty"):
-        E.export(store, "h3", rules(), tmp_path / "out")
+        export_with(store, rules(), tmp_path / "out")
 
 
 def test_a_missing_outgroup_refuses_unless_a_stand_in_is_labelled(
@@ -71,11 +75,11 @@ def test_a_missing_outgroup_refuses_unless_a_stand_in_is_labelled(
 ) -> None:
     absent = S.Outgroup("EPI_ISL_1", "EPI1", "not fetched yet")
     with pytest.raises(S.SelectionError, match="outgroup"):
-        E.export(store, "h3", rules(absent), tmp_path / "a")
+        export_with(store, rules(absent), tmp_path / "a")
     with pytest.raises(E.ExportError, match="reason"):
-        E.export(store, "h3", rules(absent), tmp_path / "b", test_only=E.TestOnly(OUTGROUP, " "))
-    rec = E.export(
-        store, "h3", rules(absent), tmp_path / "c", test_only=E.TestOnly(OUTGROUP, "no fetch yet")
+        export_with(store, rules(absent), tmp_path / "b", test_only=E.TestOnly(OUTGROUP, " "))
+    rec = export_with(
+        store, rules(absent), tmp_path / "c", test_only=E.TestOnly(OUTGROUP, "no fetch yet")
     )
     assert rec.test_only == "no fetch yet"
     meta = json.loads((tmp_path / "c" / E.EXPORT_FILE).read_text())
@@ -86,11 +90,11 @@ def test_a_ragged_alignment_is_refused(tmp_path: Path) -> None:
     st = Store.create(tmp_path / "store")
     fill(st, ragged=True)
     with pytest.raises(E.ExportError, match="rectangular"):
-        E.export(st, "h3", rules(), tmp_path / "out")
+        export_with(st, rules(), tmp_path / "out")
 
 
 def test_files_other_than_the_exported_ones_are_refused(store: Store, tmp_path: Path) -> None:
-    rec = E.export(store, "h3", rules(), tmp_path / "out")
+    rec = export_with(store, rules(), tmp_path / "out")
     edited = tmp_path / "edited.fasta"
     edited.write_text((tmp_path / "out" / E.ALIGNMENT_FILE).read_text().replace("ATG", "ATA", 1))
     with pytest.raises(E.ExportError, match="alignment.fasta"):
@@ -168,8 +172,8 @@ def test_a_stage_tree_meets_the_clade_stores_identity_checks(tmp_path: Path) -> 
 
 def test_the_alignment_is_shuffled_with_a_recorded_seed(store: Store, tmp_path: Path) -> None:
     """A date-sorted alignment made CMAPLE bury the old lineages (H3-OLD-LINEAGE-PLACEMENT.md)."""
-    first = E.export(store, "h3", rules(), tmp_path / "a")
-    again = E.export(store, "h3", rules(), tmp_path / "b")
+    first = export_with(store, rules(), tmp_path / "a")
+    again = export_with(store, rules(), tmp_path / "b")
     order = list(read_alignment(tmp_path / "a" / E.ALIGNMENT_FILE))
     assert order == list(read_alignment(tmp_path / "b" / E.ALIGNMENT_FILE))  # reproducible
     assert first.shuffle_seed == again.shuffle_seed == E.SHUFFLE_SEED
@@ -184,7 +188,7 @@ def test_the_outgroup_is_written_first_whatever_the_seed(store: Store, tmp_path:
     """CMAPLE takes the first record as its reference, so this must not depend on the seed."""
     seen = set()
     for index, seed in enumerate((1, 2, 7, 20261001)):
-        record = E.export(store, "h3", rules(), tmp_path / f"s{index}", shuffle_seed=seed)
+        record = export_with(store, rules(), tmp_path / f"s{index}", shuffle_seed=seed)
         order = list(read_alignment(tmp_path / f"s{index}" / E.ALIGNMENT_FILE))
         assert order[0] == KEYS["o"] == record.outgroup
         assert sorted(order) == sorted(read_alignment(tmp_path / "s0" / E.ALIGNMENT_FILE))
@@ -195,8 +199,137 @@ def test_the_outgroup_is_written_first_whatever_the_seed(store: Store, tmp_path:
 def test_a_different_seed_changes_the_order_but_not_the_leaves(
     store: Store, tmp_path: Path
 ) -> None:
-    one = E.export(store, "h3", rules(), tmp_path / "one", shuffle_seed=1)
-    two = E.export(store, "h3", rules(), tmp_path / "two", shuffle_seed=2)
+    one = export_with(store, rules(), tmp_path / "one", shuffle_seed=1)
+    two = export_with(store, rules(), tmp_path / "two", shuffle_seed=2)
     assert (one.leaves, one.embargoed) == (two.leaves, two.embargoed)
     assert one.leaves_sha256 == two.leaves_sha256  # leaves.parquet is sorted by key, not shuffled
     assert one.alignment_sha256 != two.alignment_sha256
+
+
+# ---------------------------------------------------------------------------------------------
+# FORMAT 3: the selection's own inputs
+
+
+def list_rules(tmp_path: Path) -> S.SubtypeRules:
+    """The fixture rules plus an include and an exclude list sharing one file, as a subtype's
+    weekly-tree list does, so the file must be hashed once and name both rules."""
+    lists = tmp_path / "rules" / "h3.tsv"
+    lists.parent.mkdir()
+    lists.write_text(
+        "# invented keys\nepi_isl\taccession\tlist\treason\nEPI_ISL_1\tEPI1\tinclude\tx\n"
+    )
+    base = rules()
+    return S.SubtypeRules(
+        base.dataset,
+        base.outgroup,
+        [
+            *base.rules,
+            S.Rule("weekly-in", "include_list", "keep", optional=True, file=lists.resolve()),
+            S.Rule("weekly-out", "exclude_list", "drop", optional=True, file=lists.resolve()),
+        ],
+    )
+
+
+def test_the_export_records_the_config_and_each_rule_file_by_hash(
+    store: Store, tmp_path: Path
+) -> None:
+    """The same sequences version under an edited rule file is a different tree, so the export
+    must say which files it selected with: each once, relative to the config, by byte hash."""
+    subtype_rules = list_rules(tmp_path)
+    export_with(store, subtype_rules, tmp_path / "out")
+    meta = json.loads((tmp_path / "out" / E.EXPORT_FILE).read_text())
+    config = tmp_path / "out.selection.toml"
+    assert meta["format"] == 3
+    assert meta["selection"] == {
+        "config": {"path": "out.selection.toml", "sha256": sha256_path(config)},
+        "files": [
+            {
+                "path": "rules/h3.tsv",
+                "sha256": sha256_path(tmp_path / "rules" / "h3.tsv"),
+                "rules": ["weekly-in", "weekly-out"],
+            }
+        ],
+        "cut": None,
+    }
+    assert E.read_export(tmp_path / "out").selection == meta["selection"]
+
+
+def test_an_edited_rule_file_changes_the_record_even_when_the_leaves_do_not(
+    store: Store, tmp_path: Path
+) -> None:
+    subtype_rules = list_rules(tmp_path)
+    one = export_with(store, subtype_rules, tmp_path / "one")
+    lists = tmp_path / "rules" / "h3.tsv"
+    lists.write_text(lists.read_text() + "EPI_ISL_2\tEPI2\tinclude\ty\n")  # matches nothing yet
+    two = export_with(store, subtype_rules, tmp_path / "two")
+    assert (one.alignment_sha256, one.leaves) == (two.alignment_sha256, two.leaves)
+    assert one.selection != two.selection
+
+
+def test_rules_that_are_not_the_configs_are_refused(store: Store, tmp_path: Path) -> None:
+    """A record must never vouch for a config the selection did not use."""
+    config = write_selection(tmp_path / "selection.toml", rules())
+    other = S.SubtypeRules("h3", OUTGROUP, [])
+    with pytest.raises(E.ExportError, match="not the ones given"):
+        E.export(store, "h3", other, tmp_path / "out", config=config)
+    assert not (tmp_path / "out").exists()
+
+
+def test_an_export_selects_from_a_named_version_not_only_current(
+    store: Store, tmp_path: Path
+) -> None:
+    """What a back-fill needs: the version a tree read, after CURRENT has moved on."""
+    first = store.current("sequences", "h3")
+    fill(store, names="oab", pull="p2")  # pulls accumulate: a new version, the same records
+    assert store.current("sequences", "h3") != first
+    named = export_with(store, rules(), tmp_path / "named", sequences=first)
+    latest = export_with(store, rules(), tmp_path / "latest")
+    assert named.sequences == first
+    assert latest.sequences == store.current("sequences", "h3")
+
+
+def test_a_version_of_another_dataset_is_refused(store: Store, tmp_path: Path) -> None:
+    wrong = dataclasses.replace(store.current("sequences", "h3"), dataset="h1")
+    with pytest.raises(S.SelectionError, match="given"):
+        export_with(store, rules(), tmp_path / "out", sequences=wrong)
+
+
+def test_a_format_2_export_is_still_read(store: Store, tmp_path: Path) -> None:
+    """Exports and records already written never move; a FORMAT 2 export builds as before."""
+    rec = export_with(store, rules(), tmp_path / "out")
+    path = tmp_path / "out" / E.EXPORT_FILE
+    meta = json.loads(path.read_text())
+    meta["format"] = 2
+    del meta["selection"]
+    path.write_text(json.dumps(meta))
+    assert E.read_export(path) == dataclasses.replace(rec, selection=None)
+
+
+def test_a_format_3_export_without_its_selection_is_refused(store: Store, tmp_path: Path) -> None:
+    export_with(store, rules(), tmp_path / "out")
+    path = tmp_path / "out" / E.EXPORT_FILE
+    meta = json.loads(path.read_text())
+    meta["selection"] = None
+    path.write_text(json.dumps(meta))
+    with pytest.raises(E.ExportError, match="selection inputs"):
+        E.read_export(path)
+
+
+def test_the_tree_carries_the_selection_inputs_and_cites_export_json(tmp_path: Path) -> None:
+    config = exported_project(tmp_path / "p")
+    assert statuses(config) == dict.fromkeys(TREE_STEPS, "ran")
+    export_json = tmp_path / "p" / "export" / E.EXPORT_FILE
+    selection = json.loads(export_json.read_text())["selection"]
+    build = json.loads((tmp_path / "p/work/trees/h3/build/build.json").read_text())
+    assert build["source"]["selection"] == selection
+    store = Store.open(tmp_path / "p" / "store")
+    published = store.current("trees", f"h3/{FIXTURE_PURPOSE}")
+    version = store.resolve(published)
+    assert i6.read_metadata(version)["source"]["selection"] == selection
+    provenance = json.loads((version / "PROVENANCE.json").read_text())
+    cited = {
+        Path(item["external"]["path"]).name: item["external"]["sha256"]
+        for item in provenance["inputs"]
+        if "external" in item
+    }
+    assert cited[E.EXPORT_FILE] == sha256_path(export_json)

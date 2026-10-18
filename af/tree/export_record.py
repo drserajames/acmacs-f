@@ -25,6 +25,18 @@ The record embeds ``export.json`` **verbatim** rather than restating its fields,
 editable copy of each fact (design rule 6) and the two cannot drift. ``files`` is lifted out
 because the reader compares it directly against the tree's external inputs.
 
+**Which hash is normative: ``files``.** ``files`` holds the sha256 of the bytes, which is what a
+tree's provenance records and what a report compares (af.report.provenance). ``content`` is
+evidence only: a writer-independent re-hash that can show two different byte hashes hold the same
+data (``leaves.parquet`` embeds its pyarrow version). It never stands in for ``files``, and a
+reader that finds them disagreeing reads ``files``.
+
+**A back-fill names the version it re-exported.** :func:`back_fill` takes the sequences version as
+an argument and never reads CURRENT, so the record's ``export.sequences`` is the version asked
+for, not whichever happened to be CURRENT that day. Given the alignment hash a tree recorded, it
+checks the re-export against it *before* writing, and the record keeps that hash as
+``checked_against``, so the record says both what it re-exported and what it was compared with.
+
 ``root`` is always passed in. It is deliberately not defaulted here: the records live outside the
 store, at a site-specific path, and this package reads no config (design rule 10).
 """
@@ -43,7 +55,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from af.store import Store
+from af.store import Store, StoreRef
 from af.util.artefacts import sha256_path
 
 RECORDS_DIR = "exports"
@@ -133,8 +145,12 @@ def build_record(
     written: datetime.datetime | None = None,
     directory: Path | None = None,
     note: str | None = None,
+    checked_against: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The record's content. ``written`` carries a zone; a naive datetime is refused.
+
+    ``checked_against`` is the file hashes a back-fill was asked to reproduce (a tree's recorded
+    alignment), kept so the record names what it was compared with as well as what it holds.
 
     ``note`` says in words what the structured fields cannot, and a back-fill usually needs one:
     the env that wrote a tree's own files is often not the env available now. For the first
@@ -161,6 +177,11 @@ def build_record(
         "writer": _writer(),
         "note": note,
     }
+    if checked_against is not None:
+        bad = {k: v for k, v in checked_against.items() if not SHA256.match(str(v))}
+        if not checked_against or bad:
+            raise RecordError(f"checked_against must be sha256 by file name, not {checked_against}")
+        record["checked_against"] = dict(checked_against)
     if directory is not None:
         missing = [name for name in files if not (Path(directory) / name).is_file()]
         if missing:
@@ -178,6 +199,7 @@ def write_record(
     af_release: str | None = None,
     directory: Path | None = None,
     note: str | None = None,
+    checked_against: dict[str, str] | None = None,
 ) -> Path:
     """Write the record for one export. Idempotent; refuses to change an existing one silently.
 
@@ -194,6 +216,7 @@ def write_record(
         af_release=af_release,
         directory=directory,
         note=note,
+        checked_against=checked_against,
     )
     if path.exists():
         existing = json.loads(path.read_text())
@@ -271,23 +294,36 @@ def back_fill(
     selection: Path,
     root: Path,
     *,
+    sequences: StoreRef,
+    expect_alignment: str | None = None,
     af_release: str | None = None,
     work: Path | None = None,
     note: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
-    """Export the store's current version of ``subtype`` into scratch, record it, discard the files.
+    """Export ``sequences`` into scratch, record it, discard the files.
 
     The export is deterministic given (sequences version, selection rules), so a record can be made
     for an existing version at any time without a republish and without keeping the files: on B/Vic
     this takes about 1.5 s. The scratch directory is always removed, including on failure.
+
+    ``sequences`` is required: a back-fill of CURRENT once recorded a version seven versions after
+    the one the tree read. With ``expect_alignment`` (the hash a tree recorded) a re-export that
+    does not reproduce it is refused and nothing is written.
     """
-    from af.tree.export import export, load_rules
+    from af.tree.export import ALIGNMENT_FILE, export, load_rules
 
     scratch = Path(tempfile.mkdtemp(dir=work, prefix=f"export-record-{subtype}-"))
     try:
         out = scratch / "export"
-        export(store, subtype, load_rules(selection, subtype), out)
+        rules = load_rules(selection, subtype)
+        export(store, subtype, rules, out, config=selection, sequences=sequences)
         export_json = json.loads((out / "export.json").read_text())
+        produced = export_json["files"][ALIGNMENT_FILE]
+        if expect_alignment is not None and produced != expect_alignment:
+            raise RecordError(
+                f"{sequences}: its export's {ALIGNMENT_FILE} is {produced}, not the expected "
+                f"{expect_alignment}; that tree is content-behind this version. Nothing written."
+            )
         path = write_record(
             root,
             export_json,
@@ -296,10 +332,25 @@ def back_fill(
             af_release=af_release,
             directory=out,
             note=note,
+            checked_against=(
+                None if expect_alignment is None else {ALIGNMENT_FILE: expect_alignment}
+            ),
         )
         return path, export_json
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def sequences_ref(store: Store, dataset: str, version: str) -> StoreRef:
+    """``sequences/<dataset>@<version>`` as a ref, its manifest read from the store."""
+    from af.store.manifest import MANIFEST, Manifest
+
+    manifest = store.dataset_dir("sequences", dataset) / "versions" / version / MANIFEST
+    if not manifest.is_file():
+        raise RecordError(f"sequences/{dataset}@{version}: no such version in {store.root}")
+    return StoreRef(
+        "sequences", dataset, version, Manifest.from_bytes(manifest.read_bytes()).sha256()
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -311,6 +362,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("store", type=Path, help="the store root")
     parser.add_argument(
         "root", type=Path, help="the records root (records go under <root>/exports)"
+    )
+    parser.add_argument(
+        "--sequences",
+        required=True,
+        metavar="VERSION",
+        help="the sequences version to re-export (the one the tree read); CURRENT is never assumed",
     )
     parser.add_argument("--af-release", help="the release this was exported with, for the record")
     parser.add_argument(
@@ -325,24 +382,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    path, export_json = back_fill(
-        Store.open(args.store),
-        args.subtype,
-        args.selection,
-        args.root,
-        af_release=args.af_release,
-        note=args.note,
-    )
-    files = export_json["files"]
-    if args.expect_alignment and files.get("alignment.fasta") != args.expect_alignment:
-        print(
-            f"MISMATCH: this export's alignment.fasta is {files.get('alignment.fasta')}, "
-            f"not the expected {args.expect_alignment}. The record was written at {path} and is "
-            "correct for what the store holds now, but it does NOT match the tree you named: that "
-            "tree is content-behind this sequences version.",
-            file=sys.stderr,
+    from af.tree.export import load_rules
+
+    store = Store.open(args.store)
+    dataset = load_rules(args.selection, args.subtype).dataset
+    try:
+        path, export_json = back_fill(
+            store,
+            args.subtype,
+            args.selection,
+            args.root,
+            sequences=sequences_ref(store, dataset, args.sequences),
+            expect_alignment=args.expect_alignment,
+            af_release=args.af_release,
+            note=args.note,
         )
+    except RecordError as err:
+        print(f"REFUSED: {err}", file=sys.stderr)
         return 1
+    files = export_json["files"]
     print(f"{path}")
     print(
         f"  sequences {export_json['sequences']['dataset']}@{export_json['sequences']['version']}"

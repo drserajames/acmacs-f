@@ -132,8 +132,22 @@ class _Record:
     pull: str
 
 
-def select(store: Store, config: SubtypeRules, *, cut: Cut | None = None) -> Selection:
-    ref = store.current("sequences", config.dataset)
+def select(
+    store: Store,
+    config: SubtypeRules,
+    *,
+    cut: Cut | None = None,
+    sequences: StoreRef | None = None,
+) -> Selection:
+    """The selection from ``sequences``, or from the dataset's CURRENT when it is not given.
+
+    A named version is what lets an export be re-made for the version a tree actually read, which
+    may no longer be CURRENT (af.tree.export_record.back_fill).
+    """
+    ref = store.current("sequences", config.dataset) if sequences is None else sequences
+    if (ref.kind, ref.dataset) != ("sequences", config.dataset):
+        raise SelectionError(f"{config.dataset}: rules for sequences/{config.dataset}, given {ref}")
+    store.resolve(ref)
     records = _load(store, ref)
     _check_rules(config.rules, cut)
     if config.outgroup.key not in records:
