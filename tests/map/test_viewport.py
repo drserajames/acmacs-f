@@ -85,8 +85,13 @@ def test_a_chosen_frame_keeps_required_markers_whole() -> None:
     page = choice.frame.page(xy[recent])
     assert page.min() >= 0.02 - 1e-9 and page.max() <= 0.98 + 1e-9
     assert choice.hidden == {"recent": 0, "all": 3}
+    # Markers too big to keep whole (0.4 u a side, 10.2 u needed): the centres still decide
+    # whether a frame exists, and the cut markers are reported rather than refused.
+    big = choose_frame(xy, prio, size=10.0, furniture=(), radii=0.04)
+    assert big.hidden["recent"] > 0
+    assert not hidden_mask(big.frame.page(xy[recent]), ()).any()
     with pytest.raises(FrameError, match="cannot be shown"):
-        choose_frame(xy, prio, size=10.0, furniture=(), radii=0.04)  # 0.4 u a side: no room
+        choose_frame(xy, prio, size=9.0, furniture=(), radii=0.04)  # centres do not fit either
 
 
 # ---------------------------------------------------------------- y grows UP (Sarah, Q105)
