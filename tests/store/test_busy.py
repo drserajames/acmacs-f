@@ -165,6 +165,66 @@ def test_own_batch_writes_its_datasets(store: Store) -> None:
         assert marker.published == ("sequences/h3",)
 
 
+def test_a_hostname_change_mid_batch_does_not_disown_it(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """18 Oct 2026: the laptop's hostname changed (the VPN came up) during a batch, and the
+    holder refused its own next publish: "a running batch 'dryrun' ... names it"."""
+    path = busy.busy_dir(store.root) / "dryrun.json"
+    with store.batch("dryrun", ["sequences/h3", "sequences/h1"]):
+        publish(store, "sequences", "h3", "before")
+        monkeypatch.setattr(socket, "gethostname", lambda: "another-name.vpn")
+        publish(store, "sequences", "h1", "after")
+        (marker,) = busy.read_markers(store.root)
+        assert marker.host != socket.gethostname()  # recorded once, at the start
+        assert marker.published == ("sequences/h3", "sequences/h1")
+        assert busy.is_own(marker, store.root) and busy.holder_gone(marker) is None
+        assert not busy.is_partial(marker) and busy.stale_reason(marker) is None
+        with pytest.raises(StoreBusy), store.reading("r"):
+            pass  # it still holds readers off
+    assert not path.exists()
+
+
+def test_a_batch_that_fails_after_a_hostname_change_stays_partial(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(RuntimeError), store.batch("dryrun", ["sequences/h3"]):
+        publish(store, "sequences", "h3", "before")
+        monkeypatch.setattr(socket, "gethostname", lambda: "another-name.vpn")
+        raise RuntimeError("stopped")
+    (marker,) = busy.read_markers(store.root)
+    assert marker.failed and busy.is_partial(marker)
+    with pytest.raises(StoreBusy, match="a PARTIAL batch"):
+        publish(store, "sequences", "h3", "stray")
+    with store.batch("dryrun", ["sequences/h3"]):  # resumed under the new name
+        publish(store, "sequences", "h3", "resumed")
+    assert busy.read_markers(store.root) == []
+
+
+def test_own_means_taken_by_this_process_not_a_marker_naming_it(store: Store) -> None:
+    """A marker on disk with this process's host, pid and start that it never took (here,
+    written by hand) is not its own: ownership is the batch it holds, on that store."""
+    write_marker(store)
+    (marker,) = busy.read_markers(store.root)
+    assert not busy.is_own(marker, store.root)
+    with pytest.raises(StoreBusy, match="publish to sequences/h3 refused: a running batch"):
+        publish(store, "sequences", "h3", "not ours")
+    other = Store.create(store.root.parent / "other")
+    with store.batch("held", ["sequences/h1"]):
+        (held,) = [m for m in busy.read_markers(store.root) if m.name == "held"]
+        assert busy.is_own(held, store.root) and not busy.is_own(held, other.root)
+
+
+def test_a_forked_child_does_not_inherit_its_parents_batch(store: Store) -> None:
+    with store.batch("sweep", ["sequences/h3"]):
+        (marker,) = busy.read_markers(store.root)
+        child = os.fork()
+        if child == 0:  # pragma: no cover - runs in the child
+            os._exit(0 if not busy.is_own(marker, store.root) else 1)
+        _, status = os.waitpid(child, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+
+
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGKILL])
 def test_a_holder_stopped_after_publishing_leaves_a_partial_marker(
     store: Store, sig: signal.Signals, capsys: pytest.CaptureFixture[str]
