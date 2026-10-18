@@ -61,6 +61,10 @@ MAX_PASSES = 4
 BUILD_RECORD_VERSION = 1
 
 
+GEOMETRY = r"\usepackage[top=3em,bottom=5em,left=2.5em,right=2.5em]{geometry}"
+UNRECORDED = "NOT RECORDED"  # what a gap once printed; never on a report page (00, 18 Oct 2026)
+
+
 class BuildError(RuntimeError):
     """The report could not be built; the message lists every reason found."""
 
@@ -234,8 +238,10 @@ def clade_keys(
                 for loc in figs[slot].figure.doc.get("geo", {}).get("locations", []):
                     errors += _dot_problems(slot, loc["points"], colours, classes, section)
         rows = [KeyRow(e["legend"], e["colour"][1:]) for e in reversed(entries)]
+        # A class no dot in the window is drawn in has no row (00, 18 Oct 2026: a key row for
+        # nothing, as "clade not defined (0 viruses)" on B/Vic, says nothing).
         rows += [_class_row(section.clade_key_classes[cls], c) for cls, c in classes.items()
-                 if cls in section.clade_key_classes]  # fmt: skip
+                 if cls in section.clade_key_classes and c["window"] > 0]  # fmt: skip
         keys[i] = rows
         counts[section.title] = {cls: c["window"] for cls, c in classes.items()}
     if errors:
@@ -351,10 +357,13 @@ def intro_texts(
             continue
         values = {"period": text.period_text(cfg.months())}
         gaps: list[str] = []
-        if CLADE_NOT_DEFINED in text.placeholders(section.intro):
+        intro = section.intro
+        if CLADE_NOT_DEFINED in text.placeholders(intro):
             count = classes.get(section.title, {}).get(CLADE_NOT_DEFINED)
             if count is None:
                 gaps.append(f"{section.title}: the clade-not-defined count (no clade key lists it)")
+            elif count == 0:  # no such virus: its paragraph goes, as its key row does
+                intro = text.without_paragraphs_using(intro, CLADE_NOT_DEFINED)
             unit = "virus" if count == 1 else "viruses"  # a geo dot is a virus
             values[CLADE_NOT_DEFINED] = "?" if count is None else f"{count:,} {unit}"
         if "tree_method" in text.placeholders(section.intro):
@@ -364,18 +373,18 @@ def intro_texts(
                     gaps.append(f"{slot}: the tree's method (no --store to read it from)")
                     continue
                 ref, tree = text.tree_json(store, figs[slot].figure.doc)
-                method, missing = text.tree_method(tree)
+                method, missing = text.tree_method(tree, text.tree_caveats(store, ref))
                 if missing:  # one line per tree: the version, then every field it lacks
                     gaps.append(f"{slot} ({ref}): " + ", ".join(missing))
                 methods.append(method)
             values["tree_method"] = " ".join(m for m in methods if m)
-        filled = text.fill(section.intro, values)
+        filled = text.fill(intro, values)
         out[i] = ([p.strip() for p in filled.split("\n\n") if p.strip()], gaps)
     return out
 
 
 def _intro_page(section: Section, intro: Intro, key: Key | None = None, n: int = 0) -> list[str]:
-    """The section heading, its paragraphs, and any unrecorded fact in red; then a new page.
+    """The section heading and its paragraphs; then a new page. An unrecorded fact is refused.
 
     Spaced as the delivered report: 3em under the heading, 1em between paragraphs. A tree
     intro page has no page number there (the tree follows as a whole page), a geo one has.
@@ -390,8 +399,8 @@ def _intro_page(section: Section, intro: Intro, key: Key | None = None, n: int =
         paragraphs = paragraphs[1:]
     if paragraphs:
         out.append(r"\par\vspace{1em}".join(tex_escape(p) for p in paragraphs) + r"\par")
-    out += [rf"{{\small\raggedright\textcolor{{red}}{{NOT RECORDED: {tex_escape(g)}}}\par}}"
-            for g in gaps]  # fmt: skip
+    if gaps:  # build() refuses these before typesetting: a gap never reaches the page
+        raise BuildError(f"{section.title}: unrecorded fact(s) in the intro: {gaps}")
     return [*out, r"\newpage"]
 
 
@@ -452,9 +461,12 @@ def _grid_pages(
         table = [r"\renewcommand{\arraystretch}{2.5}"]
         row_end = r"\\"
     lines: list[str] = []
-    for n, (heading, cells) in enumerate(section.pages(months)):
-        if section.landscape:
+    pages, starts = section.pages(months), section.run_starts(months)
+    for n, (heading, cells) in enumerate(pages):
+        if section.landscape and starts[n]:
             lines.append(r"\begin{landscape}")
+        elif section.landscape:  # a window's next page, in the same landscape as delivered:
+            lines.append(r"\newpage\vspace*{-2pt}")  # 24pt lower than a fresh landscape
         if (n == 0 and headed) or heading:  # the first page (unless an intro page has the
             # heading), and the first page of each map window
             lines.append(
@@ -477,7 +489,8 @@ def _grid_pages(
             lines.append(" & ".join(row) + row_end)
         lines += [r"\end{tabular}", r"\end{center}"]
         if section.landscape:
-            lines.append(r"\end{landscape}")
+            if n + 1 == len(pages) or starts[n + 1]:  # the window's last page
+                lines.append(r"\end{landscape}")
         else:
             lines.append(r"\newpage")
     return lines
@@ -503,7 +516,7 @@ def write_tex(
         r"\documentclass[a4paper,12pt]{article}",
         r"\usepackage[T1]{fontenc}",
         r"\usepackage{times}",
-        r"\usepackage[top=3em,bottom=5em,left=2.5em,right=2.5em]{geometry}",
+        GEOMETRY,
         r"\usepackage{graphicx,xcolor,pdflscape,pdfpages,zref-user,zref-abspage}",
         r"\usepackage[export]{adjustbox}",  # the frame key on \includegraphics, as delivered
         r"\usepackage{tikz}",  # the clade key's swatches, drawn as the delivered report's \cbox
@@ -524,6 +537,11 @@ def write_tex(
         # Grouped reports (subtype > figure) are unnumbered, like the delivered VCM report.
         r"\setcounter{secnumdepth}{0}" if any(sec.group for sec in cfg.sections) else "",
         r"\begin{document}",
+        # Set again as the delivered report does, after \begin{document}: there an em is the
+        # body font's (Times, 12pt; in the preamble it is Computer Modern's, 11.75pt, which
+        # put every page 0.6pt left and 0.7pt up), and the node it leaves keeps the cover's
+        # opening space, without which the cover sat 11.5pt high (review, 18 Oct 2026).
+        GEOMETRY.replace("\\usepackage[", "\\newgeometry{").replace("]{geometry}", "}"),
         *_cover(cfg, sum(r.figure.placeholder for r in figs.values()), n_not_from_store, built_at),
     ]
     group = None
@@ -743,7 +761,7 @@ def build(
         keys, key_record = clade_keys(cfg, figs, figures_root)
         intros = intro_texts(cfg, figs, Store.open(store_root) if store_root else None, key_record)
         gaps = [g for _, section_gaps in intros.values() for g in section_gaps]
-        if gaps and not cfg.figures.allow_placeholders:
+        if gaps:  # bring-up too: a gap would print internal identifiers in place of a sentence
             raise BuildError(
                 f"{len(gaps)} fact(s) in intro text no artefact records:\n  " + "\n  ".join(gaps)
             )
@@ -752,6 +770,8 @@ def build(
             shutil.rmtree(build_dir)  # never reuse a stale .aux/.toc or an old figure
         build_dir.mkdir(parents=True)
         tex = write_tex(cfg, figs, build_dir, built_at, len(use.not_from_store), intros, keys)
+        if UNRECORDED in tex.read_text():  # from any source, config words included
+            raise BuildError(f"{tex}: {UNRECORDED!r} would be printed in the report body")
         passes = run_latex(tex, LocalRunner())
         pages = check_output(tex, cfg.all_slots(), 1 if cfg.report.end_page else 0)
     final = out_dir / f"{cfg.report.id}.pdf"

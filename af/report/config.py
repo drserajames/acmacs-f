@@ -98,6 +98,14 @@ class Section:
         maps: one run of pages per window, cells = slots in order (``"-"`` = blank);
         geo: one slot per month of the report period, ``<slot>/<YYYY-MM>``.
         """
+        return [(heading, cells) for heading, cells, _ in self._pages(months)]
+
+    def run_starts(self, months: list[str]) -> list[bool]:
+        """Per page of :meth:`pages`, whether it starts a run (a map window, a geo slot): a
+        window titled "" has no heading to tell it by."""
+        return [first for _, _, first in self._pages(months)]
+
+    def _pages(self, months: list[str]) -> list[tuple[str, list[str | None], bool]]:
         cols, rows = self.grid
         per_page = cols * rows
         runs: list[tuple[str, list[str | None]]] = []
@@ -111,7 +119,8 @@ class Section:
         out = []
         for heading, cells in runs:
             for start in range(0, len(cells), per_page):
-                out.append((heading if start == 0 else "", cells[start : start + per_page]))
+                page = cells[start : start + per_page]
+                out.append((heading if start == 0 else "", page, start == 0))
         return out
 
 

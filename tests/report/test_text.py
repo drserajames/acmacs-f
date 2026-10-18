@@ -69,12 +69,24 @@ def test_tree_method_says_only_what_tree_json_records() -> None:
     ]  # fmt: skip
 
 
+def test_an_imported_tree_says_af_did_not_build_it() -> None:
+    """A tree af imported records no alignment or build: its provenance says so, and the page
+    says that, not a line of missing fields (00, 18 Oct 2026)."""
+    caveats = ["not an af build: another toolkit's tree", "synthetic leaf keys"]
+    assert text.tree_method({"asr": {"backend": "x"}}, caveats) == (text.IMPORTED_METHOD, [])
+    # a version that records a build anyway is checked as usual
+    assert text.tree_method({"build": FULL["build"]}, caveats)[1] == ["tree.json aligned.region"]
+    assert text.tree_method({"asr": {}}, ["synthetic leaf keys"])[1] != []
+
+
 def test_period_text() -> None:
     assert text.period_text(["2026-04", "2026-05", "2026-09"]) == "April 2026 to September 2026"
     assert text.period_text(["2026-04"]) == "April 2026"
 
 
-def _setup(tmp: Path, tree: dict[str, Any] | None, allow: bool) -> tuple[Path, Path, Store]:
+def _setup(
+    tmp: Path, tree: dict[str, Any] | None, allow: bool, caveats: list[str] | None = None
+) -> tuple[Path, Path, Store]:
     cfg = tmp / "r.toml"
     cfg.write_text(CONFIG.replace("ALLOW", "true" if allow else "false"))
     root = tmp / "figs"
@@ -83,7 +95,8 @@ def _setup(tmp: Path, tree: dict[str, Any] | None, allow: bool) -> tuple[Path, P
     store = Store.create(tmp / "store")
     with store.build("trees", "x/report") as version:
         (version.path / "tree.json").write_text(json.dumps(tree or {}))
-        ref = version.publish(Provenance("test", (), {}, T0, T0))
+        params = {} if caveats is None else {"caveats": caveats}
+        ref = version.publish(Provenance("test", (), params, T0, T0))
     i7 = next((root / "tree/x/report").glob("*/figure.i7.json"))
     doc = json.loads(i7.read_text())
     doc["provenance"]["store_refs"] = [ref.to_json()]
@@ -107,9 +120,8 @@ def test_intro_pages_fill_facts_from_the_tree_version(tmp_path: Path) -> None:
     assert "Report generated: 2026-09-01 12:00 UTC" in tex
 
 
-def test_an_unrecorded_method_is_red_in_bring_up_and_refused_in_a_final_report(
-    tmp_path: Path,
-) -> None:
+def test_an_unrecorded_method_is_refused_in_bring_up_too(tmp_path: Path) -> None:
+    """A gap once printed "NOT RECORDED: <version>: <fields>" on the page (00, 18 Oct 2026)."""
     cfg_path, root, store = _setup(tmp_path, {"asr": {}}, allow=True)
     cfg = load(cfg_path)
     figs = build.resolve_all(cfg, root)
@@ -120,8 +132,18 @@ def test_an_unrecorded_method_is_red_in_bring_up_and_refused_in_a_final_report(
     )
     out = tmp_path / "build"
     out.mkdir()
-    tex = build.write_tex(cfg, figs, out, T0, 0, build.intro_texts(cfg, figs, store))
-    assert r"\textcolor{red}{NOT RECORDED: tree/x/report (trees/x/report@" in tex.read_text()
+    with pytest.raises(build.BuildError, match="unrecorded fact"):
+        build.write_tex(cfg, figs, out, T0, 0, build.intro_texts(cfg, figs, store))
+    with pytest.raises(build.BuildError, match="1 fact.* no artefact records"):
+        build.build(cfg_path, root, tmp_path / "out", store_root=tmp_path / "store")
+
+
+def test_an_imported_tree_page_says_so(tmp_path: Path) -> None:
+    cfg_path, root, store = _setup(tmp_path, {"asr": {}}, allow=True,
+                                   caveats=["not an af build: imported"])  # fmt: skip
+    cfg = load(cfg_path)
+    intros = build.intro_texts(cfg, build.resolve_all(cfg, root), store)
+    assert intros[1] == (["The tree is coloured by region.", text.IMPORTED_METHOD], [])
 
 
 def test_intro_config_is_checked(tmp_path: Path) -> None:
@@ -139,7 +161,17 @@ def test_intro_config_is_checked(tmp_path: Path) -> None:
 def test_a_report_with_an_end_page_builds(tmp_path: Path) -> None:
     """The closing page follows the last figure: the page check must allow it (it did not)."""
     cfg_path, root, _ = _setup(tmp_path, FULL, allow=True)
+    cfg_path.write_text(cfg_path.read_text().replace("\\n\\n{tree_method}", ""))
     pdf = build.build(cfg_path, root, tmp_path / "out")
     record = json.loads((tmp_path / "out" / "r.build.json").read_text())
     assert pdf.is_file() and record["output"]["pages"] >= 4
-    assert record["text_gaps"]  # no --store: the tree's method cannot be read, so it is a gap
+    assert record["text_gaps"] == []
+
+
+@build_needs_latex
+def test_not_recorded_never_reaches_the_page(tmp_path: Path) -> None:
+    """Whatever puts it there, config words included (00, 18 Oct 2026)."""
+    cfg_path, root, _ = _setup(tmp_path, FULL, allow=True)
+    cfg_path.write_text(cfg_path.read_text().replace("\\n\\n{tree_method}", " NOT RECORDED"))
+    with pytest.raises(build.BuildError, match="'NOT RECORDED' would be printed"):
+        build.build(cfg_path, root, tmp_path / "out")
