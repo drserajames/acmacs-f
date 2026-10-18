@@ -59,10 +59,15 @@ def test_a_rule_says_everything_it_means(changes, message):
         rule(**changes)
 
 
-def test_the_deletion_is_read_as_r5_reads_it():
+def test_the_deletion_is_read_as_r5_reads_it_and_never_guessed():
     assert deleted(GAP, [3, 4]) is True and deleted(NO_GAP, [3, 4]) is False
-    assert deleted("MK-", [3, 4]) is False  # too short to have position 4: not deleted
     assert deleted(None, [3]) is None
+    # unobservable is not "not deleted": past the end, or unread ("X", af's padding)
+    assert deleted("MK-", [3, 4]) is None
+    assert deleted("MK-XLV", [3, 4]) is None
+    assert deleted("MKXXLV", [3, 4]) is None
+    # a residue read at one position is evidence enough that the deletion is not there
+    assert deleted("MKTXLV", [3, 4]) is False
 
 
 @pytest.mark.parametrize(
@@ -274,3 +279,26 @@ def test_closest_passage_follows_the_ranked_candidates_protein(tables):  # noqa:
     assert got[names[1]].verdict == TIE_SPLIT and got[names[1]].removed  # ranked E2: none
     assert got[names[2]].removed and got[names[2]].ranked_deleted is None  # no protein
     assert got[names[0]].to_json()["ranked"] == ["E1", "A1"]
+
+
+def test_an_unread_position_never_removes_a_point_as_not_deleted(tables):  # noqa: F811
+    cfg, inputs = _inputs(tables)
+    until = cfg.tables[0].date.isoformat()
+    name = next(a.name for a in inputs[0].chart.antigens if a.name.startswith("TEST-10"))
+    seq = Sequencer({name: "E1"}, {"E1": "MK-XLV"})
+    keep = rule(tables_until=until, unsequenced="keep", optional=True)
+    [d] = [d for d in decide([keep], inputs, seq) if d.designation.startswith(name + " ")]
+    assert d.verdict == NO_PROTEIN and not d.removed
+
+
+def test_an_unread_ranked_candidate_follows_unsequenced(tables):  # noqa: F811
+    """closest-passage on a tie whose ranked pick has "X" at a deletion position: no answer,
+    so `unsequenced` decides, never "not deleted"."""
+    cfg, inputs = _inputs(tables)
+    until = cfg.tables[0].date.isoformat()
+    name = next(a.name for a in inputs[0].chart.antigens if a.name.startswith("TEST-10"))
+    seq = Sequencer({name: ["E1", "E2"]}, {"E1": "MK-XLV", "E2": GAP})
+    for unsequenced, removed in (("keep", False), ("remove", True)):
+        r = rule(tables_until=until, ties="closest-passage", unsequenced=unsequenced, optional=True)
+        [d] = [d for d in decide([r], inputs, seq) if d.designation.startswith(name + " ")]
+        assert d.ranked == ("E1", "A1") and d.ranked_deleted is None and d.removed is removed

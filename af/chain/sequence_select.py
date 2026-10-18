@@ -49,7 +49,7 @@ TIES = ("by-candidates", "closest-passage", "as-unsequenced")
 # A point's verdict. "deleted" keeps it, "not-deleted" removes it; the rest follow the rule.
 DELETED, NOT_DELETED = "deleted", "not-deleted"
 UNSEQUENCED_VERDICT = "unsequenced"  # no sequence matched (or no dataset covers it)
-NO_PROTEIN = "no-protein"  # a sequence matched, but it has no aligned protein to test
+NO_PROTEIN = "no-protein"  # a sequence matched, but its protein cannot be read at the positions
 TIE_ALL, TIE_NONE, TIE_SPLIT = "tie-all-deleted", "tie-none-deleted", "tie-split"
 
 Key = tuple[str, str, tuple[str, ...], str]  # name, reassortant, annotations, passage or serum id
@@ -310,11 +310,19 @@ def _ranked_key(m: Any) -> tuple[str, str] | None:
 
 
 def deleted(aa: str | None, positions: Sequence[int]) -> bool | None:
-    """Whether the protein has a gap at every position (1-based mature HA, as R5); None when
-    there is no protein to test."""
+    """Whether the protein has a gap at every position (1-based mature HA, as R5 reads one).
+
+    True: "-" at every position. False: a residue is READ at one of them, which no deletion
+    leaves. None (unobservable) otherwise: no protein, a position past its end, or "X" where a
+    residue was not read (af pads an untranslatable CDS with "X"; its aa_partial is set). A point
+    is never removed as not-deleted on missing evidence; unobservable follows `unsequenced`, as
+    an unobservable locus is no evidence in clade colouring (10, 18 Oct 2026)."""
     if aa is None:
         return None
-    return all(len(aa) >= p and aa[p - 1] == "-" for p in positions)
+    calls = [aa[p - 1] if len(aa) >= p else None for p in positions]
+    if any(c not in (None, "-", "X") for c in calls):
+        return False
+    return True if all(c == "-" for c in calls) else None
 
 
 def _verdict(
@@ -362,7 +370,7 @@ def row_of(table: Any, kind: str, index: int) -> dict[str, Any]:
     p = (table.antigens if kind == "antigen" else table.sera)[index]
     return {
         "subtype": table.subtype,
-        "lineage": p.lineage or table.lineage or "",
+        "lineage": p.lineage,  # the point's own, as the join's row (rows.py): never the table's
         "name": p.name,
         "passage": p.passage,
         "passage_class": p.passage_class,
