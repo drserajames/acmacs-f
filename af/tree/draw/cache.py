@@ -98,24 +98,51 @@ def reuse_or_draw(
     ``draw`` must write every output; they are checked (exists, non-empty) before an entry is
     made, so a failed draw never becomes a reusable entry.
     """
+    result = reuse(cache, parts, code, outputs, step)
+    if not result.hit:
+        draw()
+        keep(cache, parts, code, outputs, step)
+    return result
+
+
+def reuse(
+    cache: Path | None,
+    parts: Mapping[str, Any],
+    code: Mapping[str, Any] | None,
+    outputs: Mapping[str, Path],
+    step: str,
+) -> CacheResult:
+    """Copy the entry for ``parts`` and ``code`` into ``outputs`` if there is one (a hit).
+    On a miss nothing is written, and the outputs are the caller's to draw, then :func:`keep`."""
     for name in outputs:
         if Path(name).name != name or name == ENTRY_FILE or name.startswith("."):
             raise ValueError(f"{step}: output name {name!r} is not a plain file name")
     if cache is None:
-        draw()
         return CacheResult(False, "no cache directory given", None)
     if code is None:
-        draw()
         return CacheResult(False, "code not identified (a dirty or unknown af): not cached", None)
     key = entry_key(parts, code)
     entry = cache / key
     if entry.is_dir():
         _copy_out(entry, key, outputs, step)
         return CacheResult(True, "reused: tree, config and code unchanged", key)
-    draw()
-    checked = check_artefacts(step, [Artefact(path) for path in outputs.values()])
-    _store(cache, key, parts, code, {name: c for name, c in zip(outputs, checked, strict=True)})
     return CacheResult(False, "no entry for this tree, config and code: drawn", key)
+
+
+def keep(
+    cache: Path | None,
+    parts: Mapping[str, Any],
+    code: Mapping[str, Any] | None,
+    outputs: Mapping[str, Path],
+    step: str,
+) -> None:
+    """Check freshly drawn ``outputs`` (exists, non-empty) and store them as the entry for
+    ``parts`` and ``code``; without a cache or an identified code only the check is made."""
+    checked = check_artefacts(step, [Artefact(path) for path in outputs.values()])
+    if cache is None or code is None:
+        return
+    key = entry_key(parts, code)
+    _store(cache, key, parts, code, {name: c for name, c in zip(outputs, checked, strict=True)})
 
 
 def _copy_out(entry: Path, key: str, outputs: Mapping[str, Path], step: str) -> None:
