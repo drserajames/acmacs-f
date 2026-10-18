@@ -266,6 +266,11 @@ def _step_info(s: dict, r: dict) -> list[str]:
         ),
         f"RMSD to previous {rmsd_prev} · incremental vs scratch RMSD {rmsd_basin}",
     ]
+    if late := r.get("late"):  # af.chain.append: arrived after the chain had passed its date
+        info.append(
+            f"<b>late</b>: dated {_e(late['date'])}, appended after the published chain"
+            f" {_e(late['published_version'])} (to {_e(late['published_until'])})"
+        )
     if pf := r.get("platform"):  # which build made the step: near ties can differ between them
         info.append(
             _e(

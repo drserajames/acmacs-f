@@ -855,6 +855,8 @@ def _merge_step(
         },
         **_search(optimiser, {"incremental": all_incremental, "scratch": all_scratch}),
         "trapped_loop": {"incremental": _loop(all_incremental), "scratch": _loop(all_scratch)},
+        # appended after a published chain although dated before its latest table (Q164)
+        **({"late": late} if (late := cfg.late(table_ref.table_id)) else {}),
         **({"removed": removed} if cfg.remove else {}),
         **({"removed_by_sequence": by_sequence} if cfg.sequence_removals is not None else {}),
         **({"dropped_cells_by_rule": dropped} if dropped else {}),
