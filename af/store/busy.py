@@ -20,6 +20,13 @@ is gone (pid plus the process's start time, so a reused pid does not count) is s
 marker from another host is stale once older than its ``max_age_hours``. Stale markers
 are reported and ignored, and the next batch of the same name replaces one.
 
+The holder itself never asks the hostname whether a marker is its own: it knows, because
+it took it (an in-memory registry of the batches this process holds). The hostname is
+recorded once, when the marker is made, and serves only to judge other processes'
+markers (18 Oct 2026: the laptop's hostname changed when the VPN came up, mid-batch; the
+holder no longer recognised its own marker, refused its next publish, and left the batch
+failed and partial in a scratch clone).
+
 A batch that stops part way (an exception, a signal, a dead holder) after publishing
 anything is *partial*, never stale: its marker records each publish as it happens, and it
 blocks readers and other writers until a batch of the same name resumes it, or someone
@@ -113,9 +120,12 @@ def is_partial(marker: Marker) -> bool:
 def holder_gone(marker: Marker) -> str | None:
     """Why ``marker``'s holder no longer runs, or None if it may still.
 
-    On the marker's own host the process decides. Elsewhere, or where processes cannot be
-    inspected (a sandbox that forbids ``ps``), only the marker's age can.
+    A batch this process holds is not gone, whatever the hostname now says. For other
+    processes: on the marker's own host the process decides. Elsewhere, or where processes
+    cannot be inspected (a sandbox that forbids ``ps``), only the marker's age can.
     """
+    if _held_here(marker):
+        return None
     why_unchecked = f"held from another host, {marker.host}"
     if marker.host == socket.gethostname():
         started = process_start(marker.pid)
@@ -331,13 +341,31 @@ def record_publish(root: Path, kind: str, dataset: str) -> None:
                 _rewrite(held.path, held.marker)
 
 
-def is_own(marker: Marker) -> bool:
-    """Taken by this very process (pid plus its start time)."""
-    return (
-        marker.host == socket.gethostname()
-        and marker.pid == os.getpid()
-        and marker.process_started == (process_start(os.getpid()) or UNKNOWN)
+def _held_here(marker: Marker, root: Path | None = None) -> bool:
+    """Is ``marker`` one this process took (on the store ``root``, or on any store)?
+
+    Decided from the registry, never from the hostname, which can change under a running
+    process. A forked child inherits the registry, but not the batch: the pid must be ours.
+    """
+    if marker.pid != os.getpid():
+        return False
+    with _held_lock:
+        if root is None:
+            helds = [held for entries in _holding.values() for held in entries]
+        else:
+            helds = list(_holding.get(Path(root).resolve(), ()))
+    return any(
+        held.marker.name == marker.name
+        and held.marker.pid == marker.pid
+        and held.marker.started == marker.started
+        and held.marker.process_started == marker.process_started
+        for held in helds
     )
+
+
+def is_own(marker: Marker, root: Path) -> bool:
+    """Taken by this very process on the store ``root``: a batch it holds now."""
+    return _held_here(marker, root)
 
 
 def check_write(root: Path, kind: str, dataset: str) -> None:
@@ -351,7 +379,7 @@ def check_write(root: Path, kind: str, dataset: str) -> None:
     for marker in live_markers(root, report_stale=False):
         # A failed batch blocks its own process too: only a resuming batch (which rewrites
         # the marker as its own, not failed) may write those datasets again.
-        if entry in marker.datasets and (marker.failed or not is_own(marker)):
+        if entry in marker.datasets and (marker.failed or not is_own(marker, root)):
             what = "a PARTIAL batch" if is_partial(marker) else "a running batch"
             raise StoreBusy(
                 f"publish to {entry} refused: {what} {marker.describe()} names it. "
