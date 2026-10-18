@@ -16,7 +16,7 @@ with a config such as (paths relative to the config file)::
     tsv = "../fludata/CDC-Atlanta-WHO-CC/raw-data/CDC_titers_sept_2019_onwards.tsv"
     xlsx = ["../whocc-tables/h3-hi-guinea-pig-cdc/xlsx/<one workbook>.xlsx"]  # tests not in the TSV
     sequence_ids = ["../fludata/CDC-Atlanta-WHO-CC/raw-data/<season>_GISAID.tsv"]  # optional
-    sequence_id_ties = "blank"  # required with sequence_ids (af.tables.cdc_seqids)
+    sequence_id_ties = "closest-passage"  # required with sequence_ids (Q221; af.tables.cdc_seqids)
 
 Every run reads every input (a full re-read), so a rule that matched nothing is an error.
 Nothing is published if anything went wrong: format errors, broken tables, unmatched

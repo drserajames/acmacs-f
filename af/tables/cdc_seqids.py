@@ -13,10 +13,11 @@ TSV's own pairings (the same CDC virus id tested again after September 2019):
   ``sequence_pairing`` "exact", or CDC's own status when the main TSV gave the pairing;
 - otherwise, one isolate at another passage: "proxy", CDC's own word for a sequence of the
   same isolate at a passage other than the one tested;
-- otherwise, several isolates: the run's rule (``sequence_id_ties``, a required config choice
-  until Sarah rules on Q221): ``blank`` leaves the antigen without one, ``closest-passage``
-  takes the closest by af's passage rank (the Q217 rule, :func:`af.seq.matching.ae_ranked`),
-  ``original`` takes the clinical specimen's when there is exactly one.
+- otherwise, several isolates: the run's rule, ``sequence_id_ties`` (required, as every input
+  is; design rule 4). Sarah chose ``closest-passage`` (Q221 (a), 18 Oct 2026): the closest by
+  af's passage rank, then the lowest EPI_ISL (the Q217 rule, :func:`af.seq.matching.ae_ranked`).
+  ``blank`` leaves the antigen without one; ``original`` takes the clinical specimen's when
+  there is exactly one.
 
 Every id joined records where it came from in ``source`` ("epi_isl_from"), and the run
 reports how many antigens took one each way. EPI_ISL is not map content (``model``): a
