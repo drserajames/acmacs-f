@@ -33,6 +33,12 @@ name that found nothing is looked up again under each GISAID spelling the table 
 flagged ``match.location-equivalent``. It reaches deposits by any centre, which the number
 rule, keyed on the lab's own deposits, cannot.
 
+A tie that every rule above left is settled, last, by the antigen's own **passage**: when
+exactly one sequence of the tie was deposited with the very passage the table gives (step for
+step, ae's rank 0), that one is taken and flagged ``match.passage-exact`` (Sarah, Q217: the
+closest passage). A tie still left is refused, and keeps its candidates and ae's ranked pick
+for colouring (Q81).
+
 Passage classes of GISAID's free-text passages come from a rule table
 (``gisaid_passage_classes.tsv``, acmacs-f-data); table antigens bring their own class from
 the table parsers.
@@ -63,6 +69,7 @@ CELL_FROM_EGG = "match.cell-antigen-egg-sequence"
 IDENTICAL_DUPLICATES = "match.identical-duplicates"
 AMBIGUOUS = "match.ambiguous"
 OWN_LAB = "match.own-lab"
+PASSAGE_EXACT = "match.passage-exact"  # a tie settled by the one sequence of the same passage
 LAB_NUMBER = "match.lab-number"
 LAB_NUMBER_COLLISION = "match.lab-number-collision"
 LOCATION_EQUIVALENT = "match.location-equivalent"
@@ -215,7 +222,8 @@ class SequenceIndex:
         """The sequence for one antigen; ``antigen_class`` is egg, cell, original or unknown.
 
         ``lab`` is the lab whose table the antigen is in; it breaks a name tie only through
-        ``submitters``. ``passage`` (the antigen's own) only ranks a tie that stays refused.
+        ``submitters``. ``passage`` (the antigen's own) settles a tie only when exactly one
+        sequence of it has that very passage; otherwise it ranks the tie, which stays refused.
         """
         flags: list[str] = [REASSORTANT] if reassortant else []
         if epi_isl:
@@ -235,6 +243,8 @@ class SequenceIndex:
             result = self._from_equivalent(result, key, lab, antigen_class, own, passage)
         if result.chosen is None and key is not None and lab in self.number_rules:
             result = self._from_number(result, key, lab, antigen_class)
+        if result.chosen is None and result.tied:
+            result = _from_exact_passage(result, passage)
         self.counts.update(result.flags or ["match.clean"])
         return result
 
@@ -401,6 +411,29 @@ def ae_passage_rank(antigen: str, antigen_class: str, candidate: Candidate) -> i
     if (antigen_class == EGG) == (candidate.passage_class == EGG):
         return 50
     return 90
+
+
+def _from_exact_passage(result: Match, passage: str) -> Match:
+    """A refused tie settled by the one sequence deposited with the antigen's very passage.
+
+    Sarah, Q217: a tie takes the closest passage, and nothing is closer than the same one.
+    The last step of :meth:`SequenceIndex.match`, so the lab's own deposit (own-lab, number)
+    still settles a tie first, and every route to a refused tie (name, location forms,
+    equivalents) is settled alike. Several such sequences that differ are still a tie: the
+    passage cannot tell them apart. The same sequence deposited more than once is one, taken by
+    key as identical duplicates are. Compared step for step (:func:`passage_steps`, ae's rank
+    0), so GISAID's free-text spellings of a passage meet the table's, while a longer or
+    shorter history does not; an antigen passage that reads as no steps never matches.
+    """
+    mine = passage_steps(passage)
+    same = [c for c in result.tied if mine and passage_steps(c.passage) == mine]
+    if not same or len({c.seq_hash for c in same}) != 1:
+        return result
+    flags = [f for f in result.flags if f != AMBIGUOUS]  # chosen now, no longer refused
+    if len(same) > 1:
+        flags.append(IDENTICAL_DUPLICATES)
+    chosen = min(same, key=lambda c: c.key)
+    return replace(result, chosen=chosen, flags=(*flags, PASSAGE_EXACT), tied=(), ranked=None)
 
 
 def ae_ranked(tier: Sequence[Candidate], passage: str, antigen_class: str) -> Candidate | None:

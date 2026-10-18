@@ -368,10 +368,10 @@ class TestRefusedTies:
 
     def test_a_refused_tie_keeps_its_candidates_and_aes_pick(self) -> None:
         a, b = candidate(8, "MDCK2", seq="x"), candidate(3, "SIAT1", seq="y")
-        match = index(a, b).match(ANTIGEN, M.CELL, passage="SIAT1")
+        match = index(a, b).match(ANTIGEN, M.CELL, passage="SIAT2")
         assert match.chosen is None and M.AMBIGUOUS in match.flags  # still refused
         assert set(match.tied) == {a, b}
-        assert match.ranked == b  # identical passage (0) beats same class (50)
+        assert match.ranked == b  # same last step name (20) beats same class (50)
 
     def test_a_chosen_match_has_no_tie(self) -> None:
         match = index(candidate(1, "MDCK2")).match(ANTIGEN, M.CELL, passage="MDCK2")
@@ -398,6 +398,89 @@ class TestRefusedTies:
         for order in (tier, tier[::-1], tier[1:] + tier[:1]):
             ranked = M.ae_ranked(order, "MDCK2", M.CELL)
             assert ranked is not None and ranked.epi_isl == "EPI_ISL_9"  # numeric, not text
+
+
+class TestPassageExact:
+    """Sarah, Q217: a tie is settled by the one sequence deposited with the antigen's passage."""
+
+    def test_the_one_sequence_of_the_same_passage_is_chosen_and_flagged(self) -> None:
+        a, b = candidate(8, "MDCK2", seq="x"), candidate(3, "SIAT1", seq="y")
+        match = index(a, b).match(ANTIGEN, M.CELL, passage="SIAT1")
+        assert (match.method, match.chosen) == ("name", b)
+        assert match.flags == (M.PASSAGE_EXACT,) and not match.doubtful  # no longer ambiguous
+        assert match.tied == () and match.ranked is None
+
+    def test_free_text_spellings_of_one_passage_meet(self) -> None:
+        a, b = candidate(8, "MDCK1, SIAT2", seq="x"), candidate(3, "SIAT2", seq="y")
+        assert index(a, b).match(ANTIGEN, M.CELL, passage="MDCK1/SIAT2").chosen == a
+
+    def test_a_longer_or_shorter_history_is_not_the_same_passage(self) -> None:
+        a, b = candidate(8, "C2, MDCK2", seq="x"), candidate(3, "MDCK1", seq="y")
+        match = index(a, b).match(ANTIGEN, M.CELL, passage="MDCK2")
+        assert match.chosen is None and M.AMBIGUOUS in match.flags
+        assert match.ranked == a  # still ranked: same last step (10)
+
+    def test_two_different_sequences_of_the_same_passage_are_still_a_tie(self) -> None:
+        a, b = candidate(8, "SIAT1", seq="x"), candidate(3, "SIAT1", seq="y")
+        c = candidate(5, "MDCK1", seq="z")
+        match = index(a, b, c).match(ANTIGEN, M.CELL, passage="SIAT1")
+        assert match.chosen is None and M.PASSAGE_EXACT not in match.flags
+        assert set(match.tied) == {a, b, c} and match.ranked == b  # rank 0, lowest EPI_ISL
+
+    def test_one_sequence_deposited_twice_with_the_passage_is_one(self) -> None:
+        a, b = candidate(8, "SIAT1", seq="x"), candidate(3, "SIAT1", seq="x")
+        c = candidate(5, "MDCK1", seq="z")
+        match = index(a, b, c).match(ANTIGEN, M.CELL, passage="SIAT1")
+        assert match.chosen == b  # by key, as identical duplicates are
+        assert match.flags == (M.IDENTICAL_DUPLICATES, M.PASSAGE_EXACT)
+
+    @pytest.mark.parametrize("passage", ["", "?", "(2024-01-02)"])
+    def test_a_passage_that_reads_as_no_steps_never_settles_a_tie(self, passage: str) -> None:
+        # both read as no steps, as the antigen's does: "equal", and still never the same passage
+        a, b = candidate(8, passage, seq="x"), candidate(3, "", seq="y")
+        match = index(a, b).match(ANTIGEN, M.UNKNOWN, passage=passage)
+        assert match.chosen is None and M.AMBIGUOUS in match.flags
+
+    def test_the_antigens_own_lab_settles_the_tie_first(self) -> None:
+        own = M.Candidate("EPI_ISL_1", "EPI1", "h3", ANTIGEN, "MDCK1", M.CELL, "a",
+                          "Example Centre A")  # fmt: skip
+        other = M.Candidate("EPI_ISL_2", "EPI2", "h3", ANTIGEN, "SIAT1", M.CELL, "b",
+                            "Example Centre B")  # fmt: skip
+        idx = index(own, other)
+        idx.submitters = {"LAB-A": frozenset({"Example Centre A"})}
+        match = idx.match(ANTIGEN, M.CELL, lab="LAB-A", passage="SIAT1")
+        assert match.chosen == own and match.flags == (M.OWN_LAB,)
+
+    def test_the_labs_numbered_deposit_settles_the_tie_first(self) -> None:
+        lab, name = "Example National Centre", "A(H3N2)/EXAMPLEPROV EXAMPLESPELLING/31/2024"
+        x = M.Candidate("EPI_ISL_1", "EPI1", "h3", "A/EXAMPLEPROV EXAMPLESPELLING/31/2024",
+                        "MDCK1", M.CELL, "a", "Someone Else")  # fmt: skip
+        y = M.Candidate("EPI_ISL_2", "EPI2", "h3", "A/EXAMPLEPROV EXAMPLESPELLING/31/2024",
+                        "SIAT1", M.CELL, "b", "Someone Else")  # fmt: skip
+        own = M.Candidate("EPI_ISL_3", "EPI3", "h3", "A/EXAMPLEPROV EXAMPLEOTHER/31/2024",
+                          "SIAT1", M.CELL, "c", lab)  # fmt: skip
+        idx = index(x, y, own)
+        idx.submitters = {"lab-n": frozenset({lab})}
+        idx.number_rules = {"lab-n": M.NumberRule("lab-n")}
+        match = idx.match(name, M.CELL, lab="lab-n", passage="MDCK1")
+        assert (match.method, match.chosen) == ("number", own)
+        assert M.LAB_NUMBER in match.flags and M.PASSAGE_EXACT not in match.flags
+
+    def test_a_tie_between_spellings_of_the_location_is_settled_alike(self) -> None:
+        name = "A(H3N2)/EXAMPLEPROV EXAMPLETOWN/31/2024"
+        a = M.Candidate("EPI_ISL_1", "EPI1", "h3", "A/EXAMPLEPROVEXAMPLETOWN/31/2024", "MDCK1",
+                        M.CELL, "a")  # fmt: skip
+        b = M.Candidate("EPI_ISL_2", "EPI2", "h3", "A/EXAMPLEPROV_EXAMPLETOWN/31/2024", "MDCK3",
+                        M.CELL, "b")  # fmt: skip
+        match = index(a, b).match(name, M.CELL, passage="MDCK3")
+        assert (match.method, match.chosen) == ("location-forms", b)
+        assert match.flags == (M.NAME_SPACING, M.PASSAGE_EXACT)
+
+    def test_each_settled_tie_is_counted(self) -> None:
+        idx = index(candidate(8, "MDCK2", seq="x"), candidate(3, "SIAT1", seq="y"))
+        idx.match(ANTIGEN, M.CELL, passage="SIAT1")
+        idx.match(ANTIGEN, M.CELL, passage="SIAT2")
+        assert idx.counts == {M.PASSAGE_EXACT: 1, M.AMBIGUOUS: 1}
 
 
 class TestLocationForms:
