@@ -283,6 +283,11 @@ def record(
     finish = [ap.pop("finish", None), an.pop("finish", None)]
     ap.pop("finished_from", None)
     an.pop("finished_from", None)
+    # an adopted map (af.chain.adopt) is the same problem searched from another chain's layout:
+    # the source is a search setting too
+    adopted = [ap.pop("adopted_from", None), an.pop("adopted_from", None)]
+    ap.pop("adopted_onto", None)
+    an.pop("adopted_onto", None)
     # the move-lower rule a map was made under (options.move_lower): a search setting with it
     lower_rule = [ap.pop("move_lower_rule", None), an.pop("move_lower_rule", None)]
     keys = sorted(set(an) | set(ap))
@@ -292,6 +297,8 @@ def record(
         search["refine_best"] = refined
     if finish[0] != finish[1]:
         search["finish"] = finish
+    if adopted[0] != adopted[1]:
+        search["adopted_from"] = adopted
     if lower_rule[0] != lower_rule[1]:
         search["move_lower_rule"] = lower_rule
     same = pn["inputs"] == pp["inputs"] and not differ

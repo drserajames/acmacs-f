@@ -98,6 +98,16 @@ class Optimiser(Protocol):
         self, arrays: dict, layout: np.ndarray, rule: FinishRule, recorded_stress: float
     ) -> MapResult: ...
 
+    def adopt(
+        self,
+        arrays: dict,
+        layout: np.ndarray,
+        source_stress: float,
+        move_groups: bool = False,
+        move_lower: bool = False,
+        move_lower_rule: str = DEFAULT_MOVE_LOWER_RULE,
+    ) -> MapResult: ...
+
 
 def move_lower_rule(name: str = DEFAULT_MOVE_LOWER_RULE) -> dict[str, Any]:
     """The move-lower rule `name` (MOVE_LOWER_RULES) as a step records it (JSON), with the round
@@ -485,6 +495,68 @@ class CoreOptimiser:
             },
         }
 
+    def adopt(
+        self,
+        arrays,
+        layout,
+        source_stress,
+        move_groups=False,
+        move_lower=False,
+        move_lower_rule=DEFAULT_MOVE_LOWER_RULE,
+    ):
+        """Another map's layout of this same problem (af.chain.adopt), minimised fine once from
+        where it is, then the trapped-point loop under this chain's own options. No starts.
+
+        Refused unless the layout, as placed, has the stress its own map recorded: the caller
+        has shown the two problems are cell for cell the same, and this shows the layout is
+        that map's and is placed point for point. Arithmetics may differ (a map made under the
+        original one adopted under strict-fp-1): that moves a stress in its last bits only."""
+        from af.map.optimise import Projection, refine, resolve_trapped, stress
+
+        problem = self._problem(arrays)
+        placed = stress(problem, layout)
+        if not math.isclose(placed, source_stress, rel_tol=FINISH_STRESS_TOLERANCE, abs_tol=0.0):
+            raise ValueError(
+                f"the adopted layout's stress is {placed!r} in these arrays, but its map recorded"
+                f" {source_stress!r}: it is not that map's layout of this problem"
+            )
+        start = Projection(
+            layout=layout,
+            stress=placed,
+            dimensions=int(layout.shape[1]),
+            n_iterations=0,
+            start_seed=0,
+            start_index=0,
+            termination=0,
+        )
+        [minimised] = refine(problem, [start], n_best=1, threads=self.threads)
+        fixed = resolve_trapped(
+            problem,
+            minimised.layout,
+            threads=self.threads,
+            move_groups=move_groups,
+            move_lower=move_lower,
+            move_lower_rule=_rule(move_lower_rule),
+        )
+        p = fixed.projection
+        return {
+            "layout": p.layout,
+            "stress": p.stress,
+            "dimensions": p.dimensions,
+            "n_iterations": minimised.n_iterations,
+            "start_seed": 0,
+            "adopt": {
+                "stress_placed": placed,
+                "stress_minimised": minimised.stress,
+                "stress_after": p.stress,
+                "rounds": fixed.rounds,
+                "moves": fixed.moved,
+                "groups": _group_record(fixed.groups),
+                **({"move_lower": _move_lower_record(fixed)} if move_lower else {}),
+                "threads": int(fixed.threads),
+            },
+        }
+
     def grid_test(self, layout, arrays):
         from af.map.optimise import grid_test
 
@@ -577,6 +649,10 @@ class StubOptimiser:
 
     def finish(self, arrays, layout, rule, recorded_stress):
         raise ValueError("the stand-in optimiser cannot finish a map: finishing needs the core")
+
+    def adopt(self, arrays, layout, source_stress, move_groups=False, move_lower=False,
+              move_lower_rule=DEFAULT_MOVE_LOWER_RULE):  # fmt: skip
+        raise ValueError("the stand-in optimiser cannot adopt a layout: adopting needs the core")
 
     def grid_test(self, layout, arrays):
         from af.chain import stub_optimiser

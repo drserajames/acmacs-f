@@ -168,7 +168,8 @@ def _stress_points(steps: list[Step]) -> list[tuple[int, float, float, str, str]
         if not terms:
             continue
         st = r["stress"]
-        one = st.get("scratch", st.get("seed", st.get("finished")))  # a finished map has one
+        # a finished or an adopted map has one stress of its own
+        one = st.get("scratch", st.get("seed", st.get("finished", st.get("adopted"))))
         inc = st.get("incremental", one)
         scr = one
         pts.append((s["index"], inc / terms, scr / terms, s["table_id"], r["chosen"]))
@@ -255,6 +256,12 @@ def _step_info(s: dict, r: dict) -> list[str]:
             f" · finished from {_e(r['finished_from']['version'])} by the trapped-point loop with "
             + _e(", ".join(k for k, v in r["finish"]["rule"].items() if v is True))
             if "finished_from" in r
+            else ""
+        )
+        + (  # af.chain.adopt: the other chain whose layout this map took
+            f" · layout adopted from {_e(r['adopted_from']['dataset'])}@"
+            f"{_e(r['adopted_from']['version'])} step {_e(r['adopted_from']['step'])}"
+            if "adopted_from" in r
             else ""
         ),
         f"RMSD to previous {rmsd_prev} · incremental vs scratch RMSD {rmsd_basin}",
