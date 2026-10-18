@@ -37,6 +37,7 @@ from typing import Any
 from af.chain.adjust import ColumnBasisAdjustment
 from af.chain.backend import DEFAULT_MOVE_LOWER_RULE, MOVE_LOWER_RULES
 from af.chain.select import DropCell, RemoveRule, Selection, SeraPolicy
+from af.chain.sequence_select import SequenceRemovals
 from af.chart.merge import ColumnBasisConvention
 from af.chart.sera import read_markers
 from af.util.artefacts import sha256_path
@@ -223,6 +224,8 @@ class ChainConfig:
     references: list[Reference] = field(default_factory=list)
     column_basis_adjustments: list[ColumnBasisAdjustment] = field(default_factory=list)
     drop_cells: list[DropCell] = field(default_factory=list)  # readings kept out of the map
+    # points left out by their sequence, decided when the chain is loaded (af.chain.sequence_select)
+    sequence_removals: SequenceRemovals | None = None
 
     def __post_init__(self) -> None:
         if self.column_basis_adjustments and not self.options.merge_all:
@@ -233,6 +236,10 @@ class ChainConfig:
         if self.options.merge_all and self.first_map is not None:
             raise ChainConfigError(
                 f"{self.name}: merge_all maps the tables from scratch; no first_map"
+            )
+        if self.sequence_removals is not None and self.first_map is not None:
+            raise ChainConfigError(
+                f"{self.name}: select.remove_by_sequence cannot be used with first_map"
             )
         if self.remove and self.first_map is not None:
             # the seed map would lose its stress (Chart.select unsets it: stale), which step 0
@@ -294,6 +301,12 @@ def load_chain_config(
             for x in tables
             if (start is None or x.date >= start) and (end is None or x.date <= end)
         ]
+        policy = _sera_policy(path, s.select)
+        removals = (
+            _sequence_removals(path, s.select, tables, ref, tables_store, policy)
+            if s.select.remove_by_sequence
+            else None
+        )
         return ChainConfig(
             s.name,
             tables,
@@ -303,10 +316,16 @@ def load_chain_config(
             ref.to_json(),
             s.select.remove,
             _selection(t),
-            _sera_policy(path, s.select),
+            policy,
             s.reference,
             s.adjust_column_bases,
             s.select.drop_cell,
+            removals,
+        )
+    if s.select.remove_by_sequence:
+        raise ChainConfigError(
+            f"{path}: select.remove_by_sequence needs tables from the store (their rows say which"
+            " sequence each point is)"
         )
     if t.directory is not None and t.group is not None and t.dataset is None:
         tables = tables_from_directory(t.directory, t.group, start, end, set(t.exclude))
@@ -327,13 +346,83 @@ def load_chain_config(
     raise ChainConfigError(f"{path}: [tables] needs either dataset or directory + group")
 
 
+def _data_root(chain_path: Path) -> Path | None:
+    """The data repo a chain file lives in: the directory holding chains/."""
+    return next((d.parent for d in chain_path.resolve().parents if d.name == "chains"), None)
+
+
+def _sequence_removals(
+    chain_path: Path,
+    select: Selection,
+    tables: list[TableRef],
+    tables_ref: Any,
+    store_root: Path,
+    policy: SeraPolicy,
+) -> SequenceRemovals:
+    """Decide `[[select.remove_by_sequence]]` on the chain's own tables (af.chain.sequence_select):
+    the tables store's rows, the matcher's tables from the chain's data repo, and the pinned
+    sequence versions, every one of which must be a published version of its dataset."""
+    import json
+
+    from af.chain.sequence_select import MatchRowSequencer, decide, store_inputs
+    from af.chart.sera import non_ferret
+    from af.seq.matching_rules import matching_rules
+    from af.store.ref import StoreRef
+    from af.store.store import Store
+    from af.tables.model import Table
+    from af.util.subtypes import subtypes
+
+    store = Store.open(store_root)
+    datasets = sorted(subtypes().keys())
+    if sorted(select.sequences) != datasets:
+        raise ChainConfigError(
+            f"{chain_path}: [select.sequences] must pin every sequence dataset {datasets}, not"
+            f" {sorted(select.sequences)}: the matcher reads them all"
+        )
+    pins = {}
+    for dataset, version in select.sequences.items():
+        manifest = store.dataset_dir("sequences", dataset) / "versions" / version / "MANIFEST.json"
+        if not manifest.is_file():
+            raise ChainConfigError(
+                f"{chain_path}: sequences/{dataset}@{version} is not in the store"
+            )
+        pins[dataset] = StoreRef("sequences", dataset, version, sha256_path(manifest))
+        store.resolve(pins[dataset])  # the version id is its manifest's hash: checked here
+    root = _data_root(chain_path)
+    if root is None:
+        raise ChainConfigError(
+            f"{chain_path}: no chains/ directory above it for the matcher's rules"
+        )
+    rules = matching_rules(root)
+    tables_dir = store.resolve(tables_ref) / "tables"
+
+    def model(table_id: str) -> Table:
+        text = (tables_dir / f"{table_id}.json").read_text(encoding="utf-8")
+        return Table.from_json(json.loads(text))
+
+    def kept(chart: Any) -> set[int]:
+        if policy.mode == "keep":
+            return set(range(chart.n_sera))
+        gone = {j for j, _, _ in non_ferret(chart, list(policy.markers)).non_ferret}
+        return {j for j in range(chart.n_sera) if j not in gone}
+
+    inputs = store_inputs(tables, model, kept)
+    decisions = decide(select.remove_by_sequence, inputs, MatchRowSequencer(store, rules, pins))
+    return SequenceRemovals(
+        tuple(select.remove_by_sequence),
+        decisions,
+        {d: r.to_json() for d, r in sorted(pins.items())},
+        tuple(i.to_json() for i in rules.inputs),
+    )
+
+
 def _sera_policy(chain_path: Path, select: Selection) -> SeraPolicy:
     """The ferret-only policy with its markers file: `[select] non_ferret_markers`, or else
     rules/sera/non_ferret_markers.tsv in the data repo the chain file lives in (the directory
     holding chains/). The file is required either way."""
     path = select.non_ferret_markers
     if path is None:
-        root = next((d.parent for d in chain_path.resolve().parents if d.name == "chains"), None)
+        root = _data_root(chain_path)
         if root is None:
             raise ChainConfigError(
                 f"{chain_path}: no [select] non_ferret_markers and no chains/ directory above it"
@@ -405,6 +494,11 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
         "options": option_parameters(cfg.options),
         **({"select_remove": [r.to_json() for r in cfg.remove]} if cfg.remove else {}),
         **({"select_drop_cell": [r.to_json() for r in cfg.drop_cells]} if cfg.drop_cells else {}),
+        **(
+            {"select_remove_by_sequence": cfg.sequence_removals.to_json()}
+            if cfg.sequence_removals is not None
+            else {}
+        ),
         **({"selection": cfg.selection} if cfg.selection else {}),
         "non_ferret_sera": cfg.sera_policy.to_json(),
         **(

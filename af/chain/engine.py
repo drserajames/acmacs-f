@@ -29,13 +29,13 @@ import shutil
 import sys
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from af.chain import adjust, select
+from af.chain import adjust, select, sequence_select
 from af.chain.backend import DEFAULT_MOVE_LOWER_RULE, Optimiser, default_optimiser, map_order
 from af.chain.config import ChainConfig, TableRef, config_to_json, option_parameters
 from af.chain.diagnostics import group_moves, run_threads, step_diagnostics, two_position_points
@@ -273,6 +273,8 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
         common["select_remove"] = [r.to_json() for r in cfg.remove]
     if cfg.drop_cells:  # likewise
         common["select_drop_cell"] = [r.to_json() for r in cfg.drop_cells]
+    if cfg.sequence_removals is not None:  # likewise: the rules and what they decided to remove
+        common["select_remove_by_sequence"] = cfg.sequence_removals.to_parameters()
     if _removes_sera(cfg):  # likewise: only a chain whose tables HAVE non-ferret sera changes
         common["non_ferret_sera"] = cfg.sera_policy.to_json()
     if cfg.column_basis_adjustments:  # they change the map; a map without them keeps its steps
@@ -587,6 +589,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
     t = cfg.tables[0]
     table, sera = select.apply_sera_policy(cfg.sera_policy, read_chart(t.path))
     table, removed = select.apply(cfg.remove, table)
+    table, by_sequence = sequence_select.apply(cfg.sequence_removals, table)
     table, dropped = select.drop_cells(cfg.drop_cells, t.table_id, table)
     arrays = table.optimiser_arrays(
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
@@ -625,6 +628,7 @@ def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Ma
         **_search(mapper.optimiser, {"scratch": all_maps}),
         "trapped_loop": {"scratch": _loop(all_maps)},
         **({"removed": removed} if cfg.remove else {}),
+        **({"removed_by_sequence": by_sequence} if cfg.sequence_removals is not None else {}),
         **({"dropped_cells_by_rule": dropped} if dropped else {}),
         "non_ferret_sera": sera,
     }
@@ -649,6 +653,7 @@ class MergedTables:
     removed: dict[str, list[dict]]
     dropped: list[dict]
     sera: dict[str, dict]
+    by_sequence: dict[str, list[str]] = field(default_factory=dict)  # af.chain.sequence_select
 
 
 def merge_all_tables(cfg: ChainConfig) -> MergedTables:
@@ -658,6 +663,7 @@ def merge_all_tables(cfg: ChainConfig) -> MergedTables:
     options = dataclasses.replace(_merge_options(cfg), merge_type=MergeType.SIMPLE)
     tables: list[Chart] = []
     removed: dict[str, list[dict]] = {}
+    by_sequence: dict[str, list[str]] = {}
     dropped: list[dict] = []
     sera: dict[str, dict] = {}
     for t in cfg.tables:
@@ -665,6 +671,7 @@ def merge_all_tables(cfg: ChainConfig) -> MergedTables:
         table, rule_report = select.apply(cfg.remove, table)
         if cfg.remove:
             removed[t.table_id] = rule_report
+        table, by_sequence[t.table_id] = sequence_select.apply(cfg.sequence_removals, table)
         table, cells = select.drop_cells(cfg.drop_cells, t.table_id, table)
         dropped += cells
         tables.append(table)
@@ -680,7 +687,9 @@ def merge_all_tables(cfg: ChainConfig) -> MergedTables:
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
     )
     arrays["scratch_precision"] = o.scratch_precision  # carried to split chunks in the problem file
-    return MergedTables(merged, chart, adjustments, arrays, report, removed, dropped, sera)
+    return MergedTables(
+        merged, chart, adjustments, arrays, report, removed, dropped, sera, by_sequence
+    )
 
 
 def _merge_all_record(cfg: ChainConfig, m: MergedTables) -> dict[str, Any]:
@@ -699,6 +708,11 @@ def _merge_all_record(cfg: ChainConfig, m: MergedTables) -> dict[str, Any]:
             "outcomes": {str(k): v for k, v in report.outcomes.items()} if report else {},
         },
         **({"removed": m.removed} if cfg.remove else {}),
+        **(
+            {"removed_by_sequence": {k: v for k, v in m.by_sequence.items() if v}}
+            if cfg.sequence_removals is not None
+            else {}
+        ),
         **({"dropped_cells_by_rule": m.dropped} if m.dropped else {}),
         **({"column_basis_adjustments": m.adjustments} if m.adjustments else {}),
         "non_ferret_sera": m.sera,
@@ -771,6 +785,7 @@ def _merge_step(
     previous = read_chart(previous_path)
     table, sera = select.apply_sera_policy(cfg.sera_policy, read_chart(table_ref.path))
     table, removed = select.apply(cfg.remove, table)
+    table, by_sequence = sequence_select.apply(cfg.sequence_removals, table)
     table, dropped = select.drop_cells(cfg.drop_cells, table_ref.table_id, table)
     merged, report = merge(previous, table, _merge_options(cfg))
     write_chart(merged, directory / "merge.ace")
@@ -841,6 +856,7 @@ def _merge_step(
         **_search(optimiser, {"incremental": all_incremental, "scratch": all_scratch}),
         "trapped_loop": {"incremental": _loop(all_incremental), "scratch": _loop(all_scratch)},
         **({"removed": removed} if cfg.remove else {}),
+        **({"removed_by_sequence": by_sequence} if cfg.sequence_removals is not None else {}),
         **({"dropped_cells_by_rule": dropped} if dropped else {}),
         "non_ferret_sera": sera,
         "merge": {
