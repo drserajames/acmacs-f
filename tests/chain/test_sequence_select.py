@@ -73,12 +73,26 @@ def test_the_deletion_is_read_as_r5_reads_it():
         ("by-candidates", "keep", [True, False, True, True, True, False, True]),
         ("as-unsequenced", "remove", [True, False, False, False, False, False, False]),
         ("as-unsequenced", "keep", [True, False, True, True, True, True, True]),
+        # closest-passage with no ranked candidate: every tie is no answer
+        ("closest-passage", "remove", [True, False, False, False, False, False, False]),
     ],
 )
 def test_what_each_verdict_keeps(ties, unsequenced, kept):
     r = rule(ties=ties, unsequenced=unsequenced)
     verdicts = [DELETED, NOT_DELETED, UNSEQUENCED_VERDICT, NO_PROTEIN, TIE_ALL, TIE_NONE, TIE_SPLIT]
     assert [r.keeps(v) for v in verdicts] == kept
+
+
+@pytest.mark.parametrize("tie", [TIE_ALL, TIE_NONE, TIE_SPLIT])
+def test_closest_passage_decides_a_tie_by_the_ranked_candidate(tie):
+    r = rule(ties="closest-passage")
+    assert r.keeps(tie, ranked_deleted=True) is True
+    assert r.keeps(tie, ranked_deleted=False) is False
+    assert r.keeps(tie, ranked_deleted=None) is False  # no ranked protein: as unsequenced
+    assert r.keeps(DELETED, ranked_deleted=False) is True  # a chosen sequence is not a tie
+    # by-candidates leaves a split tie to `unsequenced`
+    assert rule(ties="by-candidates").keeps(TIE_SPLIT) is False
+    assert rule(ties="by-candidates", unsequenced="keep").keeps(TIE_SPLIT) is True
 
 
 # ---- deciding, with a stand-in for the matcher ---------------------------------------------------
@@ -99,8 +113,9 @@ class Sequencer:
         a = self.answers.get(row["name"])
         if a is None:
             return SimpleNamespace(chosen=None, tied=())
-        if isinstance(a, list):
-            return SimpleNamespace(chosen=None, tied=tuple(_seq(e) for e in a))
+        if isinstance(a, list):  # a tie; ae's ranked pick is the first listed
+            tied = tuple(_seq(e) for e in a)
+            return SimpleNamespace(chosen=None, tied=tied, ranked=tied[0])
         return SimpleNamespace(chosen=_seq(a), tied=())
 
     def proteins(self, keys):
@@ -245,3 +260,17 @@ def test_a_chain_of_directory_tables_cannot_use_it(tables, tmp_path):  # noqa: F
     )
     with pytest.raises(ChainConfigError, match="needs tables from the store"):
         load_chain_config(chain)
+
+
+def test_closest_passage_follows_the_ranked_candidates_protein(tables):  # noqa: F811
+    cfg, inputs = _inputs(tables)
+    until = cfg.tables[0].date.isoformat()
+    names = [a.name for a in inputs[0].chart.antigens if a.name.startswith("TEST-10")]
+    answers = {names[0]: ["E1", "E2"], names[1]: ["E2", "E1"], names[2]: ["E3", "E1"]}
+    proteins = {"E1": GAP, "E2": NO_GAP}  # E3: no protein
+    r = rule(tables_until=until, ties="closest-passage", optional=True)
+    got = {d.designation.split()[0]: d for d in decide([r], inputs, Sequencer(answers, proteins))}
+    assert got[names[0]].verdict == TIE_SPLIT and not got[names[0]].removed  # ranked E1: gap
+    assert got[names[1]].verdict == TIE_SPLIT and got[names[1]].removed  # ranked E2: none
+    assert got[names[2]].removed and got[names[2]].ranked_deleted is None  # no protein
+    assert got[names[0]].to_json()["ranked"] == ["E1", "A1"]

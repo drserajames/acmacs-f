@@ -13,7 +13,7 @@ data in the chain file, with the sequences it was decided on pinned beside it:
     tables_until = "2021-12-09"          # only points seen ONLY in tables up to this date
     deletion = [162, 163, 164]           # 1-based mature-HA positions that must all be deleted
     unsequenced = "remove"               # or "keep": a point with no sequence (Sarah, Q176)
-    ties = "by-candidates"               # or "as-unsequenced": a name tie (see `keeps`)
+    ties = "by-candidates"               # or "closest-passage", "as-unsequenced" (see `keeps`)
     reason = "..."
 
 Which sequence a point is: `af.serology.joins.match_row` on the point's own row in its table, as
@@ -44,7 +44,7 @@ from af.chart.model import Antigen, Chart, Serum
 
 WHAT = ("antigens", "sera", "both")
 UNSEQUENCED = ("keep", "remove")
-TIES = ("by-candidates", "as-unsequenced")
+TIES = ("by-candidates", "closest-passage", "as-unsequenced")
 
 # A point's verdict. "deleted" keeps it, "not-deleted" removes it; the rest follow the rule.
 DELETED, NOT_DELETED = "deleted", "not-deleted"
@@ -93,17 +93,25 @@ class SequenceRule:
     def covers(self, kind: str) -> bool:
         return self.what == "both" or self.what == kind
 
-    def keeps(self, verdict: str) -> bool:
+    def keeps(self, verdict: str, ranked_deleted: bool | None = None) -> bool:
         """Whether a point with `verdict` stays. A name tie (the matcher found several sequences
-        and chose none): with ties = "by-candidates", kept when every candidate has the deletion,
-        removed when none has, and a split is no answer; with "as-unsequenced", every tie is no
-        answer. No answer follows `unsequenced`."""
+        and chose none, after its exact-passage step):
+        - "by-candidates": kept when every candidate has the deletion, removed when none has; a
+          split (or a candidate with no protein) is no answer;
+        - "closest-passage": as the candidate ae's rank takes (best passage rank, then lowest
+          EPI_ISL; `af.seq.matching.ae_ranked`), whose protein is `ranked_deleted`; the same
+          pick Sarah's Q217 colours a tie by. No ranked candidate, or no protein, is no answer;
+        - "as-unsequenced": every tie is no answer.
+        No answer follows `unsequenced`."""
         if verdict == DELETED:
             return True
         if verdict == NOT_DELETED:
             return False
-        if self.ties == "by-candidates" and verdict in (TIE_ALL, TIE_NONE):
-            return verdict == TIE_ALL
+        if verdict in (TIE_ALL, TIE_NONE, TIE_SPLIT):
+            if self.ties == "by-candidates" and verdict != TIE_SPLIT:
+                return verdict == TIE_ALL
+            if self.ties == "closest-passage" and ranked_deleted is not None:
+                return ranked_deleted
         return self.unsequenced == "keep"
 
     def to_json(self) -> dict[str, Any]:
@@ -136,6 +144,9 @@ class Decision:
     verdict: str
     removed: bool
     sequences: tuple[tuple[str, str], ...] = ()  # the chosen sequence, or the tied candidates
+    # a tie: the candidate ae's rank takes, and whether its protein has the deletion
+    ranked: tuple[str, str] | None = None
+    ranked_deleted: bool | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -145,6 +156,11 @@ class Decision:
             "verdict": self.verdict,
             "removed": self.removed,
             "sequences": [list(s) for s in self.sequences],
+            **(
+                {"ranked": list(self.ranked), "ranked_deleted": self.ranked_deleted}
+                if self.ranked is not None
+                else {}
+            ),
         }
 
 
@@ -223,17 +239,24 @@ def decide(
                 f" to {rule.tables_until}; a rule that matches nothing is an error"
             )
         matches = {c: sequencer.match(row) for c, row in found.items()}
-        wanted = sorted({k for m in matches.values() for k in _sequence_keys(m)})
+        wanted = sorted(
+            {k for m in matches.values() for k in [*_sequence_keys(m), _ranked_key(m)] if k}
+        )
         proteins = sequencer.proteins(wanted)
         for (what, key, table_id, designation), m in matches.items():
             verdict, sequences = _verdict(m, proteins, rule.deletion)
-            removed = not rule.keeps(verdict)
+            ranked = _ranked_key(m)
+            ranked_deleted = (
+                None if ranked is None else deleted(proteins.get(ranked), rule.deletion)
+            )
+            removed = not rule.keeps(verdict, ranked_deleted)
             earlier = out.get((what, key))
             if earlier is not None and (earlier.removed or not removed):
                 continue  # a point removed by any rule is removed; the first verdict is kept
             out[(what, key)] = Decision(
-                what, key, designation, table_id, verdict, removed, sequences
-            )
+                what, key, designation, table_id, verdict, removed, sequences, ranked,
+                ranked_deleted,
+            )  # fmt: skip
     return tuple(sorted(out.values(), key=lambda d: (d.what, d.designation)))
 
 
@@ -278,6 +301,12 @@ def _sequence_keys(m: Any) -> list[tuple[str, str]]:
     if m.chosen is not None:
         return [(m.chosen.epi_isl, m.chosen.accession)]
     return [(c.epi_isl, c.accession) for c in m.tied]
+
+
+def _ranked_key(m: Any) -> tuple[str, str] | None:
+    """A tie's ae-ranked candidate (Match.ranked); None for anything that is not a tie."""
+    r = None if m is None or m.chosen is not None else getattr(m, "ranked", None)
+    return None if r is None else (r.epi_isl, r.accession)
 
 
 def deleted(aa: str | None, positions: Sequence[int]) -> bool | None:
