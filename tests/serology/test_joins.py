@@ -312,6 +312,67 @@ def test_rows_naming_two_records_take_the_one_whose_passage_matches(
     assert none.resolution == ROWS_NONE_MATCH and none.accession is None
 
 
+def test_rows_naming_two_records_of_one_sequence_are_no_conflict(tmp_path: Path, syn: Any) -> None:
+    """OWED 45: two records of one sequence (one virus deposited twice, af.seq.matching
+    identity) are not a conflict. The passage-matched record carries the sequence, else the
+    lowest EPI_ISL; records of one sequence whose clades differ still go to the conflict rules."""
+    from af.serology.joins import ROWS_PASSAGE_MATCHED, ROWS_SAME_SEQUENCE
+
+    def antigen(place: str, passage: str, epi: str) -> dict[str, Any]:
+        return {"name": syn.virus(place, 1), "passage": passage, "passage_date": None,
+                "passage_class": "egg" if passage.startswith("E") else "cell",
+                "epi_isl": epi, "sequence_pairing": "exact"}  # fmt: skip
+
+    serum = {"name": syn.virus("SOMEWHERE", 9), "serum_id": "S-1"}
+    towns = {  # place: (passage, first record, second record, identities, clades)
+        "ONETOWN": ("SIAT2", 50, 51, ("same-1", "same-1"), ("CLADE-X", "CLADE-X")),
+        "BOTHTOWN": ("MDCK2", 61, 60, ("same-2", "same-2"), ("CLADE-X", "CLADE-X")),
+        "TWOSEQTOWN": ("SIAT2", 80, 81, ("seq-a", "seq-b"), ("CLADE-X", "CLADE-X")),
+        "TWOCLADETOWN": ("SIAT2", 90, 91, ("same-3", "same-3"), ("CLADE-X", "CLADE-Y")),
+    }
+    passages = {50: "S1", 51: "S2", 60: "C2", 61: "MDCK2", 80: "S1", 81: "S2", 90: "S1", 91: "S2"}
+    first = [antigen(t, v[0], f"EPI_ISL_{v[1]}") for t, v in towns.items()]
+    second = [antigen(t, v[0], f"EPI_ISL_{v[2]}") for t, v in towns.items()]
+    tables = [
+        syn.table("t1", first, [serum], [[["40"]] for _ in first]),
+        syn.table("t2", second, [serum], [[["40"]] for _ in second], date="2021-04-01"),
+    ]
+    build(tables, tmp_path / "v", syn.rules)
+    con = query.connect(tmp_path / "v")
+    index, isolate_rows, clade_rows = SequenceIndex(), [], []
+    for place, (_, a, b, identities, named) in towns.items():
+        for n, identity, clade in zip((a, b), identities, named, strict=True):
+            name = gisaid("A", place, 1)
+            index.add(_candidate(f"EPI_ISL_{n}", f"ACC{n}", name, "cell", identity))
+            isolate_rows.append(f"('EPI_ISL_{n}', 'ACC{n}', 'C', 'R', '{place}', '2021-01-01', "
+                                f"'{passages[n]}')")  # fmt: skip
+            clade_rows.append(f"('EPI_ISL_{n}', 'ACC{n}', '{clade}', 'fallback')")
+    isolates = _parquet(
+        tmp_path / "records.parquet",
+        f"SELECT * FROM (VALUES {', '.join(isolate_rows)}) AS v(epi_isl, accession, country, "
+        "region, place, collection_date, passage)",
+    )
+    clades = _parquet(
+        tmp_path / "record-clades.parquet",
+        f"SELECT * FROM (VALUES {', '.join(clade_rows)}) AS v(epi_isl, accession, clade, method)",
+    )
+    link_sequences(con, {"h3": index}, [isolates], [clades], class_of=passage_class_column)
+    preps = {
+        key[1]: value
+        for key, value in preparation_sequences(con, passage_matcher(tmp_path)).items()
+    }
+    one = preps[syn.virus("ONETOWN", 1)]  # the SIAT2 preparation's own record carries it
+    assert not one.conflict and one.resolution == ROWS_SAME_SEQUENCE
+    assert (one.accession, one.clade) == ("ACC51", "CLADE-X")
+    assert [a.accession for a in one.alternatives] == ["ACC50", "ACC51"]
+    both = preps[syn.virus("BOTHTOWN", 1)]  # both records are MDCK2: the lowest EPI_ISL
+    assert not both.conflict and both.resolution == ROWS_SAME_SEQUENCE and both.accession == "ACC60"
+    two_seq = preps[syn.virus("TWOSEQTOWN", 1)]  # two sequences: a conflict, as before
+    assert two_seq.conflict and two_seq.resolution == ROWS_PASSAGE_MATCHED
+    two_clade = preps[syn.virus("TWOCLADETOWN", 1)]  # one sequence, two clades: a conflict
+    assert two_clade.conflict and two_clade.resolution == ROWS_PASSAGE_MATCHED
+
+
 def test_a_chart_antigen_has_the_same_preparation_key_as_serology(tmp_path: Path, syn: Any) -> None:
     """preparation_key is the one copy of the key: a chart's passage is already the identity
     passage (the lab's passage with its harvest date), so it equals serology's own key."""

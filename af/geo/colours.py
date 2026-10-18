@@ -46,6 +46,7 @@ from af.clades.sequence import AlignedSequence
 from af.seq.matching import TIE_AGREES, TIE_RANKED
 from af.serology.joins import (
     ROWS_PASSAGE_MATCHED,
+    ROWS_SAME_SEQUENCE,
     PreparationKey,
     PreparationSequence,
     TiedSequence,
@@ -185,6 +186,8 @@ def dot_styles(
             return UNCOLOURED, "proxy pairing not used"
         if linked.tied:
             return _tie(linked)
+        if linked.resolution == ROWS_SAME_SEQUENCE:  # rows naming copies of one sequence
+            counts.rows[ROWS_SAME_SEQUENCE] += 1
         return _sequence_style(linked)
 
     def _evidence(linked: PreparationSequence) -> str:

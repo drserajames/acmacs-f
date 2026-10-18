@@ -129,7 +129,7 @@ def link_sequences(
         CREATE OR REPLACE VIEW antigen_sequences AS
         SELECT m.table_id, m.position, m.method, m.flags, m.doubtful, m.epi_isl, m.accession,
                m.dataset, coalesce(a.sequence_pairing, '') AS pairing,
-               m.tied, m.ranked_epi_isl, m.ranked_accession,
+               m.tied, m.ranked_epi_isl, m.ranked_accession, m.identity AS sequence_identity,
                CASE WHEN m.accession IS NULL THEN 'unmatched'
                     WHEN m.doubtful THEN 'doubtful' ELSE 'matched' END AS status,
                i.country, i.region, i.place,
@@ -199,6 +199,7 @@ def _match_rows(
         out["tied"].append([{"epi_isl": c.epi_isl, "accession": c.accession} for c in tied])
         out["ranked_epi_isl"].append(ranked.epi_isl if ranked else None)
         out["ranked_accession"].append(ranked.accession if ranked else None)
+        out["identity"].append(chosen.identity if chosen else None)
     table = pa.table({k: pa.array(v, type=_MATCH_COLUMNS[k]) for k, v in out.items()})
     con.register("antigen_matches_arrow", table)
     con.execute("CREATE OR REPLACE TABLE antigen_matches AS SELECT * FROM antigen_matches_arrow")
@@ -279,6 +280,9 @@ _MATCH_COLUMNS: dict[str, pa.DataType] = {
     "tied": pa.list_(pa.struct([("epi_isl", pa.string()), ("accession", pa.string())])),
     "ranked_epi_isl": pa.string(),
     "ranked_accession": pa.string(),
+    # the chosen record's sequence identity (af.seq.matching.identity_sql): two records of one
+    # sequence, deposited twice or trimmed differently, share it
+    "identity": pa.string(),
 }
 
 
@@ -389,7 +393,8 @@ class PreparationSequence:
     doubts: tuple[str, ...] = ()
     # conflict: the records its rows name, and how one was chosen (Sarah, Q81, 30 Sep):
     # ROWS_PASSAGE_MATCHED (epi_isl/accession/clade are that record), or ROWS_NONE_MATCH /
-    # ROWS_SEVERAL_MATCH (none chosen; colouring uses them only when they agree).
+    # ROWS_SEVERAL_MATCH (none chosen; colouring uses them only when they agree). Not a conflict
+    # but listed too: ROWS_SAME_SEQUENCE, records of one sequence, one chosen to carry it.
     alternatives: tuple[TiedSequence, ...] = ()
     resolution: str = ""
     # the sequence datasets (subtype rows: "bvic", ...) its matched rows found sequences in;
@@ -408,6 +413,10 @@ class PreparationSequence:
 ROWS_PASSAGE_MATCHED = "rows.passage-matched"
 ROWS_NONE_MATCH = "rows.agree.no-record-matches-passage"
 ROWS_SEVERAL_MATCH = "rows.agree.several-records-match-passage"
+#: Rows naming different records of one sequence (af.seq.matching.identity_sql: one virus
+#: deposited twice, or trimmed differently) are no conflict: the sequence is the preparation's,
+#: and the record whose passage matches carries it, else the lowest EPI_ISL (OWED 45).
+ROWS_SAME_SEQUENCE = "rows.same-sequence"
 
 
 PreparationKey = tuple[
@@ -494,7 +503,9 @@ def preparation_sequences(
     matches its own (``passages``, :class:`af.seq.passage_match.PassageMatcher`; Sarah, Q81):
     the one scoring highest, if it is the only one; otherwise none, and colouring falls back to
     agreement among them. Never one picked by table order. Passage stays part of the
-    preparation's identity: this only chooses among the records its own rows name.
+    preparation's identity: this only chooses among the records its own rows name. Records of
+    one sequence (af.seq.matching.identity_sql) are no conflict: the passage-matched one, else
+    the lowest EPI_ISL, carries it (ROWS_SAME_SEQUENCE).
     """
     from af.seq.matching import AMBIGUOUS, DOUBTFUL, USABLE_DOUBTS
 
@@ -538,7 +549,8 @@ def _single_sequences(
                list(DISTINCT struct_pack(epi := s.epi_isl, acc := s.accession, clade := s.clade,
                                          passage := coalesce(s.sequence_passage, ''),
                                          ev := s.clade_evidence, sup := s.supported_clade,
-                                         why := s.clade_evidence_reason)) AS sequences,
+                                         why := s.clade_evidence_reason,
+                                         ident := s.sequence_identity)) AS sequences,
                any_value(s.epi_isl), any_value(s.accession), any_value(s.clade),
                bool_or(s.pairing = 'exact'), bool_or(s.pairing = 'proxy'), {doubts},
                list(DISTINCT s.dataset) FILTER (WHERE s.dataset IS NOT NULL)
@@ -553,7 +565,8 @@ def _single_sequences(
         pairing = "exact" if ex else "proxy" if px else ""
         datasets = frozenset(ds or ())
         if len({(r["epi"], r["acc"]) for r in seqs}) > 1:
-            found = _resolve(key[4], seqs, passages, pairing, tuple(dts))
+            same = _same_sequence(key[4], seqs, passages, pairing, tuple(dts))
+            found = same or _resolve(key[4], seqs, passages, pairing, tuple(dts))
             out[key] = replace(found, datasets=datasets)
         else:
             only = seqs[0]  # one record (listed once per passage it was deposited with)
@@ -562,6 +575,42 @@ def _single_sequences(
                 **_evidence(only["ev"], only["sup"], only["why"]),
             )  # fmt: skip
     return out
+
+
+def _same_sequence(
+    passage: str,
+    records: list[dict[str, Any]],
+    passages: PassageMatcher,
+    pairing: str,
+    doubts: tuple[str, ...],
+) -> PreparationSequence | None:
+    """Several records of one sequence, carrying one clade and one evidence: not a conflict.
+
+    The record whose passage matches the preparation's carries it, if it is the only best;
+    else the lowest EPI_ISL. None when the records differ in sequence, or (should a clade store
+    ever give copies of one sequence different clades) in clade or evidence: the conflict rules
+    then decide, as before.
+    """
+    from af.seq.matching import epi_order
+
+    identities = {r["ident"] for r in records}
+    shared = {(r["clade"], r["ev"], r["sup"], r["why"]) for r in records}
+    if len(identities) != 1 or None in identities or len(shared) != 1:
+        return None
+    scores: dict[tuple[str, str], int] = {}
+    for r in records:  # a record is listed once per passage it was deposited with
+        here = passages.score(passage, r["passage"])
+        scores[(r["epi"], r["acc"])] = max(here, scores.get((r["epi"], r["acc"]), here))
+    order = sorted(scores, key=lambda k: (epi_order(k[0]), k[1]))
+    best = max(scores.values())
+    top = [k for k in order if scores[k] == best]
+    epi, acc = top[0] if best > 0 and len(top) == 1 else order[0]
+    clade, ev, sup, why = shared.pop()
+    alternatives = tuple(TiedSequence(e, a, clade, **_evidence(ev, sup, why)) for e, a in order)
+    return PreparationSequence(
+        epi, acc, clade, pairing, conflict=False, doubts=doubts, alternatives=alternatives,
+        resolution=ROWS_SAME_SEQUENCE, **_evidence(ev, sup, why),
+    )  # fmt: skip
 
 
 def _resolve(

@@ -1,6 +1,7 @@
 """Dot colours from a colour scheme, with every uncoloured dot counted by reason."""
 
 import datetime
+from dataclasses import replace
 from pathlib import Path
 
 from af.clades.colours import ColourEntry, ColourScheme
@@ -149,6 +150,7 @@ def test_rows_naming_two_records_colour_by_the_passage_matched_one_else_by_agree
     from af.serology.joins import (
         ROWS_NONE_MATCH,
         ROWS_PASSAGE_MATCHED,
+        ROWS_SAME_SEQUENCE,
         ROWS_SEVERAL_MATCH,
         TiedSequence,
     )
@@ -166,17 +168,21 @@ def test_rows_naming_two_records_colour_by_the_passage_matched_one_else_by_agree
             resolution=resolution,
         )  # fmt: skip
 
-    preps = {n: prep(n) for n in ("matched", "agree", "disagree")}
+    preps = {n: prep(n) for n in ("matched", "agree", "disagree", "same")}
+    copy = TiedSequence("EPI_ISL_4", "ACC4", "P.1.1")  # p11's sequence, deposited again
     links = {
         key(preps["matched"]): rows(p2, ROWS_PASSAGE_MATCHED, p1, p2),  # P, not P.1
         key(preps["agree"]): rows(None, ROWS_SEVERAL_MATCH, p1, p11),  # both colour as P.1
         key(preps["disagree"]): rows(None, ROWS_NONE_MATCH, p1, p2),
+        # one sequence's records: no conflict, coloured by the one carrying it, counted
+        key(preps["same"]): replace(rows(p11, ROWS_SAME_SEQUENCE, p11, copy), conflict=False),
     }
     style, counts = dot_styles(links, lambda e, a: AlignedSequence("K" * 30), SCHEME, clade_set)
     assert style(preps["matched"]) == DotStyle("Clade P", "#aa0000", BASIS_CLADE)
     assert style(preps["agree"]) == DotStyle("Clade P.1", "#0000aa", BASIS_CLADE)
     assert style(preps["disagree"]) == UNCOLOURED
-    assert counts.rows == {ROWS_PASSAGE_MATCHED: 1, ROWS_SEVERAL_MATCH: 1}
+    assert style(preps["same"]) == DotStyle("Clade P.1", "#0000aa", BASIS_CLADE)
+    assert counts.rows == {ROWS_PASSAGE_MATCHED: 1, ROWS_SEVERAL_MATCH: 1, ROWS_SAME_SEQUENCE: 1}
     assert counts.uncoloured == {"rows name different sequences": 1}
 
 
