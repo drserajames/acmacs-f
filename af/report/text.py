@@ -9,6 +9,9 @@ change from round to round:
 - ``{period}``: the report period, "April 2026 to September 2026" (from the config's period);
 - ``{tree_method}`` (tree sections only): what was aligned and how the tree was built, from the
   tree store version's ``tree.json`` ("aligned" and "build", written by af.tree).
+- ``{clade_not_defined}`` (geo sections with a clade key only): how many viruses over the period
+  are drawn as "clade not defined", with the noun ("1 virus", "2 viruses"), from the geo build's
+  clade-key.json (Sarah, Q215).
 
 A fact no artefact records is a gap: named, counted in the build record, and drawn in red as
 NOT RECORDED in a bring-up report; a final report with a gap is refused.
@@ -22,7 +25,11 @@ from typing import Any
 
 from af.store import Store, StoreRef
 
-PLACEHOLDERS = {"period": ("geo", "trees", "maps"), "tree_method": ("trees",)}
+PLACEHOLDERS = {
+    "period": ("geo", "trees", "maps"),
+    "tree_method": ("trees",),
+    "clade_not_defined": ("geo",),
+}
 
 
 def placeholders(text: str) -> list[str]:
