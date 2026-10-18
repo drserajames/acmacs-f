@@ -75,13 +75,14 @@ class Revision:
     def describe(self) -> str:
         what = ", ".join(f"{k} {v}" for k, v in self.changes.items()) or "map content"
         return (
-            f"  {self.table_id}: position {self.position} ({self.from_end} from the end),"
-            f" changed: {what}; a re-run from it makes {self.rerun_steps} steps.\n"
-            f"    to re-run from it, add to the chain file:\n"
-            f"      [[tables.rerun_from]]\n"
-            f'      table = "{self.table_id}"\n'
-            f'      map_hash = "{self.new_hash}"\n'
-            f'      decided = "<who, date: why>"'
+            f"  {self.table_id}: position {self.position} ({self.from_end} from the end); a"
+            f" re-run from it makes {self.rerun_steps} steps; changed: {what}"
+        )
+
+    def acknowledgement(self) -> str:
+        return (
+            f'  {{ table = "{self.table_id}", map_hash = "{self.new_hash}",'
+            ' decided = "<who, date: why>" },'
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -101,10 +102,15 @@ class RevisedTablesError(OrderError):
 
     def __init__(self, dataset: str, version: str, revisions: Sequence[Revision]) -> None:
         self.revisions = tuple(revisions)
+        first = min(revisions, key=lambda r: r.position)
         super().__init__(
             f"{dataset}: {len(revisions)} table(s) of the published chain {version} were revised"
-            " since it was built; nothing was run. Each re-run is a decision (Q224):\n"
+            " since it was built; nothing was run. Each re-run is a decision (Q224). Re-running"
+            f" makes {first.rerun_steps} steps, from the earliest, {first.table_id}:\n"
             + "\n".join(r.describe() for r in revisions)
+            + "\nTo re-run, every revised table is acknowledged under [tables]:\nrerun_from = [\n"
+            + "\n".join(r.acknowledgement() for r in revisions)
+            + "\n]"
         )
 
 
@@ -189,32 +195,47 @@ def append_order(
 
 def table_changes(old: Any, new: Any) -> dict[str, int]:
     """What changed between two versions of one table (af.tables.model.Table), counted for the
-    refusal: points by identity, and cells among the points both hold."""
-
-    def keys(points: Sequence[Any], serum: bool) -> list[tuple]:
-        return [
-            (p.name, p.reassortant, tuple(p.annotations), p.serum_id if serum else p.ae_passage())
-            for p in points
-        ]
-
+    refusal, in the terms the map hash uses (`Table.map_content`): points added or removed by
+    identity; per field, how many points both hold changed it (a serum's species, which the
+    ferret-only policy reads, is one); cells among the points both hold; other table fields."""
+    a, b = old.map_content(), new.map_content()
     out: dict[str, int] = {}
-    for what, serum in (("antigens", False), ("sera", True)):
-        a = keys(getattr(old, what), serum)
-        b = keys(getattr(new, what), serum)
-        if added := len(set(b) - set(a)):
+    matched: dict[str, list[tuple[int, int]]] = {}
+    for what, key in (("antigens", _antigen_key), ("sera", _serum_key)):
+        ka = {key(p): i for i, p in enumerate(a[what])}
+        kb = {key(p): i for i, p in enumerate(b[what])}
+        if added := len(kb.keys() - ka.keys()):
             out[f"{what} added"] = added
-        if removed := len(set(a) - set(b)):
+        if removed := len(ka.keys() - kb.keys()):
             out[f"{what} removed"] = removed
-    oa, na = keys(old.antigens, False), keys(new.antigens, False)
-    os_, ns = keys(old.sera, True), keys(new.sera, True)
-    cells = 0
-    for i, ak in enumerate(na):
-        if ak not in oa:
-            continue
-        oi = oa.index(ak)
-        for j, sk in enumerate(ns):
-            if sk in os_ and new.titres[i][j] != old.titres[oi][os_.index(sk)]:
-                cells += 1
+        pairs = [(ka[k], kb[k]) for k in ka.keys() & kb.keys()]
+        matched[what] = pairs
+        fields: dict[str, int] = {}
+        for i, j in pairs:
+            x, y = a[what][i], b[what][j]
+            for f in sorted(set(x) | set(y)):
+                if x.get(f) != y.get(f):
+                    fields[f] = fields.get(f, 0) + 1
+        for f, n in fields.items():
+            out[f"{what} {f}"] = n
+    cells = sum(
+        a["titres"][i][j] != b["titres"][k][m]
+        for i, k in matched["antigens"]
+        for j, m in matched["sera"]
+    )  # fmt: skip
     if cells:
         out["cells changed"] = cells
+    for f in sorted((set(a) | set(b)) - {"antigens", "sera", "titres"}):
+        if a.get(f) != b.get(f):
+            out[f"table {f}"] = 1
     return out
+
+
+def _antigen_key(p: Mapping[str, Any]) -> tuple:
+    return (p.get("name"), p.get("reassortant"), tuple(p.get("annotations") or ()),
+            p.get("passage"), p.get("passage_date"))  # fmt: skip
+
+
+def _serum_key(p: Mapping[str, Any]) -> tuple:
+    return (p.get("name"), p.get("reassortant"), tuple(p.get("annotations") or ()),
+            p.get("serum_id"))  # fmt: skip

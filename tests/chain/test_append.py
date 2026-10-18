@@ -65,7 +65,8 @@ def test_a_revised_table_stops_the_run_and_says_what_a_rerun_costs():
         _order([JAN, FEB, MAR, APR], hashes={**HASHES, "t-feb": "h2-new"})
     [r] = e.value.revisions
     assert (r.table_id, r.position, r.from_end, r.rerun_steps) == ("t-feb", 1, 1, 3)
-    assert 'map_hash = "h2-new"' in str(e.value) and "[[tables.rerun_from]]" in str(e.value)
+    assert 'map_hash = "h2-new"' in str(e.value) and "rerun_from = [" in str(e.value)
+    assert "makes 3 steps, from the earliest, t-feb" in str(e.value)
 
 
 def test_a_decided_rerun_keeps_the_table_in_place():
@@ -99,6 +100,15 @@ def test_what_changed_in_a_revised_table_is_counted():
     got = table_changes(old, new)
     assert got["antigens removed"] == 1 and got["cells changed"] > 0
     assert table_changes(old, make_table(1)) == {}
+
+
+def test_a_field_the_map_reads_is_named_in_the_changes():
+    """A serum's species, which the ferret-only policy reads, changes the map hash without
+    changing a cell or a point: the refusal says which field, not just "map content"."""
+    old, new = make_table(1), make_table(1)
+    new.sera[0] = dataclasses.replace(new.sera[0], species="HUMAN")
+    assert old.map_hash() != new.map_hash()
+    assert table_changes(old, new) == {"sera species": 1}
 
 
 # ---- end to end, through the store ---------------------------------------------------------------
