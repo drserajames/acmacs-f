@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from af.chain.sequence_select import SequenceRule
 from af.chart.ace import read_chart
 from af.chart.model import Antigen, Chart, Serum, Titres
 from af.chart.sera import FERRET_ONLY, Marker, non_ferret
@@ -154,8 +155,16 @@ class Selection:
     non_ferret_reason: str = ""
     # The markers file; default: <data repo>/rules/sera/non_ferret_markers.tsv next to chains/
     non_ferret_markers: Path | None = None
+    # Points left out by their sequence (af.chain.sequence_select), and the sequence versions
+    # they are decided on: every sequence dataset, pinned (dataset -> version id)
+    remove_by_sequence: list[SequenceRule] = field(default_factory=list)
+    sequences: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.remove_by_sequence and not self.sequences:
+            raise SelectError("select.remove_by_sequence needs [select.sequences] pinned")
+        if self.sequences and not self.remove_by_sequence:
+            raise SelectError("[select.sequences] pins sequences for no remove_by_sequence rule")
         if self.non_ferret_sera not in ("exclude", "keep"):
             raise SelectError("select.non_ferret_sera must be exclude or keep")
         if self.non_ferret_sera == "keep" and not self.non_ferret_reason.strip():

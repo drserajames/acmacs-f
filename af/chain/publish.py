@@ -98,6 +98,10 @@ def _inputs(config: dict[str, Any]) -> tuple[Input, ...]:
         inputs.extend(ExternalInput.of(Path(t["path"])) for t in config["tables"])
     if config.get("first_map"):
         inputs.append(ExternalInput.of(Path(config["first_map"])))
+    # points left out by their sequence (af.chain.sequence_select): the pinned sequence versions
+    by_sequence = config.get("select_remove_by_sequence")
+    if by_sequence:
+        inputs.extend(StoreRef.from_json(r) for _, r in sorted(by_sequence["sequences"].items()))
     return tuple(inputs)
 
 
