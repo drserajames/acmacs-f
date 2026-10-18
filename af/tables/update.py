@@ -15,6 +15,8 @@ with a config such as (paths relative to the config file)::
     [tables.cdc]
     tsv = "../fludata/CDC-Atlanta-WHO-CC/raw-data/CDC_titers_sept_2019_onwards.tsv"
     xlsx = ["../whocc-tables/h3-hi-guinea-pig-cdc/xlsx/<one workbook>.xlsx"]  # tests not in the TSV
+    sequence_ids = ["../fludata/CDC-Atlanta-WHO-CC/raw-data/<season>_GISAID.tsv"]  # optional
+    sequence_id_ties = "blank"  # required with sequence_ids (af.tables.cdc_seqids)
 
 Every run reads every input (a full re-read), so a rule that matched nothing is an error.
 Nothing is published if anything went wrong: format errors, broken tables, unmatched
@@ -47,6 +49,7 @@ from af.util.config import load_config, parse_config
 
 from . import cdc, identity, ids, warnings
 from .model import Table
+from .passage import PassageParser
 from .rules import Rules
 from .store import KIND, current_tables, previous_index, publish
 
@@ -58,6 +61,11 @@ class CDCInputs:
     tsv: Path
     xlsx: list[Path] = field(default_factory=list)
     season: list[Path] = field(default_factory=list)  # older per-season files, scoped by rules
+    # CDC's EPI_ISL lookups (the season *_GISAID.tsv files) for antigens without one
+    # (af.tables.cdc_seqids); with them, ``sequence_id_ties`` must say how several isolates
+    # are decided: "blank", "closest-passage" or "original"
+    sequence_ids: list[Path] = field(default_factory=list)
+    sequence_id_ties: str = ""
 
 
 @dataclass(frozen=True)
@@ -449,13 +457,39 @@ def _read_cdc(inputs: CDCInputs, rules: Rules) -> tuple[list[Table], list[str], 
                 "  harvest dates: " + ", ".join(f"{k} {v}" for k, v in sorted(joined.items()))
             )
         tables.extend(season.tables)
+    if inputs.sequence_ids:
+        report.append(_join_sequence_ids(inputs, rules, main, tables))
     return tables, report, errors
+
+
+def _join_sequence_ids(
+    inputs: CDCInputs, rules: Rules, main: list[Table], tables: list[Table]
+) -> str:
+    from . import cdc_seqids
+
+    if not inputs.sequence_id_ties:
+        raise ValueError(
+            "[tables.cdc] sequence_ids needs sequence_id_ties: " + ", ".join(cdc_seqids.TIES)
+        )
+    passages = PassageParser(rules.passage_tokens, cdc.LAB)
+
+    def classify(raw: str) -> tuple[str, str]:
+        text = passages.parse(raw).text
+        return text, passages.passage_class(text)
+
+    lookups = [cdc_seqids.read_lookup(p, classify) for p in inputs.sequence_ids]
+    lookups.append(cdc_seqids.from_tables(main))
+    counts = cdc_seqids.join(tables, lookups, inputs.sequence_id_ties)
+    return f"sequence ids ({inputs.sequence_id_ties}): " + ", ".join(
+        f"{k} {v}" for k, v in sorted(counts.items())
+    )
 
 
 def _input_files(settings: TablesSettings) -> list[Path]:
     files: list[Path] = []
     if settings.cdc:
         files += [settings.cdc.tsv, *settings.cdc.xlsx, *settings.cdc.season]
+        files += settings.cdc.sequence_ids
     if settings.locations:
         files += [settings.locations.locdb, settings.locations.chinese_aliases]
     folders: list[AC21Inputs | VIDRLInputs] = [
