@@ -11,7 +11,9 @@ What it does, and nothing more:
 - split into type / location / isolate / year;
 - strip the isolate's leading zeros (``02`` -> ``2``);
 - write a hyphen inside a location as a space;
-- split off whatever follows the year, for the caller to interpret.
+- split off whatever follows the year, for the caller to interpret;
+- write a two-digit year with its century, **only** when the caller gives the collection
+  year and exactly one century puts the name within a year of it (:func:`expand_year`).
 
 What it deliberately does not do:
 
@@ -46,6 +48,7 @@ EXTRA_SLASH_IN_PAREN = "name.extra_slash_in_paren"  # trailing "(...)" held a sl
 _SPACES = re.compile(r"\s+")
 _AROUND_SLASH = re.compile(r"\s*/\s*")
 _YEAR_AND_EXTRA = re.compile(r"(\d{4})(?:[\s-]+(.+))?")
+_TWO_DIGIT_YEAR_AND_EXTRA = re.compile(r"(\d{2})(?:[\s-]+(.+))?")
 _PAREN_TAIL = re.compile(r"\s*\(([^()]*)\)\s*$")
 _TYPE = re.compile(r"A\([^)]*\)|[ABCD]")
 
@@ -62,13 +65,15 @@ class Name:
     name: str
     extra: str = ""
     problems: list[str] = field(default_factory=list)
+    #: The two digits the name was written with, when :func:`expand_year` gave them a century.
+    two_digit_year: str = ""
 
     @property
     def ok(self) -> bool:
         return not self.problems
 
 
-def normalise(raw: str, subtype: str | None = None) -> Name:
+def normalise(raw: str, subtype: str | None = None, *, collected: int | None = None) -> Name:
     """Normalise one strain name.
 
     ``subtype`` is what the *source* says the virus is ("A(H1N1)", "A(H3N2)", "B"):
@@ -76,6 +81,10 @@ def normalise(raw: str, subtype: str | None = None) -> Name:
     disagrees, the name wins and :data:`TYPE_MISMATCH` is recorded — relabelling a
     virus to match the file it arrived in loses the evidence that something is wrong.
     Pass ``None`` when the source does not say.
+
+    ``collected`` is the record's collection year, when there is one: with it, a two-digit
+    year is written in full where :func:`expand_year` can choose the century. Without it a
+    two-digit year stays as written, flagged :data:`YEAR`, as before.
     """
     text = _AROUND_SLASH.sub("/", _SPACES.sub(" ", raw.strip()).upper())
     problems: list[str] = []
@@ -101,11 +110,18 @@ def normalise(raw: str, subtype: str | None = None) -> Name:
     elif subtype is not None and flu_type != subtype and flu_type != subtype[0]:
         problems.append(TYPE_MISMATCH)
 
-    if (match := _YEAR_AND_EXTRA.fullmatch(last)) is None:
+    two_digit = ""
+    if (match := _YEAR_AND_EXTRA.fullmatch(last)) is not None:
+        year, extra = match.group(1), match.group(2) or ""
+    elif (
+        collected is not None
+        and (short := _TWO_DIGIT_YEAR_AND_EXTRA.fullmatch(last)) is not None
+        and (full := expand_year(short.group(1), collected)) is not None
+    ):
+        two_digit, year, extra = short.group(1), str(full), short.group(2) or ""
+    else:
         problems.append(YEAR)
         year, extra = last, ""
-    else:
-        year, extra = match.group(1), match.group(2) or ""
 
     if len(middle) == 2:
         location, isolate = middle
@@ -122,7 +138,23 @@ def normalise(raw: str, subtype: str | None = None) -> Name:
 
     if paren:
         extra = f"{extra} ({paren})".strip()
-    return Name("/".join((flu_type, location, isolate, year)), extra, problems)
+    return Name("/".join((flu_type, location, isolate, year)), extra, problems, two_digit)
+
+
+def expand_year(digits: str, collected: int) -> int | None:
+    """The four-digit year a two-digit name year means, judged by the collection year.
+
+    The century is the one that puts the name within one year of the collection: the year
+    after covers the season convention (collected in December, named for the next year), the
+    year before a name given at isolation. Centuries are a hundred years apart, so at most one
+    fits. When none does, the digits are probably not a year at all (an isolate code or a
+    serial where the year should be, a "-LIKE" lab name), and None is returned rather than a
+    guess. Never by today's date (design rule 7): ae wrote 20yy, which reads a 1998 virus's
+    "98" as 2098 and a serial "90" as 2090.
+    """
+    yy = int(digits)
+    fits = [c + yy for c in (1900, 2000) if abs(c + yy - collected) <= 1]
+    return fits[0] if len(fits) == 1 else None
 
 
 def _strip_padding(isolate: str) -> str:

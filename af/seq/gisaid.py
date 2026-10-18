@@ -74,6 +74,8 @@ EXCEL_SERIAL_BEFORE = datetime.date(1910, 1, 1)
 SEASON_NAMING_MONTHS = (11, 12)
 NAME_YEAR_SEASON = "date.name-year-season"  # name a year ahead, collected November or December
 NAME_YEAR_DIFFERS = "date.name-year-differs"  # any other disagreement: the ones worth reading
+# the name was written with a two-digit year, given its century by the collection year
+NAME_YEAR_TWO_DIGIT = "date.name-year-two-digit"
 
 _XL_DATE = 3  # xlrd.XL_CELL_DATE
 _FIELD = re.compile(r"_\|_|\|")
@@ -146,6 +148,7 @@ class PullCounts:
     #: (category, submitting lab) -> records, so a one-lab one-month batch shows as a batch.
     name_year: Counter[tuple[str, str]] = field(default_factory=Counter)
     name_problems: Counter[str] = field(default_factory=Counter)
+    name_two_digit_year: int = 0  # names whose two-digit year was given its century
     #: N, i.e. "not known". Counted apart from R/Y/W…, which state a real ambiguity;
     #: Nextclade's QC treats the two differently and so must any threshold of ours.
     unknown_bases: int = 0
@@ -163,6 +166,7 @@ class PullCounts:
             "excel_serial_date": self.excel_serial_date,
             "name_year": {f"{c}\t{lab}": n for (c, lab), n in sorted(self.name_year.items())},
             "name_problems": dict(self.name_problems),
+            "name_two_digit_year": self.name_two_digit_year,
             "unknown_bases": self.unknown_bases,
             "ambiguous_bases": self.ambiguous_bases,
         }
@@ -329,10 +333,22 @@ def join(
                     counts.defline_date_conflicts += 1
                     problems.append("date.defline-conflict")
 
-        name = names.normalise(gisaid_name, subtype)
+        # The collection year chooses a two-digit name year's century; an Excel-serial date
+        # is not a collection year, so such a name keeps its two digits and its name.year.
+        collected = (
+            collection_date.first.year
+            if collection_date is not None and "date.excel-serial" not in problems
+            else None
+        )
+        name = names.normalise(gisaid_name, subtype, collected=collected)
         for problem in name.problems:
             counts.name_problems[problem] += 1
         problems.extend(name.problems)
+        if name.two_digit_year:
+            # A flag, not a name problem: the name parses, and records with a name.* problem
+            # are kept out of the new-locations review (af.seq.build).
+            counts.name_two_digit_year += 1
+            problems.append(NAME_YEAR_TWO_DIGIT)
 
         if collection_date is not None:
             # The name's year against the collection year (task 2.8; DECISIONS 25 Sep: report,

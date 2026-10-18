@@ -19,6 +19,7 @@ from af.seq.names import (
     TYPE_MISMATCH,
     TYPE_UNKNOWN,
     YEAR,
+    expand_year,
     normalise,
 )
 
@@ -179,3 +180,62 @@ def test_store_names_are_fixed_points(af_data: Path) -> None:
     locations = [line for line in path.read_text().splitlines() if line and line[0] != "#"]
     moved = [loc for loc in locations if normalise(f"A/{loc}/1/2000").name != f"A/{loc}/1/2000"]
     assert not moved, f"{len(moved)} of {len(locations)} are not fixed points: {moved[:5]}"
+
+
+class TestTwoDigitYear:
+    """A two-digit name year gets its century from the collection year, or is left alone."""
+
+    @pytest.mark.parametrize(
+        ("raw", "collected", "expected"),
+        [
+            ("A/EXAMPLETOWN/12/26", 2026, "A/EXAMPLETOWN/12/2026"),
+            ("A/EXAMPLETOWN/12/98", 1998, "A/EXAMPLETOWN/12/1998"),  # not 2098, as ae wrote
+            ("A/EXAMPLETOWN/12/26", 2025, "A/EXAMPLETOWN/12/2026"),  # the season convention
+            ("A/EXAMPLETOWN/12/25", 2026, "A/EXAMPLETOWN/12/2025"),  # named at isolation
+            ("A/EXAMPLETOWN/12/00", 1999, "A/EXAMPLETOWN/12/2000"),  # across the century
+            ("A/EXAMPLETOWN/12/99", 2000, "A/EXAMPLETOWN/12/1999"),
+        ],
+    )
+    def test_the_century_that_fits_the_collection_year_is_written(
+        self, raw: str, collected: int, expected: str
+    ) -> None:
+        result = normalise(raw, collected=collected)
+        assert result.name == expected
+        assert result.ok, result.problems
+        assert result.two_digit_year == raw[-2:]
+
+    def test_digits_no_century_fits_are_not_a_year_and_stay_as_written(self) -> None:
+        # a code or serial where the year belongs: ae would have written 2090
+        result = normalise("A/EXAMPLETOWN/EXAMPLECODE/90", collected=2019)
+        assert result.name == "A/EXAMPLETOWN/EXAMPLECODE/90"
+        assert result.problems == [YEAR]
+        assert result.two_digit_year == ""
+
+    def test_without_a_collection_year_nothing_is_guessed(self) -> None:
+        result = normalise("A/EXAMPLETOWN/12/26")
+        assert (result.name, result.problems, result.two_digit_year) == (
+            "A/EXAMPLETOWN/12/26", [YEAR], ""
+        )  # fmt: skip
+
+    def test_text_after_a_two_digit_year_is_split_off(self) -> None:
+        result = normalise("A/EXAMPLETOWN/12/26-EXAMPLEX", collected=2026)
+        assert (result.name, result.extra) == ("A/EXAMPLETOWN/12/2026", "EXAMPLEX")
+
+    @pytest.mark.parametrize("last", ["7", "026", "2X"])
+    def test_other_short_years_are_still_a_problem(self, last: str) -> None:
+        assert normalise(f"A/EXAMPLETOWN/12/{last}", collected=2026).problems == [YEAR]
+
+    def test_four_digit_years_are_not_touched_by_the_collection_year(self) -> None:
+        # the name year and the collection year disagreeing is af.seq.gisaid's report
+        result = normalise("A/EXAMPLETOWN/12/2021", collected=1998)
+        assert (result.name, result.two_digit_year) == ("A/EXAMPLETOWN/12/2021", "")
+
+    def test_an_expanded_name_normalises_to_itself(self) -> None:
+        once = normalise("A/EXAMPLETOWN/012/26", collected=2026).name
+        assert normalise(once).name == once == "A/EXAMPLETOWN/12/2026"
+
+    def test_at_most_one_century_fits(self) -> None:
+        assert expand_year("26", 2026) == 2026
+        assert expand_year("26", 1950) is None
+        assert all(expand_year(f"{yy:02d}", year) is not None
+                   for yy in range(100) for year in (1900 + yy, 2000 + yy))  # fmt: skip
