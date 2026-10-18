@@ -84,7 +84,8 @@ class FiguresReport:
     files: list[Path] = field(default_factory=list)
     drawn: dict[str, int] = field(default_factory=dict)  # month -> dots drawn
     no_coordinates: Counter[str] = field(default_factory=Counter)  # location -> dots
-    clipped: Counter[str] = field(default_factory=Counter)  # location -> dots cut by the edge
+    # location -> dots in clusters moved inward so the map's edge cuts none (af.geo.render)
+    moved_inside: Counter[str] = field(default_factory=Counter)
 
 
 def write_geo_figures(
@@ -114,12 +115,12 @@ def write_geo_figures(
         folder.mkdir(parents=True, exist_ok=True)
         pdf = folder / "figure.pdf"
         unplaced: Counter[str] = Counter()
-        cut: Counter[str] = Counter()
+        moved: Counter[str] = Counter()
         report.drawn[month] = render_period(
-            period, coordinates, coastline, pdf, look, unplaced, cut
+            period, coordinates, coastline, pdf, look, unplaced, moved
         )
         report.no_coordinates.update(unplaced)
-        report.clipped.update(cut)
+        report.moved_inside.update(moved)
         decisions: dict[str, Any] = {}
         if period.get("unpainted"):
             if scheme is None:
@@ -143,8 +144,8 @@ def write_geo_figures(
                 "look": look_record(look if look is not None else Look()),
                 "drawn": report.drawn[month],
                 "no_coordinates": dict(sorted(unplaced.items())),
-                # dots the map's edge cuts (a cluster at the seam, 168.24 W): drawn, but partly
-                "clipped_at_edge": dict(sorted(cut.items())),
+                # a cluster at the seam (168.24 W) moved inward until no dot is cut: its dots
+                "moved_inside_edge": dict(sorted(moved.items())),
                 **({"decisions": decisions} if decisions else {}),
             },
             "geo": {
