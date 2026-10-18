@@ -21,8 +21,18 @@ MapResult = dict[str, Any]
 
 # How far a published layout's stress, evaluated again, may be from the one its map recorded
 # before a finish refuses it: last-bit differences between the optimiser's own final value and a
-# fresh evaluation, never a different problem (CoreOptimiser.finish).
+# fresh evaluation, never a different problem (CoreOptimiser.finish). RELATIVE (math.isclose
+# rel_tol, abs_tol 0).
 FINISH_STRESS_TOLERANCE = 1e-9
+
+# The same for an adopted layout against its source map's recorded stress (CoreOptimiser.adopt),
+# RELATIVE. Tighter, because here the check is the evidence that the layout is that map's, placed
+# point for point. The same layout re-evaluated under another arithmetic agrees to 5e-16 relative
+# (notes/optimiser/reproducibility; 15 o-made maps re-evaluated, Q195); distinct minima of one
+# chain map differ by ~3e-9 relative (AD h1pdm-cdc step 34). 1e-12 accepts the first with ~2,000x
+# margin and refuses the second with ~3,000x (06, 18 Oct 2026); 1e-9 would pass the second with
+# only 3x. At stress ~10,000 it is ~1e-8 absolute, some 5,000 ULPs: no re-summation trips it.
+ADOPT_STRESS_TOLERANCE = 1e-12
 
 # The move-lower rules a chain or a finish may name (MapOptions.move_lower_rule), by the name each
 # rule records, with the af.map.optimise constant that holds it. Names, not the rules, so a
@@ -511,25 +521,16 @@ class CoreOptimiser:
         has shown the two problems are cell for cell the same, and this shows the layout is
         that map's and is placed point for point. Arithmetics may differ (a map made under the
         original one adopted under strict-fp-1): that moves a stress in its last bits only."""
-        from af.map.optimise import Projection, refine, resolve_trapped, stress
+        from af.map.optimise import optimise, resolve_trapped, stress
 
         problem = self._problem(arrays)
         placed = stress(problem, layout)
-        if not math.isclose(placed, source_stress, rel_tol=FINISH_STRESS_TOLERANCE, abs_tol=0.0):
+        if not math.isclose(placed, source_stress, rel_tol=ADOPT_STRESS_TOLERANCE, abs_tol=0.0):
             raise ValueError(
                 f"the adopted layout's stress is {placed!r} in these arrays, but its map recorded"
                 f" {source_stress!r}: it is not that map's layout of this problem"
             )
-        start = Projection(
-            layout=layout,
-            stress=placed,
-            dimensions=int(layout.shape[1]),
-            n_iterations=0,
-            start_seed=0,
-            start_index=0,
-            termination=0,
-        )
-        [minimised] = refine(problem, [start], n_best=1, threads=self.threads)
+        minimised = optimise(problem, layout, precision="fine")  # the loop's own minimise
         fixed = resolve_trapped(
             problem,
             minimised.layout,

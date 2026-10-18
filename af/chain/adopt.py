@@ -354,14 +354,16 @@ def _adopt(
         )  # fmt: skip
     except ValueError as e:
         raise AdoptError(f"{adopted.dataset}@{adopted.version}: {e}") from e
-    own = read_chart(target.chosen).projections  # the target's own basins, kept after it
+    # The adopted map is projection 0 BY DECISION, not by stress: the target's own basins follow
+    # it unchanged, and one of them may be lower (the step records both stresses).
+    own = read_chart(target.chosen).projections
     chart = _map_chart(m.chart, [*_projections([made], m.arrays, o.minimum_column_basis), *own])
     write_chart(chart, directory / CHOSEN)
     base = _merge_all_record(cfg, m)
     record = {
         **{k: base[k] for k in ("index", "table_id", "merge_all")},
         "optimiser": mapper.optimiser.name,
-        "chosen": "adopted",
+        "chosen": "adopted",  # projection 0 by decision; not necessarily the lowest stress
         "stress": {"adopted": made["stress"], "target": target.stress, "source": adopted.stress},
         "adopted_from": {**adopted.to_json(), "paired_by_titres": list(pairing.by_titres)},
         "adopted_onto": target.to_json(),

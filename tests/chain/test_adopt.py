@@ -214,3 +214,40 @@ def test_a_different_problem_is_refused(both):
     with pytest.raises(AdoptError, match="not the same problem"):
         _adopt(both, None, "--step", "0000")
     assert Store.open(both.root / "store").current("chains", MERGED).version == both.version
+
+
+# ---- the optimiser's own refusal: the layout placed point for point --------------------------
+
+
+def _problem_and_map():
+    pytest.importorskip("af.map.optimise")
+    from af.chain.backend import CoreOptimiser
+    from af.chain.synthetic import make_tables as _make
+    from af.chart.ace import read_chart
+
+    return CoreOptimiser(threads=1), _make, read_chart
+
+
+def test_the_optimiser_refuses_a_layout_not_placed_point_for_point(tmp_path):
+    """The stress check is what proves the placement: two connected points swapped is refused,
+    the layout as it is (to the last bits) is accepted, and the stand-in refuses outright."""
+    core, make, read = _problem_and_map()
+    import af.map.optimise as optimise
+    from af.chain.backend import StubOptimiser
+
+    make(tmp_path / "t", GROUP, n_tables=1)
+    chart = read(sorted((tmp_path / "t").glob("*.ace"))[0])
+    arrays = chart.optimiser_arrays("none", disconnect_threshold=None)
+    problem = core._problem(arrays)
+    rng = np.random.default_rng(1)
+    layout = optimise.optimise(problem, rng.normal(size=(chart.n_points, 2))).layout
+    recorded = optimise.stress(problem, layout)
+    made = core.adopt(arrays, layout, recorded * (1 + 1e-15))
+    assert made["adopt"]["stress_placed"] == pytest.approx(recorded, rel=1e-15)
+    swapped = layout.copy()
+    swapped[[0, 1]] = swapped[[1, 0]]
+    assert optimise.stress(problem, swapped) != recorded
+    with pytest.raises(ValueError, match="is not that map's layout"):
+        core.adopt(arrays, swapped, recorded)
+    with pytest.raises(ValueError, match="cannot adopt"):
+        StubOptimiser().adopt(arrays, layout, recorded)
