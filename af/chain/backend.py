@@ -21,8 +21,18 @@ MapResult = dict[str, Any]
 
 # How far a published layout's stress, evaluated again, may be from the one its map recorded
 # before a finish refuses it: last-bit differences between the optimiser's own final value and a
-# fresh evaluation, never a different problem (CoreOptimiser.finish).
+# fresh evaluation, never a different problem (CoreOptimiser.finish). RELATIVE (math.isclose
+# rel_tol, abs_tol 0).
 FINISH_STRESS_TOLERANCE = 1e-9
+
+# The same for an adopted layout against its source map's recorded stress (CoreOptimiser.adopt),
+# RELATIVE. Tighter, because here the check is the evidence that the layout is that map's, placed
+# point for point. The same layout re-evaluated under another arithmetic agrees to 5e-16 relative
+# (notes/optimiser/reproducibility; 15 o-made maps re-evaluated, Q195); distinct minima of one
+# chain map differ by ~3e-9 relative (AD h1pdm-cdc step 34). 1e-12 accepts the first with ~2,000x
+# margin and refuses the second with ~3,000x (06, 18 Oct 2026); 1e-9 would pass the second with
+# only 3x. At stress ~10,000 it is ~1e-8 absolute, some 5,000 ULPs: no re-summation trips it.
+ADOPT_STRESS_TOLERANCE = 1e-12
 
 # The move-lower rules a chain or a finish may name (MapOptions.move_lower_rule), by the name each
 # rule records, with the af.map.optimise constant that holds it. Names, not the rules, so a
@@ -96,6 +106,16 @@ class Optimiser(Protocol):
 
     def finish(
         self, arrays: dict, layout: np.ndarray, rule: FinishRule, recorded_stress: float
+    ) -> MapResult: ...
+
+    def adopt(
+        self,
+        arrays: dict,
+        layout: np.ndarray,
+        source_stress: float,
+        move_groups: bool = False,
+        move_lower: bool = False,
+        move_lower_rule: str = DEFAULT_MOVE_LOWER_RULE,
     ) -> MapResult: ...
 
 
@@ -485,6 +505,59 @@ class CoreOptimiser:
             },
         }
 
+    def adopt(
+        self,
+        arrays,
+        layout,
+        source_stress,
+        move_groups=False,
+        move_lower=False,
+        move_lower_rule=DEFAULT_MOVE_LOWER_RULE,
+    ):
+        """Another map's layout of this same problem (af.chain.adopt), minimised fine once from
+        where it is, then the trapped-point loop under this chain's own options. No starts.
+
+        Refused unless the layout, as placed, has the stress its own map recorded: the caller
+        has shown the two problems are cell for cell the same, and this shows the layout is
+        that map's and is placed point for point. Arithmetics may differ (a map made under the
+        original one adopted under strict-fp-1): that moves a stress in its last bits only."""
+        from af.map.optimise import optimise, resolve_trapped, stress
+
+        problem = self._problem(arrays)
+        placed = stress(problem, layout)
+        if not math.isclose(placed, source_stress, rel_tol=ADOPT_STRESS_TOLERANCE, abs_tol=0.0):
+            raise ValueError(
+                f"the adopted layout's stress is {placed!r} in these arrays, but its map recorded"
+                f" {source_stress!r}: it is not that map's layout of this problem"
+            )
+        minimised = optimise(problem, layout, precision="fine")  # the loop's own minimise
+        fixed = resolve_trapped(
+            problem,
+            minimised.layout,
+            threads=self.threads,
+            move_groups=move_groups,
+            move_lower=move_lower,
+            move_lower_rule=_rule(move_lower_rule),
+        )
+        p = fixed.projection
+        return {
+            "layout": p.layout,
+            "stress": p.stress,
+            "dimensions": p.dimensions,
+            "n_iterations": minimised.n_iterations,
+            "start_seed": 0,
+            "adopt": {
+                "stress_placed": placed,
+                "stress_minimised": minimised.stress,
+                "stress_after": p.stress,
+                "rounds": fixed.rounds,
+                "moves": fixed.moved,
+                "groups": _group_record(fixed.groups),
+                **({"move_lower": _move_lower_record(fixed)} if move_lower else {}),
+                "threads": int(fixed.threads),
+            },
+        }
+
     def grid_test(self, layout, arrays):
         from af.map.optimise import grid_test
 
@@ -577,6 +650,10 @@ class StubOptimiser:
 
     def finish(self, arrays, layout, rule, recorded_stress):
         raise ValueError("the stand-in optimiser cannot finish a map: finishing needs the core")
+
+    def adopt(self, arrays, layout, source_stress, move_groups=False, move_lower=False,
+              move_lower_rule=DEFAULT_MOVE_LOWER_RULE):  # fmt: skip
+        raise ValueError("the stand-in optimiser cannot adopt a layout: adopting needs the core")
 
     def grid_test(self, layout, arrays):
         from af.chain import stub_optimiser

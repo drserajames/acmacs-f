@@ -72,7 +72,7 @@ def publish_chain(store_root: Path, dataset: str, chain_root: Path) -> StoreRef:
         shutil.copytree(chain_root / "review", build.path / "review")
         provenance = Provenance(
             step="af.chain",
-            inputs=_inputs(doc["config"]),
+            inputs=_inputs(doc["config"]) + _adopted_input(store, doc),
             parameters={k: v for k, v in doc["config"].items() if k != "tables"}
             | {
                 "tables": [t["table_id"] for t in doc["config"]["tables"]],
@@ -83,7 +83,9 @@ def publish_chain(store_root: Path, dataset: str, chain_root: Path) -> StoreRef:
             # how many rough starts were refined fine; chains published before it was kept used 5
             | ({"refine_best": doc["refine_best"]} if "refine_best" in doc else {})
             # a finished map (af.chain.finish): the version it came from and the rule applied
-            | {k: doc[k] for k in ("finished_from", "finish") if k in doc},
+            | {k: doc[k] for k in ("finished_from", "finish") if k in doc}
+            # an adopted map (af.chain.adopt): whose layout it took, and the version it replaced
+            | {k: doc[k] for k in ("adopted_from", "adopted_onto") if k in doc},
             started=started,
             finished=datetime.datetime.now(datetime.UTC),
         )
@@ -99,6 +101,15 @@ def _inputs(config: dict[str, Any]) -> tuple[Input, ...]:
     if config.get("first_map"):
         inputs.append(ExternalInput.of(Path(config["first_map"])))
     return tuple(inputs)
+
+
+def _adopted_input(store: Store, doc: dict[str, Any]) -> tuple[Input, ...]:
+    """An adopted map's layout came from another published chain: that version is an input."""
+    a = doc.get("adopted_from")
+    if a is None:
+        return ()
+    manifest = store.dataset_dir(KIND, a["dataset"]) / "versions" / a["version"] / "MANIFEST.json"
+    return (StoreRef(KIND, a["dataset"], a["version"], sha256_path(manifest)),)
 
 
 def _summary(doc: dict[str, Any]) -> dict[str, Any]:
