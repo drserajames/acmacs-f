@@ -39,6 +39,14 @@ step, ae's rank 0), that one is taken and flagged ``match.passage-exact`` (Sarah
 closest passage). A tie still left is refused, and keeps its candidates and ae's ranked pick
 for colouring (Q81).
 
+Candidates are told apart by their **sequence identity** (:func:`identity_sql`): the aligned
+mature HA where the alignment covers it with no insertion or frameshift, else the raw
+sequence. One virus deposited twice and trimmed differently is then one sequence, not a tie
+(OWED 45). Several records of one sequence are still several records, each with its own
+passage and EPI_ISL, so one is taken by the same order that settles a tie: the antigen's own
+lab's, then the antigen's very passage, then ae's closest passage, then the lowest key
+(:func:`_one_copy`).
+
 Passage classes of GISAID's free-text passages come from a rule table
 (``gisaid_passage_classes.tsv``, acmacs-f-data); table antigens bring their own class from
 the table parsers.
@@ -142,7 +150,8 @@ class Candidate:
     name: str
     passage: str
     passage_class: str
-    seq_hash: str
+    #: what tells this candidate's sequence from another's (identity_sql); equal for copies
+    identity: str
     submitting_lab: str = ""
 
     @property
@@ -242,9 +251,9 @@ class SequenceIndex:
         if result.method is None and key is not None and (lab, key[0]) in self.equivalents:
             result = self._from_equivalent(result, key, lab, antigen_class, own, passage)
         if result.chosen is None and key is not None and lab in self.number_rules:
-            result = self._from_number(result, key, lab, antigen_class)
+            result = self._from_number(result, key, lab, antigen_class, passage)
         if result.chosen is None and result.tied:
-            result = _from_exact_passage(result, passage)
+            result = _from_exact_passage(result, passage, own, antigen_class)
         self.counts.update(result.flags or ["match.clean"])
         return result
 
@@ -266,10 +275,10 @@ class SequenceIndex:
             return Match(None, None, (), (*flags, NO_MATCH))
         tier = _preferred(found, antigen_class, flags)
         mine = [c for c in tier if c.submitting_lab in own]
-        if len({c.seq_hash for c in tier}) > 1 and len({c.seq_hash for c in mine}) == 1:
+        if len({c.identity for c in tier}) > 1 and len({c.identity for c in mine}) == 1:
             flags.append(OWN_LAB)  # a tie only the antigen's own lab's submission settles
             tier = mine
-        chosen = _one_sequence(tier, flags, AMBIGUOUS)
+        chosen = _one_sequence(tier, flags, AMBIGUOUS, own, passage, antigen_class)
         if chosen is None:
             ranked = ae_ranked(tier, passage, antigen_class)
             return Match("name", None, tuple(found), tuple(flags), tuple(tier), ranked)
@@ -323,7 +332,12 @@ class SequenceIndex:
         )
 
     def _from_number(
-        self, result: Match, key: tuple[str, str, str], lab: str, antigen_class: str
+        self,
+        result: Match,
+        key: tuple[str, str, str],
+        lab: str,
+        antigen_class: str,
+        passage: str = "",
     ) -> Match:
         """The lab's own deposit with this number: only for a name with no match or a tie."""
         rule = self.number_rules[lab]
@@ -334,7 +348,7 @@ class SequenceIndex:
         if len({c.name.split("/")[1] for c in found}) > 1:  # districts of the key
             return replace(result, flags=(*result.flags, LAB_NUMBER_COLLISION))
         tier = _preferred(found, antigen_class, flags)
-        chosen = _one_sequence(tier, flags, AMBIGUOUS)
+        chosen = _one_sequence(tier, flags, AMBIGUOUS, passage=passage, antigen_class=antigen_class)
         if chosen is None:
             return result  # the number finds the same tie: nothing gained
         flags = [f for f in flags if f != AMBIGUOUS]
@@ -413,7 +427,12 @@ def ae_passage_rank(antigen: str, antigen_class: str, candidate: Candidate) -> i
     return 90
 
 
-def _from_exact_passage(result: Match, passage: str) -> Match:
+def _from_exact_passage(
+    result: Match,
+    passage: str,
+    own: frozenset[str] = frozenset(),
+    antigen_class: str = UNKNOWN,
+) -> Match:
     """A refused tie settled by the one sequence deposited with the antigen's very passage.
 
     Sarah, Q217: a tie takes the closest passage, and nothing is closer than the same one.
@@ -427,18 +446,11 @@ def _from_exact_passage(result: Match, passage: str) -> Match:
     does a candidate whose passage has no known class: "unknown" or "N/A" on both sides is the
     same missing fact, not the same passage, though it reads as steps.
     """
-    mine = passage_steps(passage)
-    same = [
-        c
-        for c in result.tied
-        if mine and c.passage_class != UNKNOWN and passage_steps(c.passage) == mine
-    ]
-    if not same or len({c.seq_hash for c in same}) != 1:
+    same = _same_passage(result.tied, passage)
+    if not same or len({c.identity for c in same}) != 1:
         return result
     flags = [f for f in result.flags if f != AMBIGUOUS]  # chosen now, no longer refused
-    if len(same) > 1:
-        flags.append(IDENTICAL_DUPLICATES)
-    chosen = min(same, key=lambda c: c.key)
+    chosen = same[0] if len(same) == 1 else _one_copy(same, flags, own, passage, antigen_class)
     return replace(result, chosen=chosen, flags=(*flags, PASSAGE_EXACT), tied=(), ranked=None)
 
 
@@ -466,15 +478,60 @@ def epi_order(epi_isl: str) -> tuple[int, str]:
     return (int(digits), epi_isl) if digits.isdigit() else (1 << 62, epi_isl)
 
 
-def _one_sequence(tier: list[Candidate], flags: list[str], ambiguous_flag: str) -> Candidate | None:
+def _one_sequence(
+    tier: list[Candidate],
+    flags: list[str],
+    ambiguous_flag: str,
+    own: frozenset[str] = frozenset(),
+    passage: str = "",
+    antigen_class: str = UNKNOWN,
+) -> Candidate | None:
     """One candidate, or several that carry the same sequence; otherwise none, flagged."""
     if len(tier) == 1:
         return tier[0]
-    if len({c.seq_hash for c in tier}) == 1:
-        flags.append(IDENTICAL_DUPLICATES)
-        return min(tier, key=lambda c: c.key)
+    if len({c.identity for c in tier}) == 1:
+        return _one_copy(tier, flags, own, passage, antigen_class)
     flags.append(ambiguous_flag)
     return None
+
+
+def _one_copy(
+    copies: list[Candidate],
+    flags: list[str],
+    own: frozenset[str],
+    passage: str,
+    antigen_class: str,
+) -> Candidate:
+    """One of several records of one sequence, flagged ``match.identical-duplicates``.
+
+    The sequence is settled, but the record still matters: it brings its own passage and
+    EPI_ISL into the join. So copies are narrowed in the order that settles a tie (OWED 45,
+    with 10): the antigen's own lab's deposits, then those with the antigen's very passage
+    (Q217, Q223), each flagged when it narrowed them; then ae's closest passage; then the
+    lowest key, so the choice never depends on input order (design rule 8).
+    """
+    flags.append(IDENTICAL_DUPLICATES)
+    mine = [c for c in copies if c.submitting_lab in own]
+    if mine and len(mine) < len(copies):
+        flags.append(OWN_LAB)
+        copies = mine
+    exact = _same_passage(copies, passage)
+    if exact and len(exact) < len(copies):
+        flags.append(PASSAGE_EXACT)
+        copies = exact
+    return min(copies, key=lambda c: (ae_passage_rank(passage, antigen_class, c), c.key))
+
+
+def _same_passage(candidates: Iterable[Candidate], passage: str) -> list[Candidate]:
+    """The candidates deposited with this very passage, step for step (see
+    :func:`_from_exact_passage`): none for a passage that reads as no steps, nor any candidate
+    whose passage has no known class."""
+    mine = passage_steps(passage)
+    return [
+        c
+        for c in candidates
+        if mine and c.passage_class != UNKNOWN and passage_steps(c.passage) == mine
+    ]
 
 
 def sequences_ref(
@@ -509,18 +566,50 @@ def index_from_store(
         columns = {c for (c, *_) in duckdb.execute(
             "describe select * from read_parquet(?)", [isolates]).fetchall()}  # fmt: skip
         submitter = "coalesce(i.submitting_lab, '')" if "submitting_lab" in columns else "''"
+        sequences = str(version / "sequences" / "*" / "*.parquet")
+        stored = {c for (c, *_) in duckdb.execute(
+            "describe select * from read_parquet(?)", [sequences]).fetchall()}  # fmt: skip
+        if stored >= ALIGNMENT_COLUMNS:
+            identity = identity_sql("s")
+        else:  # a version without the alignment knows only its raw sequences: counted
+            identity = "'raw:' || s.seq_hash"
+            index.counts["identity.version-without-alignment"] += 1
         rows = duckdb.execute(
-            "select i.epi_isl, i.accession, i.name, i.passage, s.seq_hash, " + submitter +
+            f"select i.epi_isl, i.accession, i.name, i.passage, {identity}, " + submitter +
             " from read_parquet(?) i join read_parquet(?) s using (epi_isl, accession)",
-            [isolates, str(version / "sequences" / "*" / "*.parquet")],
+            [isolates, sequences],
         ).fetchall()  # fmt: skip
-        for epi_isl, accession, name, passage, seq_hash, submitter in rows:
+        for epi_isl, accession, name, passage, identity, submitter in rows:
             kind = passage_class(passage, passage_rules)
             index.counts[f"passage.{kind}"] += 1
+            index.counts[f"identity.{identity.split(':', 1)[0]}"] += 1
             index.add(
-                Candidate(epi_isl, accession, dataset, name, passage, kind, seq_hash, submitter)
+                Candidate(epi_isl, accession, dataset, name, passage, kind, identity, submitter)
             )
     return index
+
+
+#: The sequences columns :func:`identity_sql` reads beyond ``seq_hash``.
+ALIGNMENT_COLUMNS = frozenset({"covers_mature", "nuc_aligned", "inserted_aa", "frameshifts"})
+
+
+def identity_sql(alias: str) -> str:
+    """SQL for a stored sequence's identity, over the sequences table aliased ``alias``.
+
+    ``aligned:<sha256>`` of the aligned mature HA when the alignment covers it with no
+    insertion or frameshift there, else ``raw:<seq_hash>``. The aligned mature HA is what
+    every use downstream reads, so two deposits of one virus trimmed differently, or differing
+    only outside mature HA, are one sequence. It keeps what was read: an ambiguous base or an
+    unread stretch is still a difference. The alignment drops insertions against the
+    reference, so a sequence with one (or a frameshift, an insertion of other length) keeps its
+    raw identity: two such could otherwise look the same while differing.
+    The serology join compares records of one preparation by the same expression.
+    """
+    s = alias
+    return (
+        f"CASE WHEN {s}.covers_mature AND {s}.inserted_aa = 0 AND {s}.frameshifts = 0 "
+        f"THEN 'aligned:' || sha256({s}.nuc_aligned) ELSE 'raw:' || {s}.seq_hash END"
+    )
 
 
 def read_lab_submitters(path: Path) -> dict[str, frozenset[str]]:

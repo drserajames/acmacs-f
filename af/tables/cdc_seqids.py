@@ -165,5 +165,5 @@ def _candidate(s: Sequenced) -> Candidate:
         name="",
         passage=s.passage,
         passage_class=s.passage_class,
-        seq_hash="",
+        identity="",
     )
