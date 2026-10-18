@@ -414,6 +414,38 @@ def test_vcm_layout_builds(tmp_path: Path) -> None:
     assert record["output"]["pages"] == 5 and pdf.is_file()
 
 
+def test_a_window_continues_in_the_same_landscape_and_the_geometry_is_set_in_the_body(
+    tmp_path: Path,
+) -> None:
+    """As delivered: a window's next page is \\newpage\\vspace*{-2pt} in the same landscape (a
+    fresh landscape put both rows 24pt high), and \\newgeometry after \\begin{document}
+    (review, 18 Oct 2026). Two windows, the first titled "", 7 panels: 2 pages each."""
+    cfg = tmp_path / "v.toml"
+    cfg.write_text(VCM.replace(
+        'slots = ["map/a", "map/b", "-", "map/c", "-", "-"]\n'
+        'windows = [{ name = "all", title = "" }]',
+        'slots = ["map/a", "map/b", "map/c", "map/d", "map/e", "map/f", "map/g"]\n'
+        'windows = [{ name = "all", title = "" }, { name = "6m", title = "(6m)" }]',
+    ))  # fmt: skip
+    section = load(cfg).sections[1]
+    assert section.run_starts([]) == [True, False, True, False]
+    root = tmp_path / "figs"
+    for slot in load(cfg).all_slots():
+        placeholder.make(root, slot, slot, T0)
+    cfg_ = load(cfg)
+    out = tmp_path / "build"
+    out.mkdir()
+    tex = build.write_tex(cfg_, build.resolve_all(cfg_, root), out, T0).read_text()
+    maps = tex[tex.index(r"\begin{landscape}") :]
+    assert maps.count(r"\begin{landscape}") == maps.count(r"\end{landscape}") == 2
+    assert maps.count(r"\newpage\vspace*{-2pt}") == 2
+    assert maps.index(r"\newpage\vspace*{-2pt}") < maps.index(r"\end{landscape}")
+    body = tex[tex.index(r"\begin{document}") :]
+    assert body.index(r"\newgeometry{top=3em,bottom=5em,left=2.5em,right=2.5em}") < body.index(
+        r"\begin{quotation}"
+    )
+
+
 def test_build_record_says_which_af_built_it() -> None:
     import af
 
@@ -781,6 +813,26 @@ def test_the_clade_key_is_listed_newest_first_with_the_uncoloured_classes_last(
     assert r"\ubox{none}{afkey0x2e}{0.5} & no seq \\" in page
     assert r"\ubox{afkey0x3}{afkey0x3e}{0.6} & no clade \\" in page
     assert r"\definecolor{afkey0x2}" not in page
+
+
+def test_a_class_with_no_dot_in_the_window_has_no_row_and_no_paragraph(tmp_path: Path) -> None:
+    """00, 18 Oct 2026: "clade not defined (0 viruses)" said nothing; both go when it is 0."""
+    cfg_path, root = _geo_key_setup(tmp_path, {"x": {**KEY["x"], "uncoloured_classes": [
+        KEY["x"]["uncoloured_classes"][0],
+        {**KEY["x"]["uncoloured_classes"][1], "per_month": {}, "window": 0, "states": {}},
+    ]}})  # fmt: skip
+    cfg_path.write_text(GEO_KEY.replace("test strain. Undefined", "test strain.\\n\\nUndefined"))
+    cfg = load(cfg_path)
+    figs = build.resolve_all(cfg, root)
+    keys, record = build.clade_keys(cfg, figs, root)
+    assert [row.label for row in keys[0]] == ["New 9Z", "Old (q1)", "no seq"]
+    assert record is not None
+    assert record["uncoloured_classes"]["X geographic data"]["clade_not_defined"] == 0
+    paragraphs, gaps = build.intro_texts(cfg, figs, None, record)[0]
+    assert (
+        paragraphs == ["Months November 2025 to February 2026", "Each dot is a test strain."]
+        and gaps == []
+    )
 
 
 def test_uncoloured_dots_are_checked_against_their_class_in_the_key(tmp_path: Path) -> None:
