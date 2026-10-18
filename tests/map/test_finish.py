@@ -88,6 +88,21 @@ def test_style_paints_last_matching_row_and_greys_old() -> None:
     assert {t: n for t, _, n in matched.legend}["group A"] == 80  # includes the painted-over sub
 
 
+def test_a_marked_vaccine_keeps_its_colour_and_other_preparations_follow_the_window() -> None:
+    pts = synthetic_points()
+    scene = style_points(pts, SCHEME, Window("12m", SINCE), title="t", vaccines={"ag0": "Te/24"})
+    by_id = {p.id: p for p in scene.points}
+    # ag0 is dated before the window: as the picked vaccine it keeps its clade colour (Q220)
+    assert not by_id["ag0"].greyed and by_id["ag0"].colour == "#ff7f0e"
+    assert by_id["ag3"].greyed  # an unmarked antigen of the same date follows the window
+    plain = style_points(pts, SCHEME, Window("12m", SINCE), title="t")
+    assert {p.id for p in plain.points if p.greyed} - {p.id for p in scene.points if p.greyed} == {
+        "ag0"
+    }
+    every = style_points(pts, SCHEME, Window("all", None), title="t", vaccines={"ag0": "Te/24"})
+    assert {p.id: p.colour for p in every.points}["ag0"] == by_id["ag0"].colour  # as in "all"
+
+
 def strain(prefix: str, place: str) -> str:
     """Invented strain names, generated rather than written out (see tools/WHO-DATA-GATE.md)."""
     return "/".join((prefix, place, "5", "2021"))
@@ -151,8 +166,9 @@ def test_finish_map_writes_pdf_and_matching_i7(tmp_path: Path) -> None:
     assert by_id["ag0"]["greyed"] and by_id["ag0"]["colour"] == "#bebebe"  # the window's grey
     assert doc["map"]["flags"] == ["189R move refused: 4.499 u > cap 4.0 u"]
     vac = [a for a in doc["map"]["antigens"] if a["vaccine"]]
-    # a vaccine dated before the window is greyed like any antigen, and keeps its label
-    assert vac[0]["label"] == "Te/25-cell" and vac[0]["greyed"] and vac[0]["colour"] == "#bebebe"
+    # a marked vaccine dated before the window keeps its own colour and its label (Q220)
+    assert vac[0]["label"] == "Te/25-cell" and not vac[0]["greyed"]
+    assert vac[0]["colour"] == "#2ca02c"
 
 
 def test_i7_refuses_naive_timestamp(tmp_path: Path) -> None:
