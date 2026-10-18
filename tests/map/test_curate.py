@@ -1,5 +1,7 @@
 """Named moves and continuity layouts, with stand-in relaxers (the optimiser has its own tests)."""
 
+import json
+
 import numpy as np
 import pytest
 
@@ -10,6 +12,7 @@ from af.map.curate import (
     apply_block_offset,
     apply_move,
     continuity_layout,
+    near_cap_flags,
 )
 from af.map.orient import rotation
 
@@ -52,7 +55,11 @@ def test_movers_go_to_median_of_painted_group() -> None:
     assert result.largest_other_move == 0.0
     report = result.report(rule())
     assert report["movers"] == 2
-    assert all(type(v) in (str, int, float) for v in report.values())  # plain JSON types
+    assert json.loads(json.dumps(report)) == report  # plain JSON
+    assert [c["guard"] for c in json.loads(json.dumps(report["checks"]))] == [
+        "stress_rise",
+        "from_target",
+    ]
 
 
 def test_mover_must_match_exactly_one() -> None:
@@ -245,3 +252,72 @@ def test_a_block_is_a_fixed_shift_or_a_target_never_both() -> None:
         block_rule(shift=None)
     with pytest.raises(ValueError, match="to must be"):
         block_rule(shift=None, derived_from=None, to="somewhere")
+
+
+def relax_movers_back(by: float):
+    """Stand-in relax that leaves the two movers (rows 3, 4) ``by`` units from where they start."""
+
+    def relax(start: np.ndarray, movable: np.ndarray) -> tuple[np.ndarray, float]:
+        out = start.copy()
+        out[[3, 4], 0] += by
+        return out, float(np.nansum(out**2))
+
+    return relax
+
+
+@pytest.mark.parametrize(
+    ("back", "applied", "flagged"),
+    [
+        (0.49, True, True),
+        (0.476, True, True),
+        (0.47, True, False),
+        (0.51, False, True),
+        (0.6, False, False),
+    ],
+)
+def test_a_move_within_5_percent_of_a_cap_is_flagged_applied_or_refused(
+    back: float, applied: bool, flagged: bool
+) -> None:
+    """The cap is 0.5 u from the target: 0.475-0.525 is near it, on either side."""
+    relax = relax_movers_back(back)
+    try:
+        result = apply_move(rule(), LAYOUT, NAMES, PAINTED, stress_before=0.0, relax=relax)
+        checks, done = result.checks, True
+    except CurationError as exc:
+        checks, done = exc.checks, False
+        assert exc.fields()["checks"] == [c.fields() for c in checks]
+    assert done is applied
+    flags = near_cap_flags("move", "pull strays in", done, checks)
+    if flagged:
+        state = "applied" if applied else "refused"
+        assert flags == [
+            f"move 'pull strays in' {state} within 5% of its from_target cap: "
+            f"{back:.4f} against 0.5"
+        ]
+    else:
+        assert flags == []
+    # the measured value always sits beside its cap in the record
+    (target,) = [c for c in checks if c.guard == "from_target"]
+    assert (round(target.measured, 4), target.limit) == (back, 0.5)
+
+
+def test_a_check_before_the_relax_carries_no_guard_list() -> None:
+    with pytest.raises(CurationError) as none:
+        apply_move(
+            rule(movers=("NOBODY",)), LAYOUT, NAMES, PAINTED, stress_before=0.0, relax=no_relax
+        )
+    assert none.value.checks == () and "checks" not in none.value.fields()
+
+
+def test_a_block_records_every_guard_and_flags_one_near_its_cap() -> None:
+    result = apply_block_offset(
+        block_rule(min_settled=2), LAYOUT, NAMES, PAINTED,
+        stress_before=0.0, relax=no_relax,
+    )  # fmt: skip
+    assert [c.guard for c in result.checks] == ["stress_rise", "settled", "other_move"]
+    assert json.loads(json.dumps(result.report(block_rule())["checks"]))[1] == {
+        "guard": "settled", "measured": 2, "limit": 2, "bound": "min", "near_cap": True,
+    }  # fmt: skip
+    # both movers settled, against a minimum of 2: on the cap, so flagged; the others are far
+    flags = near_cap_flags("block", "b", True, result.checks)
+    assert flags == ["block 'b' applied within 5% of its settled cap: 2.0000 against 2"]

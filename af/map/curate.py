@@ -43,6 +43,51 @@ class Relax(Protocol):
     def __call__(self, start: Array, movable: Mask) -> tuple[Array, float]: ...
 
 
+# A guard within this fraction of its cap, on either side, is flagged: a move that a rounding
+# difference could flip between applied and refused needs a person's eye, not the cap's.
+NEAR_CAP = 0.05
+
+
+@dataclass(frozen=True)
+class GuardCheck:
+    """One guard of a move or block after its relax: what was measured against which cap."""
+
+    guard: str
+    measured: float
+    limit: float
+    bound: Literal["max", "min"]
+
+    @property
+    def passed(self) -> bool:
+        return self.measured <= self.limit if self.bound == "max" else self.measured >= self.limit
+
+    @property
+    def near(self) -> bool:
+        """Within :data:`NEAR_CAP` of the cap, passed or not."""
+        return abs(self.measured - self.limit) <= NEAR_CAP * abs(self.limit)
+
+    def fields(self) -> dict[str, object]:
+        return {
+            "guard": self.guard,
+            "measured": round(float(self.measured), 4),
+            "limit": self.limit,
+            "bound": self.bound,
+            "near_cap": self.near,
+        }
+
+
+def near_cap_flags(kind: str, name: str, applied: bool, checks: Sequence[GuardCheck]) -> list[str]:
+    """One figure flag per guard within NEAR_CAP of its cap, naming the move and both numbers."""
+    state = "applied" if applied else "refused"
+    pct = round(100 * NEAR_CAP)
+    return [
+        f"{kind} {name!r} {state} within {pct}% of its {c.guard} cap: "
+        f"{c.measured:.4f} against {c.limit}"
+        for c in checks
+        if c.near
+    ]
+
+
 class CurationError(ValueError):
     """A curation rule matched the wrong points, or its result broke a guard.
 
@@ -59,21 +104,27 @@ class CurationError(ValueError):
         measured: float,
         limit: float,
         bound: Literal["max", "min", "exact"],
+        checks: Sequence[GuardCheck] = (),
     ) -> None:
         super().__init__(message)
         self.guard = guard
         self.measured = measured
         self.limit = limit
         self.bound = bound
+        # every relax guard, not only the one that refused (empty before a relax ran)
+        self.checks = tuple(checks)
 
     def fields(self) -> dict[str, object]:
-        """The refusal as plain data: guard, measured, limit, bound."""
-        return {
+        """The refusal as plain data: guard, measured, limit, bound, and every guard checked."""
+        out: dict[str, object] = {
             "guard": self.guard,
             "measured": round(float(self.measured), 4),
             "limit": self.limit,
             "bound": self.bound,
         }
+        if self.checks:
+            out["checks"] = [c.fields() for c in self.checks]
+        return out
 
 
 @dataclass(frozen=True)
@@ -108,6 +159,7 @@ class MoveResult:
     target_points: int
     worst_from_target: float
     largest_other_move: float
+    checks: tuple[GuardCheck, ...] = ()
 
     def report(self, rule: MoveOverride) -> dict[str, object]:
         return {
@@ -121,6 +173,7 @@ class MoveResult:
             "movers_moved": round(float(self.movers_moved), 4),
             "worst_from_target": round(float(self.worst_from_target), 4),
             "largest_other_move": round(float(self.largest_other_move), 4),
+            "checks": [c.fields() for c in self.checks],
         }
 
 
@@ -186,7 +239,11 @@ def apply_move(
         [i for i in range(len(layout)) if i not in movers and has_xy[i]], dtype=np.intp
     )
     largest_other = float(np.linalg.norm(out[others] - layout[others], axis=1).max())
-    if stress_after - stress_before > rule.max_stress_rise:
+    checks = (
+        GuardCheck("stress_rise", stress_after - stress_before, rule.max_stress_rise, "max"),
+        GuardCheck("from_target", worst, rule.max_from_target, "max"),
+    )
+    if not checks[0].passed:
         raise CurationError(
             f"move {rule.name!r}: stress rose {stress_after - stress_before:.3f} "
             f"(cap {rule.max_stress_rise}); layout left unchanged",
@@ -194,8 +251,9 @@ def apply_move(
             measured=stress_after - stress_before,
             limit=rule.max_stress_rise,
             bound="max",
+            checks=checks,
         )
-    if worst > rule.max_from_target:
+    if not checks[1].passed:
         raise CurationError(
             f"move {rule.name!r}: a mover relaxed back {worst:.3f} from the target "
             f"(cap {rule.max_from_target}); layout left unchanged",
@@ -203,6 +261,7 @@ def apply_move(
             measured=worst,
             limit=rule.max_from_target,
             bound="max",
+            checks=checks,
         )
     return MoveResult(
         layout=out,
@@ -214,6 +273,7 @@ def apply_move(
         target_points=len(group),
         worst_from_target=worst,
         largest_other_move=largest_other,
+        checks=checks,
     )
 
 
@@ -338,6 +398,7 @@ class BlockResult:
     largest_other_move: float
     rotation_degrees: float
     shift: tuple[float, float] = (0.0, 0.0)  # the shift applied (computed for a target rule)
+    checks: tuple[GuardCheck, ...] = ()
 
     def report(self, rule: BlockOffset) -> dict[str, object]:
         placed = {"to": rule.to} if rule.to else {"derived_from": rule.derived_from}
@@ -353,6 +414,7 @@ class BlockResult:
             "stress_after": round(float(self.stress_after), 4),
             "largest_other_move": round(float(self.largest_other_move), 4),
             "rotation_degrees": round(float(self.rotation_degrees), 4),
+            "checks": [c.fields() for c in self.checks],
         }
 
 
@@ -428,8 +490,13 @@ def apply_block_offset(
     centre = np.median(fitted[group], axis=0)
     settled = int((np.linalg.norm(fitted[rows] - centre, axis=1) <= rule.settled_within).sum())
     degrees = decompose(fit.matrix)[0]
+    checks = (
+        GuardCheck("stress_rise", stress_after - stress_before, rule.max_stress_rise, "max"),
+        GuardCheck("settled", settled, rule.min_settled, "min"),
+        GuardCheck("other_move", largest_other, rule.max_other_move, "max"),
+    )
 
-    if stress_after - stress_before > rule.max_stress_rise:
+    if not checks[0].passed:
         raise CurationError(
             f"block {rule.name!r}: stress rose {stress_after - stress_before:.3f} "
             f"(cap {rule.max_stress_rise}); layout left unchanged",
@@ -437,8 +504,9 @@ def apply_block_offset(
             measured=stress_after - stress_before,
             limit=rule.max_stress_rise,
             bound="max",
+            checks=checks,
         )
-    if settled < rule.min_settled:
+    if not checks[1].passed:
         raise CurationError(
             f"block {rule.name!r}: only {settled} of {len(rows)} movers settled within "
             f"{rule.settled_within} of the target (need {rule.min_settled}); layout left unchanged",
@@ -446,8 +514,9 @@ def apply_block_offset(
             measured=settled,
             limit=rule.min_settled,
             bound="min",
+            checks=checks,
         )
-    if largest_other > rule.max_other_move:
+    if not checks[2].passed:
         raise CurationError(
             f"block {rule.name!r}: another point moved {largest_other:.3f} "
             f"(cap {rule.max_other_move}); layout left unchanged",
@@ -455,6 +524,7 @@ def apply_block_offset(
             measured=largest_other,
             limit=rule.max_other_move,
             bound="max",
+            checks=checks,
         )
     return BlockResult(
         layout=out,
@@ -465,4 +535,5 @@ def apply_block_offset(
         largest_other_move=largest_other,
         rotation_degrees=degrees,
         shift=(float(shift[0]), float(shift[1])),
+        checks=checks,
     )
