@@ -39,6 +39,10 @@ matches nothing pending is an error (design rule 1):
     [[tables.rerun_settings]]           # changed step parameters: re-run the chain from step 0
     keys = ["select_remove_by_sequence"]
     decided = "..."
+
+An acknowledgement lives for one run: once the re-run is published, delete it from the chain
+file (the decision stays recorded in the version's chain.json, config.append.reruns). Left in,
+it matches nothing the next month and stops that run as an error (03, 18 Oct 2026).
 """
 
 from __future__ import annotations
@@ -332,7 +336,9 @@ def table_changes(old: Any, new: Any) -> dict[str, int]:
 
     Points pair by identity and occurrence (the n-th point with one key pairs with the n-th:
     repeats in a test, as af.chain.tables marks them DISTINCT), then any left over by row order,
-    so a corrected passage or name reads as that field, not as one point removed and one added."""
+    so a corrected passage or name reads as that field, not as one point removed and one added.
+    The price: a strain genuinely replaced by another at the same row also reads as "name 1".
+    That is enough for a refusal, whose job is to point at the table, not to describe it."""
     a, b = old.map_content(), new.map_content()
     out: dict[str, int] = {}
     matched: dict[str, list[tuple[int, int]]] = {}
