@@ -103,6 +103,29 @@ def segments_cross(p1: Point, p2: Point, q1: Point, q2: Point) -> bool:
     return orient(p1, p2, q1) != orient(p1, p2, q2) and orient(q1, q2, p1) != orient(q1, q2, p2)
 
 
+def reach(box: Box, anchor: Point) -> Box:
+    """The rectangle a label and its leader cover: the box and its node (the leader runs
+    between the box's right edge and the node)."""
+    return (
+        min(box[0], anchor[0]),
+        min(box[1], anchor[1]),
+        max(box[2], anchor[0]),
+        max(box[3], anchor[1]),
+    )
+
+
+def near(a: Box, b: Box, margin: float = 1.0) -> bool:
+    """Do two rectangles come within ``margin`` points of each other? With ``margin`` above
+    segment_hits_box's 0.5 pt pad, two labels whose reaches are not near cannot overlap, cross
+    or run a leader through each other."""
+    return (
+        a[0] <= b[2] + margin
+        and b[0] <= a[2] + margin
+        and a[1] <= b[3] + margin
+        and b[1] <= a[3] + margin
+    )
+
+
 def leader_end(box: Box) -> Point:
     """The leader leaves the box at the middle of its right edge (labels sit left of the node)."""
     return (box[2], (box[1] + box[3]) / 2)
@@ -150,7 +173,22 @@ def place_labels(
     boxes: dict[int, Box] = {}
     order = sorted(range(len(items)), key=lambda k: (items[k][2][1], items[k][0]))
 
+    # Speed (18 Oct 2026: placement was 11% of the tree stage) without changing any result:
+    # every cost below is computed with the same arithmetic in the same order. A pair of labels
+    # whose reaches (box plus leader) are more than a point apart contributes exactly zero
+    # (no overlap, no crossing, no leader through a box, with the 0.5 pt pad), so it is skipped;
+    # adding zero would not have changed the sum. The grid is not changed during placement, so
+    # its counts are kept per box and per leader, and each label's candidates are made once.
+    made: dict[int, list[Box]] = {}
+    ink_under: dict[Box, int] = {}
+    ink_along: dict[tuple[Point, Point], int] = {}
+
     def candidates(k: int) -> list[Box]:
+        if k not in made:
+            made[k] = _candidates(k)
+        return made[k]
+
+    def _candidates(k: int) -> list[Box]:
         _, text, (ax, ay) = items[k]
         lines = text.split("\n")
         bw = max(text_width(t) for t in lines) + 2
@@ -169,16 +207,25 @@ def place_labels(
         anchor = items[k][2]
         end = leader_end(box)
         length = float(np.hypot(anchor[0] - end[0], anchor[1] - end[1]))
-        c = w.ink * grid.cost(box) + w.leader_ink * grid.line_cost(end, anchor) + w.length * length
+        if box not in ink_under:
+            ink_under[box] = grid.cost(box)
+        if (end, anchor) not in ink_along:
+            ink_along[(end, anchor)] = grid.line_cost(end, anchor)
+        c = w.ink * ink_under[box] + w.leader_ink * ink_along[(end, anchor)] + w.length * length
         if length > 3 and abs(anchor[1] - end[1]) < np.tan(np.radians(8)) * abs(anchor[0] - end[0]):
             c += w.flat
+        here = reach(box, anchor)
         for o in obstacles:
+            if not near(here, o):
+                continue
             c += w.overlap * box_overlap(box, o)
             c += w.crossing * segment_hits_box(end, anchor, o)
         for j, b in boxes.items():
             if j == k:
                 continue
             other_anchor = items[j][2]
+            if not near(here, reach(b, other_anchor)):
+                continue
             c += w.overlap * box_overlap(box, b)
             c += w.crossing * segments_cross(end, anchor, leader_end(b), other_anchor)
             through = segment_hits_box(end, anchor, b) or segment_hits_box(
