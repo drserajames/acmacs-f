@@ -13,11 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from af.store import Store
+from af.store import Store, StoreRef
 from af.tree import export as E
 from af.tree import export_record as R
 
-from .test_stages import OUTGROUP, fill, rules
+from .test_stages import OUTGROUP, export_with, fill, rules
 
 # The same single optional host rule as the `rules()` fixture, as a config file, because back_fill
 # loads the selection from disk (and hashes it into the record) rather than taking SubtypeRules.
@@ -51,8 +51,12 @@ def store(tmp_path: Path) -> Store:
     return st
 
 
+def current(store: Store) -> StoreRef:
+    return store.current("sequences", "h3")
+
+
 def exported(store: Store, out: Path) -> dict[str, object]:
-    E.export(store, "h3", rules(), out)
+    export_with(store, rules(), out)
     return json.loads((out / E.EXPORT_FILE).read_text())
 
 
@@ -144,7 +148,9 @@ def test_back_fill_records_an_existing_version_and_leaves_no_scratch(
     root = tmp_path / "records"
     work = tmp_path / "work"
     work.mkdir()
-    path, export_json = R.back_fill(store, "h3", selection, root, work=work)
+    path, export_json = R.back_fill(
+        store, "h3", selection, root, sequences=current(store), work=work
+    )
     assert path.exists()
     assert R.read_record(path)["how"] == R.BACK_FILLED
     assert export_json["sequences"] == store.current("sequences", "h3").to_json()
@@ -156,7 +162,9 @@ def test_back_fill_reproduces_the_hashes_a_direct_export_gives(
 ) -> None:
     """Back-filling is only sound because the export is deterministic for a fixed version."""
     direct = exported(store, tmp_path / "out")
-    _, from_back_fill = R.back_fill(store, "h3", selection, tmp_path / "records")
+    _, from_back_fill = R.back_fill(
+        store, "h3", selection, tmp_path / "records", sequences=current(store)
+    )
     assert from_back_fill["files"] == direct["files"]
 
 
@@ -181,7 +189,7 @@ def test_content_hashes_are_recorded_and_ignore_the_parquet_writer_version(
     differs from the build's. The record therefore carries writer-independent content hashes, and
     this test is what stops them being removed as redundant.
     """
-    path, _ = R.back_fill(store, "h3", selection, tmp_path / "records")
+    path, _ = R.back_fill(store, "h3", selection, tmp_path / "records", sequences=current(store))
     record = R.read_record(path)
     assert set(record["content"]) == {E.ALIGNMENT_FILE, E.LEAVES_FILE}
     assert record["writer"]["pyarrow"]
@@ -221,7 +229,14 @@ def test_a_back_fill_can_record_which_env_wrote_the_bytes(
     env, which no laptop release reproduces, so the note says where the bytes came from and why
     pyarrow was pinned. Without it the record looks as though a release wrote it.
     """
-    path, _ = R.back_fill(store, "h3", selection, tmp_path / "records", note="pyarrow pinned to X")
+    path, _ = R.back_fill(
+        store,
+        "h3",
+        selection,
+        tmp_path / "records",
+        sequences=current(store),
+        note="pyarrow pinned to X",
+    )
     assert R.read_record(path)["note"] == "pyarrow pinned to X"
     assert (
         R.read_record(path)["af_release"] is None
@@ -294,3 +309,86 @@ def test_recording_an_export_twice_changes_nothing(
     before = first.read_text()
     assert R.record_export(out, selection, root) == first
     assert first.read_text() == before
+
+
+# ---------------------------------------------------------------------------------------------
+# A back-fill names the version it re-exported, and what it was checked against
+
+
+def back_fill_cli(store: Store, selection: Path, root: Path, *extra: str) -> int:
+    return R.main([str(selection), "h3", str(store.root), str(root), *extra])
+
+
+def test_a_back_fill_records_the_version_asked_for_not_current(
+    store: Store, tmp_path: Path, selection: Path
+) -> None:
+    """On 13 Oct a back-fill of CURRENT recorded a version seven after the one the tree read."""
+    read = current(store)
+    fill(store, names="oab", pull="p2")  # CURRENT moves on
+    assert current(store) != read
+    path, export_json = R.back_fill(store, "h3", selection, tmp_path / "records", sequences=read)
+    assert export_json["sequences"] == read.to_json()
+    assert path.name == f"{read.version}{R.RECORD_SUFFIX}"
+
+
+def test_a_back_fill_checked_against_a_tree_keeps_the_hash_it_was_checked_with(
+    store: Store, tmp_path: Path, selection: Path
+) -> None:
+    alignment = exported(store, tmp_path / "out")["files"][E.ALIGNMENT_FILE]  # type: ignore[index]
+    path, _ = R.back_fill(
+        store,
+        "h3",
+        selection,
+        tmp_path / "records",
+        sequences=current(store),
+        expect_alignment=alignment,
+    )
+    assert R.read_record(path)["checked_against"] == {E.ALIGNMENT_FILE: alignment}
+
+
+def test_a_back_fill_that_does_not_reproduce_the_tree_writes_nothing(
+    store: Store, tmp_path: Path, selection: Path
+) -> None:
+    """A record made to vouch for a tree it does not match would be the wrong evidence."""
+    with pytest.raises(R.RecordError, match="content-behind"):
+        R.back_fill(
+            store,
+            "h3",
+            selection,
+            tmp_path / "records",
+            sequences=current(store),
+            expect_alignment="0" * 64,
+        )
+    assert not list(tmp_path.rglob(f"*{R.RECORD_SUFFIX}"))
+
+
+def test_the_back_fill_command_needs_the_version(
+    store: Store, tmp_path: Path, selection: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "records"
+    with pytest.raises(SystemExit):
+        back_fill_cli(store, selection, root)
+    assert "--sequences" in capsys.readouterr().err
+    assert back_fill_cli(store, selection, root, "--sequences", "0" * 16) == 1  # no such version
+    assert "no such version" in capsys.readouterr().err
+    version = current(store).version
+    assert back_fill_cli(store, selection, root, "--sequences", version) == 0
+    refused = back_fill_cli(
+        store, selection, root, "--sequences", version, "--expect-alignment", "0" * 64
+    )
+    assert refused == 1
+    assert "REFUSED" in capsys.readouterr().err
+
+
+def test_a_format_3_record_keeps_the_byte_hashes_and_the_selection_inputs(
+    store: Store, tmp_path: Path, selection: Path
+) -> None:
+    """``files`` (bytes) stays what a report compares; the selection inputs ride in the
+    embedded export.json, so the record's shape for workstream 11's reader is unchanged."""
+    path, export_json = R.back_fill(
+        store, "h3", selection, tmp_path / "records", sequences=current(store)
+    )
+    record = R.read_record(path)
+    assert record["files"] == export_json["files"]
+    assert record["export"]["format"] == 3
+    assert record["export"]["selection"]["config"]["sha256"] == R.sha256_path(selection)

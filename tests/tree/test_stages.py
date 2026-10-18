@@ -102,10 +102,21 @@ purpose = "{purpose}"
 OUTGROUP = S.Outgroup("EPI_ISL_900000", "EPI900000", "invented outgroup")
 
 
-def fill(store: Store, *, ragged: bool = False, nextclade: StoreRef | None = None) -> None:
-    """The five fixture leaves as a sequence-store version; ``c`` embargoed, ``b`` year-only."""
+def fill(
+    store: Store,
+    *,
+    ragged: bool = False,
+    nextclade: StoreRef | None = None,
+    names: str = "oabcd",
+    pull: str = "p1",
+) -> None:
+    """The five fixture leaves as a sequence-store version; ``c`` embargoed, ``b`` year-only.
+
+    ``names`` publishes a subset instead (a later version that has lost records)."""
     recs, found = [], {}
     for index, name in enumerate("oabcd"):
+        if name not in names:
+            continue
         rec = record(
             index,
             epi_isl=f"EPI_ISL_90000{index}",
@@ -118,8 +129,8 @@ def fill(store: Store, *, ragged: bool = False, nextclade: StoreRef | None = Non
         found[rec.epi_isl] = aligned(rec, nucleotides=sequence, clade="P", subclade="P")
     found = {processed.seq_id(r): found[r.epi_isl] for r in recs}
     processed.publish_pull(
-        store, "h3", "p1", processed.isolates_table(recs, "h3", "p1"),
-        processed.sequences_table(recs, found, "p1"), inputs=[nextclade] if nextclade else [],
+        store, "h3", pull, processed.isolates_table(recs, "h3", pull),
+        processed.sequences_table(recs, found, pull), inputs=[nextclade] if nextclade else [],
         parameters={}, started=datetime.datetime.now(datetime.UTC),
     )  # fmt: skip
 
@@ -130,6 +141,37 @@ def rules(outgroup: S.Outgroup = OUTGROUP) -> S.SubtypeRules:
     )
 
 
+def write_selection(path: Path, subtype_rules: S.SubtypeRules, subtype: str = "h3") -> Path:
+    """``subtype_rules`` as a selection config: an export hashes the config it selected with and
+    re-reads it, so a test passes rules only through a file holding exactly those rules."""
+    out = subtype_rules.outgroup
+    lines = [
+        f"[{subtype}]",
+        f"dataset = {json.dumps(subtype_rules.dataset)}",
+        f"[{subtype}.outgroup]",
+        f"epi_isl = {json.dumps(out.epi_isl)}",
+        f"accession = {json.dumps(out.accession)}",
+        f"reason = {json.dumps(out.reason)}",
+    ]
+    defaults = {f.name: f.default for f in dataclasses.fields(S.Rule)}  # MISSING if required
+    for rule in subtype_rules.rules:
+        lines.append(f"[[{subtype}.rule]]")
+        for name, value in dataclasses.asdict(rule).items():
+            if value != defaults[name]:
+                value = str(value) if isinstance(value, Path) else value
+                lines.append(f"{name} = {json.dumps(value)}")
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def export_with(
+    store: Store, subtype_rules: S.SubtypeRules, out: Path, **kwargs: object
+) -> E.ExportRecord:
+    """E.export with ``subtype_rules`` written beside ``out`` as the config it records."""
+    config = write_selection(out.parent / f"{out.name}.selection.toml", subtype_rules)
+    return E.export(store, "h3", subtype_rules, out, config=config, **kwargs)  # type: ignore[arg-type]
+
+
 def exported_project(root: Path, *, test_only: bool = False, purpose: str | None = None) -> Path:
     """make_project's config, its inputs replaced by an export from its own store."""
     config = make_project(root, purpose or FIXTURE_PURPOSE)
@@ -137,7 +179,7 @@ def exported_project(root: Path, *, test_only: bool = False, purpose: str | None
     # The dataset the clades step's fallback reads the stored calls from (tests/clades/synthetic).
     fill(store, nextclade=raw_dataset(store, "synthetic", "P"))
     stand_in = E.TestOnly(OUTGROUP, "stand-in for the test") if test_only else None
-    E.export(store, "h3", rules(), root / "export", test_only=stand_in)
+    export_with(store, rules(), root / "export", test_only=stand_in)
     text = config.read_text().replace(
         'alignment = "alignment.fasta"\nleaves = "leaves.parquet"\n',
         'alignment = "export/alignment.fasta"\nleaves = "export/leaves.parquet"\n'

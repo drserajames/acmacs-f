@@ -119,8 +119,9 @@ WEEKLY_PURPOSE = "weekly"
 is built: on 2 Oct 2026 an H1 weekly tree published with no clade inputs, and nothing refused it
 until the clades publish found it held no clades, days later and after it had become CURRENT."""
 
-CODE_VERSION = 2
-"""Bump when a stage's code changes what it writes, so existing records stop counting."""
+CODE_VERSION = 3
+"""Bump when a stage's code changes what it writes, so existing records stop counting.
+3: build.json's source carries the export's selection inputs, publish cites export.json."""
 
 
 class StageError(ValueError):
@@ -599,6 +600,8 @@ def _checked_export(
         "embargoed": record.embargoed,
         "test_only": record.test_only,
         "export": str(inputs.export),
+        # The selection config's and rule files' hashes (FORMAT 3); None from a FORMAT 2 export.
+        "selection": record.selection,
     }
 
 
@@ -845,6 +848,10 @@ def _publish_step(
             ExternalInput.of(inputs.alignment),
             ExternalInput.of(inputs.leaves),
         ]
+        if inputs.export is not None:
+            # export.json by hash: it is what names the selection config and rule files the
+            # leaves were chosen with, so the tree's provenance pins those too.
+            provenance_inputs.append(ExternalInput.of(inputs.export))
         sequences = _source_sequences(layout)
         if sequences is not None:
             provenance_inputs.append(sequences)
