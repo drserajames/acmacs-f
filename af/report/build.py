@@ -320,15 +320,15 @@ def _key_table(key: Key, n: int) -> list[str]:
     """A clade key as the delivered report draws it: a ring-and-fill swatch, then the label.
     Colours get generated names (labels hold spaces and parentheses). A clade's swatch has the
     delivered black ring; an uncoloured class's has its dots' fill (or none) and ring, the ring
-    as wide in points as on the geo figure. The table is indented 1.5em, as delivered: there it
-    started a paragraph and took the 12pt article's indent, which this report sets to 0."""
+    as wide in points as on the geo figure. The table is indented as delivered: there it started
+    a paragraph and took the 12pt article's indent (kept as afkeyindent), zeroed here."""
     out = []
     for j, row in enumerate(key):
         if row.fill:
             out.append(rf"\definecolor{{afkey{n}x{j}}}{{HTML}}{{{row.fill}}}")
         if row.edge:
             out.append(rf"\definecolor{{afkey{n}x{j}e}}{{HTML}}{{{row.edge}}}")
-    out.append(r"\hspace*{1.5em}\begin{tabular}{l l}")
+    out.append(r"\hspace*{\afkeyindent}\begin{tabular}{l l}")
     for j, row in enumerate(key):
         if row.edge:
             fill = f"afkey{n}x{j}" if row.fill else "none"
@@ -521,6 +521,8 @@ def write_tex(
         r"\contentsmargin{120pt}",
         r"\usepackage{hyperref}",
         _pdf_metadata(cfg, built_at),
+        # The class's own indent, kept for the clade key, which the delivered report indented by it
+        r"\newlength{\afkeyindent}\setlength{\afkeyindent}{\parindent}",
         r"\setlength{\parindent}{0pt}",
         # Grouped reports (subtype > figure) are unnumbered, like the delivered VCM report.
         r"\setcounter{secnumdepth}{0}" if any(sec.group for sec in cfg.sections) else "",

@@ -775,7 +775,7 @@ def test_the_clade_key_is_listed_newest_first_with_the_uncoloured_classes_last(
     page = "\n".join(build._intro_page(cfg.sections[0], (["Months a", "Each dot"], []), keys[0]))
     # as delivered: the period sentence, the key, then the description
     assert page.index("Months a") < page.index(r"\begin{tabular}{l l}") < page.index("Each dot")
-    assert r"\hspace*{1.5em}\begin{tabular}{l l}" in page  # indented as delivered (18 pt at 12pt)
+    assert r"\hspace*{\afkeyindent}\begin{tabular}{l l}" in page  # the class's indent, as delivered
     assert r"\cbox[afkey0x1] & Old (q1) \\" in page
     # Q215: each uncoloured class on its own line, in the swatch its dots are drawn in
     assert r"\ubox{none}{afkey0x2e}{0.5} & no seq \\" in page
