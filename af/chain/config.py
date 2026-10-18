@@ -91,7 +91,9 @@ class MapOptions:
     # Which move-lower rule, by the name it records (af.chain.backend.MOVE_LOWER_RULES):
     # "move-lower-1" (rounds until nothing is lower, at most 20) or "ad-last-round-1", AD's one
     # joint round after every map's trapped-point loop (Sarah, Q198 a, 16 Oct 2026: the chains
-    # move to it once reports A and B are final). Only with move_lower. A search setting.
+    # move to it once reports A and B are final). Only with move_lower. A search setting. With
+    # resolve_best > 1 it runs on each of the best maps and the lowest is kept; AD ran it on
+    # projection 0 only, which is resolve_best = 1, the default.
     move_lower_rule: str = DEFAULT_MOVE_LOWER_RULE
 
     def __post_init__(self) -> None:

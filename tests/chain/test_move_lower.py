@@ -72,12 +72,14 @@ def test_core_records_the_rounds_on_the_kept_map(monkeypatch, kept):
             threads=1,
             move_lower=[_round(kept)],
             move_lower_stop="nothing lower" if kept else "stress did not fall",
+            move_lower_rule=optimise.MOVE_LOWER_RULE,
         )
 
     monkeypatch.setattr(optimise, "resolve_trapped", resolve)
     maps = [{"layout": start, "stress": 2.0, "start_seed": 0}]
     [out] = backend.CoreOptimiser()._resolve(None, maps, False, move_lower=True)
     assert seen["move_lower"] is True
+    assert out["resolved_lower"]["rule"] == "move-lower-1"
     assert out["resolved_lower"]["stop"] == ("nothing lower" if kept else "stress did not fall")
     [r] = out["resolved_lower"]["rounds"]
     assert r["candidates"] == [2, 0] and r["moved"] == ([2, 0] if kept else [])
@@ -203,6 +205,7 @@ def test_core_hands_resolve_trapped_the_rule_named(monkeypatch, name, constant):
             threads=1,
             move_lower=[],
             move_lower_stop="nothing lower",
+            move_lower_rule=k.get("move_lower_rule"),
         )
 
     monkeypatch.setattr(optimise, "resolve_trapped", resolve)
@@ -212,29 +215,57 @@ def test_core_hands_resolve_trapped_the_rule_named(monkeypatch, name, constant):
     assert seen["move_lower_rule"] is getattr(optimise, constant)
 
 
-def test_ad_last_round_remakes_the_steps_and_records_itself(tables, tmp_path):  # noqa: F811
+@pytest.mark.parametrize("split", [False, True])
+def test_ad_last_round_reaches_every_maps_loop(tables, tmp_path, monkeypatch, split):  # noqa: F811
+    """What ran, not what was asked: every trapped-point loop of every step (scratch, incremental,
+    and after a split relax the parent's combine) is handed AD_LAST_ROUND, and records it."""
     pytest.importorskip("af.map.optimise")
+    import functools
     import json
 
-    from af.chain.engine import CHOSEN, step_dir
+    import af.map.optimise as optimise
+    from af.chain.engine import CHOSEN, SplitStarts, step_dir
+    from af.run.local import LocalRunner
 
+    real = optimise.resolve_trapped
+    rules = []
+
+    @functools.wraps(real)  # the default round cap is read from resolve_trapped's signature
+    def spy(problem, layout, **kwargs):
+        rules.append(kwargs.get("move_lower_rule"))
+        return real(problem, layout, **kwargs)
+
+    monkeypatch.setattr(optimise, "resolve_trapped", spy)
     cfg = config(tables)
+    on = dataclasses.replace(
+        cfg, options=dataclasses.replace(cfg.options, move_lower=True, move_lower_rule=AD)
+    )
     core = backend.CoreOptimiser(threads=1)  # strict-fp-1, the core's default arithmetic
-
-    def options(**k):
-        return dataclasses.replace(cfg, options=dataclasses.replace(cfg.options, **k))
-
-    lower = options(move_lower=True)
-    ad = options(move_lower=True, move_lower_rule=AD)
-    assert reused(run_chain(lower, tmp_path / "s", optimiser=core)) == [False] * 4
-    results = run_chain(ad, tmp_path / "s", optimiser=core)
-    assert reused(results) == [False] * 4  # another rule is another map: every step remade
-    for r in results:
-        for kind, loop in r.record["trapped_loop"].items():
-            assert len(loop["move_lower"]["rounds"]) <= 1, kind  # one round, never more
+    chunks = SplitStarts(chunks=2, work_dir=tmp_path / "w") if split else None
+    runner = LocalRunner() if split else None
+    results = run_chain(on, tmp_path / "s", optimiser=core, runner=runner, split=chunks)
+    assert reused(results) == [False] * 4
+    # step 0 maps from scratch, each later step incrementally and from scratch: 7 loops
+    assert len(rules) == 7 and all(r is optimise.AD_LAST_ROUND for r in rules), rules
+    loops = [loop for r in results for loop in r.record["trapped_loop"].values()]
+    assert len(loops) == 7 and all(loop["move_lower"]["rule"] == AD for loop in loops)
+    assert all(len(loop["move_lower"]["rounds"]) <= 1 for loop in loops)
     sidecar = step_dir(tmp_path / "s" / cfg.name, 0) / f"{CHOSEN}.provenance.json"
     params = json.loads(sidecar.read_text())["parameters"]
     assert params["options"]["move_lower_rule"] == AD
     assert params["move_lower_rule"] == backend.move_lower_rule(AD)
     assert params["numerics"] == core.numerics == "strict-fp-1"  # recorded together
+
+
+def test_ad_last_round_is_another_map_than_move_lower(tables, tmp_path):  # noqa: F811
+    pytest.importorskip("af.map.optimise")
+    cfg = config(tables)
+    core = backend.CoreOptimiser(threads=1)
+
+    def options(**k):
+        return dataclasses.replace(cfg, options=dataclasses.replace(cfg.options, **k))
+
+    lower, ad = options(move_lower=True), options(move_lower=True, move_lower_rule=AD)
+    assert reused(run_chain(lower, tmp_path / "s", optimiser=core)) == [False] * 4
+    assert reused(run_chain(ad, tmp_path / "s", optimiser=core)) == [False] * 4
     assert reused(run_chain(ad, tmp_path / "s", optimiser=core)) == [True] * 4

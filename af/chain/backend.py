@@ -120,9 +120,12 @@ def _rule(name: str) -> Any:
 
 
 def _move_lower_record(fixed: Any) -> dict[str, Any]:
-    """resolve_trapped's move-lower rounds, in step-record terms: why it stopped, and per round
-    tried (the rejected last one included) which points it tried and kept, and the stresses."""
+    """resolve_trapped's move-lower rounds, in step-record terms: the rule that ran (its own
+    record of it, so a map says what ran on it, not only what its config asked for), why it
+    stopped, and per round tried (the rejected last one included) which points it tried and kept,
+    and the stresses."""
     return {
+        "rule": fixed.move_lower_rule.name,
         "stop": fixed.move_lower_stop,
         "rounds": [
             {
