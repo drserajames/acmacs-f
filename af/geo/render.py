@@ -18,6 +18,11 @@ Two inputs are explicit rather than fetched or guessed:
 
 The returned :class:`RenderReport` says how many dots each month drew and which
 locations had no coordinates, so a thin map says why.
+
+A cluster that would cross the map's edge (a place near the seam at 168.24 W, such as the
+central Pacific) is moved inward just far enough that every dot is drawn whole, and counted
+per location in ``moved_inside``. Cut at the frame, part of it read as missing dots (R4
+review, 18 Oct 2026); ae drew such a place off the canvas, so it showed even less.
 """
 
 from __future__ import annotations
@@ -74,7 +79,8 @@ class Look:
 class RenderReport:
     drawn: dict[str, int] = field(default_factory=dict)  # period -> dots drawn
     no_coordinates: Counter[str] = field(default_factory=Counter)  # location -> dots
-    clipped: Counter[str] = field(default_factory=Counter)  # location -> dots cut by the edge
+    # location -> dots in clusters moved inward so the map's edge cuts none of them
+    moved_inside: Counter[str] = field(default_factory=Counter)
     files: list[Path] = field(default_factory=list)
 
 
@@ -94,7 +100,7 @@ def render_geo(
     for period in doc["periods"]:
         path = out_dir / f"{prefix}-{period['period']}.pdf"
         report.drawn[period["period"]] = _render_period(
-            period, coordinates, shapes, path, look, report.no_coordinates, report.clipped
+            period, coordinates, shapes, path, look, report.no_coordinates, report.moved_inside
         )
         report.files.append(path)
     return report
@@ -107,18 +113,18 @@ def render_period(
     path: Path,
     look: Look | None = None,
     no_coordinates: Counter[str] | None = None,
-    clipped: Counter[str] | None = None,
+    moved_inside: Counter[str] | None = None,
 ) -> int:
     """Draw one period of an I7 ``geo`` document to ``path``; the number of dots drawn.
 
     For a caller that files each month separately (the report's one figure per folder).
-    Locations it cannot place are added to ``no_coordinates``; dots the map's edge cuts, to
-    ``clipped``.
+    Locations it cannot place are added to ``no_coordinates``; the dots of a cluster moved in
+    from the map's edge, to ``moved_inside``.
     """
     unplaced = no_coordinates if no_coordinates is not None else Counter()
-    cut = clipped if clipped is not None else Counter()
+    moved = moved_inside if moved_inside is not None else Counter()
     look = look if look is not None else Look()
-    return _render_period(period, coordinates, _coastline(coastline), path, look, unplaced, cut)
+    return _render_period(period, coordinates, _coastline(coastline), path, look, unplaced, moved)
 
 
 def ring_capacity(ring: int) -> int:
@@ -179,6 +185,17 @@ def wrap_longitude(longitude: float, central: float) -> float:
     return (longitude - central + 180.0) % 360.0 - 180.0
 
 
+def inward_shift(low: float, high: float, radius: float, limit: float) -> float:
+    """How far to move a cluster whose dot centres span ``low``..``high`` so that every dot, of
+    ``radius``, lies within -``limit``..``limit``: 0 when it already does. One shift for the whole
+    cluster, so its packing is kept and it moves no further than the edge requires."""
+    if high + radius > limit:
+        return limit - radius - high
+    if low - radius < -limit:
+        return -limit + radius - low
+    return 0.0
+
+
 def _coastline(path: Path) -> list[Any]:
     return list(_read_coastline(str(Path(path).resolve())))
 
@@ -203,7 +220,7 @@ def _render_period(
     path: Path,
     look: Look,
     no_coordinates: Counter[str],
-    clipped: Counter[str],
+    moved_inside: Counter[str],
 ) -> int:
     import cartopy.crs as ccrs
     import matplotlib
@@ -222,7 +239,6 @@ def _render_period(
     fig = plt.figure(figsize=(look.width_points / 72.0, height / 72.0))
     # figure points to degrees: the map fills the figure, as ae's does
     lon_per_point, lat_per_point = 360.0 / look.width_points, 180.0 / height
-    radius = look.dot_diameter / 2.0 * lon_per_point
     try:
         # A GeoAxes: matplotlib's stubs type add_axes as plain Axes.
         ax: Any = fig.add_axes((0.0, 0.0, 1.0, 1.0), projection=centred)
@@ -254,9 +270,14 @@ def _render_period(
                 fills.append(fill)
                 edges.append(edge)
                 widths.append(width)
-            cut = sum(1 for x in xs if abs(x) + radius > 180.0)
-            if cut:
-                clipped[location["name"]] += cut
+            # the dot's outer edge: its fill and the outer half of its ring
+            reach = look.dot_diameter / 2.0 + max(widths) / 2.0
+            shift_x = inward_shift(min(xs), max(xs), reach * lon_per_point, 180.0)
+            shift_y = inward_shift(min(ys), max(ys), reach * lat_per_point, 90.0)
+            if shift_x or shift_y:
+                xs = [x + shift_x for x in xs]
+                ys = [y + shift_y for y in ys]
+                moved_inside[location["name"]] += len(dots)
             ax.scatter(
                 xs, ys, s=look.dot_diameter**2, c=fills, edgecolors=edges, linewidths=widths,
                 transform=centred, zorder=3,

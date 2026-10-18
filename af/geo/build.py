@@ -142,7 +142,7 @@ def build_geo(
             "store_refs": slot_provenance["store_refs"],
             "drawn": written.drawn,
             "no_coordinates": dict(sorted(written.no_coordinates.items())),
-            "clipped_at_edge": dict(sorted(written.clipped.items())),
+            "moved_inside_edge": dict(sorted(written.moved_inside.items())),
             "undated": doc["undated"],
             "no_location": len(doc["no_location"]),
         }

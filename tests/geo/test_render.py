@@ -11,6 +11,7 @@ from af.geo.render import (
     GeoRenderError,
     Look,
     honeycomb_offsets,
+    inward_shift,
     packed_offsets,
     render_geo,
     render_period,
@@ -85,18 +86,27 @@ def test_longitudes_wrap_at_ae_seam() -> None:
     assert wrap_longitude(-168.0, centre) == pytest.approx(-179.762094)  # just east: left
 
 
-def test_figure_is_ae_size_and_a_cluster_at_the_seam_is_counted(tmp_path: Path) -> None:
+def test_figure_is_ae_size_and_a_cluster_at_the_seam_is_moved_inside(tmp_path: Path) -> None:
     period = {"period": "2021-01", "title": "January 2021", "locations": [
         {"name": "Edge", "points": [{"color": "#0000aa", "count": 7, "clade": "Clade P.1"}]},
         {"name": "Middle", "points": [{"color": "#0000aa", "count": 7, "clade": "Clade P.1"}]},
     ]}  # fmt: skip
     coords = {"Edge": (-169.5, 0.0), "Middle": (20.0, 0.0)}
-    pdf, cut = tmp_path / "m.pdf", Counter[str]()
-    assert render_period(period, coords.get, _coastline(tmp_path), pdf, clipped=cut) == 14
-    # wrapped to 1.3 degrees inside the right edge: its centre stays, its ring is cut, counted
-    assert cut == {"Edge": 4}
+    pdf, moved = tmp_path / "m.pdf", Counter[str]()
+    assert render_period(period, coords.get, _coastline(tmp_path), pdf, moved_inside=moved) == 14
+    # wrapped to 1.3 degrees inside the right edge, its ring would be cut: the whole cluster
+    # moves in instead, and its dots are counted; the one in the middle stays where it is
+    assert moved == {"Edge": 7}
     box = re.search(rb"/MediaBox \[ *0 +0 +([\d.]+) +([\d.]+)", pdf.read_bytes())
     assert box is not None and (float(box[1]), round(float(box[2]), 2)) == (800.0, 401.23)
+
+
+def test_a_cluster_moves_only_as_far_as_the_edge_requires() -> None:
+    assert inward_shift(-10.0, 10.0, 1.0, 180.0) == 0.0  # inside: stays
+    assert inward_shift(170.0, 179.5, 1.0, 180.0) == pytest.approx(-0.5)  # right edge: in by 0.5
+    assert inward_shift(-179.5, -170.0, 1.0, 180.0) == pytest.approx(0.5)  # left edge
+    assert inward_shift(85.0, 89.8, 1.0, 90.0) == pytest.approx(-0.8)  # top edge
+    assert inward_shift(170.0, 179.0, 1.0, 180.0) == 0.0  # touching the edge is not cut
 
 
 def test_honeycomb_packing_is_a_look_choice(tmp_path: Path) -> None:
