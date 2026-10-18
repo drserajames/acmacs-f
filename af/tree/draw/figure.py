@@ -15,7 +15,7 @@ from typing import Any
 
 from af.store import StoreRef
 
-from .aa_labels import LabelParams, select_labels
+from .aa_labels import LabelHide, LabelParams, hide_labels, select_labels
 from .defaults import load_defaults
 from .i7 import tree_block, write_i7
 from .layout import HideRules, Layout, compute_layout, rows_matching
@@ -56,6 +56,8 @@ class FigureConfig:
     select: SelectParams = field(default_factory=lambda: load_defaults().clades)
     bands: BandParams = field(default_factory=lambda: load_defaults().bands)
     labels: LabelParams = field(default_factory=lambda: load_defaults().labels)
+    # Labels a round chooses not to print, by name (design rule 9): counted in the draw report.
+    hide_labels: list[LabelHide] = field(default_factory=list)
     overrides: Overrides = field(default_factory=Overrides)
     dash_bars: list[DashBar] = field(default_factory=list)
     strains: list[tuple[str, str]] = field(default_factory=list)  # (leaf id, label text)
@@ -94,6 +96,11 @@ def make_figure(
         raise SectionOverrideError(f"clade label size(s) for clade(s) not shown: {unknown}")
     bands = [(b.first, b.last) for cs in selection.shown for b in cs.bands]
     labels, label_counts = select_labels(tree, layout, bands, config.labels)
+    if config.hide_labels:
+        labels, label_counts["hidden by name"] = hide_labels(
+            tree, layout, labels, config.hide_labels
+        )
+        label_counts["labels"] = len(labels)
 
     dash_bars = dash_bar_counts(tree, layout.leaf_nodes, config.dash_bars)
 
@@ -160,6 +167,7 @@ def make_figure(
             for lab in labels
         ],
         "aa_label_filter": label_counts,
+        "aa_label_hides": [asdict(h) for h in config.hide_labels],
         "aa_label_placement": drawn.label_metrics,
         "dash_bars": dash_bars,
         "strains": drawn.strains,
