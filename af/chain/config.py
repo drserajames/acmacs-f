@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from af.chain.adjust import ColumnBasisAdjustment
+from af.chain.append import ORDERS, Order, Rerun, SettingsRerun
 from af.chain.backend import DEFAULT_MOVE_LOWER_RULE, MOVE_LOWER_RULES
 from af.chain.select import DropCell, RemoveRule, Selection, SeraPolicy
 from af.chain.sequence_select import SequenceRemovals
@@ -42,6 +43,8 @@ from af.chart.merge import ColumnBasisConvention
 from af.chart.sera import read_markers
 from af.util.artefacts import sha256_path
 from af.util.config import load_config
+
+CHOSEN_PROVENANCE = "chosen.ace.provenance.json"  # a step's build record (af.chain.engine CHOSEN)
 
 
 class ChainConfigError(ValueError):
@@ -160,6 +163,19 @@ class TableSelection:
     date_from: str | None = None  # ISO date, inclusive
     date_to: str | None = None
     exclude: list[str] = field(default_factory=list)  # table ids; each must match a table
+    # "date" (every table in test-date order) or "append-to-published": the published chain's
+    # order kept and new tables appended, late ones recorded (af.chain.append; Q164, Q224)
+    order: str = "date"
+    rerun_from: list[Rerun] = field(default_factory=list)  # revised or dropped tables, decided
+    rerun_settings: list[SettingsRerun] = field(default_factory=list)  # changed parameters, decided
+
+    def __post_init__(self) -> None:
+        if self.order not in ORDERS:
+            raise ChainConfigError(f"[tables] order must be one of {ORDERS}: {self.order!r}")
+        if (self.rerun_from or self.rerun_settings) and self.order != "append-to-published":
+            raise ChainConfigError(
+                '[tables] rerun_from and rerun_settings go with order = "append-to-published"'
+            )
 
 
 @dataclass(frozen=True)
@@ -226,6 +242,13 @@ class ChainConfig:
     drop_cells: list[DropCell] = field(default_factory=list)  # readings kept out of the map
     # points left out by their sequence, decided when the chain is loaded (af.chain.sequence_select)
     sequence_removals: SequenceRemovals | None = None
+    # set when the order is "append-to-published" (af.chain.append): the published version kept,
+    # late tables and acknowledged re-runs, for the records
+    append: dict[str, Any] | None = None
+    # the published version that order keeps, and the settings re-runs accepted: checked against
+    # the steps' parameters when they are built (af.chain.append.check_settings); not a record
+    append_published: Any = None
+    rerun_settings: list[SettingsRerun] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.column_basis_adjustments and not self.options.merge_all:
@@ -254,8 +277,17 @@ class ChainConfig:
         if len(set(ids)) != len(ids):
             raise ChainConfigError(f"{self.name}: duplicate table ids")
         order = [(t.date, t.suffix) for t in self.tables]
-        if order != sorted(order):
+        if self.append is None and order != sorted(order):
             raise ChainConfigError(f"{self.name}: tables are not in (date, suffix) order")
+        if self.append is not None and (self.options.merge_all or self.first_map is not None):
+            raise ChainConfigError(
+                f"{self.name}: append-to-published is for a chain of steps, not merge_all or"
+                " first_map"
+            )
+
+    def late(self, table_id: str) -> dict[str, Any] | None:
+        """A late table's record (af.chain.append), or None."""
+        return None if self.append is None else self.append["late_tables"].get(table_id)
 
 
 # Options a chain file must state: their defaults are not neutral. Sarah, 2 Oct 2026: a map built
@@ -301,6 +333,9 @@ def load_chain_config(
             for x in tables
             if (start is None or x.date >= start) and (end is None or x.date <= end)
         ]
+        append, published = None, None
+        if t.order == "append-to-published":
+            tables, append, published = _append_order(path, t, tables, ref, tables_store)
         policy = _sera_policy(path, s.select)
         removals = (
             _sequence_removals(path, s.select, tables, ref, tables_store, policy)
@@ -321,12 +356,17 @@ def load_chain_config(
             s.adjust_column_bases,
             s.select.drop_cell,
             removals,
+            append,
+            published,
+            list(t.rerun_settings),
         )
     if s.select.remove_by_sequence:
         raise ChainConfigError(
             f"{path}: select.remove_by_sequence needs tables from the store (their rows say which"
             " sequence each point is)"
         )
+    if t.order != "date":
+        raise ChainConfigError(f"{path}: [tables] order = {t.order!r} needs tables from the store")
     if t.directory is not None and t.group is not None and t.dataset is None:
         tables = tables_from_directory(t.directory, t.group, start, end, set(t.exclude))
         return ChainConfig(
@@ -416,6 +456,91 @@ def _sequence_removals(
     )
 
 
+def _append_order(
+    chain_path: Path, t: TableSelection, tables: list[TableRef], ref: Any, store_root: Path
+) -> tuple[list[TableRef], dict[str, Any], Any]:
+    """`[tables] order = "append-to-published"` (af.chain.append): this chain dataset's published
+    CURRENT version's order kept, today's new tables after it. Returns the tables, the record,
+    and the published version (for `check_settings` once the steps exist)."""
+    import json
+
+    from af.chain.__main__ import dataset_from_path
+    from af.chain.append import Published, append_order, table_changes
+    from af.store.ref import StoreError, StoreRef
+    from af.store.store import Store
+    from af.tables.model import Table
+
+    dataset = dataset_from_path(chain_path)
+    store = Store.open(store_root)
+    try:
+        current = store.current("chains", dataset)
+    except StoreError:
+        current = None  # the first version
+    today_dir = store.resolve(ref)
+    today_doc = json.loads((today_dir / "index.json").read_text())
+    today_sha = {x.table_id: sha256_path(x.path) for x in tables}  # what keys each step
+    published, old_dir = None, None
+    if current is not None:
+        vdir = store.resolve(current)
+        doc = json.loads((vdir / "chain.json").read_text())
+        old_dir = store.resolve(StoreRef.from_json(doc["config"]["tables_source"]))
+        published = Published(
+            current.version,
+            [(s["table_id"], _step_table_sha(vdir / s["directory"])) for s in doc["steps"]],
+            vdir,
+        )
+
+    def read(directory: Path, table_id: str) -> Table:
+        text = (directory / "tables" / f"{table_id}.json").read_text(encoding="utf-8")
+        return Table.from_json(json.loads(text))
+
+    def changes(table_id: str) -> dict[str, Any]:
+        assert old_dir is not None
+        got = table_changes(read(old_dir, table_id), read(today_dir, table_id))
+        return got or {"chart (map content the same: an af chart-format change)": 1}
+
+    def why_dropped(table_id: str) -> tuple[str, str]:
+        if table_id in today_doc["tables"]:
+            if table_id in t.exclude:
+                return "excluded", "excluded by the chain file ([tables] exclude)"
+            return "excluded", "outside the chain file's date_from/date_to"
+        retired = today_doc.get("retired", {}).get(table_id)
+        if retired is None:
+            return "retired", "no longer in the tables store"
+        heirs = [
+            tid for tid, e in today_doc["tables"].items()
+            if e.get("source_key") == retired.get("source_key")
+        ]  # fmt: skip
+        if heirs:
+            return "retired", f"retired; its source ({retired.get('source_key')}) is now {heirs[0]}"
+        return "retired", (
+            f"retired with no successor in this dataset (source {retired.get('source_key')}): gone"
+            " from the source, or moved to another group"
+        )
+
+    order: Order = append_order(
+        dataset, published, tables, today_sha, t.rerun_from, changes, why_dropped
+    )
+    record = order.to_json(published)
+    if t.rerun_settings:
+        record["rerun_settings"] = [
+            {"keys": r.keys, "decided": r.decided} for r in t.rerun_settings
+        ]
+    return order.tables, record, published
+
+
+def _step_table_sha(step: Path) -> str:
+    """The table chart a published step was built from: its step.json `table_sha256`, or for a
+    first step without one, its build's one input."""
+    import json
+
+    record = json.loads((step / "step.json").read_text())
+    if record.get("table_sha256"):
+        return str(record["table_sha256"])
+    inputs = json.loads((step / f"{CHOSEN_PROVENANCE}").read_text())["inputs"]
+    return str(inputs[-1]["sha256"])
+
+
 def _sera_policy(chain_path: Path, select: Selection) -> SeraPolicy:
     """The ferret-only policy with its markers file: `[select] non_ferret_markers`, or else
     rules/sera/non_ferret_markers.tsv in the data repo the chain file lives in (the directory
@@ -441,6 +566,8 @@ def _sera_policy(chain_path: Path, select: Selection) -> SeraPolicy:
 def _selection(t: TableSelection) -> dict[str, Any]:
     """The chain file's [tables] as written (store excluded: refused above)."""
     out = {k: v for k, v in asdict(t).items() if k != "store" and v not in (None, [])}
+    if out.get("order") == "date":  # the default, written only when chosen otherwise
+        del out["order"]
     return {k: str(v) if isinstance(v, Path) else v for k, v in out.items()}
 
 
@@ -500,6 +627,7 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
             else {}
         ),
         **({"selection": cfg.selection} if cfg.selection else {}),
+        **({"append": cfg.append} if cfg.append is not None else {}),
         "non_ferret_sera": cfg.sera_policy.to_json(),
         **(
             {"column_basis_adjustments": [a.to_json() for a in cfg.column_basis_adjustments]}

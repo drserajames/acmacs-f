@@ -401,6 +401,14 @@ def run_chain(
     # it, <store_root>/<name>. Pipeline state goes in <root>/state (DatasetWork.state).
     root = Path(root) if root is not None else Path(store_root) / cfg.name
     steps = chain_steps(cfg, root, Mapper(optimiser, split, site))
+    if cfg.append_published is not None:  # a monthly chain: its published steps' keys stand
+        from af.chain.append import check_settings
+        from af.pipeline.record import canonical
+
+        check_settings(
+            cfg.name, cfg.append_published, [t.table_id for t in cfg.tables],
+            [canonical(s.parameters) for s in steps], cfg.rerun_settings,
+        )  # fmt: skip
     # Inputs are named and outputs recorded relative to the chain root, so a store or a tables
     # checkout moved to another root (a sync to o or the HPC) re-runs nothing.
     pipeline = Pipeline(steps, state_dir=root / "state", runner=runner or LocalRunner(), root=root)
@@ -855,6 +863,8 @@ def _merge_step(
         },
         **_search(optimiser, {"incremental": all_incremental, "scratch": all_scratch}),
         "trapped_loop": {"incremental": _loop(all_incremental), "scratch": _loop(all_scratch)},
+        # appended after a published chain although dated before its latest table (Q164)
+        **({"late": late} if (late := cfg.late(table_ref.table_id)) else {}),
         **({"removed": removed} if cfg.remove else {}),
         **({"removed_by_sequence": by_sequence} if cfg.sequence_removals is not None else {}),
         **({"dropped_cells_by_rule": dropped} if dropped else {}),
