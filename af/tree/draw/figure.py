@@ -7,13 +7,15 @@ hierarchy, and a :class:`FigureConfig`. Output: the PDF, its I7 JSON and a draw 
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from af.store import StoreRef
+from af.util.fonts import FigureFonts
 
 from .aa_labels import LabelHide, LabelParams, hide_labels, select_labels
 from .defaults import load_defaults
@@ -72,6 +74,13 @@ class FigureConfig:
     # matching the shipped page (no B/Vic title, "A(H1N1)" on H1) never renames the figure
     # in the I7, the report heading or the caption.
     drawn_title: str | None = None
+    # Bracket text per clade, where a figure prints more than the clade's name: the shipped pages
+    # print the older name upstream records beside the current one, "<name> (<older name>)"
+    # (legacy_clade_display). A clade not drawn is not printed, so an entry for it is unused.
+    clade_display: dict[str, str] = field(default_factory=dict)
+    # The round's figure fonts (af.util.fonts, figures.toml): the whole figure, label placement
+    # included, is drawn in them and their files are recorded in the I7. None: DejaVu, as before.
+    fonts: FigureFonts | None = None
 
 
 def make_figure(
@@ -127,8 +136,17 @@ def make_figure(
         clade_label_sizes=dict(config.clade_label_sizes),
         leaf_names=config.leaf_names,
         drawn_title=config.drawn_title,
+        clade_display=dict(config.clade_display),
+        figure_fonts=config.fonts is not None,
     )
-    drawn = render(spec, pdf)
+    # Every text, label placement included, is measured and drawn in the figure fonts. They are
+    # registered here, in the process that draws: a spawned worker (af.tree.draw.stage) starts
+    # with matplotlib's own fonts only, and would draw in its fallback with just a warning.
+    fonts = config.fonts.files.resolve() if config.fonts is not None else None
+    with fonts.context() if fonts is not None else contextlib.nullcontext():
+        drawn = render(spec, pdf)
+    if config.fonts is not None:  # the font files are inputs (rule 5)
+        inputs = {**inputs, **{k: v["sha256"] for k, v in config.fonts.inputs().items()}}
     write_i7(
         pdf,
         config.title,
@@ -185,6 +203,31 @@ def make_figure(
     }
     pdf.with_suffix(".draw.json").write_text(json.dumps(report, indent=1, default=str))
     return report
+
+
+class OlderNames(Protocol):
+    """What legacy_clade_display asks of a clade set (af.clades.nomenclature.CladeSet)."""
+
+    @property
+    def version(self) -> str: ...
+
+    def __contains__(self, name: object) -> bool: ...
+
+    def legacy_name(self, name: str) -> str | None: ...
+
+
+def legacy_clade_display(clade_set: OlderNames, clades: Iterable[str]) -> dict[str, str]:
+    """``"<name> (<older name>)"`` for each clade upstream records an older name for, as the
+    report pages have always printed a clade (af.clades.nomenclature.CladeSet.legacy_name).
+    A clade not in ``clade_set`` is an error, never a name printed bare by default."""
+    out = {}
+    for clade in clades:
+        if clade not in clade_set:
+            raise ValueError(f"clade {clade!r} is not in {clade_set.version}")
+        older = clade_set.legacy_name(clade)
+        if older and older != clade:
+            out[clade] = f"{clade} ({older})"
+    return out
 
 
 def arrange(

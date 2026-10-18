@@ -108,6 +108,18 @@ class Geometry:
     # None = fit this tree.
     x_max: float | None = None
     row_capacity: int | None = None
+    # Shipped placements (R4 review, 18 Oct 2026); None keeps af's own rule.
+    # Strain (vaccine) labels left-aligned at this x, in the margin where no substitution leader
+    # runs (leaders always run right, to their node); None: right-aligned just left of the tree.
+    strain_x: float | None = None
+    # The continent inset's preferred corner (left x, bottom y): the clear spot nearest to it is
+    # taken, never one over ink; None: the lowest, then leftmost clear spot. And its width.
+    inset_left: float | None = None
+    inset_bottom: float | None = None
+    inset_width: float = 140.0
+    # Dash-bar legend rows: the first row's bottom (None: 16 above the rows) and the row pitch.
+    legend_bottom: float | None = None
+    legend_pitch: float = 6.5
 
 
 @dataclass
@@ -144,6 +156,11 @@ class FigureSpec:
     # and H3 tree pages carried the same layer.
     leaf_names: bool = False
     drawn_title: str | None = None  # drawn instead of ``title`` ("" = no title); see FigureConfig
+    # Bracket text per clade where it differs from the name (FigureConfig.clade_display).
+    clade_display: dict[str, str] = field(default_factory=dict)
+    # Drawn in a round's figure fonts (FigureConfig.fonts, af.util.fonts): text uses the rc sans
+    # and mono families. False: DejaVu Sans and DejaVu Sans Mono, as before the figure fonts.
+    figure_fonts: bool = False
 
 
 @dataclass
@@ -185,6 +202,11 @@ class _Page:
         """A row is far thinner than a printable line on a big tree; never go below the
         geometry's row stroke (the shipped pages draw 0.15 units whatever the row count)."""
         return max(self.g.row_stroke, self.row_h)
+
+
+def _families(spec: FigureSpec) -> tuple[str, str]:
+    """(sans, mono) family names: the figure fonts' rc families, else DejaVu."""
+    return ("sans-serif", "monospace") if spec.figure_fonts else ("DejaVu Sans", "DejaVu Sans Mono")
 
 
 def _text_width(font: FontProperties):
@@ -345,7 +367,7 @@ def _draw_brackets(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> dict[i
             for r in (b.first, b.last + 1):
                 edges[r] = max(edges.get(r, x), x)
             names.append((x + g.clade_name_offset, (y0 + y1) / 2, cs.clade))
-    _place_clade_names(ax, names, g.clade_font, spec.clade_label_sizes)
+    _place_clade_names(ax, names, g.clade_font, spec.clade_label_sizes, spec.clade_display)
     return edges
 
 
@@ -354,6 +376,7 @@ def _place_clade_names(
     names: list[tuple[float, float, str]],
     size: float,
     sizes: Mapping[str, float] | None = None,
+    display: Mapping[str, str] | None = None,
 ) -> None:
     """Write each clade's name beside its bracket, centred on the band.
 
@@ -361,11 +384,12 @@ def _place_clade_names(
     other; a name that would overlap the one above slides down just past it, with a thin
     leader back to its band's middle, so every name stays readable.
     """
-    sizes = sizes or {}
+    sizes, display = sizes or {}, display or {}
     widths = {s: _text_width(FontProperties(size=s)) for s in {size, *sizes.values()}}
     last_end: dict[float, float] = {}
-    for x, mid, text in sorted(names, key=lambda t: (t[0], t[1])):
-        text_size = sizes.get(text, size)
+    for x, mid, clade in sorted(names, key=lambda t: (t[0], t[1])):
+        text_size = sizes.get(clade, size)
+        text = display.get(clade, clade)
         half = widths[text_size](text) / 2 + 3  # a clear gap between stacked names
         centre = max(mid, last_end.get(x, -1e9) + half)
         last_end[x] = centre + half
@@ -416,10 +440,11 @@ def _draw_dash_bars(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> None:
             segs.append(((x, y), (x + width, y)))
             cols.append(colour)
         ax.add_collection(LineCollection(segs, colors=cols, linewidths=pg.dash_width))
+        first = g.top - 16 if g.legend_bottom is None else g.legend_bottom
         for k, (text, colour) in enumerate(bar.legend):
             ax.text(
                 x + width / 2,
-                g.top - 16 + k * 6.5,
+                first + k * g.legend_pitch,
                 text,
                 color=colour,
                 fontsize=g.legend_font,
@@ -434,7 +459,7 @@ def _draw_strains(
 ) -> tuple[list[Box], list[dict]]:
     """Strain labels right-aligned just left of the tree ink on their row, never overlapping."""
     g, t, lay = pg.g, spec.tree, spec.layout
-    font = FontProperties(family="DejaVu Sans", size=g.strain_font)
+    font = FontProperties(family=_families(spec)[0], size=g.strain_font)
     width = _text_width(font)
     row_of = {t.leaf_id[i]: r for r, i in enumerate(lay.leaf_nodes)}
     boxes: list[Box] = []
@@ -445,6 +470,12 @@ def _draw_strains(
             report.append({"leaf": leaf_id, "text": text, "drawn": False})
             continue
         y = float(pg.row_y(r))
+        if g.strain_x is not None:
+            at = _margin_strain_box(g.strain_x, y, width(text), g.strain_font * 1.1, boxes, grid)
+            ax.text(at[0], (at[1] + at[3]) / 2, text, ha="left", va="center", fontproperties=font)
+            boxes.append(at)
+            report.append({"leaf": leaf_id, "text": text, "drawn": True, "row": int(r)})
+            continue
         near = grid.ink[max(0, int(y) - 3) : int(y) + 4, : int(pg.tree_right)].any(axis=0)
         cols = np.flatnonzero(near)
         x_right = max(
@@ -471,6 +502,20 @@ def _draw_strains(
     return boxes, report
 
 
+def _margin_strain_box(x: float, y: float, w: float, h: float, boxes: list[Box], grid: Grid) -> Box:
+    """A strain label in the left margin at ``x``: on its row, or the nearest row offset that
+    overlaps no other strain label and no ink. None clear is an error, not an overlap."""
+    for dy in (0, -h, h, -2 * h, 2 * h, -3 * h, 3 * h):
+        box: Box = (x, y + dy - h / 2, x + w, y + dy + h / 2)
+        clear = not any(
+            min(box[2], o[2]) > max(box[0], o[0]) and min(box[3], o[3]) > max(box[1], o[1])
+            for o in boxes
+        )
+        if clear and not grid.cost(box):
+            return box
+    raise ValueError(f"no clear margin space for a strain label at x {x}, y {y:.0f}")
+
+
 def _draw_leaf_names(ax: Axes, spec: FigureSpec, pg: _Page) -> int:
     """One text per drawn row, "<name> <leaf id>" (names repeat across passages; the id makes
     each search hit one leaf), left-aligned just right of the leaf's tip at the row's height.
@@ -486,7 +531,7 @@ def _draw_leaf_names(ax: Axes, spec: FigureSpec, pg: _Page) -> int:
             float(pg.row_y(r)),
             f"{t.name[i]} {t.leaf_id[i]}",
             fontsize=1.0,
-            family="DejaVu Sans",
+            family=_families(spec)[0],
             alpha=0.0,
             ha="left",
             va="center",
@@ -496,7 +541,7 @@ def _draw_leaf_names(ax: Axes, spec: FigureSpec, pg: _Page) -> int:
 
 def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: list[Box]):
     g = pg.g
-    font = FontProperties(family="DejaVu Sans Mono", size=g.label_font)
+    font = FontProperties(family=_families(spec)[1], size=g.label_font)
     for o in obstacles:
         grid.add_box(o)
     items = [
@@ -537,11 +582,13 @@ class InsetPlacementError(ValueError):
     """No clear space on the tree side of the page for the continent inset."""
 
 
-def _inset_polygons() -> tuple[dict[str, list[list[tuple[float, float]]]], float, float]:
-    """Continent outlines scaled to the inset's 140-unit width, origin at the inset's corner;
-    plus the inset's width and height."""
+def _inset_polygons(
+    width: float = 140.0,
+) -> tuple[dict[str, list[list[tuple[float, float]]]], float, float]:
+    """Continent outlines scaled to the inset's width, origin at the inset's corner; plus the
+    inset's width and height."""
     data = json.loads(resources.files(__package__).joinpath("continents.json").read_text())
-    scale = 140.0 / data["size"][0]
+    scale = width / data["size"][0]
     out: dict[str, list[list[tuple[float, float]]]] = {}
     for continent in INSET_CONTINENTS:
         path = data["paths"][continent]
@@ -561,7 +608,13 @@ def _inset_polygons() -> tuple[dict[str, list[list[tuple[float, float]]]], float
 
 
 def place_inset(
-    grid: Grid, w: float, h: float, lowest: float, right: float, pad: float = 2.0
+    grid: Grid,
+    w: float,
+    h: float,
+    lowest: float,
+    right: float,
+    pad: float = 2.0,
+    near: tuple[float, float] | None = None,
 ) -> Box:
     """The lowest, then leftmost, ``w`` x ``h`` box with no ink under it (``pad`` around it),
     whose bottom is at most ``lowest`` and right edge at most ``right``.
@@ -586,8 +639,13 @@ def place_inset(
     clear_rows = np.flatnonzero((inked == 0).any(axis=1))
     if not len(clear_rows):
         raise InsetPlacementError(f"no clear {w:.0f} x {h:.0f} space left of x {right:.0f}")
-    bi = int(clear_rows[-1])
-    bj = int(np.flatnonzero(inked[bi] == 0)[0])
+    if near is not None:  # the clear corner nearest the wanted one (left x, top y)
+        ti, tj = (near[1] - pad) / c, (near[0] - pad) / c
+        distance = np.where(inked == 0, (i - ti) ** 2 + (j - tj) ** 2, np.inf)
+        bi, bj = (int(k) for k in np.unravel_index(int(np.argmin(distance)), distance.shape))
+    else:
+        bi = int(clear_rows[-1])
+        bj = int(np.flatnonzero(inked[bi] == 0)[0])
     x0, y0 = bj * c + pad, bi * c + pad
     return (x0, y0, x0 + w, y0 + h)
 
@@ -605,8 +663,11 @@ def _draw_key(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid) -> Box | None:
             ax.add_patch(plt.Rectangle((22, y), 8, 8, color=colour))
             ax.text(34, y + 4, clade, fontsize=7, va="center")
         return None
-    polys, w, h = _inset_polygons()
-    box = place_inset(grid, w, h, lowest=pg.bottom - g.inset_gap, right=pg.tree_right)
+    polys, w, h = _inset_polygons(g.inset_width)
+    near = None
+    if g.inset_left is not None and g.inset_bottom is not None:
+        near = (g.inset_left, g.inset_bottom - h)
+    box = place_inset(grid, w, h, lowest=pg.bottom - g.inset_gap, right=pg.tree_right, near=near)
     for continent, parts in polys.items():
         ax.add_collection(
             PolyCollection(
@@ -648,9 +709,12 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
         ax.text(g.tree_left - 4, 16, title, fontsize=g.title_font, ha="left", va="center")
     names = _draw_leaf_names(ax, spec, pg) if spec.leaf_names else None
 
-    # Type 42 fonts carry a Unicode map, so viewers can search the name layer; matplotlib's
-    # default Type 3 has none. Only with the layer, so other figures keep their bytes.
-    with plt.rc_context({"pdf.fonttype": 42} if spec.leaf_names else {}):
+    # Without figure fonts the name layer is written Type 42 (a Unicode map, so viewers can search
+    # it), and only with the layer, so other figures keep their bytes. The figure fonts set their
+    # own type (af.util.fonts.pdf_fonttype; TeX Gyre is Type 3, whose
+    # text stays searchable): forcing 42 there only makes readers flag a font type mismatch.
+    searchable = spec.leaf_names and not spec.figure_fonts
+    with plt.rc_context({"pdf.fonttype": 42} if searchable else {}):
         fig.savefig(pdf_path, metadata={"CreationDate": None, "Creator": "acmacs-f"})
     plt.close(fig)
     return Drawn(placed, metrics, strain_report, continents_not_in_legend(spec), names, inset)
