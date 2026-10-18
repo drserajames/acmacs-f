@@ -205,6 +205,33 @@ def test_move_lower_runs_the_rule_and_records_it(made, monkeypatch):
         assert _current(made.root) == made.version
 
 
+def test_move_lower_honours_ad_last_rounds_cap(made, monkeypatch):
+    import af.map.optimise as optimise
+
+    real = optimise.resolve_trapped
+    seen = {}
+
+    @functools.wraps(real)
+    def spy(problem, layout, **kwargs):
+        seen.update(kwargs)
+        return real(problem, layout, **kwargs)
+
+    monkeypatch.setattr(optimise, "resolve_trapped", spy)
+    assert _finish(made, "--move-lower", "--move-lower-rule", "ad-last-round-1") == 0
+    assert seen["move_lower"] is True and seen["move_lower_rule"] is optimise.AD_LAST_ROUND
+    step = json.loads((_finish_root(made) / "steps/0000/step.json").read_text())
+    rule = step["finish"]["rule"]["move_lower_rule"]
+    assert rule["name"] == "ad-last-round-1" and rule["max_rounds"] == 1
+    assert len(step["finish"]["move_lower"]["rounds"]) <= 1
+
+
+def test_a_move_lower_rule_without_move_lower_is_refused(made):
+    with pytest.raises(ValueError, match="without move_lower"):
+        _finish(made, "--move-groups", "--move-lower-rule", "ad-last-round-1")
+    with pytest.raises(ValueError, match="unknown move-lower rule"):
+        FinishRule(move_lower=True, move_lower_rule="ad-last-round")
+
+
 def test_a_layout_whose_stress_is_not_its_own_is_refused(made, monkeypatch):
     import dataclasses
 

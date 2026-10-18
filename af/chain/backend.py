@@ -24,6 +24,12 @@ MapResult = dict[str, Any]
 # fresh evaluation, never a different problem (CoreOptimiser.finish).
 FINISH_STRESS_TOLERANCE = 1e-9
 
+# The move-lower rules a chain or a finish may name (MapOptions.move_lower_rule), by the name each
+# rule records, with the af.map.optimise constant that holds it. Names, not the rules, so a
+# config can be checked where the core is not built.
+MOVE_LOWER_RULES = {"move-lower-1": "MOVE_LOWER_RULE", "ad-last-round-1": "AD_LAST_ROUND"}
+DEFAULT_MOVE_LOWER_RULE = "move-lower-1"  # what move_lower meant before rules had names
+
 
 class Optimiser(Protocol):
     name: str
@@ -47,10 +53,9 @@ class Optimiser(Protocol):
         each step and chain; maps made before it was recorded used 5."""
         ...
 
-    @property
-    def move_lower_rule(self) -> dict[str, Any] | None:
-        """The rule the trapped-point loop applies with `move_lower` (`move_lower_rule()`), as a
-        step records it; None for an optimiser that has no such rule (the stand-in)."""
+    def move_lower_rule(self, name: str = DEFAULT_MOVE_LOWER_RULE) -> dict[str, Any] | None:
+        """The rule `name` the trapped-point loop applies with `move_lower` (`move_lower_rule()`),
+        as a step records it; None for an optimiser that has no such rule (the stand-in)."""
         ...
 
     def optimise(
@@ -63,6 +68,7 @@ class Optimiser(Protocol):
         move_groups: bool = False,
         resolve_best: int = 1,
         move_lower: bool = False,
+        move_lower_rule: str = DEFAULT_MOVE_LOWER_RULE,
     ) -> list[MapResult]: ...
 
     def relax_chunk(
@@ -83,6 +89,7 @@ class Optimiser(Protocol):
         move_groups: bool = False,
         resolve_best: int = 1,
         move_lower: bool = False,
+        move_lower_rule: str = DEFAULT_MOVE_LOWER_RULE,
     ) -> list[MapResult]: ...
 
     def grid_test(self, layout: np.ndarray, arrays: dict) -> list[dict]: ...
@@ -92,20 +99,33 @@ class Optimiser(Protocol):
     ) -> MapResult: ...
 
 
-def move_lower_rule() -> dict[str, Any]:
-    """`af.map.optimise.MOVE_LOWER_RULE` as a step records it (JSON), with the round cap the
-    chain gives it: resolve_trapped's own max_rounds, which the chain never sets. A map made under
-    another rule, or another cap, is another map."""
-    from af.map.optimise import MOVE_LOWER_RULE, resolve_trapped
+def move_lower_rule(name: str = DEFAULT_MOVE_LOWER_RULE) -> dict[str, Any]:
+    """The move-lower rule `name` (MOVE_LOWER_RULES) as a step records it (JSON), with the round
+    cap it runs under: its own (AD_LAST_ROUND: 1), else resolve_trapped's max_rounds, which the
+    chain never sets. A map made under another rule, or another cap, is another map."""
+    from af.map.optimise import resolve_trapped
 
-    max_rounds = inspect.signature(resolve_trapped).parameters["max_rounds"].default
-    return json.loads(json.dumps({**asdict(MOVE_LOWER_RULE), "max_rounds": max_rounds}))
+    rule = _rule(name)
+    default = inspect.signature(resolve_trapped).parameters["max_rounds"].default
+    return json.loads(json.dumps({**asdict(rule), "max_rounds": rule.max_rounds or default}))
+
+
+def _rule(name: str) -> Any:
+    """The af.map.optimise.MoveLowerRule called `name`; an unknown name is an error."""
+    import af.map.optimise
+
+    if name not in MOVE_LOWER_RULES:
+        raise ValueError(f"unknown move-lower rule {name!r}: known {sorted(MOVE_LOWER_RULES)}")
+    return getattr(af.map.optimise, MOVE_LOWER_RULES[name])
 
 
 def _move_lower_record(fixed: Any) -> dict[str, Any]:
-    """resolve_trapped's move-lower rounds, in step-record terms: why it stopped, and per round
-    tried (the rejected last one included) which points it tried and kept, and the stresses."""
+    """resolve_trapped's move-lower rounds, in step-record terms: the rule that ran (its own
+    record of it, so a map says what ran on it, not only what its config asked for), why it
+    stopped, and per round tried (the rejected last one included) which points it tried and kept,
+    and the stresses."""
     return {
+        "rule": fixed.move_lower_rule.name,
         "stop": fixed.move_lower_stop,
         "rounds": [
             {
@@ -147,15 +167,25 @@ class FinishRule:
 
     move_groups: bool = False  # af.map.optimise.resolve_trapped's group pass (DECISIONS Q61, Q78)
     move_lower: bool = False  # its move-lower rule (af.map.optimise.MOVE_LOWER_RULE; Q195)
+    # which move-lower rule, by name (MOVE_LOWER_RULES); AD's last round is "ad-last-round-1" (Q198)
+    move_lower_rule: str = DEFAULT_MOVE_LOWER_RULE
 
     def __post_init__(self) -> None:
-        if not any(asdict(self).values()):
+        if not (self.move_groups or self.move_lower):
             raise ValueError("a finish rule must turn something on, or it would change nothing")
+        if self.move_lower_rule not in MOVE_LOWER_RULES:
+            raise ValueError(
+                f"unknown move-lower rule {self.move_lower_rule!r}:"
+                f" known {sorted(MOVE_LOWER_RULES)}"
+            )
+        if self.move_lower_rule != DEFAULT_MOVE_LOWER_RULE and not self.move_lower:
+            raise ValueError(f"move-lower rule {self.move_lower_rule!r} without move_lower")
 
     def to_json(self) -> dict[str, Any]:
         out = {"loop": "af.map.optimise.resolve_trapped", **asdict(self)}
+        del out["move_lower_rule"]  # the name is in the record below, which says what it does
         if self.move_lower:  # which rule, so a later rule is never taken for this one
-            out["move_lower_rule"] = move_lower_rule()
+            out["move_lower_rule"] = move_lower_rule(self.move_lower_rule)
         return out
 
 
@@ -192,9 +222,8 @@ class CoreOptimiser:
 
         return INCREMENTAL_REFINED
 
-    @property
-    def move_lower_rule(self) -> dict[str, Any]:
-        return move_lower_rule()
+    def move_lower_rule(self, name: str = DEFAULT_MOVE_LOWER_RULE) -> dict[str, Any]:
+        return move_lower_rule(name)
 
     def _problem(self, arrays: dict) -> Any:
         from af.map.optimise import MapProblem
@@ -256,6 +285,7 @@ class CoreOptimiser:
         move_groups=False,
         resolve_best=1,
         move_lower=False,
+        move_lower_rule=DEFAULT_MOVE_LOWER_RULE,
     ):
         from af.map.optimise import refine, relax
 
@@ -279,7 +309,7 @@ class CoreOptimiser:
         refined = rough or start_layout is not None
         return self._resolve(
             problem, maps, move_groups, resolve_best=resolve_best, refined=refined,
-            move_lower=move_lower,
+            move_lower=move_lower, move_lower_rule=move_lower_rule,
         )  # fmt: skip
 
     def relax_chunk(self, arrays, first_start, n_starts, dim, seed, start_layout):
@@ -302,7 +332,14 @@ class CoreOptimiser:
         return [self._as_dict(p, result.threads) for p in result.projections]
 
     def combine(
-        self, arrays, chunks, incremental, move_groups=False, resolve_best=1, move_lower=False
+        self,
+        arrays,
+        chunks,
+        incremental,
+        move_groups=False,
+        resolve_best=1,
+        move_lower=False,
+        move_lower_rule=DEFAULT_MOVE_LOWER_RULE,
     ):
         from af.map.optimise import refine, sort_projections
 
@@ -314,7 +351,9 @@ class CoreOptimiser:
         # the relax threads of the chunks, whatever order the maps are in now
         relax = [{"threads": r["threads"], "cpus": r["cpus"]} for r in chunks if "threads" in r]
         maps = [self._as_dict(p) for p in projections]
-        return self._resolve(problem, maps, move_groups, relax, resolve_best, refined, move_lower)
+        return self._resolve(
+            problem, maps, move_groups, relax, resolve_best, refined, move_lower, move_lower_rule
+        )
 
     def _resolve(
         self,
@@ -325,6 +364,7 @@ class CoreOptimiser:
         resolve_best: int = 1,
         refined: bool | None = None,
         move_lower: bool = False,
+        move_lower_rule: str = DEFAULT_MOVE_LOWER_RULE,
     ) -> list[MapResult]:
         """The trapped-point loop on the best `resolve_best` maps (MapOptions.resolve_best); the
         lowest is kept. `relax` is the threads/CPUs of each split chunk's starts; unsplit, the
@@ -339,7 +379,9 @@ class CoreOptimiser:
         stage made that so (`refined`), how many it refined (`refine_best`). `refined` None: the
         caller did not say, and neither is recorded.
 
-        With `move_lower`, the loop's move-lower rule runs too, and the kept map records its
+        With `move_lower`, the move-lower rule `move_lower_rule` runs too (by name,
+        MOVE_LOWER_RULES: AD's last round runs after every map's loop, as AD's grid test made
+        it on every map of every step; 06, Q198), and the kept map records its
         rounds (`resolved_lower`), also when it found nothing to move."""
         from af.map.optimise import available_cpus, resolve_trapped
 
@@ -357,6 +399,7 @@ class CoreOptimiser:
                 threads=self.threads,
                 move_groups=move_groups,
                 move_lower=move_lower,
+                move_lower_rule=_rule(move_lower_rule),
             )
             threads = int(fixed.threads)
             groups_of[rank] = _group_record(fixed.groups)
@@ -421,6 +464,7 @@ class CoreOptimiser:
             threads=self.threads,
             move_groups=rule.move_groups,
             move_lower=rule.move_lower,
+            move_lower_rule=_rule(rule.move_lower_rule),
         )
         p = fixed.projection
         return {
@@ -484,7 +528,9 @@ class StubOptimiser:
     key = "stub"
     numerics: str | None = None  # numpy on whatever machine: it names no arithmetic
     refine_best: int | None = None  # every start is relaxed once
-    move_lower_rule: dict[str, Any] | None = None  # it has no trapped-point loop
+
+    def move_lower_rule(self, name: str = DEFAULT_MOVE_LOWER_RULE) -> dict[str, Any] | None:
+        return None  # it has no trapped-point loop
 
     def optimise(
         self,
@@ -496,6 +542,7 @@ class StubOptimiser:
         move_groups=False,
         resolve_best=1,
         move_lower=False,
+        move_lower_rule=DEFAULT_MOVE_LOWER_RULE,
     ):
         if move_lower:
             raise ValueError("the stand-in optimiser has no move-lower rule: that needs the core")
@@ -515,7 +562,14 @@ class StubOptimiser:
         )
 
     def combine(
-        self, arrays, chunks, incremental, move_groups=False, resolve_best=1, move_lower=False
+        self,
+        arrays,
+        chunks,
+        incremental,
+        move_groups=False,
+        resolve_best=1,
+        move_lower=False,
+        move_lower_rule=DEFAULT_MOVE_LOWER_RULE,
     ):
         if move_lower:
             raise ValueError("the stand-in optimiser has no move-lower rule: that needs the core")
