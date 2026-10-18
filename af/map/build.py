@@ -50,6 +50,7 @@ from af.map.curate import (
     MoveOverride,
     apply_block_offset,
     apply_move,
+    near_cap_flags,
 )
 from af.map.figure import chart_points
 from af.map.finish import finish_map
@@ -266,6 +267,7 @@ def apply_moves(
             )
         except CurationError as exc:
             flags.append(str(exc).split(";")[0])
+            flags.extend(near_cap_flags("move", m.name, False, exc.checks))
             reports.append(
                 {
                     "override": m.name,
@@ -276,6 +278,7 @@ def apply_moves(
             )
             continue
         layout, current = result.layout, result.stress_after
+        flags.extend(near_cap_flags("move", m.name, True, result.checks))
         report = {**result.report(rule), "applied": True}
         # A move that reports success and changes nothing is a known failure mode of the scripts
         # this replaces (one ran for weeks moving nothing). Flag it: either the map already had
@@ -584,6 +587,7 @@ def build_map(
             )
         except CurationError as exc:
             flags.append(str(exc).split(";")[0])
+            flags.extend(near_cap_flags("block", b.name, False, exc.checks))
             decisions.setdefault("blocks", []).append(
                 {
                     "override": b.name,
@@ -594,6 +598,7 @@ def build_map(
             )
             continue
         layout = result_b.layout
+        flags.extend(near_cap_flags("block", b.name, True, result_b.checks))
         decisions.setdefault("blocks", []).append({**result_b.report(rule_b), "applied": True})
 
     hidden = hidden_by_rules(chart, cfg)
