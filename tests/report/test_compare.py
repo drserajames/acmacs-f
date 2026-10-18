@@ -215,6 +215,25 @@ def test_geo_counts_dot_differences_per_month() -> None:
     assert res["per_month"]["2026-01"]["clade"]["frac_diff"] == 0
 
 
+def test_geo_clades_are_tallied_by_colour_when_one_side_names_none() -> None:
+    def doc(points: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"periods": [{"period": "2026-01", "locations": [{"name": "P", "points": points}]}]}
+
+    # as shipped: colours only; af: the same dots with their clade names and drawn colours
+    ref = doc([{"color": "#AA0000", "count": 3}, {"color": "transparent", "count": 1}])
+    named = doc([{"color": "#aa0000", "count": 3, "clade": "Test 1"},
+                 {"color": "transparent", "count": 1, "clade": None}])  # fmt: skip
+    res = geo.compare(ref, named)
+    assert res["clade_key"] == "colour"
+    assert res["per_month"]["2026-01"]["clade"]["frac_diff"] == 0
+    # both name clades: tallied by name, so a renamed clade in the same colour is a change
+    renamed = doc([{"color": "#aa0000", "count": 3, "clade": "Test 2"},
+                   {"color": "transparent", "count": 1}])  # fmt: skip
+    res = geo.compare(named, renamed)
+    assert res["clade_key"] == "name"
+    assert res["per_month"]["2026-01"]["clade"]["abs_diff"] == 6
+
+
 def test_expectation_without_approver_is_rejected(tmp_path: Path) -> None:
     limits = tmp_path / "limits.toml"
     limits.write_text(

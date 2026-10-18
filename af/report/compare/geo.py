@@ -2,6 +2,9 @@
 
 Input is the I7 ``geo`` shape, the same as ae's ``geo/<st>-records.json`` (periods -> locations
 -> coloured point counts), where a point may carry a ``clade``; without one, its colour stands in.
+The two sides are tallied by clade name only when both name clades: the shipped ae records carry
+colours alone, so against them af's dots are tallied by the colour they are drawn in too, or every
+dot would count as changed (a name never equals a hex colour).
 Only months present on both sides are compared; months on one side only are listed.
 """
 
@@ -11,7 +14,19 @@ from collections import Counter
 from typing import Any
 
 
-def tallies(doc: dict[str, Any]) -> tuple[dict[str, Counter[str]], dict[str, Counter[str]]]:
+def names_clades(doc: dict[str, Any]) -> bool:
+    """Whether any of the document's dots carries a clade name."""
+    return any(
+        point.get("clade")
+        for period in doc["periods"]
+        for location in period["locations"]
+        for point in location["points"]
+    )
+
+
+def tallies(
+    doc: dict[str, Any], by_name: bool = True
+) -> tuple[dict[str, Counter[str]], dict[str, Counter[str]]]:
     by_location: dict[str, Counter[str]] = {}
     by_clade: dict[str, Counter[str]] = {}
     for period in doc["periods"]:
@@ -21,7 +36,8 @@ def tallies(doc: dict[str, Any]) -> tuple[dict[str, Counter[str]], dict[str, Cou
         for location in period["locations"]:
             for point in location["points"]:
                 loc[location["name"]] += point["count"]
-                cla[point.get("clade") or point["color"].lower()] += point["count"]
+                name = point.get("clade") if by_name else None
+                cla[name or point["color"].lower()] += point["count"]
     return by_location, by_clade
 
 
@@ -41,10 +57,12 @@ def _diff(a: Counter[str], b: Counter[str]) -> dict[str, Any]:
 
 
 def compare(ref: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
-    rl, rc = tallies(ref)
-    nl, nc = tallies(new)
+    by_name = names_clades(ref) and names_clades(new)
+    rl, rc = tallies(ref, by_name)
+    nl, nc = tallies(new, by_name)
     months = sorted(rl.keys() & nl.keys())
     return {
+        "clade_key": "name" if by_name else "colour",  # what "clade" tallies by on both sides
         "months_compared": months,
         "months_only_ref": sorted(rl.keys() - nl.keys()),
         "months_only_new": sorted(nl.keys() - rl.keys()),
