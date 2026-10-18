@@ -160,6 +160,12 @@ def pull_datasets(config: SequencesConfig, pull_id: str) -> list[str]:
     for check in config.lineage_check:
         if name_terms(check.gisaid_subtype) == subtype:
             names.update(check.candidates.values())
+    # where a reference_check sends the records it holds is published by the same run
+    names.update(
+        item.held_dataset
+        for item in config.reference_check
+        if item.dataset in names and item.held_dataset is not None
+    )
     if not names:
         raise ConfigError("<config>", [f"placement: no dataset receives {subtype!r} records"])
     return sorted(names)
@@ -248,6 +254,7 @@ def store_pull(config: SequencesConfig, pull_id: str, runner: Runner) -> dict[st
         )
     _merge(placed, unchecked)
     held_counts, held_groups = _hold_far_records(config, placed, alignments)
+    _check_held_apart(store, config, pull_id, placed, held_groups)
     new_locations = _check_new_locations(
         config.locations, placed, area.root / NEW_LOCATIONS, started
     )
@@ -412,15 +419,66 @@ def _check_split(
     """No key may be both kept and held: one virus cannot be of two lineages (design rule 3).
 
     This covers the split of one pull, which is where a logic error in the rule would show.
-    A key kept from one pull and held from another would put one virus in both datasets and
-    is NOT caught here: the within-dataset check (``_check_keys_across_pulls``) sees only one
-    dataset at a time. That needs a cross-dataset check over published versions; it is not in
-    this change.
+    A key kept from one pull and held from another is :func:`_check_held_apart`'s.
     """
     keys = {(r.epi_isl, r.accession) for r in kept}
     if both := sorted(keys & {(r.epi_isl, r.accession) for r in held}):
         raise processed.StoreBuildError(
             f"reference_check on {dataset!r}: {len(both)} keys both kept and held, first {both[0]}"
+        )
+
+
+def _check_held_apart(
+    store: Store,
+    config: SequencesConfig,
+    pull_id: str,
+    placed: Mapping[str, Sequence[SequenceRecord]],
+    held_groups: Mapping[str, _HeldGroup],
+) -> None:
+    """No key may be in a checked dataset and in its ``held_dataset`` at once, across pulls.
+
+    :func:`_check_split` covers one pull, and the cross-pull dedup works within one dataset,
+    so neither sees a record this pull keeps that another pull published as held, or the
+    reverse. The hold depends only on the record's own alignment, so that happens when the
+    rule or the reference changed between the two stores: then the other pull is stale, and
+    re-storing it first moves the record. Checked before anything is published, so a refusal
+    leaves every dataset as it was.
+
+    This pull's own partition of a dataset is left out only when this run republishes that
+    dataset. A pull that held records under an old rule and holds none now does not
+    republish the held dataset, so its old partition there stays, and is checked.
+    """
+    publishing = set(placed) | set(held_groups)
+    problems: list[str] = []
+    for item in config.reference_check:
+        held_dataset = item.held_dataset
+        if held_dataset is None:
+            continue
+        held = held_groups[held_dataset].records if held_dataset in held_groups else []
+        for mine, records, other in (
+            (item.dataset, placed.get(item.dataset, []), held_dataset),
+            (held_dataset, held, item.dataset),
+        ):
+            if not records:
+                continue
+            stored = processed.published_keys(
+                store, other, except_pull=pull_id if other in publishing else None
+            )
+            both = sorted({(r.epi_isl, r.accession) for r in records} & stored.keys())
+            if both:
+                epi_isl, accession = both[0]
+                holder = stored[both[0]]
+                problems.append(
+                    f"{len(both)} key(s) going to {mine!r} are in {other!r} already,"
+                    f" first {epi_isl}/{accession} from pull {holder}"
+                    + (" (this pull's own partition, which this run does not replace)"
+                       if holder == pull_id else "")
+                )  # fmt: skip
+    if problems:
+        raise processed.StoreBuildError(
+            f"{pull_id}: one virus cannot be of two lineages: {'; '.join(problems)}."
+            " The reference_check or its reference changed since that partition was stored;"
+            " re-store another pull first, or retire the stale partition deliberately"
         )
 
 

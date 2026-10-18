@@ -599,6 +599,30 @@ def _without(table: pa.Table, keys: Mapping[Key, str]) -> pa.Table:
     return table.filter(pa.array([key not in keys for key in _keys(table)], pa.bool_()))
 
 
+def published_keys(store: Store, dataset: str, *, except_pull: str | None) -> dict[Key, str]:
+    """Every key in the current ``sequences/<dataset>``, with the pull that holds it.
+
+    ``except_pull``'s partition is left out: a publish under way replaces it, so what it
+    holds now says nothing about the version being built. Empty for a dataset never
+    published.
+    """
+    if not (store.dataset_dir(KIND, dataset) / CURRENT).is_file():
+        return {}
+    version = store.version_dir(store.current(KIND, dataset))
+    skip = partition("isolates", except_pull) if except_pull is not None else None
+    keys: dict[Key, str] = {}
+    for path in sorted((version / "isolates").glob(f"pull=*/{PART}")):
+        if path.relative_to(version).as_posix() == skip:
+            continue
+        table = pq.read_table(path, columns=["epi_isl", "accession", "source_pull"],
+                              partitioning=None)  # fmt: skip
+        for epi_isl, accession, pull in zip(
+            *(table[c].to_pylist() for c in table.column_names), strict=True
+        ):
+            keys[(epi_isl, accession)] = pull
+    return keys
+
+
 def _check_keys_across_pulls(version: Path) -> None:
     keys = pq.read_table(version / "isolates", columns=["epi_isl", "accession", "source_pull"],
                          partitioning=None)  # fmt: skip

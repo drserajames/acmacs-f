@@ -9,7 +9,7 @@ import datetime
 import json
 import random
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -145,11 +145,13 @@ class TestRows:
             processed.sequences_table([record(1)], {}, "p")
 
 
-def publish(store: Store, pull_id: str, records: list[SequenceRecord]) -> StoreRef:
+def publish(
+    store: Store, pull_id: str, records: list[SequenceRecord], dataset: str = "h3"
+) -> StoreRef:
     results = {processed.seq_id(r): aligned(r) for r in records}
     return processed.publish_pull(
-        store, "h3", pull_id,
-        processed.isolates_table(records, "h3", pull_id),
+        store, dataset, pull_id,
+        processed.isolates_table(records, dataset, pull_id),
         processed.sequences_table(records, results, pull_id),
         inputs=[], parameters={"pull": pull_id}, started=datetime.datetime.now(datetime.UTC),
     )  # fmt: skip
@@ -1049,8 +1051,81 @@ def test_the_split_of_distinct_keys_is_accepted() -> None:
     build._check_split("h1", [record(1)], [record(2)])
 
 
+def _apart(
+    store: Store,
+    pull_id: str,
+    kept: list[SequenceRecord],
+    held: list[SequenceRecord],
+) -> None:
+    groups = {"h1-other": build._HeldGroup("h1", held)} if held else {}
+    build._check_held_apart(
+        store, _held_config(reference_check=[_row(held_dataset="h1-other")]),
+        pull_id, {"h1": kept}, groups,
+    )  # fmt: skip
+
+
+def test_a_key_kept_here_and_held_by_another_pull_is_refused(tmp_path: Path) -> None:
+    # the rule changed between the two stores: one virus would sit in both datasets
+    store = Store.create(tmp_path / "store")
+    publish(store, "p1", [record(1)], dataset="h1-other")
+    with pytest.raises(processed.StoreBuildError, match=r"'h1' are in 'h1-other'.*pull p1"):
+        _apart(store, "p2", [record(1), record(2)], [])
+
+
+def test_a_key_held_here_and_kept_by_another_pull_is_refused(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "store")
+    publish(store, "p1", [record(1)], dataset="h1")
+    with pytest.raises(processed.StoreBuildError, match=r"'h1-other' are in 'h1'.*pull p1"):
+        _apart(store, "p2", [record(2)], [record(1)])
+
+
+def test_this_pulls_own_partitions_are_replaced_so_not_counted(tmp_path: Path) -> None:
+    # re-storing p1 under a changed rule moves record 1 from one dataset to the other;
+    # both of p1's partitions are rewritten by this run, so the old ones are no clash
+    store = Store.create(tmp_path / "store")
+    publish(store, "p1", [record(1), record(2)], dataset="h1")
+    publish(store, "p1", [record(3)], dataset="h1-other")
+    _apart(store, "p1", [record(2), record(3)], [record(1)])
+
+
+def test_a_stale_held_partition_this_run_does_not_replace_is_refused(tmp_path: Path) -> None:
+    # p1 once held record 1; it holds nothing now, so h1-other is not republished and the
+    # old partition would stay beside the kept copy
+    store = Store.create(tmp_path / "store")
+    publish(store, "p1", [record(1)], dataset="h1-other")
+    with pytest.raises(processed.StoreBuildError, match="own partition"):
+        _apart(store, "p1", [record(1), record(2)], [])
+
+
+def test_distinct_keys_across_the_two_datasets_are_accepted(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "store")
+    publish(store, "p1", [record(1)], dataset="h1")
+    publish(store, "p1", [record(2)], dataset="h1-other")
+    _apart(store, "p2", [record(3)], [record(4)])
+
+
+def test_without_held_dataset_nothing_is_read(tmp_path: Path) -> None:
+    # the key absent must leave the store untouched by this check: no dataset, no read
+    build._check_held_apart(
+        Store.create(tmp_path / "store"), _held_config(reference_check=[_row()]),
+        "p1", {"h1": [record(1)]}, {},
+    )  # fmt: skip
+
+
+def test_the_batch_marker_names_the_held_dataset() -> None:
+    config = _held_config(
+        reference_check=[_row(held_dataset="h1-other")],
+        placement=[build.PlacementConfig("A / H1N1", "", "h1", "example")],
+        source_subtypes={"h1n1": "A(H1N1)"},
+    )
+    assert build.pull_datasets(config, "definitive-2021-0312-h1n1") == ["h1", "h1-other"]
+
+
 def _run_held_pull(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **row: object
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    before: Callable[[Store], object] | None = None,
+    **row: object,
 ) -> tuple[Store, dict[str, StoreRef]]:
     """A one-dataset pull where the check holds EPI_ISL_3, published to a held_dataset.
 
@@ -1061,6 +1136,8 @@ def _run_held_pull(
     rng = random.Random(7)
     root = extractor_set(tmp_path / "set", rng)
     store = Store.create(tmp_path / "store")
+    if before is not None:
+        before(store)  # what other pulls published earlier
     Work.create(tmp_path / "work")
     make_dataset(tmp_path / "ds", rng)
     monkeypatch.setattr(
@@ -1165,3 +1242,18 @@ def test_without_a_held_dataset_the_same_pull_publishes_only_the_kept_one(
     assert _provenance(store, refs["h3"])["reference_check"] == {
         "max_substitutions": 200, "held": 1, processed.FAR_FROM_REFERENCE: 1,
     }  # fmt: skip
+
+
+def test_a_pull_that_would_put_a_virus_in_both_datasets_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # another pull kept EPI_ISL_3 before the rule held it; this pull holds it
+    def earlier(store: Store) -> None:
+        publish(store, "earlier", [record(3)], dataset="h3")
+
+    with pytest.raises(processed.StoreBuildError, match="EPI_ISL_3.*pull earlier"):
+        _run_held_pull(tmp_path, monkeypatch, before=earlier)
+    store = Store.open(tmp_path / "store")
+    assert not (store.dataset_dir(processed.KIND, "h3-other") / "CURRENT").exists()
+    ids = processed.read_table(store, store.current(processed.KIND, "h3"), "isolates", ["epi_isl"])
+    assert ids["epi_isl"].to_pylist() == ["EPI_ISL_3"]  # h3 is as the earlier pull left it
