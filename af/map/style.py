@@ -196,10 +196,14 @@ def style_points(
 ) -> Scene:
     """Build the :class:`Scene` for one map and window.
 
-    ``vaccines`` maps point id to label text. A windowed map greys EVERY antigen dated before the
-    window: painted or not, vaccines too (a vaccine keeps its size, outline and label), as the
-    shipped maps' window style did (style 08-25). An antigen without an isolation date is greyed
-    in a windowed map (it cannot be shown to be recent) and counted in ``Scene.undated_antigens``.
+    ``vaccines`` maps point id to label text: the antigens af picked to represent each vaccine,
+    drawn larger. A windowed map greys every OTHER antigen dated before the window, painted or not
+    (style 08-25); a marked vaccine keeps its own colour in every window (Sarah, Q220: "There are
+    some antigens that have been picked to represent the vaccine. They are larger in the maps.
+    They should have their vaccine color. Other viruses take their clade color"). Another
+    preparation of a vaccine strain is an ordinary antigen and follows the window. An antigen
+    without an isolation date is greyed in a windowed map (it cannot be shown to be recent) and
+    counted in ``Scene.undated_antigens``.
     """
     vaccines = vaccines or {}
     unknown = set(vaccines) - {p.id for p in points}
@@ -214,9 +218,10 @@ def style_points(
         row = rows[p.id]
         shown = p.xy is not None and p.hide is None
         reason = None if shown else ("no_coordinates" if p.xy is None else f"override:{p.hide}")
-        # Greyed means the window drew the antigen in its grey, whatever its own colour.
+        # Greyed means the window drew the antigen in its grey, whatever its own colour. A marked
+        # vaccine never is (Q220).
         greyed = False
-        if p.kind == "antigen" and window.since is not None:
+        if p.kind == "antigen" and window.since is not None and p.id not in vaccines:
             if p.date is None:
                 undated += 1
                 greyed = True

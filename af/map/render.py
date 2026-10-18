@@ -25,7 +25,7 @@ from af.map.style import MARKERS, Scene, ScenePoint
 from af.map.viewport import Box, Frame
 
 GREY = "#cccccc"  # an antigen with no colour (unpainted, or unsequenced)
-GREY_WINDOW = "#bebebe"  # an antigen outside the map's window, greyed by it (vaccines too)
+GREY_WINDOW = "#bebebe"  # an antigen outside the map's window, greyed by it (never a vaccine mark)
 OPEN = "transparent"  # no fill, GREY outline: a reference antigen with no colour
 SERUM_OUTLINE = "#cccccc"  # as the shipped report maps
 
