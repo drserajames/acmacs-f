@@ -401,6 +401,14 @@ def run_chain(
     # it, <store_root>/<name>. Pipeline state goes in <root>/state (DatasetWork.state).
     root = Path(root) if root is not None else Path(store_root) / cfg.name
     steps = chain_steps(cfg, root, Mapper(optimiser, split, site))
+    if cfg.append_published is not None:  # a monthly chain: its published steps' keys stand
+        from af.chain.append import check_settings
+        from af.pipeline.record import canonical
+
+        check_settings(
+            cfg.name, cfg.append_published, [t.table_id for t in cfg.tables],
+            [canonical(s.parameters) for s in steps], cfg.rerun_settings,
+        )  # fmt: skip
     # Inputs are named and outputs recorded relative to the chain root, so a store or a tables
     # checkout moved to another root (a sync to o or the HPC) re-runs nothing.
     pipeline = Pipeline(steps, state_dir=root / "state", runner=runner or LocalRunner(), root=root)
