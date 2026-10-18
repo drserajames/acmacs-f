@@ -441,6 +441,30 @@ class TestPassageExact:
         match = index(a, b).match(ANTIGEN, M.UNKNOWN, passage=passage)
         assert match.chosen is None and M.AMBIGUOUS in match.flags
 
+    @pytest.mark.parametrize("passage", ["unknown", "N/A", "NA", "not provided"])
+    def test_text_that_is_no_passage_never_settles_a_tie(self, passage: str) -> None:
+        # it reads as steps, but its class is unknown: the same missing fact on both sides
+        a, b = candidate(8, passage, seq="x"), candidate(3, "", seq="y")
+        assert M.passage_steps(passage) and a.passage_class == M.UNKNOWN
+        match = index(a, b).match(ANTIGEN, M.UNKNOWN, passage=passage)
+        assert match.chosen is None and M.AMBIGUOUS in match.flags
+
+    def test_a_number_collision_settled_by_passage_keeps_its_flag(self) -> None:
+        lab, name = "Example National Centre", "A(H3N2)/EXAMPLEPROV EXAMPLESPELLING/31/2024"
+        x = M.Candidate("EPI_ISL_1", "EPI1", "h3", "A/EXAMPLEPROV EXAMPLESPELLING/31/2024",
+                        "MDCK1", M.CELL, "a", "Someone Else")  # fmt: skip
+        y = M.Candidate("EPI_ISL_2", "EPI2", "h3", "A/EXAMPLEPROV EXAMPLESPELLING/31/2024",
+                        "SIAT1", M.CELL, "b", "Someone Else")  # fmt: skip
+        own = [M.Candidate(f"EPI_ISL_{n}", f"EPI{n}", "h3", f"A/EXAMPLEPROV {d}/31/2024", "SIAT1",
+                           M.CELL, s, lab) for n, d, s in ((3, "EXAMPLEDISTA", "c"),
+                                                           (4, "EXAMPLEDISTB", "d"))]  # fmt: skip
+        idx = index(x, y, *own)
+        idx.submitters = {"lab-n": frozenset({lab})}
+        idx.number_rules = {"lab-n": M.NumberRule("lab-n")}
+        match = idx.match(name, M.CELL, lab="lab-n", passage="MDCK1")
+        assert (match.method, match.chosen) == ("name", x)  # passage chose within the name's tie
+        assert match.flags == (M.LAB_NUMBER_COLLISION, M.PASSAGE_EXACT)  # still true, kept
+
     def test_the_antigens_own_lab_settles_the_tie_first(self) -> None:
         own = M.Candidate("EPI_ISL_1", "EPI1", "h3", ANTIGEN, "MDCK1", M.CELL, "a",
                           "Example Centre A")  # fmt: skip

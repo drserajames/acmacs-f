@@ -423,10 +423,16 @@ def _from_exact_passage(result: Match, passage: str) -> Match:
     passage cannot tell them apart. The same sequence deposited more than once is one, taken by
     key as identical duplicates are. Compared step for step (:func:`passage_steps`, ae's rank
     0), so GISAID's free-text spellings of a passage meet the table's, while a longer or
-    shorter history does not; an antigen passage that reads as no steps never matches.
+    shorter history does not; an antigen passage that reads as no steps never matches. Nor
+    does a candidate whose passage has no known class: "unknown" or "N/A" on both sides is the
+    same missing fact, not the same passage, though it reads as steps.
     """
     mine = passage_steps(passage)
-    same = [c for c in result.tied if mine and passage_steps(c.passage) == mine]
+    same = [
+        c
+        for c in result.tied
+        if mine and c.passage_class != UNKNOWN and passage_steps(c.passage) == mine
+    ]
     if not same or len({c.seq_hash for c in same}) != 1:
         return result
     flags = [f for f in result.flags if f != AMBIGUOUS]  # chosen now, no longer refused
