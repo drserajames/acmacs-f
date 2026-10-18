@@ -388,3 +388,73 @@ def test_drawn_title_changes_the_page_only(tmp_path, monkeypatch, drawn):
     assert texts.count("TEST tree") == (1 if drawn is None else 0)
     if drawn:
         assert texts.count(drawn) == 1
+
+
+class _CladeSet:
+    """The two things legacy_clade_display asks of a clade set (invented names)."""
+
+    version = "invented@0"
+    older = {"X": "old1", "X.1": "old1.a", "X.2": None}
+
+    def __contains__(self, name):
+        return name in self.older
+
+    def legacy_name(self, name):
+        return self.older[name]
+
+
+def test_brackets_print_the_older_name_where_upstream_records_one(tmp_path):
+    from af.tree.draw.figure import legacy_clade_display
+
+    display = legacy_clade_display(_CladeSet(), ["X", "X.1", "X.2"])
+    assert display == {"X": "X (old1)", "X.1": "X.1 (old1.a)"}
+    with pytest.raises(ValueError, match="not in"):
+        legacy_clade_display(_CladeSet(), ["Y"])
+    plain = make_figure(standard_tree(), PARENTS, config(), tmp_path / "p.pdf", {})
+    named = make_figure(
+        standard_tree(), PARENTS, config(clade_display=display), tmp_path / "n.pdf", {}
+    )
+    assert named["clades_shown"] == plain["clades_shown"]  # the clades are the same ones
+    assert (tmp_path / "n.pdf").read_bytes() != (tmp_path / "p.pdf").read_bytes()
+
+
+def test_margin_strain_labels_stack_clear_of_each_other_and_of_ink():
+    from af.tree.draw.place import Grid
+    from af.tree.draw.render import _margin_strain_box
+
+    grid = Grid(200, 200)
+    first = _margin_strain_box(3.0, 100.0, 40.0, 8.0, [], grid)
+    assert first == (3.0, 96.0, 43.0, 104.0)
+    second = _margin_strain_box(3.0, 101.0, 40.0, 8.0, [first], grid)
+    assert second[0] == 3.0 and (second[3] <= first[1] or second[1] >= first[3])
+    grid.add_box((0, 0, 200, 200))
+    with pytest.raises(ValueError, match="no clear margin space"):
+        _margin_strain_box(3.0, 100.0, 40.0, 8.0, [], grid)
+
+
+def test_place_inset_takes_the_clear_corner_nearest_the_wanted_one():
+    from af.tree.draw.place import Grid
+    from af.tree.draw.render import place_inset
+
+    g = Grid(300, 200)
+    x0, y0, _, _ = place_inset(g, 50, 20, lowest=200, right=300, near=(40.0, 150.0))
+    assert (x0, y0) == (40.0, 150.0)
+    g.add_box((30, 140, 80, 180))  # ink at the wanted corner: the nearest clear one instead
+    box = place_inset(g, 50, 20, lowest=200, right=300, near=(40.0, 150.0))
+    assert g.cost(box) == 0 and box != (40.0, 150.0, 90.0, 170.0)
+
+
+def test_a_figure_in_the_round_fonts_draws_and_records_them(tmp_path):
+    from pathlib import Path
+
+    import matplotlib
+
+    from af.util.fonts import FontNames
+
+    ttf = Path(matplotlib.get_data_path()) / "fonts" / "ttf"  # stand-ins every env has
+    names = FontNames("STIXGeneral.ttf", "STIXGeneralBol.ttf", "DejaVuSansMono.ttf")
+    fonts = names.locate(lambda name: ttf / name).resolve()
+    make_figure(standard_tree(), PARENTS, config(fonts=fonts), tmp_path / "f.pdf", {"tree": "x"})
+    assert b"STIXGeneral" in (tmp_path / "f.pdf").read_bytes()
+    inputs = json.loads((tmp_path / "f.i7.json").read_text())["provenance"]["inputs"]
+    assert set(inputs) >= {"tree", "font_sans", "font_sans_bold", "font_mono"}
