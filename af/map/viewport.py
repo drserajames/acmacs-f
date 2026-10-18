@@ -143,7 +143,11 @@ def choose_frame(
     each priority in order, then the distance between the frame centre and the centre of the first
     priority's points (so the recent antigens sit in the middle when nothing else decides). The
     first priority is required: if even the best frame hides one of its points, :class:`FrameError`.
-    ``radii``: each point's marker extent as a page fraction (:func:`hidden_mask`).
+    ``radii``: each point's marker extent as a page fraction (:func:`hidden_mask`). The required
+    group's CENTRES must all be visible; after that, frames are compared by whole markers, so a
+    marker cut by the edge or reaching under the title counts as hidden in every group (``hidden``
+    reports those counts). Requiring whole markers outright made a frame impossible where every
+    centre fits (h1-vidrl, R4, 15-unit frame).
     """
     if not priorities:
         raise ValueError("choose_frame needs at least one priority group")
@@ -167,17 +171,19 @@ def choose_frame(
     for x in np.arange(lo[0], hi[0] + step / 2, step):
         for y in np.arange(lo[1], hi[1] + step / 2, step):
             frame = Frame(round(float(x), 6), -round(float(y), 6), size)
-            hidden = hidden_mask(frame.page(pts), furniture, rad)
+            page = frame.page(pts)
+            required = float((hidden_mask(page, furniture) & masks[0]).sum())
+            hidden = hidden_mask(page, furniture, rad)
             offset = float(np.hypot(*(centre - [x + size / 2, y + size / 2])))
-            cost = (*(float((hidden & m).sum()) for m in masks), offset)
+            cost = (required, *(float((hidden & m).sum()) for m in masks), offset)
             if best is None or cost < best[0]:
                 best = (cost, frame)
     assert best is not None
     cost, frame = best
-    counts = {p.name: int(c) for p, c in zip(priorities, cost, strict=False)}
-    if counts[priorities[0].name]:
+    counts = {p.name: int(c) for p, c in zip(priorities, cost[1:], strict=False)}
+    if cost[0]:
         raise FrameError(
-            f"{counts[priorities[0].name]} point(s) of {priorities[0].name!r} cannot be shown in a "
+            f"{int(cost[0])} point(s) of {priorities[0].name!r} cannot be shown in a "
             f"{size} x {size} frame with this furniture; enlarge the configured size"
         )
     return FrameChoice(frame, counts)

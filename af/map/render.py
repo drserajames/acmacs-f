@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from numpy.typing import NDArray
 
 from af.map.labels import Placed
 from af.map.orient import rows_with_coordinates
@@ -399,19 +398,13 @@ def _draw_legend(
         )
 
 
-def recent_hidden(
-    scene: Scene,
-    frame: Frame,
-    furniture: Sequence[Box],
-    since: dt.date,
-    radii: Sequence[float] | NDArray[np.float64] | float = 0.0,
-) -> int:
-    """Shown antigens isolated on or after ``since`` whose marker ends up off the page or under
-    furniture (should be 0). ``radii``: each point's :func:`marker_extent`."""
+def recent_hidden(scene: Scene, frame: Frame, furniture: Sequence[Box], since: dt.date) -> int:
+    """Shown antigens isolated on or after ``since`` that end up off the page or under furniture
+    (should be 0)."""
     from af.map.viewport import hidden_mask
 
     page = frame.page(scene.xy())
-    hidden = hidden_mask(page, tuple(furniture), np.asarray(radii, dtype=float))
+    hidden = hidden_mask(page, tuple(furniture))
     return sum(
         1
         for i, p in enumerate(scene.points)
