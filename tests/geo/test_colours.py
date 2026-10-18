@@ -8,6 +8,7 @@ from af.clades.sequence import AlignedSequence
 from af.geo.colours import BASIS_CLADE, BASIS_GROUP_NO_CLADE, UNCOLOURED, DotStyle, dot_styles
 from af.geo.records import Month, geo_counts, to_i7
 from af.serology.joins import PreparationSequence
+from af.serology.outputs import sequence_state
 from af.serology.query import Preparation
 from tests.clades.synthetic import build_clone, load_synthetic
 
@@ -75,12 +76,19 @@ def test_styles_and_reasons(tmp_path: Path) -> None:
         "no clade assignment": 1,
         "no aligned sequence": 1,
     }
-    # styled dots reach the I7 document with their legend label as the clade
+    # styled dots reach the I7 document with their legend label as the clade; the uncoloured
+    # ones by class (Q215): only D-4 reached no sequence, the rest were sequenced
     geo = geo_counts(
-        list(preps.values()), Month(2021, 1), Month(2021, 1), lambda n: "Place", style_of=style
-    )
-    points = to_i7(geo, SUBTYPE)["periods"][0]["locations"][0]["points"]
-    assert points[0] == {"color": "transparent", "count": 6}
+        list(preps.values()), Month(2021, 1), Month(2021, 1), lambda n: "Place",
+        style_of=lambda p: sequence_state(style(p), links.get(key(p))),
+    )  # fmt: skip
+    (period,) = to_i7(geo, SUBTYPE)["periods"]
+    points = period["locations"][0]["points"]
+    assert points[0] == {"color": "transparent", "count": 5, "uncoloured": "clade_not_defined"}
+    assert period["clade_not_defined"] == {  # why, by stable id: the record's own reason
+        "nomenclature_none": 1, "unresolved_match": 1, "no_assignment": 1, "other": 2
+    }  # fmt: skip
+    assert {"color": "transparent", "count": 1, "uncoloured": "not_sequenced"} in points
     assert {"color": "#0000aa", "count": 1, "clade": "Clade P.1"} in points
 
 

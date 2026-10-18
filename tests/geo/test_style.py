@@ -16,12 +16,18 @@ packing = "ae-rings"
 coloured_edge = "none"
 coloured_edge_width = 0
 uncoloured_edge_width = 0.5
+clade_not_defined_fill = "#ffffff"
+clade_not_defined_edge = "#606060"
+clade_not_defined_edge_width = 0.6
 
 [geo.bvic]
 packing = "honeycomb"
 coloured_edge = "#808080"
 coloured_edge_width = 1.0
 uncoloured_edge_width = 0.3
+clade_not_defined_fill = "none"
+clade_not_defined_edge = "#404040"
+clade_not_defined_edge_width = 0.8
 """
 
 
@@ -43,6 +49,9 @@ def test_each_slot_gets_its_look(tmp_path: Path) -> None:
     assert h3.dot_diameter == Look().dot_diameter  # the rest is ae's, unchanged
     record = look_record(bvic)
     assert record["uncoloured_edge_width"] == 0.3 and record["central_longitude"] == 11.762094
+    # Q215: a sequenced dot whose clade is not defined has its own look, per slot
+    assert (h3.clade_not_defined_fill, h3.clade_not_defined_edge) == ("#ffffff", "#606060")
+    assert (bvic.clade_not_defined_fill, bvic.clade_not_defined_edge_width) == ("none", 0.8)
 
 
 @pytest.mark.parametrize(
@@ -67,6 +76,26 @@ def test_each_slot_gets_its_look(tmp_path: Path) -> None:
             ("coloured_edge_width = 0\n", "coloured_edge_width = 0.5\n"),
             {"h3", "bvic"},
             "coloured_edge 'none' with width 0.5",
+        ),
+        (
+            ('clade_not_defined_fill = "#ffffff"', 'clade_not_defined_fill = "white"'),
+            {"h3", "bvic"},
+            "clade_not_defined_fill 'white'",
+        ),
+        (
+            ('clade_not_defined_edge = "#606060"', 'clade_not_defined_edge = "none"'),
+            {"h3", "bvic"},
+            "clade_not_defined_edge 'none'",
+        ),
+        (  # the two kinds of uncoloured dot are keyed apart, so they must not draw alike
+            (
+                'clade_not_defined_fill = "#ffffff"\nclade_not_defined_edge = "#606060"\n'
+                "clade_not_defined_edge_width = 0.6",
+                'clade_not_defined_fill = "none"\nclade_not_defined_edge = "#A0A0A0"\n'
+                "clade_not_defined_edge_width = 0.5",
+            ),
+            {"h3", "bvic"},
+            "would draw as a not-sequenced one",
         ),
     ],
 )

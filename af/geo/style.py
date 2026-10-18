@@ -9,11 +9,15 @@ report slot, beside the fonts (08-maps' ``[fonts]``, read and checked by its own
     packing = "ae-rings"          # or "honeycomb" (Q208)
     coloured_edge = "none"        # or a colour, e.g. "#808080"
     coloured_edge_width = 0.0     # figure points
-    uncoloured_edge_width = 0.5   # figure points
+    uncoloured_edge_width = 0.5   # figure points: a dot not sequenced, a ring only
+    clade_not_defined_fill = "#ffffff"   # a sequenced dot whose clade is not defined (Q215),
+    clade_not_defined_edge = "#606060"   # told apart from a not-sequenced one
+    clade_not_defined_edge_width = 0.6
 
 Every key is required and an unknown one is an error (design rule 4: no silent defaults), as is
-a slot drawn with no table or a table for a slot not drawn (rule 1). The look each slot was drawn
-with goes into its figures' provenance (:func:`look_record`), with the file's hash.
+a slot drawn with no table or a table for a slot not drawn (rule 1), and a look whose two kinds
+of uncoloured dot would draw alike (Sarah, Q215: they are keyed on different lines). The look each
+slot was drawn with goes into its figures' provenance (:func:`look_record`), with the file's hash.
 """
 
 from __future__ import annotations
@@ -25,9 +29,15 @@ from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
-from af.geo.render import PACKINGS, Look
+from af.geo.records import CLADE_NOT_DEFINED, NOT_SEQUENCED
+from af.geo.render import PACKINGS, Look, uncoloured_style
 
-KEYS = ("packing", "coloured_edge", "coloured_edge_width", "uncoloured_edge_width")
+KEYS = (
+    "packing", "coloured_edge", "coloured_edge_width", "uncoloured_edge_width",
+    "clade_not_defined_fill", "clade_not_defined_edge", "clade_not_defined_edge_width",
+)  # fmt: skip
+UNLIKE = (NOT_SEQUENCED, CLADE_NOT_DEFINED)  # keyed on different lines, so drawn apart
+WIDTHS = ("coloured_edge_width", "uncoloured_edge_width", "clade_not_defined_edge_width")
 _COLOUR = re.compile(r"#[0-9a-fA-F]{6}")
 
 
@@ -64,7 +74,7 @@ def _look(path: Path, slot: str, table: Any) -> Look:
         raise GeoStyleError(f"{where}: packing {packing!r}: one of {sorted(PACKINGS)}")
     if not isinstance(edge, str) or not (edge == "none" or _COLOUR.fullmatch(edge)):
         raise GeoStyleError(f"{where}: coloured_edge {edge!r}: '#rrggbb' or 'none'")
-    widths = {k: table[k] for k in ("coloured_edge_width", "uncoloured_edge_width")}
+    widths = {k: table[k] for k in WIDTHS}
     for key, value in widths.items():
         if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
             raise GeoStyleError(f"{where}: {key} {value!r}: a width in points, 0 or more")
@@ -74,11 +84,26 @@ def _look(path: Path, slot: str, table: Any) -> Look:
     width = widths["coloured_edge_width"]
     if (edge == "none") != (width == 0):
         raise GeoStyleError(f"{where}: coloured_edge {edge!r} with width {width}")
-    return dataclasses.replace(
+    fill, ring = table["clade_not_defined_fill"], table["clade_not_defined_edge"]
+    if not isinstance(fill, str) or not (fill == "none" or _COLOUR.fullmatch(fill)):
+        raise GeoStyleError(f"{where}: clade_not_defined_fill {fill!r}: '#rrggbb' or 'none'")
+    if not isinstance(ring, str) or not _COLOUR.fullmatch(ring):
+        raise GeoStyleError(f"{where}: clade_not_defined_edge {ring!r}: '#rrggbb'")
+    if fill == "none" and widths["clade_not_defined_edge_width"] == 0:
+        raise GeoStyleError(f"{where}: clade_not_defined with no fill and no ring would vanish")
+    look = dataclasses.replace(
         Look(), packing=packing, coloured_edge=edge,
         coloured_edge_width=float(widths["coloured_edge_width"]),
         uncoloured_edge_width=float(widths["uncoloured_edge_width"]),
+        clade_not_defined_fill=fill, clade_not_defined_edge=ring,
+        clade_not_defined_edge_width=float(widths["clade_not_defined_edge_width"]),
     )  # fmt: skip
+    alike = [tuple(str(v).lower() for v in uncoloured_style(look, c)) for c in UNLIKE]
+    if alike[0] == alike[1]:
+        raise GeoStyleError(
+            f"{where}: a dot whose clade is not defined would draw as a not-sequenced one"
+        )
+    return look
 
 
 def look_record(look: Look) -> dict[str, Any]:

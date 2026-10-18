@@ -7,8 +7,9 @@ the same I7 ``geo`` document the renderer draws (:func:`af.geo.records.to_i7`): 
 and what is compared cannot drift apart.
 
 The clade key is data, not a picture: per slot, every legend entry of the scheme with its
-colour and its dots per month and over the window, plus the uncoloured dots. The report's geo
-intro page lays it out; the PDFs carry no legend, as the shipped geo pages carry none.
+colour and its dots per month and over the window, plus the uncoloured dots by class (not
+sequenced, clade not defined: Sarah, Q215), each with the fill and ring it is drawn in. The
+report's geo intro page lays it out; the PDFs carry no legend, as the shipped geo pages carry none.
 """
 
 from __future__ import annotations
@@ -21,7 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from af.geo.colours import placement_warning, unpainted_warning
-from af.geo.render import Coordinates, Look, render_period
+from af.geo.records import CLADE_NOT_DEFINED, CLADE_NOT_IN_SCHEME, NOT_SEQUENCED
+from af.geo.render import Coordinates, Look, render_period, uncoloured_style
 from af.geo.style import look_record
 from af.map.style import ColourScheme as MapColourScheme
 from af.report.i7 import I7_NAME, I7_VERSION, validate
@@ -29,6 +31,28 @@ from af.util.artefacts import sha256_path
 
 UNCOLOURED_KEY = "uncoloured"
 UNIT = ("virus", "viruses")  # a geo dot is a virus (DotRule.VIRUS), in the warning's words
+
+
+def uncoloured_swatch(look: Look, cls: str) -> dict[str, Any]:
+    """How an uncoloured class is drawn, in the I7's words: ``fill`` ("transparent" for none),
+    ``edge`` and ``edge_width``. The figure's points and the key's swatches both take it."""
+    fill, edge, width = uncoloured_style(look, cls)
+    return {"fill": "transparent" if fill == "none" else fill, "edge": edge, "edge_width": width}
+
+
+def _with_swatches(locations: Sequence[Mapping[str, Any]], look: Look) -> list[dict[str, Any]]:
+    """The month's locations, each uncoloured point carrying its class's drawn colour and ring."""
+    out = []
+    for location in locations:
+        points = []
+        for point in location["points"]:
+            if "uncoloured" in point:
+                swatch = uncoloured_swatch(look, point["uncoloured"])
+                point = {**point, "color": swatch["fill"], "edge": swatch["edge"],
+                         "edge_width": swatch["edge_width"]}  # fmt: skip
+            points.append(point)
+        out.append({**location, "points": points})
+    return out
 
 
 def unpainted_records(unpainted: Sequence[Mapping[str, Any]], scheme: str) -> list[dict[str, Any]]:
@@ -123,7 +147,11 @@ def write_geo_figures(
                 "clipped_at_edge": dict(sorted(cut.items())),
                 **({"decisions": decisions} if decisions else {}),
             },
-            "geo": {"subtype": slot, "month": month, "locations": period["locations"]},
+            "geo": {
+                "subtype": slot,
+                "month": month,
+                "locations": _with_swatches(period["locations"], look or Look()),
+            },  # fmt: skip
         }
         validate(i7, str(folder / I7_NAME))
         (folder / I7_NAME).write_text(json.dumps(i7, indent=1, ensure_ascii=False) + "\n")
@@ -131,20 +159,33 @@ def write_geo_figures(
     return report
 
 
-def clade_key(doc: Mapping[str, Any], schemes: Sequence[MapColourScheme]) -> dict[str, Any]:
+def clade_key(
+    doc: Mapping[str, Any], schemes: Sequence[MapColourScheme], look: Look | None = None
+) -> dict[str, Any]:
     """One slot's key: each legend entry in scheme order with its dots per month and in total.
 
     Every entry of the scheme is listed, including ones with no dots in the window, so the
     intro page can choose what to show; ``window`` says which have any. A label on a dot that
     the schemes do not have is an error: the key would miss a colour the maps draw. A slot
     drawing several subtype rows (B: both lineages on one map) lists each row's scheme in turn.
+
+    The uncoloured dots are listed by class (Q215) in print order with the swatch ``look``
+    draws them in: not sequenced and clade not defined always, a supported clade the scheme
+    lacks only when drawn. ``uncoloured`` stays as their total.
     """
     per_label: dict[str, Counter[str]] = {}
+    per_class: dict[str, Counter[str]] = {}
+    undefined: Counter[str] = Counter()  # why the clade-not-defined dots are so, over the window
+    for period in doc["periods"]:
+        undefined.update(period.get("clade_not_defined", {}))
     for period in doc["periods"]:
         for location in period["locations"]:
             for point in location["points"]:
                 label = point.get("clade") or UNCOLOURED_KEY
                 per_label.setdefault(label, Counter())[period["period"]] += point["count"]
+                if not point.get("clade") and "uncoloured" in point:
+                    months = per_class.setdefault(point["uncoloured"], Counter())
+                    months[period["period"]] += point["count"]
     entries = []
     known = {UNCOLOURED_KEY}
     for row in (r for scheme in schemes for r in scheme.rows):
@@ -202,6 +243,18 @@ def clade_key(doc: Mapping[str, Any], schemes: Sequence[MapColourScheme]) -> dic
             "per_month": dict(sorted(uncoloured.items())),
             "window": sum(uncoloured.values()),
         },
+        "uncoloured_classes": [
+            {
+                "class": cls,
+                **uncoloured_swatch(look or Look(), cls),
+                "per_month": dict(sorted(per_class.get(cls, Counter()).items())),
+                "window": sum(per_class.get(cls, Counter()).values()),
+                # why (af.geo.records.UNDEFINED_STATES ids, and the two beside them), dots
+                **({"states": dict(sorted(undefined.items()))} if cls == CLADE_NOT_DEFINED else {}),
+            }
+            for cls in (NOT_SEQUENCED, CLADE_NOT_DEFINED, CLADE_NOT_IN_SCHEME)
+            if cls != CLADE_NOT_IN_SCHEME or per_class.get(cls)
+        ],
         # dots left unpainted by clade evidence over the window, each with its warning
         "unpainted_clades": unpainted_records(unpainted, ", ".join(s.name for s in schemes)),
         # dots painted by tree placement alone over the window, flagged with its warning (Q183 b)
