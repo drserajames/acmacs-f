@@ -83,9 +83,14 @@ class Section:
     # geo: the subtype in the geo build's clade key (<figures>/geo/clade-key.json) whose colours
     # the intro page lists, as the delivered report does; the key comes with the figures.
     clade_key: str = ""
-    # The key's last row, for dots no clade colours (the delivered report: "sequenced"): the
-    # report's words. Empty: no such row.
-    clade_key_uncoloured: str = ""
+    # The key's rows for dots no clade colours, after the clades: the report's words for each
+    # uncoloured class the geo build keys (af.geo.records.UNCOLOURED_CLASSES), e.g.
+    # {not_sequenced = "not sequenced", clade_not_defined = "clade not defined"} (Sarah, Q215:
+    # "mark unsequenced & clade not defined on different lines"). Printed in the key's order.
+    clade_key_classes: dict[str, str] = field(default_factory=dict)
+    # Why a clade can be not defined (the key's "states" ids) that the intro's words explain
+    # (Q215: "explain why clade not defined"); a dot so for any other reason refuses the build.
+    clade_not_defined_states: list[str] = field(default_factory=list)
 
     def pages(self, months: list[str]) -> list[tuple[str, list[str | None]]]:
         """(heading, cells) per page for a grid section; a blank cell is None.
@@ -141,6 +146,39 @@ class ReportConfig:
                 for _, cells in section.pages(self.months()):
                     out += [c for c in cells if c is not None]
         return out
+
+
+def _key_class_problems(where: str, section: Section) -> list[str]:
+    from af.geo.records import CLADE_NOT_DEFINED, UNCOLOURED_CLASSES, UNDEFINED_STATE_IDS
+
+    problems = []
+    classes = section.clade_key_classes
+    if classes and not section.clade_key:
+        problems.append(f"{where}.clade_key_classes: needs clade_key")
+    unknown = sorted(set(classes) - set(UNCOLOURED_CLASSES))
+    if unknown:
+        problems.append(f"{where}.clade_key_classes: unknown {unknown} (of {UNCOLOURED_CLASSES})")
+    if any(not label.strip() for label in classes.values()):
+        problems.append(f"{where}.clade_key_classes: an empty label")
+    if section.clade_not_defined_states and CLADE_NOT_DEFINED not in classes:
+        problems.append(f"{where}.clade_not_defined_states: needs a {CLADE_NOT_DEFINED} key row")
+    unknown = sorted(set(section.clade_not_defined_states) - set(UNDEFINED_STATE_IDS))
+    if unknown:
+        problems.append(
+            f"{where}.clade_not_defined_states: unknown {unknown} (known: {UNDEFINED_STATE_IDS})"
+        )
+    if CLADE_NOT_DEFINED in _placeholders(section) and CLADE_NOT_DEFINED not in classes:
+        problems.append(f"{where}.intro: {{{CLADE_NOT_DEFINED}}} needs a {CLADE_NOT_DEFINED} row")
+    return problems
+
+
+def _placeholders(section: Section) -> list[str]:
+    from af.report.text import placeholders
+
+    try:
+        return placeholders(section.intro)
+    except ValueError:
+        return []  # reported by _intro_problems
 
 
 def _intro_problems(where: str, section: Section) -> list[str]:
@@ -216,8 +254,7 @@ def load(path: Path) -> ReportConfig:
             problems += _intro_problems(where, section)
         if section.clade_key and (section.kind != "geo" or not section.intro):
             problems.append(f"{where}.clade_key: only for a geo section with an intro page")
-        if section.clade_key_uncoloured and not section.clade_key:
-            problems.append(f"{where}.clade_key_uncoloured: needs clade_key")
+        problems += _key_class_problems(where, section)
     slots = cfg.all_slots()
     duplicates = sorted({s for s in slots if slots.count(s) > 1})
     if duplicates:

@@ -29,8 +29,9 @@ import sys
 import zoneinfo
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
+from af.geo.records import CLADE_NOT_DEFINED, CLADE_NOT_IN_SCHEME
 from af.report import text
 from af.report.config import (
     Meeting,
@@ -179,7 +180,19 @@ def _cover(
 
 
 Intro = tuple[list[str], list[str]]  # (paragraphs, gaps: facts no artefact records)
-Key = list[tuple[str, str]]  # a clade key's rows as printed: (label, colour as 6 hex digits)
+
+
+class KeyRow(NamedTuple):
+    """A clade key's row as printed: a clade (fill as 6 hex digits, the delivered black ring), or
+    an uncoloured class (Q215) in the swatch its dots are drawn in: fill "" for none, its ring."""
+
+    label: str
+    fill: str
+    edge: str = ""
+    edge_width: float | None = None
+
+
+Key = list[KeyRow]
 
 
 def clade_keys(
@@ -189,8 +202,12 @@ def clade_keys(
 
     The key is the geo build's (one file beside its figures), so it is checked against the
     figures the report places: every coloured dot's clade must be in the key in the colour it
-    is drawn in, or the key belongs to another geo build. Rows are printed newest first, as the
-    delivered report lists them (the key file is in scheme order), then the uncoloured row."""
+    is drawn in, and every uncoloured dot's class in the swatch it is drawn in, or the key
+    belongs to another geo build. Rows are printed newest first, as the delivered report lists
+    them (the key file is in scheme order), then the uncoloured classes in the key's order, each
+    in the section's words (Sarah, Q215: "mark unsequenced & clade not defined on different
+    lines"). A class the figures draw or the key lists needs words; a dot whose clade is not
+    defined for a reason the intro does not explain (clade_not_defined_states) is refused."""
     shown = {i: section for i, section in enumerate(cfg.sections) if section.clade_key}
     if not shown:
         return {}, None
@@ -199,6 +216,7 @@ def clade_keys(
         raise BuildError(f"{path}: missing, and {len(shown)} geo section(s) show its clade key")
     doc = json.loads(path.read_text())
     keys: dict[int, Key] = {}
+    counts: dict[str, dict[str, int]] = {}
     errors: list[str] = []
     for i, section in shown.items():
         where = f"sections[{i}] ({section.title})"
@@ -209,49 +227,136 @@ def clade_keys(
         colours = {e["legend"]: e["colour"] for e in entries}
         errors += [f"{where}: {e['legend']!r} has colour {e['colour']!r}, not #rrggbb"
                    for e in entries if not HEX.fullmatch(e["colour"])]  # fmt: skip
+        classes = {c["class"]: c for c in doc[section.clade_key].get("uncoloured_classes", [])}
+        errors += _class_problems(where, section, classes)
         for _, cells in section.pages(cfg.months()):
             for slot in (c for c in cells if c is not None):
                 for loc in figs[slot].figure.doc.get("geo", {}).get("locations", []):
-                    for dot in loc["points"]:
-                        clade, colour = dot.get("clade"), dot["color"]
-                        if clade is not None and colours.get(clade) != colour:
-                            errors.append(
-                                f"{slot}: {clade!r} drawn {colour}, key has "
-                                f"{colours.get(clade)} (a key from another geo build?)"
-                            )
-        rows = [(e["legend"], e["colour"][1:]) for e in reversed(entries)]
-        if section.clade_key_uncoloured:
-            rows.append((section.clade_key_uncoloured, "FFFFFF"))
+                    errors += _dot_problems(slot, loc["points"], colours, classes, section)
+        rows = [KeyRow(e["legend"], e["colour"][1:]) for e in reversed(entries)]
+        rows += [_class_row(section.clade_key_classes[cls], c) for cls, c in classes.items()
+                 if cls in section.clade_key_classes]  # fmt: skip
         keys[i] = rows
+        counts[section.title] = {cls: c["window"] for cls, c in classes.items()}
     if errors:
         found = sorted(set(errors))
         raise BuildError(f"{len(found)} clade key problem(s):\n  " + "\n  ".join(found))
     record = {
         "path": str(path), "sha256": sha256_path(path),
         "sections": {cfg.sections[i].title: cfg.sections[i].clade_key for i in shown},
+        "uncoloured_classes": counts,  # dots per class over the window, per section
     }  # fmt: skip
     return keys, record
 
 
+def _class_problems(where: str, section: Section, classes: dict[str, Any]) -> list[str]:
+    """Words for every class the key lists, a listed class for every one worded (the key
+    always lists not_sequenced and clade_not_defined, clade_not_in_scheme only when drawn), a
+    drawable swatch, and every recorded reason for a clade not defined explained."""
+    errors = []
+    for cls in classes:
+        if cls not in section.clade_key_classes:
+            errors.append(f"{where}: the key lists uncoloured class {cls!r}; clade_key_classes "
+                          "has no words for it")  # fmt: skip
+    for cls in section.clade_key_classes:
+        if cls not in classes and cls != CLADE_NOT_IN_SCHEME:
+            errors.append(f"{where}: clade_key_classes has {cls!r}, the key does not list it "
+                          "(a geo build before Q215?)")  # fmt: skip
+    for cls, c in classes.items():
+        fill_ok = c.get("fill") == "transparent" or HEX.fullmatch(str(c.get("fill")))
+        width = c.get("edge_width")
+        if not (fill_ok and HEX.fullmatch(str(c.get("edge")))
+                and isinstance(width, int | float) and width >= 0):  # fmt: skip
+            errors.append(
+                f"{where}: uncoloured class {cls!r} swatch {c.get('fill')!r}, "
+                f"{c.get('edge')!r}, {width!r} is not #rrggbb/transparent, #rrggbb, >= 0"
+            )
+    states = classes.get(CLADE_NOT_DEFINED, {}).get("states", {})
+    explained = section.clade_not_defined_states
+    unexplained = {s: n for s, n in states.items() if n and s not in explained}
+    if unexplained and CLADE_NOT_DEFINED in section.clade_key_classes:
+        errors.append(
+            f"{where}: viruses whose clade is not defined for a reason the intro does not "
+            f"explain {unexplained} (clade_not_defined_states: {explained})"
+        )
+    return errors
+
+
+def _dot_problems(
+    slot: str, points: list[dict[str, Any]], colours: dict[str, str], classes: dict[str, Any],
+    section: Section,
+) -> list[str]:  # fmt: skip
+    """A figure's dots against the key: a clade in its colour, an uncoloured dot by its class
+    in that class's swatch."""
+    errors = []
+    for dot in points:
+        clade, colour = dot.get("clade"), dot["color"]
+        if clade is not None:
+            if colours.get(clade) != colour:
+                errors.append(f"{slot}: {clade!r} drawn {colour}, key has "
+                              f"{colours.get(clade)} (a key from another geo build?)")  # fmt: skip
+            continue
+        cls = dot.get("uncoloured")
+        if cls is None:
+            if section.clade_key_classes:
+                errors.append(f"{slot}: an uncoloured dot with no class (a geo build before Q215?)")
+            continue
+        drawn = (colour, dot.get("edge"), dot.get("edge_width"))
+        if cls not in classes:
+            errors.append(f"{slot}: uncoloured class {cls!r} drawn, the key does not list it")
+        elif drawn != tuple(classes[cls].get(k) for k in ("fill", "edge", "edge_width")):
+            keyed = tuple(classes[cls].get(k) for k in ("fill", "edge", "edge_width"))
+            errors.append(f"{slot}: {cls!r} drawn {drawn}, key has {keyed} "
+                          "(a key from another geo build?)")  # fmt: skip
+    return errors
+
+
+def _class_row(label: str, swatch: dict[str, Any]) -> KeyRow:
+    fill = "" if swatch["fill"] == "transparent" else swatch["fill"][1:]
+    return KeyRow(label, fill, swatch["edge"][1:], float(swatch["edge_width"]))
+
+
 def _key_table(key: Key, n: int) -> list[str]:
     """A clade key as the delivered report draws it: a ring-and-fill swatch, then the label.
-    Colours get generated names (labels hold spaces and parentheses)."""
-    out = [rf"\definecolor{{afkey{n}x{j}}}{{HTML}}{{{rgb}}}" for j, (_, rgb) in enumerate(key)]
+    Colours get generated names (labels hold spaces and parentheses). A clade's swatch has the
+    delivered black ring; an uncoloured class's has its dots' fill (or none) and ring, the ring
+    as wide in points as on the geo figure."""
+    out = []
+    for j, row in enumerate(key):
+        if row.fill:
+            out.append(rf"\definecolor{{afkey{n}x{j}}}{{HTML}}{{{row.fill}}}")
+        if row.edge:
+            out.append(rf"\definecolor{{afkey{n}x{j}e}}{{HTML}}{{{row.edge}}}")
     out.append(r"\begin{tabular}{l l}")
-    out += [rf"\cbox[afkey{n}x{j}] & {tex_escape(label)} \\" for j, (label, _) in enumerate(key)]
+    for j, row in enumerate(key):
+        if row.edge:
+            fill = f"afkey{n}x{j}" if row.fill else "none"
+            box = rf"\ubox{{{fill}}}{{afkey{n}x{j}e}}{{{row.edge_width:g}}}"
+        else:
+            box = rf"\cbox[afkey{n}x{j}]"
+        out.append(rf"{box} & {tex_escape(row.label)} \\")
     return [*out, r"\end{tabular}"]
 
 
 def intro_texts(
-    cfg: ReportConfig, figs: dict[str, Resolved], store: Store | None
-) -> dict[int, Intro]:
-    """Each section's intro, placeholders filled from recorded artefacts (af.report.text)."""
+    cfg: ReportConfig, figs: dict[str, Resolved], store: Store | None,
+    key_record: dict[str, Any] | None = None,
+) -> dict[int, Intro]:  # fmt: skip
+    """Each section's intro, placeholders filled from recorded artefacts (af.report.text); a
+    clade key's counts come from its record (:func:`clade_keys`)."""
     out: dict[int, Intro] = {}
+    classes = (key_record or {}).get("uncoloured_classes", {})
     for i, section in enumerate(cfg.sections):
         if not section.intro:
             continue
         values = {"period": text.period_text(cfg.months())}
         gaps: list[str] = []
+        if CLADE_NOT_DEFINED in text.placeholders(section.intro):
+            count = classes.get(section.title, {}).get(CLADE_NOT_DEFINED)
+            if count is None:
+                gaps.append(f"{section.title}: the clade-not-defined count (no clade key lists it)")
+            unit = "virus" if count == 1 else "viruses"  # a geo dot is a virus
+            values[CLADE_NOT_DEFINED] = "?" if count is None else f"{count:,} {unit}"
         if "tree_method" in text.placeholders(section.intro):
             methods = []
             for slot in section.slots:
@@ -404,6 +509,9 @@ def write_tex(
         r"\usepackage{tikz}",  # the clade key's swatches, drawn as the delivered report's \cbox
         r"\newcommand\cbox[1][black]{\tikz[baseline=-0.5ex]"
         r"\draw[black,fill=#1,radius=0.3em] (0,0) circle ;}",
+        # an uncoloured class's swatch (Q215): fill (or none), ring colour, ring width in pt
+        r"\newcommand\ubox[3]{\tikz[baseline=-0.5ex]"
+        r"\draw[draw=#2,fill=#1,line width=#3pt,radius=0.3em] (0,0) circle ;}",
         # Physical page on every \zlabel: \label pages are logical.
         r"\makeatletter\zref@addprop{main}{abspage}\makeatother",
         r"\usepackage{titletoc}",
@@ -632,8 +740,8 @@ def build(
         use = check_provenance(
             cfg, figs, store_root, manifest_path, deep=deep, export_records=export_records
         )
-        intros = intro_texts(cfg, figs, Store.open(store_root) if store_root else None)
         keys, key_record = clade_keys(cfg, figs, figures_root)
+        intros = intro_texts(cfg, figs, Store.open(store_root) if store_root else None, key_record)
         gaps = [g for _, section_gaps in intros.values() for g in section_gaps]
         if gaps and not cfg.figures.allow_placeholders:
             raise BuildError(

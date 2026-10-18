@@ -724,12 +724,20 @@ def test_the_delivered_page_style_builds(tmp_path: Path) -> None:
 
 GEO_KEY = VCM.replace(
     'slots = ["geo/x"]\ngrid = [1, 3]',
-    'slots = ["geo/x"]\ngrid = [1, 3]\nintro = "Months {period}\\n\\nEach dot is a test strain."\n'
-    'clade_key = "x"\nclade_key_uncoloured = "no colour"',
+    'slots = ["geo/x"]\ngrid = [1, 3]\nintro = "Months {period}\\n\\nEach dot is a test strain. '
+    'Undefined: {clade_not_defined}."\nclade_key = "x"\n'
+    'clade_key_classes = {not_sequenced = "no seq", clade_not_defined = "no clade"}\n'
+    'clade_not_defined_states = ["not_observable"]',
 )
+NOT_SEQ = {"fill": "transparent", "edge": "#a0a0a0", "edge_width": 0.5}
+UNDEFINED = {"fill": "#ffffff", "edge": "#606060", "edge_width": 0.6}
 KEY = {"x": {"entries": [
     {"legend": "Old (q1)", "keys": ["Old"], "colour": "#112233", "per_month": {}, "window": 0},
     {"legend": "New 9Z", "keys": ["New"], "colour": "#a0b0c0", "per_month": {}, "window": 3},
+], "uncoloured_classes": [
+    {"class": "not_sequenced", **NOT_SEQ, "per_month": {"2026-01": 4}, "window": 4},
+    {"class": "clade_not_defined", **UNDEFINED, "per_month": {"2026-01": 2}, "window": 2,
+     "states": {"not_observable": 2}},
 ]}}  # fmt: skip
 
 
@@ -745,17 +753,102 @@ def _geo_key_setup(tmp: Path, key: dict[str, Any] | None = KEY) -> tuple[Path, P
     return cfg, root
 
 
-def test_the_clade_key_is_listed_newest_first_with_the_uncoloured_row_last(tmp_path: Path) -> None:
+def _dots(*dots: dict[str, Any]) -> dict[str, Any]:
+    return {"locations": [{"name": "P", "points": list(dots)}]}
+
+
+def test_the_clade_key_is_listed_newest_first_with_the_uncoloured_classes_last(
+    tmp_path: Path,
+) -> None:
     cfg_path, root = _geo_key_setup(tmp_path)
     cfg = load(cfg_path)
     keys, record = build.clade_keys(cfg, build.resolve_all(cfg, root), root)
-    assert keys == {0: [("New 9Z", "a0b0c0"), ("Old (q1)", "112233"), ("no colour", "FFFFFF")]}
+    assert keys == {0: [
+        ("New 9Z", "a0b0c0", "", None), ("Old (q1)", "112233", "", None),
+        ("no seq", "", "a0a0a0", 0.5), ("no clade", "ffffff", "606060", 0.6),
+    ]}  # fmt: skip
     assert record is not None and record["sha256"] == sha256_path(root / build.GEO_CLADE_KEY)
     assert record["sections"] == {"X geographic data": "x"}
+    assert record["uncoloured_classes"] == {
+        "X geographic data": {"not_sequenced": 4, "clade_not_defined": 2}
+    }
     page = "\n".join(build._intro_page(cfg.sections[0], (["Months a", "Each dot"], []), keys[0]))
     # as delivered: the period sentence, the key, then the description
     assert page.index("Months a") < page.index(r"\begin{tabular}{l l}") < page.index("Each dot")
     assert r"\cbox[afkey0x1] & Old (q1) \\" in page
+    # Q215: each uncoloured class on its own line, in the swatch its dots are drawn in
+    assert r"\ubox{none}{afkey0x2e}{0.5} & no seq \\" in page
+    assert r"\ubox{afkey0x3}{afkey0x3e}{0.6} & no clade \\" in page
+    assert r"\definecolor{afkey0x2}" not in page
+
+
+def test_uncoloured_dots_are_checked_against_their_class_in_the_key(tmp_path: Path) -> None:
+    cfg_path, root = _geo_key_setup(tmp_path)
+    cfg = load(cfg_path)
+    figs = build.resolve_all(cfg, root)
+    ok = [
+        {"count": 4, "uncoloured": "not_sequenced", **NOT_SEQ},
+        {"count": 2, "uncoloured": "clade_not_defined", **UNDEFINED},
+    ]
+    for dot in ok:
+        dot["color"] = dot.pop("fill")  # an I7 point carries its fill as "color"
+    figs["geo/x/2026-01"].figure.doc["geo"] = _dots(*ok)
+    build.clade_keys(cfg, figs, root)
+    figs["geo/x/2026-01"].figure.doc["geo"] = _dots({**ok[1], "edge": "#a0a0a0"})
+    with pytest.raises(build.BuildError, match="'clade_not_defined' drawn .*key has"):
+        build.clade_keys(cfg, figs, root)
+    figs["geo/x/2026-01"].figure.doc["geo"] = _dots({**ok[0], "uncoloured": "clade_not_in_scheme"})
+    with pytest.raises(build.BuildError, match="'clade_not_in_scheme' drawn, the key does not"):
+        build.clade_keys(cfg, figs, root)
+    figs["geo/x/2026-01"].figure.doc["geo"] = _dots({"color": "transparent", "count": 1})
+    with pytest.raises(build.BuildError, match="uncoloured dot with no class"):
+        build.clade_keys(cfg, figs, root)
+
+
+def test_every_listed_class_needs_words_and_every_worded_class_a_listing(tmp_path: Path) -> None:
+    extra = {"class": "clade_not_in_scheme", **UNDEFINED, "per_month": {}, "window": 1}
+    key = {"x": {**KEY["x"], "uncoloured_classes": [*KEY["x"]["uncoloured_classes"], extra]}}
+    cfg_path, root = _geo_key_setup(tmp_path, key=key)
+    cfg = load(cfg_path)
+    with pytest.raises(build.BuildError, match="lists uncoloured class 'clade_not_in_scheme'"):
+        build.clade_keys(cfg, build.resolve_all(cfg, root), root)
+    # a key from before Q215 lists no classes; clade_not_in_scheme alone may go unlisted
+    (root / build.GEO_CLADE_KEY).write_text(json.dumps({"x": {"entries": KEY["x"]["entries"]}}))
+    with pytest.raises(build.BuildError) as err:
+        build.clade_keys(cfg, build.resolve_all(cfg, root), root)
+    assert "2 clade key problem(s)" in str(err.value) and "before Q215" in str(err.value)
+
+
+def test_a_clade_not_defined_for_an_unexplained_reason_is_refused(tmp_path: Path) -> None:
+    key = json.loads(json.dumps(KEY))
+    key["x"]["uncoloured_classes"][1]["states"] = {"not_observable": 1, "no_assignment": 1}
+    cfg_path, root = _geo_key_setup(tmp_path, key=key)
+    cfg = load(cfg_path)
+    with pytest.raises(build.BuildError, match=r"does not explain \{'no_assignment': 1\}"):
+        build.clade_keys(cfg, build.resolve_all(cfg, root), root)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ("clade_not_defined = ", "sequenced = ", r"clade_key_classes: unknown \['sequenced'\]"),
+        ('clade_key = "x"\n', "", r"clade_key_classes: needs clade_key"),
+    ],
+)
+def test_key_class_config_problems(tmp_path: Path, old: str, new: str, message: str) -> None:
+    cfg_path = tmp_path / "v.toml"
+    cfg_path.write_text(GEO_KEY.replace(old, new, 1))
+    with pytest.raises(ConfigError, match=message):
+        load(cfg_path)
+
+
+def test_the_clade_not_defined_count_and_reasons_need_its_key_row(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "v.toml"
+    cfg_path.write_text(GEO_KEY.replace(', clade_not_defined = "no clade"', ""))
+    with pytest.raises(ConfigError) as err:
+        load(cfg_path)
+    assert "clade_not_defined_states: needs a clade_not_defined" in str(err.value)
+    assert "intro: {clade_not_defined} needs a clade_not_defined row" in str(err.value)
 
 
 def test_a_clade_key_from_another_geo_build_is_refused(tmp_path: Path) -> None:
@@ -764,8 +857,9 @@ def test_a_clade_key_from_another_geo_build_is_refused(tmp_path: Path) -> None:
     figs = build.resolve_all(cfg, root)
     dots = [{"color": "#a0b0c0", "count": 2, "clade": "New 9Z"},
             {"color": "#ffffff", "count": 1, "clade": "Other"},
-            {"color": "transparent", "count": 4, "clade": None}]  # fmt: skip
-    figs["geo/x/2026-01"].figure.doc["geo"] = {"locations": [{"name": "P", "points": dots}]}
+            {"color": "transparent", "count": 4, "clade": None, "uncoloured": "not_sequenced",
+             "edge": "#a0a0a0", "edge_width": 0.5}]  # fmt: skip
+    figs["geo/x/2026-01"].figure.doc["geo"] = _dots(*dots)
     with pytest.raises(build.BuildError, match="'Other' drawn #ffffff, key has None"):
         build.clade_keys(cfg, figs, root)
 
@@ -794,6 +888,7 @@ def test_the_geo_intro_page_with_its_clade_key_builds(tmp_path: Path) -> None:
     build.build(cfg_path, root, tmp_path / "out")
     tex = (tmp_path / "out" / "build" / "report.tex").read_text()
     assert r"\definecolor{afkey0x0}{HTML}{a0b0c0}" in tex and r"\usepackage{tikz}" in tex
+    assert r"\ubox{none}{afkey0x2e}{0.5} & no seq" in tex and "Undefined: 2 viruses." in tex
     record = json.loads((tmp_path / "out" / "vcm-test.build.json").read_text())
     assert record["clade_key"]["sections"] == {"X geographic data": "x"}
     # cover, contents, the geo intro page, 2 geo pages, 1 map page

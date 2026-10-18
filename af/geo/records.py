@@ -79,6 +79,8 @@ UNDEFINED_STATES = {
 }
 PREPARATIONS_DISAGREE = "preparations_disagree"  # coloured preparations, merged uncoloured
 OTHER_UNDEFINED = "other"  # no aligned sequence, proxy pairing unused, no clade labels
+#: Every id a key's clade_not_defined "states" can hold.
+UNDEFINED_STATE_IDS = (*UNDEFINED_STATES.values(), PREPARATIONS_DISAGREE, OTHER_UNDEFINED)
 
 
 @dataclass(frozen=True)
