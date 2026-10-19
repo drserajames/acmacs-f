@@ -56,6 +56,7 @@ class Look:
     label_gap: float = (
         2.0  # points kept clear between two labels (abutting boxes looked stacked, R4 review)
     )
+    title_clear: float = 6.0  # points kept clear right of the title's last letter (R5 review)
     legend_pad: float = 0.0125  # the legend box's distance from the page's left and bottom
     # The legend, in points of the 800-point page, as the shipped report draws it (style 08-07/08,
     # measured from its figures): text size and row pitch, the text's and the marker's distance
@@ -168,19 +169,29 @@ def legend_box(scene: Scene, look: Look) -> Box:
 def text_size(text: str, size: float, *, bold: bool = False) -> tuple[float, float]:
     """Width and height of ``text`` at ``size`` points in the CURRENT matplotlib font (the
     figure fonts' context while a map is built, af.util.fonts), as matplotlib lays it out."""
+    width, height, _ = text_metrics(text, size, bold=bold)
+    return width, height
+
+
+def text_metrics(text: str, size: float, *, bold: bool = False) -> tuple[float, float, float]:
+    """:func:`text_size` and the descent: how far ``text``'s glyphs reach below its baseline
+    (points). The height runs from the lowest descender to the highest ascender of THIS text."""
     from matplotlib.font_manager import FontProperties
     from matplotlib.textpath import text_to_path
 
     prop = FontProperties(size=size, weight="bold" if bold else "normal")
-    width, height, _ = text_to_path.get_text_width_height_descent(text, prop, ismath=False)
-    return float(width), float(height)
+    width, height, descent = text_to_path.get_text_width_height_descent(text, prop, ismath=False)
+    return float(width), float(height), float(descent)
 
 
 def title_box(scene: Scene, look: Look) -> Box:
     """The title's room, measured in the figure font: an estimate from the character count
-    ran up to 13 u short of the drawn title, which then sat on points (style 08-20)."""
+    ran up to 13 u short of the drawn title, which then sat on points (style 08-20). It ends
+    ``look.title_clear`` past the last letter: ending AT it, a marker could touch the title's
+    "e" (R5 review, 19 Oct 2026)."""
     width, _ = text_size(scene.title, look.title_size, bold=True)
-    return Box("title", 0.0, 0.0, min(0.95, 0.024 + width / look.page_points), 0.06)
+    right = 0.024 + (width + look.title_clear) / look.page_points
+    return Box("title", 0.0, 0.0, min(0.95, right), 0.06)
 
 
 def draw_pdf(
@@ -286,12 +297,16 @@ def draw_scene(
     from matplotlib import patheffects
 
     for lab in labels.values():
+        # On the baseline that puts the glyphs in the placed box. Aligned "bottom", matplotlib
+        # keeps room for a descender a label without one does not have, and drew "-cell" labels
+        # up to 6 points above their box, over the label placed above (R5 review, 19 Oct 2026).
+        descent = text_metrics(lab.text, look.label_size)[2] / look.page_points
         ax.text(
             lab.box[0],
-            lab.box[3] * a,
+            (lab.box[3] - descent) * a,
             lab.text,
             fontsize=look.label_size * scale,
-            va="bottom",
+            va="baseline",
             ha="left",
             zorder=8,
             path_effects=[

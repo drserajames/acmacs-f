@@ -8,8 +8,10 @@ from af.map.viewport import (
     Frame,
     FrameError,
     Priority,
+    View,
     choose_frame,
     from_y_down,
+    hidden_counts,
     hidden_mask,
 )
 
@@ -122,3 +124,33 @@ def test_a_y_down_drawing_keeps_its_picture() -> None:
     on_ae_page = (drawn - corner) / size
     ours = Frame(float(corner[0]), float(-corner[1]), size).page(from_y_down(drawn))
     np.testing.assert_allclose(ours, on_ae_page)
+
+
+def test_one_frame_serves_every_window() -> None:
+    # Recent points in the middle; the 12m page wants two points on the left in, the 6m page one
+    # point on the right. Alone, each page frames itself differently; one frame for both keeps
+    # the recent points on both and hides the fewest summed (the right point).
+    xy = np.array([[4.0, 0.0], [6.0, 0.0], [-1.0, 0.0], [-1.0, 1.0], [11.0, 0.0]])
+    recent = np.array([True, True, False, False, False])
+    left = np.array([False, False, True, True, False])
+    right = np.array([False, False, False, False, True])
+    twelve = (Priority("recent", recent), Priority("in window", left))
+    six = (Priority("recent", recent), Priority("in window", right))
+    alone = [choose_frame(xy, p, size=8.0, furniture=()).frame for p in (twelve, six)]
+    assert alone[0].x < alone[1].x  # the control: framed alone they differ
+    shared = choose_frame(xy, twelve, size=8.0, furniture=(), also=(View(six, ()),))
+    assert shared.hidden == {"recent": 0, "in window": 0}  # reported for the first page
+    assert hidden_counts(shared.frame, xy, six, ()).hidden == {"recent": 0, "in window": 1}
+
+
+def test_every_page_must_show_the_required_points() -> None:
+    # The second page's title box covers where the first page would put a recent point.
+    xy = np.array([[0.0, 0.0], [5.0, -5.0]])
+    prio = (Priority("recent", np.ones(2, bool)),)
+    title = Box("title", 0.0, 0.0, 0.5, 0.2)
+    with pytest.raises(FrameError, match="cannot be shown"):
+        choose_frame(xy, prio, size=5.0, furniture=(), also=(View(prio, (title,)),))
+    with pytest.raises(ValueError, match="priority groups"):
+        choose_frame(xy, prio, size=5.0, furniture=(), also=(View((), ()),))
+    with pytest.raises(FrameError, match="hides points"):
+        hidden_counts(Frame(0.0, 0.0, 5.0), xy, prio, (title,))

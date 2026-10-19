@@ -118,3 +118,62 @@ def test_furniture_outranks_a_neighbouring_mark() -> None:
         anchors, texts, anchors, [legend], sizes=[(0.1, 0.035)] * 4, mark_radius=0.025
     )
     assert first.box[0] >= legend.right
+
+
+@pytest.mark.parametrize("text", ["Ex/21-cell", "Ex/21-egg"])
+def test_a_label_is_drawn_inside_its_placed_box(text: str) -> None:
+    """The placer keeps boxes apart, so the glyphs must stay in theirs. Aligned "bottom",
+    matplotlib kept room for a descender "-cell" does not have and drew it about 6 points above
+    its box, onto the label above (R5 review, 19 Oct 2026)."""
+    import matplotlib.pyplot as plt
+
+    from af.map.render import text_size
+
+    look = DEFAULT_LOOK
+    w, h = (v / look.page_points for v in text_size(text, look.label_size))
+    box = (0.3, 0.5, 0.3 + w, 0.5 + h)
+    fig = plt.figure(figsize=(look.page_points / 72,) * 2, dpi=72 * 4)
+    ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+    label = Placed(text, (0.2, 0.5), box, 0, 0)
+    from af.map.figure import chart_scene
+    from tests.map.test_figure import COLOURS, XY
+    from tests.map.test_figure import chart as invented_chart
+
+    drawn = chart_scene(invented_chart(), XY, COLOURS, title="")
+    far = Frame(100.0, 100.0, 10.0)  # every point off the page: only the label is drawn dark
+    draw_scene(ax, drawn, far, {"x": label}, look, legend=False, title=False)
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    canvas = FigureCanvasAgg(fig)
+    canvas.draw()
+    rgb = np.asarray(canvas.buffer_rgba())[:, :, :3]
+    plt.close(fig)
+    rows, cols = np.nonzero(rgb.max(axis=2) < 128)  # the glyphs (black; grid and halo light)
+    px = rgb.shape[0]
+    top, bottom = rows.min() / px, (rows.max() + 1) / px
+    assert box[1] - 1 / px <= top and bottom <= box[3] + 1 / px
+    assert box[0] - 1 / px <= cols.min() / px and (cols.max() + 1) / px <= box[2] + 1 / px
+
+
+def test_a_crowd_of_vaccines_leaves_no_label_on_another() -> None:
+    """Eight marks in a tight crowd: every near place touches a label or a mark. A label on
+    another label must lose to one further out, not tie with a label on a mark (R5 review)."""
+    from itertools import combinations
+
+    from af.map.labels import _grown, _overlap
+
+    rng = np.random.default_rng(3)
+    anchors = 0.5 + rng.normal(size=(8, 2)) * 0.03
+    gap = 2.0 / 800
+    placed = place_labels(
+        anchors,
+        [f"Ex/2{i}-cell" for i in range(8)],
+        anchors,
+        [],
+        sizes=[(0.18, 0.03)] * 8,
+        mark_radius=0.025,
+        gap=gap,
+    )
+    assert not [
+        (a.text, b.text) for a, b in combinations(placed, 2) if _overlap(_grown(a.box, gap), b.box)
+    ]
