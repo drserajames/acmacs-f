@@ -21,6 +21,7 @@ Run: ``python -m af.report.build <config.toml> --figures <root> --store <root>
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
 import json
 import re
@@ -349,9 +350,11 @@ def intro_texts(
     key_record: dict[str, Any] | None = None,
 ) -> dict[int, Intro]:  # fmt: skip
     """Each section's intro, placeholders filled from recorded artefacts (af.report.text); a
-    clade key's counts come from its record (:func:`clade_keys`)."""
+    clade key's counts come from its record (:func:`clade_keys`). A declared tree method no
+    drawn tree uses is an error (rule 1)."""
     out: dict[int, Intro] = {}
     classes = (key_record or {}).get("uncoloured_classes", {})
+    used: set[str] = set()
     for i, section in enumerate(cfg.sections):
         if not section.intro:
             continue
@@ -373,13 +376,18 @@ def intro_texts(
                     gaps.append(f"{slot}: the tree's method (no --store to read it from)")
                     continue
                 ref, tree = text.tree_json(store, figs[slot].figure.doc)
-                method, missing = text.tree_method(tree, text.tree_caveats(store, ref))
+                declared = cfg.imported_tree_methods.get(ref.dataset)
+                used.add(ref.dataset)
+                method, missing = text.tree_method(tree, text.tree_caveats(store, ref), declared)
                 if missing:  # one line per tree: the version, then every field it lacks
                     gaps.append(f"{slot} ({ref}): " + ", ".join(missing))
                 methods.append(method)
             values["tree_method"] = " ".join(m for m in methods if m)
         filled = text.fill(intro, values)
         out[i] = ([p.strip() for p in filled.split("\n\n") if p.strip()], gaps)
+    unused = sorted(set(cfg.imported_tree_methods) - used)
+    if store is not None and unused:
+        raise BuildError(f"imported_tree_methods: no tree page draws {unused}")
     return out
 
 
@@ -786,6 +794,9 @@ def build(
     for item in record["warnings"]:
         print(f"{item['slot']}: {item['warning']}", file=sys.stderr)
     record["text_gaps"] = gaps
+    record["declared_tree_methods"] = {
+        dataset: dataclasses.asdict(method) for dataset, method in cfg.imported_tree_methods.items()
+    }
     record["clade_key"] = key_record
     (out_dir / f"{cfg.report.id}.build.json").write_text(json.dumps(record, indent=1))
     return final
