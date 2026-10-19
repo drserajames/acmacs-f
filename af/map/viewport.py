@@ -128,6 +128,16 @@ def hidden_mask(page: Array, furniture: tuple[Box, ...], radii: Array | float = 
     return hidden
 
 
+@dataclass(frozen=True)
+class View:
+    """One page a frame must serve: its priority groups and its furniture. A map's windows
+    share one frame (as shipped: the all, 12m and 6m pages of a map show the same square), but
+    each window greys its own points and has its own title and legend."""
+
+    priorities: tuple[Priority, ...]
+    furniture: tuple[Box, ...]
+
+
 def choose_frame(
     xy: Array,
     priorities: tuple[Priority, ...],
@@ -136,6 +146,7 @@ def choose_frame(
     furniture: tuple[Box, ...],
     step: float = 0.1,
     radii: Array | float = 0.0,
+    also: tuple[View, ...] = (),
 ) -> FrameChoice:
     """Place a ``size`` x ``size`` frame over ``xy`` (displayed coordinates of drawn points).
 
@@ -148,42 +159,80 @@ def choose_frame(
     marker cut by the edge or reaching under the title counts as hidden in every group (``hidden``
     reports those counts). Requiring whole markers outright made a frame impossible where every
     centre fits (h1-vidrl, R4, 15-unit frame).
+
+    ``also``: further pages the same frame must serve, each with as many priority groups, in the
+    same ranks. The required group must then be visible on every page, and each rank's hidden
+    counts are summed over the pages. Choosing a frame per window moved h1-cnic's frame 3 units
+    between its all and 12m pages (R5 review, 19 Oct 2026). ``hidden`` reports the first page.
     """
+    views = (View(priorities, furniture), *also)
     if not priorities:
         raise ValueError("choose_frame needs at least one priority group")
-    for p in priorities:
-        if p.mask.shape != (len(xy),):
-            raise ValueError(f"priority {p.name!r}: mask length {p.mask.shape} != {len(xy)} points")
+    for v in views:
+        if len(v.priorities) != len(priorities):
+            raise ValueError(
+                f"every page needs {len(priorities)} priority groups, got {len(v.priorities)}"
+            )
+        for p in v.priorities:
+            if p.mask.shape != (len(xy),):
+                raise ValueError(
+                    f"priority {p.name!r}: mask length {p.mask.shape} != {len(xy)} points"
+                )
     ok = rows_with_coordinates(xy)
     if not ok.any():
         raise FrameError("no drawn point has coordinates")
     pts = xy[ok]
     rad = np.broadcast_to(np.asarray(radii, dtype=float), (len(xy),))[ok]
-    masks = [p.mask[ok] for p in priorities]
+    masks = [[p.mask[ok] for p in v.priorities] for v in views]
     # Candidates are searched in page orientation (x right, y DOWN, so ``-y``), stepping the
     # frame's top-left corner as drawn, so the search does not depend on which way map y grows.
     down = pts * [1.0, -1.0]
-    focus = down[masks[0]] if masks[0].any() else down
+    first = masks[0][0]
+    focus = down[first] if first.any() else down
     centre = (focus.min(axis=0) + focus.max(axis=0)) / 2
     lo = np.minimum(down.min(axis=0), down.max(axis=0) - size) - 1.0
     hi = np.maximum(down.min(axis=0), down.max(axis=0) - size) + 1.0
-    best: tuple[tuple[float, ...], Frame] | None = None
+    best: tuple[tuple[float, ...], Frame, list[float]] | None = None
     for x in np.arange(lo[0], hi[0] + step / 2, step):
         for y in np.arange(lo[1], hi[1] + step / 2, step):
             frame = Frame(round(float(x), 6), -round(float(y), 6), size)
             page = frame.page(pts)
-            required = float((hidden_mask(page, furniture) & masks[0]).sum())
-            hidden = hidden_mask(page, furniture, rad)
+            required = 0.0
+            ranks = np.zeros(len(priorities))
+            own: list[float] = []
+            for v, ms in zip(views, masks, strict=True):
+                required += float((hidden_mask(page, v.furniture) & ms[0]).sum())
+                hidden = hidden_mask(page, v.furniture, rad)
+                counts = [float((hidden & m).sum()) for m in ms]
+                ranks += counts
+                own = own or counts
             offset = float(np.hypot(*(centre - [x + size / 2, y + size / 2])))
-            cost = (required, *(float((hidden & m).sum()) for m in masks), offset)
+            cost = (required, *ranks.tolist(), offset)
             if best is None or cost < best[0]:
-                best = (cost, frame)
+                best = (cost, frame, own)
     assert best is not None
-    cost, frame = best
-    counts = {p.name: int(c) for p, c in zip(priorities, cost[1:], strict=False)}
+    cost, frame, own = best
+    report = {p.name: int(c) for p, c in zip(priorities, own, strict=True)}
     if cost[0]:
         raise FrameError(
             f"{int(cost[0])} point(s) of {priorities[0].name!r} cannot be shown in a "
             f"{size} x {size} frame with this furniture; enlarge the configured size"
         )
-    return FrameChoice(frame, counts)
+    return FrameChoice(frame, report)
+
+
+def hidden_counts(
+    frame: Frame,
+    xy: Array,
+    priorities: tuple[Priority, ...],
+    furniture: tuple[Box, ...],
+    radii: Array | float = 0.0,
+) -> FrameChoice:
+    """A given frame's hidden counts per priority, as :func:`choose_frame` reports them (whole
+    markers), for a page drawn in a frame chosen for several (:class:`View`). Raises
+    :class:`FrameError` if a centre of the first, required group is hidden."""
+    page = frame.page(xy)
+    if (hidden_mask(page, furniture) & priorities[0].mask).any():
+        raise FrameError(f"the given frame hides points of {priorities[0].name!r}")
+    hidden = hidden_mask(page, furniture, radii)
+    return FrameChoice(frame, {p.name: int((hidden & p.mask).sum()) for p in priorities})

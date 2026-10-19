@@ -138,14 +138,18 @@ def place_labels(
     mark_radius: float | None = None,
     char_width: float = 0.0155,
     height: float = 0.03,
-    radii: Sequence[float] = (0.0275, 0.04, 0.056),
+    radii: Sequence[float] = (0.0275, 0.04, 0.056, 0.075, 0.1, 0.13),
     gap: float = 0.0,
 ) -> list[Placed]:
     """Greedy placement, in order: try positions around each anchor at increasing distance and
     keep the one that (1) stays on the page, (2) overlaps the furniture (legend, title) least,
-    (3) overlaps fewest earlier labels and marks, (4) is nearest, (5) covers fewest drawn
-    points. Deterministic: no randomness, fixed order. Furniture comes first because it is drawn
-    over the labels: a label half under the legend cannot be read (style 08-23).
+    (3) overlaps fewest earlier labels, (4) lies on fewest marks, (5) is nearest, (6) covers
+    fewest drawn points. Deterministic: no randomness, fixed order. Furniture comes first because
+    it is drawn over the labels: a label half under the legend cannot be read (style 08-23).
+    Labels and marks used to be one count, so where every near place touched something, a label
+    on another label tied with one on a mark and the nearer won: 21 label pairs printed over each
+    other on R5's 54 map figures (R5 review, 19 Oct 2026). The outer radii are there so that a
+    crowd of vaccines still leaves each label a clear place.
 
     Nearest before fewest covered, as the shipped maps place them: a label sits just clear of
     its mark (the first radius is a marked point's 0.025 plus a little) even over other points,
@@ -175,13 +179,21 @@ def place_labels(
                 box = (left, top, left + w, top + h)
                 off = box[0] < 0 or box[1] < 0 or box[2] > 1 or box[3] > 1
                 on_furniture = sum(_overlap(box, other) for other in boxes[:n_furniture])
-                hits = sum(_overlap(_grown(box, gap), other) for other in boxes[n_furniture:])
+                on_labels = sum(_overlap(_grown(box, gap), other) for other in boxes[n_furniture:])
+                on_marks = 0
                 if mark_radius is not None:
-                    hits += sum(_on_circle(box, m, mark_radius) for m in anchors)
+                    on_marks = sum(_on_circle(box, m, mark_radius) for m in anchors)
                 covered = int(_inside(drawn, box).sum())
-                cost = (float(off), float(on_furniture), float(hits), r, float(covered))
+                cost = (
+                    float(off),
+                    float(on_furniture),
+                    float(on_labels),
+                    float(on_marks),
+                    r,
+                    float(covered),
+                )
                 if best is None or cost < best[0]:
-                    best = (cost, box, on_furniture + hits, covered)
+                    best = (cost, box, on_furniture + on_labels + on_marks, covered)
         assert best is not None
         _, box, hits, covered = best
         boxes.append(box)

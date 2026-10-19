@@ -29,7 +29,15 @@ from af.map.render import (
     title_box,
 )
 from af.map.style import ColourScheme, PointIn, Scene, Window, style_points
-from af.map.viewport import Frame, FrameChoice, Priority, choose_frame
+from af.map.viewport import (
+    Box,
+    Frame,
+    FrameChoice,
+    Priority,
+    View,
+    choose_frame,
+    hidden_counts,
+)
 
 
 @dataclass(frozen=True)
@@ -42,37 +50,27 @@ class FinishedMap:
     recent_hidden: int
 
 
-def finish_map(
+@dataclass(frozen=True)
+class _Page:
+    """What one window's page asks of its frame."""
+
+    scene: Scene
+    xy: np.ndarray  # displayed coordinates, NaN for points not shown
+    priorities: tuple[Priority, ...]
+    furniture: tuple[Box, ...]
+    radii: np.ndarray
+
+
+def _page(
     points: Sequence[PointIn],
-    *,
-    chart: str,
     scheme: ColourScheme,
     window: Window,
     title: str,
-    frame_size: float,
     must_show_since: dt.date,
     vaccine_labels: dict[str, str],
-    out_pdf: Path,
-    created: dt.datetime,
-    provenance: dict[str, Any],
-    orientation: dict[str, object] | None = None,
-    flags: Sequence[str] = (),
-    look: Look = DEFAULT_LOOK,
-    styles: Mapping[str, PointStyle] | None = None,
-) -> FinishedMap:
-    """Produce ``out_pdf`` and its I7 for one chart and window.
-
-    ``must_show_since``: antigens isolated on or after this date must all be visible (not off the
-    page, not under the legend or title) in *every* window, including "all", where nothing is
-    greyed and older antigens may fall off the edge if the frame is too small for them; among
-    the frames that show them, one that keeps their markers whole wins. Raises
-    ``FrameError`` rather than writing a map that hides one. Vaccines come next: shown if at all
-    possible, but an old vaccine far from today's viruses may not fit (the I7 records
-    ``in_viewport`` for each), then antigens in the window, sera, and everything else."""
-    # fail before drawing anything
-    if created.tzinfo is None:
-        raise ValueError("I7 'created' needs a time zone")
-    check_provenance_inputs(provenance.get("inputs"))
+    look: Look,
+    styles: Mapping[str, PointStyle] | None,
+) -> _Page:
     scene = style_points(points, scheme, window, title=title, vaccines=vaccine_labels)
     furniture = (legend_box(scene, look), title_box(scene, look))
     xy = scene.xy()
@@ -94,14 +92,89 @@ def finish_map(
     )
     own = styles or {}
     radii = np.array([marker_extent(p, look, own.get(p.id)) for p in scene.points])
+    return _Page(scene, np.where(shown[:, None], xy, np.nan), priorities, furniture, radii)
+
+
+def shared_frame(
+    points: Sequence[PointIn],
+    *,
+    scheme: ColourScheme,
+    windows: Sequence[tuple[Window, str]],
+    frame_size: float,
+    must_show_since: dt.date,
+    vaccine_labels: dict[str, str],
+    look: Look = DEFAULT_LOOK,
+    styles: Mapping[str, PointStyle] | None = None,
+) -> Frame:
+    """One frame for all of a map's windows (each a window and its title), as the shipped maps
+    use one viewport on the all, 12m and 6m pages: a reader turning the pages sees the same
+    square. It is chosen as :func:`finish_map` chooses one window's frame, over every window's
+    page at once (:class:`af.map.viewport.View`): each window's recent antigens visible, then
+    each priority's hidden markers summed over the windows. Positions and marker sizes are the
+    first window's: windows grey points, they do not move, hide or resize them."""
+    if not windows:
+        raise ValueError("shared_frame needs at least one window")
+    pages = [
+        _page(points, scheme, w, t, must_show_since, vaccine_labels, look, styles)
+        for w, t in windows
+    ]
+    first, *rest = pages
     choice = choose_frame(
-        np.where(shown[:, None], xy, np.nan),
-        priorities,
+        first.xy,
+        first.priorities,
         size=frame_size,
-        furniture=furniture,
-        radii=radii,
+        furniture=first.furniture,
+        radii=first.radii,
+        also=tuple(View(p.priorities, p.furniture) for p in rest),
     )
-    frame: Frame = choice.frame
+    return choice.frame
+
+
+def finish_map(
+    points: Sequence[PointIn],
+    *,
+    chart: str,
+    scheme: ColourScheme,
+    window: Window,
+    title: str,
+    frame_size: float,
+    must_show_since: dt.date,
+    vaccine_labels: dict[str, str],
+    out_pdf: Path,
+    created: dt.datetime,
+    provenance: dict[str, Any],
+    orientation: dict[str, object] | None = None,
+    flags: Sequence[str] = (),
+    look: Look = DEFAULT_LOOK,
+    styles: Mapping[str, PointStyle] | None = None,
+    frame: Frame | None = None,
+) -> FinishedMap:
+    """Produce ``out_pdf`` and its I7 for one chart and window.
+
+    ``must_show_since``: antigens isolated on or after this date must all be visible (not off the
+    page, not under the legend or title) in *every* window, including "all", where nothing is
+    greyed and older antigens may fall off the edge if the frame is too small for them; among
+    the frames that show them, one that keeps their markers whole wins. Raises
+    ``FrameError`` rather than writing a map that hides one. Vaccines come next: shown if at all
+    possible, but an old vaccine far from today's viruses may not fit (the I7 records
+    ``in_viewport`` for each), then antigens in the window, sera, and everything else.
+
+    ``frame``: draw in this frame (a map's :func:`shared_frame`) instead of choosing one for
+    this window alone; it is still checked to show the recent antigens."""
+    # fail before drawing anything
+    if created.tzinfo is None:
+        raise ValueError("I7 'created' needs a time zone")
+    check_provenance_inputs(provenance.get("inputs"))
+    pg = _page(points, scheme, window, title, must_show_since, vaccine_labels, look, styles)
+    scene, xy, furniture = pg.scene, pg.scene.xy(), pg.furniture
+    shown = np.array([p.shown for p in scene.points])
+    if frame is None:
+        choice = choose_frame(
+            pg.xy, pg.priorities, size=frame_size, furniture=furniture, radii=pg.radii
+        )
+    else:
+        choice = hidden_counts(frame, pg.xy, pg.priorities, furniture, pg.radii)
+    frame = choice.frame
     page = frame.page(xy)
     ids = [p.id for p in scene.points if p.mark is not None and p.shown]
     rows = [i for i, p in enumerate(scene.points) if p.mark is not None and p.shown]
