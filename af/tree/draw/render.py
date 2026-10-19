@@ -9,7 +9,7 @@ draw report; the caller writes those.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
@@ -95,6 +95,10 @@ class Geometry:
     clade_gap: float = 11.4  # matrix's right edge -> first bracket column (+2)
     clade_slot: float = 15.0  # bracket column pitch
     clade_name_offset: float = 4.5  # bracket -> clade name baseline
+    # Clear space between two names stacked in one bracket column. Too little, and a column of
+    # names reads as one string (R5 review: two sibling sub-clades at 6); too much pushes a
+    # name past the end of its small band (another tree's pair at 10).
+    clade_name_gap: float = 6.0
     bracket_width: float = 1.0
     bars_gap: float = 16.3  # last bracket column -> first dash bar
     bar_width: float = 8.7
@@ -121,6 +125,9 @@ class Geometry:
     # Strain (vaccine) labels left-aligned at this x, in the margin where no substitution leader
     # runs (leaders always run right, to their node); None: right-aligned just left of the tree.
     strain_x: float | None = None
+    # A margin strain label whose own row is taken moves off it in steps of this (None: the
+    # label's height), so two strains on near rows sit this far apart.
+    strain_step: float | None = None
     # The continent inset's preferred corner (left x, bottom y): the clear spot nearest to it is
     # taken, never one over ink; None: the lowest, then leftmost clear spot. And its width.
     inset_left: float | None = None
@@ -129,6 +136,9 @@ class Geometry:
     # Dash-bar legend rows: the first row's bottom (None: 16 above the rows) and the row pitch.
     legend_bottom: float | None = None
     legend_pitch: float = 6.5
+    # No aa label starts left of this x. With margin strain labels, set it right of their
+    # column, so the margin is theirs alone as shipped (R5 review: aa labels from x 3).
+    label_left: float = 2.0
 
 
 @dataclass
@@ -376,7 +386,9 @@ def _draw_brackets(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> dict[i
             for r in (b.first, b.last + 1):
                 edges[r] = max(edges.get(r, x), x)
             names.append((x + g.clade_name_offset, (y0 + y1) / 2, cs.clade))
-    _place_clade_names(ax, names, g.clade_font, spec.clade_label_sizes, spec.clade_display)
+    _place_clade_names(
+        ax, names, g.clade_font, spec.clade_label_sizes, spec.clade_display, g.clade_name_gap
+    )
     return edges
 
 
@@ -386,12 +398,14 @@ def _place_clade_names(
     size: float,
     sizes: Mapping[str, float] | None = None,
     display: Mapping[str, str] | None = None,
+    gap: float = 6.0,
 ) -> None:
     """Write each clade's name beside its bracket, centred on the band.
 
     Two small bands next to each other in one column would print their names on top of each
     other; a name that would overlap the one above slides down just past it, with a thin
-    leader back to its band's middle, so every name stays readable.
+    leader back to its band's middle, so every name stays readable, ``gap`` clear of the one
+    above.
     """
     sizes, display = sizes or {}, display or {}
     widths = {s: _text_width(FontProperties(size=s)) for s in {size, *sizes.values()}}
@@ -399,11 +413,12 @@ def _place_clade_names(
     for x, mid, clade in sorted(names, key=lambda t: (t[0], t[1])):
         text_size = sizes.get(clade, size)
         text = display.get(clade, clade)
-        half = widths[text_size](text) / 2 + 3  # a clear gap between stacked names
-        centre = max(mid, last_end.get(x, -1e9) + half)
-        last_end[x] = centre + half
+        half = widths[text_size](text) / 2
+        clear = half + gap / 2
+        centre = max(mid, last_end.get(x, -1e9) + clear)
+        last_end[x] = centre + clear
         if centre != mid:
-            ax.plot([x - 3, x], [mid, centre - half + 1], color="#7f7f7f", lw=0.3)
+            ax.plot([x - 3, x], [mid, centre - clear + (gap / 2 - 2)], color="#7f7f7f", lw=0.3)
         ax.text(
             x,
             centre,
@@ -481,7 +496,7 @@ def _draw_strains(
         y = float(pg.row_y(r))
         if g.strain_x is not None:
             at = _margin_strain_box(
-                g.strain_x, y, width(text), g.strain_font * 1.1, boxes, grid, placed
+                g.strain_x, y, width(text), g.strain_font * 1.1, boxes, grid, placed, g.strain_step
             )
             ax.text(at[0], (at[1] + at[3]) / 2, text, ha="left", va="center", fontproperties=font)
             boxes.append(at)
@@ -521,18 +536,27 @@ def _margin_strain_box(
     boxes: list[Box],
     grid: Grid,
     placed: Sequence[Placed] = (),
+    step: float | None = None,
 ) -> Box:
-    """A strain label in the left margin at ``x``: on its row, or the nearest row offset that
-    overlaps no other strain label, no ink, no placed aa label and no aa leader. Placed after
-    the aa labels, so they keep the spots they would have had (R4 review: margin labels placed
-    first pushed aa labels into each other's leaders). None clear is an error, not an overlap."""
-    for k in range(13):
-        dy = (k + 1) // 2 * h * (1 if k % 2 == 0 else -1)
-        box: Box = (x, y + dy - h / 2, x + w, y + dy + h / 2)
-        clear = not any(
+    """A strain label in the left margin at ``x``: on its row, or the nearest offset (in
+    ``step``s, default ``h``) that overlaps no other strain label, no ink, no placed aa label
+    and no aa leader. Off a row another strain label sits on, it moves away from that label
+    first, so the labels keep their rows' order. Placed after the aa labels, so they keep the
+    spots they would have had (R4 review: margin labels placed first pushed aa labels into each
+    other's leaders). None clear is an error, not an overlap."""
+
+    def hits(box: Box, others: Iterable[Box]) -> bool:
+        return any(
             min(box[2], o[2]) > max(box[0], o[0]) and min(box[3], o[3]) > max(box[1], o[1])
-            for o in [*boxes, *(p.box for p in placed)]
+            for o in others
         )
+
+    on_row = [o for o in boxes if hits((x, y - h / 2, x + w, y + h / 2), [o])]
+    away = 1 if any((o[1] + o[3]) / 2 <= y for o in on_row) else -1  # down if one is above
+    for k in range(13):
+        dy = (k + 1) // 2 * (h if step is None else step) * (away if k % 2 == 1 else -away)
+        box: Box = (x, y + dy - h / 2, x + w, y + dy + h / 2)
+        clear = not hits(box, [*boxes, *(p.box for p in placed)])
         crossed = any(segment_hits_box(leader_end(p.box), p.anchor, box) for p in placed)
         if clear and not crossed and not grid.cost(box):
             return box
@@ -579,7 +603,7 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
     search = Search(
         dxs=sorted({*base.dxs, *(d * k for d in base.dxs)}),
         dys=sorted({*base.dys, *(d * k for d in base.dys)}, key=lambda d: (abs(d), d)),
-        left=2.0,
+        left=g.label_left,
         top=g.top - 4,
         bottom=pg.bottom + 2,
     )
