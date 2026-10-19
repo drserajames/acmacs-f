@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from af.report import build, placeholder, text
-from af.report.config import load
+from af.report.config import TreeMethod, load
 from af.store import Provenance, Store
 from af.util.config import ConfigError
 
@@ -52,14 +52,14 @@ def test_tree_method_says_only_what_tree_json_records() -> None:
     assert missing == []
     assert sentence == (
         "Nucleotide sequences of the mature HA (HA1 and HA2) were aligned. The phylogenetic tree "
-        "was constructed using toolname/9.9 under the GTR substitution model, and zero-length "
+        "was constructed using toolname v9.9 under the GTR substitution model, and zero-length "
         "branches were collapsed into multifurcations."
     )
     partial = {"aligned": FULL["aligned"], "build": {"version": "toolname/9.9",
                "parameters": {}, "zero_length_collapsed": True}}  # fmt: skip
     assert text.tree_method(partial) == (
         "Nucleotide sequences of the mature HA (HA1 and HA2) were aligned. The phylogenetic tree "
-        "was constructed using toolname/9.9, and zero-length branches were collapsed into "
+        "was constructed using toolname v9.9, and zero-length branches were collapsed into "
         "multifurcations.",
         ["tree.json build.parameters.model"],
     )
@@ -69,13 +69,38 @@ def test_tree_method_says_only_what_tree_json_records() -> None:
     ]  # fmt: skip
 
 
-def test_an_imported_tree_says_af_did_not_build_it() -> None:
-    """A tree af imported records no alignment or build: its provenance says so, and the page
-    says that, not a line of missing fields (00, 18 Oct 2026)."""
+def test_the_tool_is_named_as_the_delivered_report_names_it() -> None:
+    """ "cmaple/2.0.0" is CMAPLE's own version string; the page says "CMAPLE v2.0.0" (00, 19 Oct
+    2026)."""
+    assert text.tool_text("cmaple/2.0.0") == "CMAPLE v2.0.0"
+    assert text.tool_text("othertool/1.2") == "othertool v1.2"
+    assert text.tool_text("cmaple/unknown") == "cmaple/unknown"
+    assert text.tool_text("bare") == "bare"
+
+
+DECLARED = TreeMethod(region="mature HA (HA1 and HA2)", version="cmaple/9.9", model="GTR",
+                      zero_length_collapsed=True, source="the build's own records")  # fmt: skip
+
+
+def test_an_imported_tree_states_its_declared_method() -> None:
+    """A tree af imported records no alignment or build: the round declares them, and the page
+    says them in the same words as for an af build, never naming af (00, 19 Oct 2026)."""
     caveats = ["not an af build: another toolkit's tree", "synthetic leaf keys"]
-    assert text.tree_method({"asr": {"backend": "x"}}, caveats) == (text.IMPORTED_METHOD, [])
-    # a version that records a build anyway is checked as usual
+    sentence, missing = text.tree_method({"asr": {"backend": "x"}}, caveats, DECLARED)
+    assert missing == []
+    assert sentence == (
+        "Nucleotide sequences of the mature HA (HA1 and HA2) were aligned. The phylogenetic tree "
+        "was constructed using CMAPLE v9.9 under the GTR substitution model, and zero-length "
+        "branches were collapsed into multifurcations."
+    )
+    assert "af" not in sentence.split()
+    # undeclared: one gap, nothing printed
+    assert text.tree_method({"asr": {}}, caveats) == ("", [
+        "an imported tree: no method recorded, none declared (imported_tree_methods)"])  # fmt: skip
+    # a version that records a build anyway is checked as usual, and is not to be declared
     assert text.tree_method({"build": FULL["build"]}, caveats)[1] == ["tree.json aligned.region"]
+    assert text.tree_method(FULL, caveats, DECLARED)[1] == [
+        "a declared method for a tree that is not imported (imported_tree_methods)"]  # fmt: skip
     assert text.tree_method({"asr": {}}, ["synthetic leaf keys"])[1] != []
 
 
@@ -138,12 +163,51 @@ def test_an_unrecorded_method_is_refused_in_bring_up_too(tmp_path: Path) -> None
         build.build(cfg_path, root, tmp_path / "out", store_root=tmp_path / "store")
 
 
-def test_an_imported_tree_page_says_so(tmp_path: Path) -> None:
+DECLARE = """
+[imported_tree_methods."x/report"]
+region = "mature HA (HA1 and HA2)"
+version = "cmaple/9.9"
+model = "GTR"
+zero_length_collapsed = true
+source = "the build's own records"
+"""
+
+
+def test_an_imported_tree_page_states_the_declared_method(tmp_path: Path) -> None:
     cfg_path, root, store = _setup(tmp_path, {"asr": {}}, allow=True,
                                    caveats=["not an af build: imported"])  # fmt: skip
     cfg = load(cfg_path)
-    intros = build.intro_texts(cfg, build.resolve_all(cfg, root), store)
-    assert intros[1] == (["The tree is coloured by region.", text.IMPORTED_METHOD], [])
+    figs = build.resolve_all(cfg, root)
+    (gap,) = build.intro_texts(cfg, figs, store)[1][1]
+    assert gap.startswith("tree/x/report (trees/x/report@")
+    assert gap.endswith("): an imported tree: no method recorded, none declared "
+                        "(imported_tree_methods)")  # fmt: skip
+    cfg_path.write_text(cfg_path.read_text() + DECLARE)
+    cfg = load(cfg_path)
+    paragraphs, gaps = build.intro_texts(cfg, figs, store)[1]
+    assert gaps == []
+    assert paragraphs[0] == "The tree is coloured by region."
+    assert paragraphs[1].startswith("Nucleotide sequences of the mature HA (HA1 and HA2)")
+    assert "CMAPLE v9.9 under the GTR" in paragraphs[1]
+
+
+def test_a_declared_method_no_tree_uses_is_refused(tmp_path: Path) -> None:
+    cfg_path, root, store = _setup(tmp_path, {"asr": {}}, allow=True,
+                                   caveats=["not an af build: imported"])  # fmt: skip
+    cfg_path.write_text(cfg_path.read_text() + DECLARE + DECLARE.replace("x/report", "y/report"))
+    cfg = load(cfg_path)
+    with pytest.raises(build.BuildError, match=r"no tree page draws \['y/report'\]"):
+        build.intro_texts(cfg, build.resolve_all(cfg, root), store)
+
+
+def test_a_declared_method_is_checked(tmp_path: Path) -> None:
+    cfg = tmp_path / "r.toml"
+    cfg.write_text(CONFIG.replace("ALLOW", "true") + DECLARE.replace('"cmaple/9.9"', '"CMAPLE 9.9"')
+                   .replace('source = "the build\'s own records"', 'source = " "'))  # fmt: skip
+    with pytest.raises(ConfigError) as err:
+        load(cfg)
+    assert "must not be empty" in str(err.value)
+    assert "is not '<tool>/<version>'" in str(err.value)
 
 
 def test_intro_config_is_checked(tmp_path: Path) -> None:

@@ -131,10 +131,26 @@ class Figures:
 
 
 @dataclass(frozen=True)
+class TreeMethod:
+    """How an imported tree (its provenance says "not an af build") was aligned and built, which
+    its ``tree.json`` does not record: declared, with the records it rests on (00, 19 Oct 2026).
+    The fields are the ones an af build records (``aligned.region``, ``build.version`` as
+    "<tool>/<version>", ``build.parameters.model``, ``build.zero_length_collapsed``)."""
+
+    region: str
+    version: str
+    model: str
+    zero_length_collapsed: bool
+    source: str  # the records each fact comes from
+
+
+@dataclass(frozen=True)
 class ReportConfig:
     report: Report
     sections: list[Section]
     figures: Figures = field(default_factory=Figures)
+    # Tree dataset -> its declared method, for imported trees only; each must be drawn.
+    imported_tree_methods: dict[str, TreeMethod] = field(default_factory=dict)
 
     def months(self) -> list[str]:
         """Every month of the report period, "YYYY-MM", first to last inclusive."""
@@ -271,6 +287,13 @@ def load(path: Path) -> ReportConfig:
     unknown_pins = sorted(set(cfg.figures.pins) - set(slots))
     if unknown_pins:
         problems.append(f"figures.pins: slots not in any section {unknown_pins}")
+    for dataset, method in cfg.imported_tree_methods.items():
+        where = f"imported_tree_methods.{dataset!r}"
+        if any(not v.strip() for v in (method.region, method.model, method.source)):
+            problems.append(f"{where}: region, model and source must not be empty")
+        tool, _, version = method.version.partition("/")
+        if not tool or not version:
+            problems.append(f"{where}.version: {method.version!r} is not '<tool>/<version>'")
     if problems:
         raise ConfigError(path, problems)
     return cfg
