@@ -87,3 +87,10 @@ explicit_package_bases = true
 ignore_missing_imports = true
 check_untyped_defs = true
 warn_unused_ignores = true
+
+# ignore_missing_imports is for third-party packages without stubs. A missing module of af's
+# own must fail here, not at run time (19 Oct 2026: a release trial imported af.util.running,
+# which its base did not have, and mypy passed it).
+[[tool.mypy.overrides]]
+module = ["af", "af.*", "tests", "tests.*"]
+ignore_missing_imports = false
