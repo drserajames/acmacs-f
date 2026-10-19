@@ -1,6 +1,7 @@
 """Drawing every tree's figure and book in parallel processes: the same bytes as one by one."""
 
 import json
+import os
 from dataclasses import dataclass, replace
 
 import pytest
@@ -14,6 +15,24 @@ from af.tree.draw.stage import TreeJob, TreeStageError, draw_trees  # noqa: E402
 from af.tree.draw.store import StoreTree  # noqa: E402
 
 from .synthetic import PARENTS, standard_tree  # noqa: E402
+
+
+def _process_pools_work() -> bool:
+    """Process pools need named semaphores; some sandboxes (the Claude Code one) refuse them
+    with PermissionError. CI and a normal shell allow them, so the tests run there."""
+    try:
+        os.sysconf("SC_SEM_NSEMS_MAX")
+    except (AttributeError, ValueError):
+        return True  # no such limit to read: the pool does not ask either
+    except OSError:
+        return False
+    return True
+
+
+needs_processes = pytest.mark.skipif(
+    not _process_pools_work(),
+    reason="named semaphores are refused here (a sandbox): process-pool tests run in CI",
+)
 
 CODE: dict[str, object] = {"commit": "c0ffee", "release": None, "python": "3.12", "libraries": {}}
 
@@ -70,6 +89,7 @@ def without_run_facts(path):
     return data
 
 
+@needs_processes
 def test_parallel_parts_draw_the_same_bytes_as_one_by_one(tmp_path):
     serial = draw_trees(jobs(tmp_path / "serial"), workers=1, code=CODE)
     parallel = draw_trees(jobs(tmp_path / "parallel"), workers=4, code=CODE)
@@ -85,6 +105,7 @@ def test_parallel_parts_draw_the_same_bytes_as_one_by_one(tmp_path):
     assert parallel["two"].report["book"]["pages"] >= 1
 
 
+@needs_processes
 def test_every_part_is_reused_from_the_cache(tmp_path):
     first = draw_trees(jobs(tmp_path / "a"), cache=tmp_path / "c", workers=2, code=CODE)
     again = draw_trees(jobs(tmp_path / "b"), cache=tmp_path / "c", workers=2, code=CODE)
@@ -94,6 +115,7 @@ def test_every_part_is_reused_from_the_cache(tmp_path):
         assert (tmp_path / "a" / rel).read_bytes() == (tmp_path / "b" / rel).read_bytes()
 
 
+@needs_processes
 def test_a_failed_part_is_named_and_stores_nothing(tmp_path):
     with pytest.raises(TreeStageError, match="tree two figure: RuntimeError: invented failure"):
         draw_trees(jobs(tmp_path / "a", fail=True), cache=tmp_path / "c", workers=2, code=CODE)
