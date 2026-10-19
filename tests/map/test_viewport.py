@@ -63,6 +63,37 @@ def test_mask_length_checked() -> None:
         choose_frame(np.zeros((3, 2)), (Priority("x", np.ones(2, bool)),), size=1.0, furniture=())
 
 
+def test_a_marker_crossing_the_edge_or_reaching_furniture_is_hidden() -> None:
+    title = Box("title", 0.0, 0.0, 0.5, 0.06)
+    page = np.array([[0.01, 0.5], [0.5, 0.995], [0.2, 0.07], [0.5, 0.5]])
+    assert not hidden_mask(page, (title,)).any()  # every centre is on the page and clear
+    np.testing.assert_array_equal(hidden_mask(page, (title,), 0.0125), [True, True, True, False])
+    # one radius per point: a plain point clears the title where a mark twice its size does not
+    np.testing.assert_array_equal(hidden_mask(page[2:3], (title,), np.array([0.005])), [False])
+
+
+def test_a_chosen_frame_keeps_required_markers_whole() -> None:
+    # Recent points span 9.4 of a 10-unit frame and three older points sit at x = -0.5. Testing
+    # centres only, the frame takes the older points in and leaves a recent one 0.1 u from the
+    # edge, its marker cut. With a 0.02 page radius (0.2 u), every recent marker is whole.
+    xy = np.array([[0.0, 0.0], [9.4, 0.0], [4.7, 5.0], [-0.5, 0.0], [-0.5, 1.0], [-0.5, 2.0]])
+    recent = np.array([True, True, True, False, False, False])
+    prio = (Priority("recent", recent), Priority("all", np.ones(6, bool)))
+    centres = choose_frame(xy, prio, size=10.0, furniture=()).frame.page(xy[recent])
+    assert centres.max() > 0.98  # the cut marker this guards against
+    choice = choose_frame(xy, prio, size=10.0, furniture=(), radii=0.02)
+    page = choice.frame.page(xy[recent])
+    assert page.min() >= 0.02 - 1e-9 and page.max() <= 0.98 + 1e-9
+    assert choice.hidden == {"recent": 0, "all": 3}
+    # Markers too big to keep whole (0.4 u a side, 10.2 u needed): the centres still decide
+    # whether a frame exists, and the cut markers are reported rather than refused.
+    big = choose_frame(xy, prio, size=10.0, furniture=(), radii=0.04)
+    assert big.hidden["recent"] > 0
+    assert not hidden_mask(big.frame.page(xy[recent]), ()).any()
+    with pytest.raises(FrameError, match="cannot be shown"):
+        choose_frame(xy, prio, size=9.0, furniture=(), radii=0.04)  # centres do not fit either
+
+
 # ---------------------------------------------------------------- y grows UP (Sarah, Q105)
 
 

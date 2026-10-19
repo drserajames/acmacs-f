@@ -53,6 +53,9 @@ class Look:
     title_size: float = 25.5
     label_size: float = 30.0
     label_halo: float = 1.22  # width of the white outline round each label's glyphs
+    label_gap: float = (
+        2.0  # points kept clear between two labels (abutting boxes looked stacked, R4 review)
+    )
     legend_pad: float = 0.0125  # the legend box's distance from the page's left and bottom
     # The legend, in points of the 800-point page, as the shipped report draws it (style 08-07/08,
     # measured from its figures): text size and row pitch, the text's and the marker's distance
@@ -258,8 +261,8 @@ def draw_scene(
         x, y = drawn[i]
         z = order(p) + 1
         own = styles.get(p.id, PointStyle())
+        s = marker_extent(p, look, own)
         if p.kind == "serum":
-            s = look.serum_half_side * (own.scale if own.scale is not None else 1.0)
             style: dict[str, Any] = {
                 "fc": own.fill or "none",
                 "ec": own.outline or SERUM_OUTLINE,
@@ -270,9 +273,6 @@ def draw_scene(
             grey = grey_of(p)
             fill = "none" if grey == OPEN else (grey or p.colour)
             edge = "black" if p.mark else (GREY if grey == OPEN else (grey or "black"))
-            s = look.antigen_radius * (look.mark_scale if p.mark else 1.0)
-            if own.scale is not None:
-                s *= own.scale
             style = {
                 "fc": own.fill or fill,
                 "ec": own.outline or edge,
@@ -320,6 +320,19 @@ def draw_scene(
     return tuple(
         p.id for p, out in zip(scene.points, outside.tolist(), strict=True) if p.shown and out
     )
+
+
+def marker_extent(p: ScenePoint, look: Look, own: PointStyle | None = None) -> float:
+    """How far a point's marker reaches from its centre, as a fraction of the page side: the
+    radius of a circle or egg (an egg is as tall as a circle is wide, and narrower), the
+    half-side of a box. The one place a marker's size is worked out, so the frame search tests
+    the marker the PDF draws (a centre-only test let markers sit over the title, R4 review)."""
+    own = own or PointStyle()
+    if p.kind == "serum":
+        s = look.serum_half_side
+    else:
+        s = look.antigen_radius * (look.mark_scale if p.mark else 1.0)
+    return s * (own.scale if own.scale is not None else 1.0)
 
 
 def _marker_patch(marker: str, x: float, y: float, size: float, style: dict[str, Any]) -> Any:

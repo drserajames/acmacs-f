@@ -104,14 +104,27 @@ class FrameChoice:
     hidden: dict[str, int]  # per priority: points off the page or under furniture
 
 
-def hidden_mask(page: Array, furniture: tuple[Box, ...]) -> Mask:
+def hidden_mask(page: Array, furniture: tuple[Box, ...], radii: Array | float = 0.0) -> Mask:
     """Points off the page or covered by a furniture box. NaN positions count as not hidden:
-    points without coordinates are reported elsewhere, not here."""
+    points without coordinates are reported elsewhere, not here.
+
+    ``radii`` (page fractions, one per point or one for all) is how far each marker reaches
+    from its centre: a point whose marker crosses the page edge or reaches into a box counts as
+    hidden, as the PDF shows it cut or under the title. Testing centres alone put coloured
+    markers over the title (R4 review, 18 Oct 2026). The marker is taken as the square round
+    it, so a box's corner hides a little early; with 0 only centres are tested.
+    """
     with np.errstate(invalid="ignore"):
         x, y = page[:, 0], page[:, 1]
-        hidden = (x < 0) | (x > 1) | (y < 0) | (y > 1)
+        r = np.broadcast_to(np.asarray(radii, dtype=float), x.shape)
+        hidden = (x - r < 0) | (x + r > 1) | (y - r < 0) | (y + r > 1)
         for box in furniture:
-            hidden |= (x >= box.left) & (x <= box.right) & (y >= box.top) & (y <= box.bottom)
+            hidden |= (
+                (x + r >= box.left)
+                & (x - r <= box.right)
+                & (y + r >= box.top)
+                & (y - r <= box.bottom)
+            )
     return hidden
 
 
@@ -122,6 +135,7 @@ def choose_frame(
     size: float,
     furniture: tuple[Box, ...],
     step: float = 0.1,
+    radii: Array | float = 0.0,
 ) -> FrameChoice:
     """Place a ``size`` x ``size`` frame over ``xy`` (displayed coordinates of drawn points).
 
@@ -129,6 +143,11 @@ def choose_frame(
     each priority in order, then the distance between the frame centre and the centre of the first
     priority's points (so the recent antigens sit in the middle when nothing else decides). The
     first priority is required: if even the best frame hides one of its points, :class:`FrameError`.
+    ``radii``: each point's marker extent as a page fraction (:func:`hidden_mask`). The required
+    group's CENTRES must all be visible; after that, frames are compared by whole markers, so a
+    marker cut by the edge or reaching under the title counts as hidden in every group (``hidden``
+    reports those counts). Requiring whole markers outright made a frame impossible where every
+    centre fits (h1-vidrl, R4, 15-unit frame).
     """
     if not priorities:
         raise ValueError("choose_frame needs at least one priority group")
@@ -139,6 +158,7 @@ def choose_frame(
     if not ok.any():
         raise FrameError("no drawn point has coordinates")
     pts = xy[ok]
+    rad = np.broadcast_to(np.asarray(radii, dtype=float), (len(xy),))[ok]
     masks = [p.mask[ok] for p in priorities]
     # Candidates are searched in page orientation (x right, y DOWN, so ``-y``), stepping the
     # frame's top-left corner as drawn, so the search does not depend on which way map y grows.
@@ -151,17 +171,19 @@ def choose_frame(
     for x in np.arange(lo[0], hi[0] + step / 2, step):
         for y in np.arange(lo[1], hi[1] + step / 2, step):
             frame = Frame(round(float(x), 6), -round(float(y), 6), size)
-            hidden = hidden_mask(frame.page(pts), furniture)
+            page = frame.page(pts)
+            required = float((hidden_mask(page, furniture) & masks[0]).sum())
+            hidden = hidden_mask(page, furniture, rad)
             offset = float(np.hypot(*(centre - [x + size / 2, y + size / 2])))
-            cost = (*(float((hidden & m).sum()) for m in masks), offset)
+            cost = (required, *(float((hidden & m).sum()) for m in masks), offset)
             if best is None or cost < best[0]:
                 best = (cost, frame)
     assert best is not None
     cost, frame = best
-    counts = {p.name: int(c) for p, c in zip(priorities, cost, strict=False)}
-    if counts[priorities[0].name]:
+    counts = {p.name: int(c) for p, c in zip(priorities, cost[1:], strict=False)}
+    if cost[0]:
         raise FrameError(
-            f"{counts[priorities[0].name]} point(s) of {priorities[0].name!r} cannot be shown in a "
+            f"{int(cost[0])} point(s) of {priorities[0].name!r} cannot be shown in a "
             f"{size} x {size} frame with this furniture; enlarge the configured size"
         )
     return FrameChoice(frame, counts)
