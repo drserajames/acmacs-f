@@ -458,3 +458,16 @@ def test_a_figure_in_the_round_fonts_draws_and_records_them(tmp_path):
     assert b"STIXGeneral" in (tmp_path / "f.pdf").read_bytes()
     inputs = json.loads((tmp_path / "f.i7.json").read_text())["provenance"]["inputs"]
     assert set(inputs) >= {"tree", "font_sans", "font_sans_bold", "font_mono"}
+
+
+def test_margin_strain_labels_keep_off_aa_labels_and_their_leaders():
+    from af.tree.draw.place import Grid, Placed
+    from af.tree.draw.render import _margin_strain_box
+
+    grid = Grid(200, 200)
+    # an aa label in the margin on the strain's row, and another whose leader runs across it
+    on_row = Placed(1, "K2N", (150.0, 100.0), (2.0, 96.0, 30.0, 104.0), 0.0)
+    leader = Placed(2, "A6S", (150.0, 80.0), (2.0, 110.0, 30.0, 118.0), 0.0)
+    box = _margin_strain_box(3.0, 100.0, 40.0, 8.0, [], grid, [on_row, leader])
+    assert box[0] == 3.0 and box[1] >= 104.0 or box[3] <= 96.0
+    assert box[1] >= 118.0 or box[3] <= 96.0  # not between the leader's ends either
