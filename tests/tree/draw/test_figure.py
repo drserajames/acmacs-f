@@ -171,6 +171,22 @@ def test_clade_names_in_one_column_do_not_overlap():
     plt.close(fig)
 
 
+def test_stacked_clade_names_keep_the_gap_clear():
+    import matplotlib.pyplot as plt
+    from matplotlib.font_manager import FontProperties
+
+    from af.tree.draw.render import _place_clade_names, _text_width
+
+    fig, ax = plt.subplots()
+    for gap in (6.0, 10.0):
+        ax.clear()
+        _place_clade_names(ax, [(10.0, 100.0, "X.1.1"), (10.0, 101.0, "X.1.2")], 7.0, gap=gap)
+        (_, ya), (_, yb) = sorted(t.get_position() for t in ax.texts)
+        width = _text_width(FontProperties(size=7.0))
+        assert (yb - width("X.1.2") / 2) - (ya + width("X.1.1") / 2) == pytest.approx(gap)
+    plt.close(fig)
+
+
 def test_store_refs_are_recorded_in_the_i7(tmp_path):
     from af.store import StoreRef
 
@@ -430,6 +446,42 @@ def test_margin_strain_labels_stack_clear_of_each_other_and_of_ink():
     grid.add_box((0, 0, 200, 200))
     with pytest.raises(ValueError, match="no clear margin space"):
         _margin_strain_box(3.0, 100.0, 40.0, 8.0, [], grid)
+
+
+def test_margin_strain_label_moves_off_its_row_in_strain_steps():
+    from af.tree.draw.place import Grid
+    from af.tree.draw.render import _margin_strain_box
+
+    grid = Grid(200, 200)
+    first = _margin_strain_box(3.0, 100.0, 40.0, 8.0, [], grid, step=12.0)
+    second = _margin_strain_box(3.0, 101.0, 40.0, 8.0, [first], grid, step=12.0)
+    assert (second[1] + second[3]) / 2 == pytest.approx(113.0)  # its row + one step
+
+
+def test_aa_labels_start_no_further_left_than_label_left(tmp_path, monkeypatch):
+    import af.tree.draw.figure as figure_module
+    from af.tree.draw.render import Geometry
+
+    drawn = []
+    real_render = figure_module.render
+
+    def capture(spec, pdf):
+        drawn.append(real_render(spec, pdf))
+        return drawn[-1]
+
+    monkeypatch.setattr(figure_module, "render", capture)
+    make_figure(standard_tree(), PARENTS, config(), tmp_path / "a.pdf", {})
+    leftmost = min(p.box[0] for p in drawn[0].placed)
+    bound = leftmost + 2.0  # the default placement has a label left of this
+    make_figure(
+        standard_tree(),
+        PARENTS,
+        config(geometry=Geometry(label_left=bound)),
+        tmp_path / "b.pdf",
+        {},
+    )
+    assert len(drawn[1].placed) == len(drawn[0].placed)
+    assert min(p.box[0] for p in drawn[1].placed) >= bound
 
 
 def test_place_inset_takes_the_clear_corner_nearest_the_wanted_one():
