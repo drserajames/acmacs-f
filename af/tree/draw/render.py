@@ -9,7 +9,7 @@ draw report; the caller writes those.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
@@ -28,7 +28,16 @@ from matplotlib.textpath import TextPath  # noqa: E402
 from .aa_labels import AALabel  # noqa: E402
 from .layout import Layout  # noqa: E402
 from .model import DrawTree  # noqa: E402
-from .place import Box, Grid, Search, leader_end, place_labels, placement_metrics  # noqa: E402
+from .place import (  # noqa: E402
+    Box,
+    Grid,
+    Placed,
+    Search,
+    leader_end,
+    place_labels,
+    placement_metrics,
+    segment_hits_box,
+)
 from .sections import HzBand, Selection  # noqa: E402
 from .timeseries import TimeSeries  # noqa: E402
 
@@ -455,7 +464,7 @@ def _draw_dash_bars(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> None:
 
 
 def _draw_strains(
-    ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid
+    ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, placed: Sequence[Placed] = ()
 ) -> tuple[list[Box], list[dict]]:
     """Strain labels right-aligned just left of the tree ink on their row, never overlapping."""
     g, t, lay = pg.g, spec.tree, spec.layout
@@ -471,7 +480,9 @@ def _draw_strains(
             continue
         y = float(pg.row_y(r))
         if g.strain_x is not None:
-            at = _margin_strain_box(g.strain_x, y, width(text), g.strain_font * 1.1, boxes, grid)
+            at = _margin_strain_box(
+                g.strain_x, y, width(text), g.strain_font * 1.1, boxes, grid, placed
+            )
             ax.text(at[0], (at[1] + at[3]) / 2, text, ha="left", va="center", fontproperties=font)
             boxes.append(at)
             report.append({"leaf": leaf_id, "text": text, "drawn": True, "row": int(r)})
@@ -502,16 +513,28 @@ def _draw_strains(
     return boxes, report
 
 
-def _margin_strain_box(x: float, y: float, w: float, h: float, boxes: list[Box], grid: Grid) -> Box:
+def _margin_strain_box(
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    boxes: list[Box],
+    grid: Grid,
+    placed: Sequence[Placed] = (),
+) -> Box:
     """A strain label in the left margin at ``x``: on its row, or the nearest row offset that
-    overlaps no other strain label and no ink. None clear is an error, not an overlap."""
-    for dy in (0, -h, h, -2 * h, 2 * h, -3 * h, 3 * h):
+    overlaps no other strain label, no ink, no placed aa label and no aa leader. Placed after
+    the aa labels, so they keep the spots they would have had (R4 review: margin labels placed
+    first pushed aa labels into each other's leaders). None clear is an error, not an overlap."""
+    for k in range(13):
+        dy = (k + 1) // 2 * h * (1 if k % 2 == 0 else -1)
         box: Box = (x, y + dy - h / 2, x + w, y + dy + h / 2)
         clear = not any(
             min(box[2], o[2]) > max(box[0], o[0]) and min(box[3], o[3]) > max(box[1], o[1])
-            for o in boxes
+            for o in [*boxes, *(p.box for p in placed)]
         )
-        if clear and not grid.cost(box):
+        crossed = any(segment_hits_box(leader_end(p.box), p.anchor, box) for p in placed)
+        if clear and not crossed and not grid.cost(box):
             return box
     raise ValueError(f"no clear margin space for a strain label at x {x}, y {y:.0f}")
 
@@ -701,8 +724,12 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     last_column = bracket_left + max(spec.selection.slots.values(), default=0) * g.clade_slot + 2
     _draw_dash_bars(ax, spec, pg, last_column + g.bars_gap)
     inset = _draw_key(ax, spec, pg, grid)
-    strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid)
-    placed, metrics = _draw_labels(ax, spec, pg, grid, strain_boxes)
+    if g.strain_x is None:  # strain labels beside the tree: the aa labels keep off them
+        strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid)
+        placed, metrics = _draw_labels(ax, spec, pg, grid, strain_boxes)
+    else:  # margin strain labels go where the aa labels and their leaders leave room
+        placed, metrics = _draw_labels(ax, spec, pg, grid, [])
+        strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid, placed)
     # The shipped pages start the title just left of the tree's root (H1 4, H3 4 units).
     title = spec.title if spec.drawn_title is None else spec.drawn_title
     if title:
