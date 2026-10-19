@@ -15,7 +15,7 @@ from af.map.viewport import Box
 
 pytest.importorskip("matplotlib")
 
-from af.map.finish import finish_map  # noqa: E402
+from af.map.finish import finish_map, shared_frame  # noqa: E402
 
 SCHEME = ColourScheme(
     "test-scheme",
@@ -298,3 +298,25 @@ def test_a_figure_in_another_style_records_it_in_its_i7(tmp_path: Path) -> None:
     assert by_id["ag0"]["style"] == {"alpha": 0.2}
     assert by_id["sr0"]["style"] == {"outline": "#ff0000"}
     assert "style" not in by_id["ag1"]
+
+
+def test_a_maps_windows_share_one_frame(tmp_path: Path) -> None:
+    windows = [(Window("all", None), "Synthetic"), (Window("12m", SINCE), "Synthetic (since)")]
+    common = dict(scheme=SCHEME, frame_size=14.0, must_show_since=SINCE, vaccine_labels={})
+    frame = shared_frame(synthetic_points(), windows=windows, **common)  # type: ignore[arg-type]
+    viewports = []
+    for window, title in windows:
+        result = finish_map(
+            synthetic_points(),
+            chart="synthetic",
+            window=window,
+            title=title,
+            out_pdf=tmp_path / window.name / "figure.pdf",
+            created=dt.datetime(2026, 9, 25, 12, 0, tzinfo=dt.UTC),
+            provenance={"inputs": {"chain": {"name": "synthetic", "sha256": "0" * 64}}},
+            frame=frame,
+            **common,  # type: ignore[arg-type]
+        )
+        assert result.frame.frame == frame and result.recent_hidden == 0
+        viewports.append(json.loads(result.i7.read_text())["map"]["viewport"])
+    assert viewports[0] == viewports[1] == [frame.x, frame.y, 14.0, 14.0]

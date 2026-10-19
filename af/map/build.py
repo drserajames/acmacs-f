@@ -53,7 +53,7 @@ from af.map.curate import (
     near_cap_flags,
 )
 from af.map.figure import chart_points
-from af.map.finish import finish_map
+from af.map.finish import finish_map, shared_frame
 from af.map.labels import LabelAbbreviations, label_text
 from af.map.orient import Orientation, RotationOverride, drawn_pairs, orient
 from af.map.render import DEFAULT_LOOK
@@ -720,16 +720,33 @@ def build_map(
     if stand_in:
         provenance["stand_in"] = stand_in
     figures = []
-    for w in config.defaults.windows:
-        suffix = "" if w.since is None else f" (since {w.since.strftime('%B %Y')})"
-        out = out_root / "map" / cfg.folder / w.name / "v1" / "figure.pdf"
+    windows = [
+        (
+            Window(w.name, w.since),
+            title_base + ("" if w.since is None else f" (since {w.since.strftime('%B %Y')})"),
+        )
+        for w in config.defaults.windows
+    ]
+    # one frame on all of the map's pages, as shipped (R5 review, 19 Oct 2026)
+    frame = shared_frame(
+        points,
+        scheme=scheme,
+        windows=windows,
+        frame_size=size,
+        must_show_since=config.defaults.must_show_since,
+        vaccine_labels=vlabels,
+        look=look,
+    )
+    for window, title in windows:
+        out = out_root / "map" / cfg.folder / window.name / "v1" / "figure.pdf"
         result = finish_map(
             points,
             chart=cfg.folder,
             scheme=scheme,
-            window=Window(w.name, w.since),
-            title=title_base + suffix,
+            window=window,
+            title=title,
             frame_size=size,
+            frame=frame,
             must_show_since=config.defaults.must_show_since,
             vaccine_labels=vlabels,
             out_pdf=out,
