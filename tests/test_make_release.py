@@ -653,7 +653,9 @@ def test_the_release_file_names_the_arithmetics_and_the_comparison(
         (mr.Numerics("", ()), mr.Original("0123456789ab", "same", "f" * 40)),
         (mr.Numerics("", ()), mr.Original("", mr.NOT_COMPARED, "")),
     ]
-    fonts = mr.Fonts("https://example.org/fonts-9.zip", "e" * 64, "9.1")
+    fonts = mr.Fonts(
+        "https://example.org/fonts-9.zip", "e" * 64, "9.1", "https://x/m.ttf", "d" * 64, "3.0"
+    )
     for numerics, original in cases:
         mr.write_release_file(
             args, tmp_path, "0" * 40, "then", {"CXX": "c++"}, numerics, original, fonts
@@ -664,6 +666,11 @@ def test_the_release_file_names_the_arithmetics_and_the_comparison(
             written["fonts_archive_sha256"],
             written["fonts_version"],
         ) == ("https://example.org/fonts-9.zip", "e" * 64, "9.1")
+        assert (
+            written["fonts_courier_prime_url"],
+            written["fonts_courier_prime_sha256"],
+            written["fonts_courier_prime_version"],
+        ) == ("https://x/m.ttf", "d" * 64, "3.0")
         assert written["numerics_default"] == numerics.default
         assert written["numerics_offered"] == list(numerics.offered)
         assert (
@@ -702,8 +709,11 @@ def test_a_release_records_the_fonts_installed_inside_it(
     mr: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     inside = {"url": "u", "sha256": "e" * 64, "version": "9.1", "directory": str(RELEASE / "f")}
-    probe_answering(mr, monkeypatch, json.dumps(inside))
+    probe_answering(mr, monkeypatch, json.dumps(inside))  # a commit with the archive only
     assert mr.verify_fonts(RELEASE) == mr.Fonts("u", "e" * 64, "9.1")
+    mono = {"url": "m", "sha256": "d" * 64, "version": "3.0"}
+    probe_answering(mr, monkeypatch, json.dumps({**inside, "courier_prime": mono}))
+    assert mr.verify_fonts(RELEASE) == mr.Fonts("u", "e" * 64, "9.1", "m", "d" * 64, "3.0")
 
 
 def test_a_commit_from_before_the_fonts_records_none(
@@ -740,4 +750,6 @@ def test_the_fonts_probe_reads_this_environments_af(mr: ModuleType) -> None:
         af.fonts.source()["archive_sha256"],
         af.fonts.source()["version"],
     )
+    mono = af.fonts.source()["courier_prime"]
+    assert found["courier_prime"] == {k: mono[k] for k in ("url", "sha256", "version")}
     assert (Path(found["directory"]) / af.fonts.SOURCE_FILE).is_file()
