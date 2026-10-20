@@ -32,6 +32,8 @@ from af.util.subtypes import subtypes
 
 # what a geo build reads: tables (the serology staleness guard), serology, sequences, clades
 KINDS_READ = frozenset({"tables", "serology", "sequences", "clades"})
+# what each figure says of where its colours came from (the run record has the rest)
+COLOUR_SOURCE = ("source", "scheme", "user_tables")
 
 
 def build_geo(
@@ -125,10 +127,17 @@ def build_geo(
         datasets = sorted(
             {d for r in rows for d in report.colour_provenance[r]["datasets"]} | set(all_rows)
         )
+        # the slot's own facts, so its how-made note reads them from its figures alone
         slot_provenance = {
             **provenance,
             "created": created.isoformat(),
             "store_refs": colours.store_refs(datasets),
+            "table_subtype": subtype,
+            "colour_source": {
+                r: {k: report.colour_provenance[r].get(k) for k in COLOUR_SOURCE} for r in rows
+            },
+            "undated": doc["undated"],
+            "no_location": len(doc["no_location"]),
         }
         with fonts.context():  # the whole drawing: the title's placement measures its ink
             written = write_geo_figures(

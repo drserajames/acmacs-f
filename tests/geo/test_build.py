@@ -104,7 +104,9 @@ def _geo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Store, list[S
     scheme = ColourScheme("h3 test", (ColourRow("Clade R", "#aa0000", frozenset({"R"})),))
     report = OutputsReport(
         serology=serology, geo_docs={"A(H3N2)": _doc()}, coordinates=lambda _: (10.0, 20.0),
-        colour_schemes={"h3": scheme}, colour_provenance={"h3": {"datasets": ["h3"]}},
+        colour_schemes={"h3": scheme},
+        colour_provenance={"h3": {"datasets": ["h3"], "source": "store", "scheme": "h3 test",
+                                  "user_tables": {"tables.py": "ab" * 32}, "coloured": {}}},
     )  # fmt: skip
     monkeypatch.setattr(geo_build, "StoreColours", lambda *args, **kwargs: colours)
     monkeypatch.setattr(geo_build, "matching_rules", lambda _: None)
@@ -133,6 +135,12 @@ def test_geo_figures_carry_created_and_the_store_versions_read(
         assert i7["provenance"]["look"]["uncoloured_edge_width"] == 0.5
         assert i7["provenance"]["figure_config"]["sha256"] == sha256_path(tmp_path / "figures.toml")
         assert i7["provenance"]["store_refs"] == [r.to_json() for r in refs]
+        # the slot's own facts, for its how-made note (af.report.howmade.geo_note)
+        assert i7["provenance"]["table_subtype"] == "A(H3N2)"
+        assert i7["provenance"]["colour_source"] == {
+            "h3": {"source": "store", "scheme": "h3 test", "user_tables": {"tables.py": "ab" * 32}}
+        }
+        assert i7["provenance"]["undated"] == 0 and i7["provenance"]["no_location"] == 0
         fonts = i7["provenance"]["fonts"]  # the font files it was drawn in, hashed (rule 5)
         assert fonts == load_fonts(tmp_path / "figures.toml", bundled).inputs()
         assert Path(fonts["font_sans"]["path"]).name == "STIXGeneral.ttf"

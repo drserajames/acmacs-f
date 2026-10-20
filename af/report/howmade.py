@@ -14,6 +14,12 @@ statement is read from something a step recorded, never recomputed or inferred:
 - the round's map config, only to catch a configured change that left no record;
 - the report comparison's rows for the map.
 
+The geographic maps get one note per slot (all its months), the same way: from each month
+figure's I7 ``provenance`` (the store versions read, the dot rule and how preparations were
+merged into a virus, what was not drawn and why, the look, the colour scheme and the user's
+tables, ``af.geo.build``), the build record's ``clade_key`` (the key's uncoloured classes) and
+the report comparison's rows for the slot.
+
 A fact no artefact records is printed as **MISSING**, with the artefact that should carry it,
 and counted (design rule 1): never skipped, never filled in by hand. Configured reasons are
 quoted as written.
@@ -39,6 +45,7 @@ from af.store import Store, StoreError, StoreRef
 from af.util.artefacts import sha256_path
 
 MAP_PREFIX = "map/"
+GEO_PREFIX = "geo/"
 
 
 @dataclass
@@ -449,7 +456,9 @@ def _warnings(note: Note, figures: list[dict[str, Any]]) -> None:
     """Every window's recorded warnings, in the map step's own words; counted apart from MISSING."""
     lines = []
     for fig in figures:
-        window = ((fig.get("map") or {}).get("window") or {}).get("name")
+        window = ((fig.get("map") or {}).get("window") or {}).get("name") or (
+            (fig.get("geo") or {}).get("month")  # a geographic figure's window is its month
+        )
         for warning in figure_warnings(fig):
             where = window or note.gap("the warned figure's window", "figure map.window.name")
             lines.append(f"**WARNING** ({where}): " + warning.removeprefix("WARNING: "))
@@ -683,38 +692,53 @@ def _same_content(note: Note, folder: str, store_use: dict[str, Any] | None) -> 
             )
 
 
-DECLARATION_FIELDS = ("ruling", "dataset", "version", "text", "file")
+DECLARATION_FIELDS = ("ruling", "version", "text", "file")
+DECLARATION_ABOUT = ("dataset", "figure")
 
 
 def load_declarations(path: Path) -> list[dict[str, Any]]:
-    """The round's declarations about chain versions: TOML ``[[declaration]]`` tables with
-    ``ruling``, ``dataset``, ``version``, ``text`` and ``file`` (where it is set out in full)."""
+    """The round's declarations: TOML ``[[declaration]]`` tables with ``ruling``, ``version``,
+    ``text``, ``file`` (where it is set out in full) and what it is about, one of:
+
+    - ``dataset``, a chain: ``version`` is the chain version the declaration was made on;
+    - ``figure = "geo/<slot>"``, a geographic slot: ``version`` is the serology version its
+      dots were read from, so the declaration is checked again when the dots can change.
+    """
     declarations = tomllib.loads(path.read_text()).get("declaration", [])
     for n, entry in enumerate(declarations, 1):
-        if lacking := [k for k in DECLARATION_FIELDS if not entry.get(k)]:
+        about = [k for k in DECLARATION_ABOUT if entry.get(k)]
+        if len(about) > 1:
+            raise ValueError(f"{path}: declaration {n} names both dataset and figure")
+        lacking = [k for k in DECLARATION_FIELDS if not entry.get(k)]
+        if lacking or not about:
+            lacking = ([] if about else ["dataset or figure"]) + lacking
             raise ValueError(f"{path}: declaration {n} lacks {', '.join(lacking)}")
     return declarations
+
+
+def _declared(note: Note, mine: list[dict[str, Any]], version: str | None, whose: str) -> None:
+    """Quote each declaration made on ``version``; one made on another version is not applied,
+    and the declaration this version lacks is counted MISSING."""
+    if not mine:
+        return
+    note.section("Declared")
+    for d in mine:
+        if d["version"] == version:
+            note.item(f"{d['ruling']}: {d['text']} (in full: {d['file']})")
+        else:
+            gap = note.gap(f"the {d['ruling']} declaration for this version", d["file"])
+            note.item(f"{d['ruling']}: declared for version {d['version']}, not for {whose} "
+                      f"{version}, so not applied; {gap}")  # fmt: skip
 
 
 def _declarations(
     note: Note, chain_input: dict[str, Any] | None, declarations: list[dict[str, Any]]
 ) -> None:
-    """What the round declared about this map's chain, quoted with the file that sets it out.
-    A declaration made about another version of the chain is not applied, and the declaration
-    this version lacks is counted MISSING."""
+    """What the round declared about this map's chain, quoted with the file that sets it out."""
     if not chain_input:
         return
-    mine = [d for d in declarations if d["dataset"] == chain_input.get("dataset")]
-    if not mine:
-        return
-    note.section("Declared")
-    for d in mine:
-        if d["version"] == chain_input.get("version"):
-            note.item(f"{d['ruling']}: {d['text']} (in full: {d['file']})")
-        else:
-            gap = note.gap(f"the {d['ruling']} declaration for this version", d["file"])
-            note.item(f"{d['ruling']}: declared for version {d['version']}, not for this map's "
-                      f"{chain_input.get('version')}, so not applied; {gap}")  # fmt: skip
+    mine = [d for d in declarations if d.get("dataset") == chain_input.get("dataset")]
+    _declared(note, mine, chain_input.get("version"), "this map's")
 
 
 def map_note(
@@ -797,28 +821,315 @@ def map_note(
     return note
 
 
+# ---------------------------------------------------------------- a geographic slot
+
+
+def _store_version(note: Note, store: Store | None, ref: dict[str, Any]) -> str:
+    """A store version a slot's figures cite, opened through its manifest hash, and whether it
+    is CURRENT."""
+    kind, dataset, version = ref.get("kind"), ref.get("dataset"), ref.get("version")
+    said = f"{str(kind).capitalize()} `{dataset}` version `{version}`"
+    if store is None:
+        return f"{said}: " + note.gap(f"{kind}/{dataset} {version}", "the store (no --store given)")
+    try:
+        store.resolve(StoreRef(str(kind), str(dataset), str(version), ref["manifest_sha256"]))
+    except (StoreError, OSError, KeyError, ValueError) as error:
+        return f"{said}: " + note.gap(f"{kind}/{dataset} {version}", f"the store ({error})")
+    try:
+        current: str | None = store.current(str(kind), str(dataset)).version
+    except StoreError:
+        current = None
+    where = (
+        "the CURRENT version"
+        if current == version
+        else (f"not CURRENT: CURRENT is {current}" if current else "no CURRENT")
+    )
+    return f"{said} ({where})"
+
+
+def _geo_source(note: Note, store: Store | None, figures: list[dict[str, Any]]) -> str | None:
+    """The store versions the dots and colours were read from; returns the serology version."""
+    prov = figures[0].get("provenance", {})
+    cited = {json.dumps(f.get("provenance", {}).get("store_refs"), sort_keys=True) for f in figures}
+    if len(cited) > 1:
+        note.item(
+            "The months of this slot were read from different store versions; this note "
+            "reads the first month's"
+        )
+    refs = prov.get("store_refs")
+    if not refs:
+        note.item(
+            note.gap("the store versions the dots were read from", "figure provenance.store_refs")
+        )
+        return None
+    for ref in refs:
+        note.item(_store_version(note, store, ref))
+    read = prov.get("store_read")
+    if read:
+        overrode = [b.get("name") for b in read.get("overrode_batches", [])]
+        note.item(
+            f"Store read {read.get('started')} ({read.get('read')}): "
+            f"{len(read.get('currents_read', {}))} CURRENT(s) read"
+            + (
+                f"; READ DESPITE batch(es) publishing: {', '.join(map(str, overrode))}"
+                if overrode
+                else ""
+            )
+        )
+    else:
+        note.item(note.gap("the geo build's store read", "figure provenance.store_read"))
+    serology = [r for r in refs if r.get("kind") == "serology"]
+    if len(serology) != 1:
+        note.item(
+            note.gap(
+                "the one serology version the dots came from",
+                f"figure provenance.store_refs ({len(serology)} serology versions)",
+            )
+        )
+        return None
+    note.source = f"serology/{serology[0].get('dataset')}@{serology[0].get('version')}"
+    return str(serology[0].get("version"))
+
+
+def _geo_built(
+    note: Note, slot: str, prov: dict[str, Any], drawn_by: dict[str, Any] | None
+) -> None:
+    _built(note, None, drawn_by, stand_in=False)
+    note.item(
+        "Drawn "
+        + _recorded(
+            note, prov, "created", "figure provenance.created", "when the figures were drawn"
+        )
+    )
+    look, config = prov.get("look"), prov.get("figure_config")
+    if look and config:
+        note.item(
+            f"Look `[geo.{slot}]` of {Path(config['path']).name} `{config['sha256'][:12]}`: "
+            f"{look.get('packing')} packing, dots {_num(look.get('dot_diameter'), 1)} pt, centred "
+            f"on longitude {look.get('central_longitude')}"
+        )
+    else:
+        note.item(
+            note.gap(
+                "the look the figures were drawn with", "figure provenance.look and .figure_config"
+            )
+        )
+    coast = prov.get("coastline")
+    note.item(
+        "Coastline: "
+        + (
+            f"{Path(coast['path']).name} `{coast['sha256'][:12]}`"
+            if coast
+            else note.gap("the coastline", "figure provenance.coastline")
+        )
+    )
+    fonts: dict[str, list[str]] = {}
+    for role, font in (prov.get("fonts") or {}).items():
+        fonts.setdefault(str(font.get("family")), []).append(role)
+    note.item(
+        "Fonts: "
+        + (
+            "; ".join(f"{family} ({', '.join(roles)})" for family, roles in fonts.items())
+            if fonts
+            else note.gap("the fonts", "figure provenance.fonts")
+        )
+    )
+
+
+def _geo_dots(note: Note, figures: list[dict[str, Any]]) -> None:
+    prov = figures[0].get("provenance", {})
+    months = []
+    for fig in figures:
+        month = (fig.get("geo") or {}).get("month", "?")
+        drawn = fig.get("provenance", {}).get("drawn")
+        months.append(
+            f"{month} {drawn}"
+            if drawn is not None
+            else f"{month} " + note.gap(f"the dots drawn in {month}", "figure provenance.drawn")
+        )
+    rule = _recorded(note, prov, "dot_rule", "figure provenance.dot_rule", "the dot rule")
+    note.item(f"One dot per {rule}; dots drawn in {len(figures)} month(s): {', '.join(months)}")
+    subtype = prov.get("table_subtype")
+    merges = (prov.get("merges") or {}).get(subtype) if subtype else None
+    if merges is None:
+        note.item(
+            note.gap(
+                "how each virus's preparations were merged",
+                "figure provenance.table_subtype and .merges",
+            )
+        )
+    else:
+        cases = ", ".join(f"{case} {n}" for case, n in merges.items())
+        preps = (prov.get("merged_preparations") or {}).get(subtype)
+        note.item(
+            f"{sum(merges.values())} {subtype} viruses in the window, from {preps} "
+            f"preparations; each virus's colour: {cases}"
+        )
+    if "undated" in prov and "no_location" in prov:
+        note.item(
+            f"Not drawn: {prov['undated']} viruses with no collection date (so in no month); "
+            f"{prov['no_location']} names in the window with no location the lookup "
+            "resolves"
+        )
+    else:
+        note.item(
+            note.gap(
+                "the viruses not drawn for want of a date or a location",
+                "figure provenance.undated and .no_location",
+            )
+        )
+    for key, what in (
+        ("no_coordinates", "Not drawn, the location has no coordinates"),
+        ("moved_inside_edge", "Clusters moved inward so the map's edge cuts no dot"),
+    ):
+        said = [
+            f"{name} {n} ({(fig.get('geo') or {}).get('month')})"
+            for fig in figures
+            for name, n in (fig.get("provenance", {}).get(key) or {}).items()
+        ]
+        if any(key not in fig.get("provenance", {}) for fig in figures):
+            note.item(
+                f"{what}: "
+                + note.gap(f"{key.replace('_', ' ')} per month", f"figure provenance.{key}")
+            )
+        else:
+            note.item(f"{what}: " + (", ".join(said) if said else "none"))
+
+
+def _geo_colours(
+    note: Note, slot: str, prov: dict[str, Any], clade_key: dict[str, Any] | None
+) -> None:
+    sources = prov.get("colour_source")
+    if not sources:
+        note.item(
+            note.gap("the colour scheme and the user's tables", "figure provenance.colour_source")
+        )
+    for row, source in sorted((sources or {}).items()):
+        tables = ", ".join(
+            f"{Path(path).name} `{sha[:12]}`"
+            for path, sha in (source.get("user_tables") or {}).items()
+        )
+        note.item(
+            f"Colours, subtype row {row}: scheme `{source.get('scheme')}` "
+            f"(source: {source.get('source')}); the user's tables: {tables or 'none'}"
+        )
+    read = {r.get("dataset") for r in prov.get("store_refs") or []}
+    for key in ("clades_behind", "clades_same_content"):  # the build's, for every subtype
+        for dataset, entry in (prov.get(key) or {}).items():
+            if dataset in read:
+                note.item(f"{key.replace('_', ' ').capitalize()}, {dataset}: {json.dumps(entry)}")
+    sections = [t for t, s in ((clade_key or {}).get("sections") or {}).items() if s == slot]
+    classes = (clade_key or {}).get("uncoloured_classes", {}).get(sections[0]) if sections else None
+    if classes is None:
+        note.item(
+            "Uncoloured: "
+            + note.gap(
+                "the key's uncoloured dots by class",
+                "the build record's clade_key.uncoloured_classes",
+            )
+        )
+        return
+    counts = ", ".join(f"{c.replace('_', ' ')} {n}" for c, n in classes.items())
+    note.item(
+        f"Uncoloured dots in the window, by class (the key on the {sections[0]} page): {counts}"
+    )
+
+
+def _geo_comparison(note: Note, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        where = "report/comparison/COMPARISON.json"
+        note.item("Report comparison: " + note.gap("the report's comparison of these maps", where))
+        return
+    approvals: dict[tuple[str, str], list[str]] = {}
+    for row in sorted(rows, key=lambda r: str(r["slot"])):
+        month = row["slot"].rsplit("/", 1)[-1]
+        checks = []
+        for c in row.get("geo_checks", []):
+            ok = {False: ", FAILING", "expected": ", approved", "stale": ", STALE"}.get(c["ok"], "")
+            checks.append(f"{c['check']} {_num(c['value'])} (limit {_num(c['limit'])}{ok})")
+            if c["ok"] == "expected":
+                text = str(c.get("expected", "")).removeprefix("expected difference: ")
+                approvals.setdefault((c["check"], text.split("; found ")[0]), []).append(month)
+        note.item(
+            f"Report comparison, {month}: {row['status']}"
+            + (f"; {'; '.join(checks)}" if checks else "")
+        )
+    for (check, why), months in approvals.items():
+        note.item(f"Approved difference, {check} ({', '.join(months)}): {why}")
+
+
+def geo_note(
+    slot: str,
+    figures: list[dict[str, Any]],
+    store: Store | None,
+    rows: list[dict[str, Any]],
+    drawn_by: dict[str, Any] | None = None,
+    clade_key: dict[str, Any] | None = None,
+    declarations: list[dict[str, Any]] | None = None,
+) -> Note:
+    """The note for one geographic slot (all its months): ``figures`` are its month figures' I7
+    documents; ``clade_key`` the build record's (the key's uncoloured classes); ``declarations``
+    the round's, those naming ``figure = "geo/<slot>"``."""
+    note = Note(f"geo-{slot}", mode="geo")
+    note.lines += [
+        f"# geo/{slot}: how these geographic maps were made",
+        "",
+        "_Written from recorded artefacts; **MISSING** marks a fact no artefact records. "
+        '"The ae round" is the round as shipped, the reference._',
+    ]
+    note.section("Source")
+    if not figures:
+        note.item(note.gap("the slot's figures", "the build record's geo slots"))
+        return note
+    figures = sorted(figures, key=lambda f: str((f.get("geo") or {}).get("month")))
+    serology = _geo_source(note, store, figures)
+    prov = figures[0].get("provenance", {})
+    note.section("Built")
+    _geo_built(note, slot, prov, drawn_by)
+    note.section("Dots")
+    _geo_dots(note, figures)
+    note.section("Colours")
+    _geo_colours(note, slot, prov, clade_key)
+    note.section("Against the ae round")
+    _geo_comparison(note, rows)
+    mine = [d for d in declarations or [] if d.get("figure") == f"geo/{slot}"]
+    _declared(note, mine, serology, "the serology these figures read,")
+    _warnings(note, figures)
+    note.lines += [
+        "",
+        f"_{len(note.missing)} fact(s) MISSING"
+        + (f": {'; '.join(note.missing)}._" if note.missing else "._"),
+    ]
+    return note
+
+
 def write_notes(
     record: dict[str, Any], store: Store | None, maps_config: dict[str, Any] | None,
     comparison: list[dict[str, Any]], out: Path, *, ignore_busy: bool = False,
     reference_records: Path | None = None, dates: VaccineDates | None = None,
     declarations: list[dict[str, Any]] | None = None,
 ) -> list[Note]:  # fmt: skip
-    """One note per map folder in the build record, and an index; returns the notes.
+    """One note per map folder and per geographic slot in the build record, and an index;
+    returns the notes.
 
     Every note is composed under ``Store.reading`` (refused while a batch publishes, failed if a
     chain's CURRENT moves mid-read), and only then written, so a refused read writes nothing.
     ``ignore_busy`` reads anyway (diagnosis); the index says so.
     """
     by_folder: dict[str, list[dict[str, Any]]] = {}
+    by_slot: dict[str, list[dict[str, Any]]] = {}
     for fig in record["figures"]:
-        if fig["slot"].startswith(MAP_PREFIX):
-            folder = fig["slot"][len(MAP_PREFIX) :].split("/")[0]
-            by_folder.setdefault(folder, []).append(json.loads(Path(fig["i7"]).read_text()))
+        for prefix, into in ((MAP_PREFIX, by_folder), (GEO_PREFIX, by_slot)):
+            if fig["slot"].startswith(prefix):
+                name = fig["slot"][len(prefix) :].split("/")[0]
+                into.setdefault(name, []).append(json.loads(Path(fig["i7"]).read_text()))
     configs = {m["folder"]: m for m in (maps_config or {}).get("maps", [])}
     rows: dict[str, list[dict[str, Any]]] = {}
+    geo_rows: dict[str, list[dict[str, Any]]] = {}
     for row in comparison:
-        if row["slot"].startswith(MAP_PREFIX):
-            rows.setdefault(row["slot"][len(MAP_PREFIX) :].split("/")[0], []).append(row)
+        for prefix, into in ((MAP_PREFIX, rows), (GEO_PREFIX, geo_rows)):
+            if row["slot"].startswith(prefix):
+                into.setdefault(row["slot"][len(prefix) :].split("/")[0], []).append(row)
     guarded = (
         store.reading("howmade", override=ignore_busy) if store is not None else nullcontext(None)
     )
@@ -838,12 +1149,26 @@ def write_notes(
             )  # fmt: skip
             for folder in sorted(by_folder)
         ]
+        notes += [
+            geo_note(
+                slot,
+                by_slot[slot],
+                store,
+                geo_rows.get(slot, []),
+                record.get("af"),
+                record.get("clade_key"),
+                declarations,
+            )  # fmt: skip
+            for slot in sorted(by_slot)
+        ]
     out.mkdir(parents=True, exist_ok=True)
     for note in notes:
         (out / f"{note.folder}.md").write_text("\n".join(note.lines) + "\n")
+    geo = f", {len(by_slot)} geographic slot(s)" if by_slot else ""
     index = [f"# How each map was made: {record.get('report', '')}", "",
-             f"{len(notes)} maps; {sum(len(n.missing) for n in notes)} fact(s) MISSING in all. "
-             "Each note says which artefact a MISSING fact would come from.", ""]  # fmt: skip
+             f"{len(by_folder)} maps{geo}; {sum(len(n.missing) for n in notes)} fact(s) "
+             "MISSING in all. Each note says which artefact a MISSING fact would come from.",
+             ""]  # fmt: skip
     if guard is not None:
         seen = guard.to_json()
         overrode = [m["name"] for m in seen["overrode_batches"]]
@@ -881,8 +1206,9 @@ def main(argv: list[str] | None = None) -> int:
     )  # fmt: skip
     parser.add_argument(
         "--declarations", type=Path,
-        help="the round's declarations about chain versions (TOML [[declaration]] tables: ruling, "
-        "dataset, version, text, file); each map's note quotes those about its chain",
+        help="the round's declarations (TOML [[declaration]] tables: ruling, dataset or figure, "
+        "version, text, file); each map's note quotes those about its chain, each geographic "
+        "slot's those naming figure = 'geo/<slot>'",
     )  # fmt: skip
     args = parser.parse_args(argv)
     record = json.loads(args.record.read_text())
