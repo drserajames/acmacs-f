@@ -33,10 +33,10 @@ and runs every check there, with no caches:
   ``AttributeError: 'af.map._core.Problem' object has no attribute ...``, on a committed
   HEAD and in files the branch never touched, so it read as someone else's broken
   branch (05-trees, twice, 1-2 Oct 2026).
-- The figure fonts (``af/fonts/*.otf`` and the build's ``SOURCE.toml``) are not in git either:
-  the build fetches them. They are copied in from the environment like the optimiser, and the
-  check stops when the environment has none, or ones from another archive than HEAD pins in
-  ``fonts/CMakeLists.txt``.
+- The figure fonts (``af/fonts/*.otf``, ``*.ttf`` and the build's ``SOURCE.toml``) are not in
+  git either: the build fetches them. They are copied in from the environment like the
+  optimiser, and the check stops when the environment has none, or ones from another archive
+  (or another Courier Prime file) than HEAD pins in ``fonts/CMakeLists.txt``.
 
 Usage (from a checkout, with the dev environment's python):
 
@@ -300,6 +300,7 @@ def copy_compiled_extensions(export: Path) -> list[str]:
 
 
 FONTS_PIN = re.compile(r'set\(AF_FONTS_SHA256 "([0-9a-f]{64})"\)')
+COURIER_PRIME_PIN = re.compile(r'set\(AF_COURIER_PRIME_SHA256 "([0-9a-f]{64})"\)')
 
 
 def installed_fonts() -> Path | None:
@@ -322,11 +323,19 @@ def stale_fonts_reason(export: Path) -> str | None:
     rebuild = "Rebuild into this environment (pip install -e . here) and run the check again."
     if installed is None:
         return f"this environment's af was installed without the fonts HEAD fetches. {rebuild}"
-    have = tomllib.loads((installed / "SOURCE.toml").read_text()).get("archive_sha256")
+    source = tomllib.loads((installed / "SOURCE.toml").read_text())
+    have = source.get("archive_sha256")
     if have != pinned[1]:
         return (
             f"this environment's fonts ({installed}) come from archive {have}, but HEAD pins "
             f"{pinned[1]}. {rebuild}"
+        )
+    mono = COURIER_PRIME_PIN.search(recipe.read_text())  # a HEAD from before it pins none
+    have_mono = source.get("courier_prime", {}).get("sha256")
+    if mono is not None and have_mono != mono[1]:
+        return (
+            f"this environment's Courier Prime ({installed}) is {have_mono}, but HEAD pins "
+            f"{mono[1]}. {rebuild}"
         )
     return None
 

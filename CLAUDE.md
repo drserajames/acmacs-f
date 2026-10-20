@@ -18,7 +18,7 @@ selection, from raw inputs, through long-lived stores, into reports. Licence GPL
 | `af/serology`, `af/geo`, `af/stat` | serology store, geographic maps, stat counts |
 | `af/report` | reports built from the stores |
 | `cpp/` | C++ optimiser (`cpp/optimiser/`), alglib fetched by `cpp/CMakeLists.txt` |
-| `fonts/`, `af/fonts` | figure fonts (TeX Gyre Heros and Cursor, GUST Font License) fetched by `fonts/CMakeLists.txt` into `af/fonts`; `af.fonts.path(name)` finds them |
+| `fonts/`, `af/fonts` | figure fonts (TeX Gyre Heros and Cursor, GUST Font License; Courier Prime, SIL OFL 1.1) fetched by `fonts/CMakeLists.txt` into `af/fonts`; `af.fonts.path(name)` finds them |
 | `tests/` | mirrors `af/` |
 | `tools/` | the WHO-data gate (MIT, copied from ae) |
 
@@ -44,8 +44,9 @@ there, and running under them silently builds for the wrong architecture.
 The build is scikit-build-core + CMake. With no `cpp/optimiser/` it is pure Python. With it,
 `cpp/CMakeLists.txt` fetches alglib 3.19.0 (hash-checked). Offline, pass
 `-Ccmake.define.AF_ALGLIB_URL=/path/to/alglib-3.19.0.cpp.gpl.tgz`.
-Every build also fetches the figure fonts (TeX Gyre 2.609, hash-checked; never committed):
-offline, `-Ccmake.define.AF_FONTS_URL=/path/to/tex_gyre-TDS_distr-2_609-31_03_2026.zip`.
+Every build also fetches the figure fonts (TeX Gyre 2.609 and Courier Prime 3.018, hash-checked;
+never committed): offline, `-Ccmake.define.AF_FONTS_URL=/path/to/tex_gyre-TDS_distr-2_609-31_03_2026.zip`
+and `-Ccmake.define.AF_COURIER_PRIME_URL=/path/to/CourierPrime-Regular.ttf`.
 An env installed before the fonts existed has none: reinstall (`pip install -e .`).
 
 ## Tests

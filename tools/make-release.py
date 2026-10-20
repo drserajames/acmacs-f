@@ -65,7 +65,9 @@ tested, in two ways, and ``RELEASE.toml`` says what was found.
 **The figure fonts.** The build fetches them itself (``fonts/CMakeLists.txt``, hash-checked), so
 they are not in the package locks either. A build with ``af.fonts`` must have them installed
 inside the release, or it stops; ``fonts_archive_url``, ``fonts_archive_sha256`` and
-``fonts_version`` record which. A commit from before them records the fields empty.
+``fonts_version`` record which (the TeX Gyre archive), and ``fonts_courier_prime_url``,
+``fonts_courier_prime_sha256`` and ``fonts_courier_prime_version`` the one Courier Prime file.
+A commit from before them records the fields empty.
 
 A commit from before the contract declares no arithmetic and has no such tests: it still
 builds, the log says there was nothing to check, and the names are empty. Its optimiser is
@@ -532,18 +534,26 @@ else:
     source = af.fonts.source()
     for name in af.fonts.names():
         af.fonts.path(name)  # each one installed
-    print(json.dumps({"url": source["archive_url"], "sha256": source["archive_sha256"],
-                      "version": source["version"], "directory": str(af.fonts.directory())}))
+    found = {"url": source["archive_url"], "sha256": source["archive_sha256"],
+             "version": source["version"], "directory": str(af.fonts.directory())}
+    if "courier_prime" in source:  # a commit from before it has the archive only
+        mono = source["courier_prime"]
+        found["courier_prime"] = {k: mono[k] for k in ("url", "sha256", "version")}
+    print(json.dumps(found))
 """
 
 
 @dataclasses.dataclass(frozen=True)
 class Fonts:
-    """The figure fonts' archive, as the build recorded it; empty before af had fonts."""
+    """The figure fonts' archive, and the Courier Prime file, as the build recorded them; empty
+    before af had them."""
 
     url: str = ""
     sha256: str = ""
     version: str = ""
+    courier_prime_url: str = ""
+    courier_prime_sha256: str = ""
+    courier_prime_version: str = ""
 
 
 def verify_fonts(release: Path) -> Fonts:
@@ -561,8 +571,19 @@ def verify_fonts(release: Path) -> Fonts:
         return Fonts()
     if not Path(found["directory"]).resolve().is_relative_to(release):
         raise SystemExit(f"the figure fonts are not inside {release}: {found['directory']}")
-    print(f"   figure fonts: TeX Gyre {found['version']} ({found['sha256'][:12]})", flush=True)
-    return Fonts(found["url"], found["sha256"], found["version"])
+    mono = found.get("courier_prime", {})
+    extra = f", Courier Prime {mono['version']} ({mono['sha256'][:12]})" if mono else ""
+    print(
+        f"   figure fonts: TeX Gyre {found['version']} ({found['sha256'][:12]}){extra}", flush=True
+    )
+    return Fonts(
+        found["url"],
+        found["sha256"],
+        found["version"],
+        mono.get("url", ""),
+        mono.get("sha256", ""),
+        mono.get("version", ""),
+    )
 
 
 def verify_linkage(release: Path) -> None:
@@ -900,6 +921,9 @@ def write_release_file(
         "fonts_archive_url": fonts.url,
         "fonts_archive_sha256": fonts.sha256,
         "fonts_version": fonts.version,
+        "fonts_courier_prime_url": fonts.courier_prime_url,
+        "fonts_courier_prime_sha256": fonts.courier_prime_sha256,
+        "fonts_courier_prime_version": fonts.courier_prime_version,
         "micromamba": capture([str(args.micromamba), "--version"], env).strip(),
         "extras": args.extras,
         "host": platform.node(),
