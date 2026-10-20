@@ -590,3 +590,184 @@ def test_a_declaration_lacking_a_field_is_refused(tmp_path: Path) -> None:
     path.write_text('[[declaration]]\nruling = "Q1 a"\ndataset = "labx/hi/merged"\ntext = "t"\n')
     with pytest.raises(ValueError, match="declaration 1 lacks version, file"):
         howmade.load_declarations(path)
+
+
+# ---------------------------------------------------------------- geographic slots
+
+
+def _published(store: Store, kind: str, dataset: str, content: str = "a") -> StoreRef:
+    with store.build(kind, dataset) as build:
+        (build.path / "data.txt").write_text(content)
+        return build.publish(Provenance("a step", (), {}, T0, T0))
+
+
+def _geo_figure(refs: list[StoreRef], month: str, *, full: bool) -> dict[str, Any]:
+    """One month of a geographic slot as af.geo.build records it; ``full`` = with the slot's
+    own facts (table subtype, colour source, undated and unlocated counts)."""
+    prov: dict[str, Any] = {
+        "store_refs": [r.to_json() for r in refs],
+        "store_read": {"read": "geo-build", "started": "2026-10-02T00:00:00+00:00",
+                       "currents_read": {"serology/all": ["x"]}, "overrode_batches": []},
+        "created": "2026-10-02T01:00:00+00:00", "dot_rule": "virus",
+        "merges": {"A(HX)": {"one preparation": 4, "preparations agree": 1}},
+        "merged_preparations": {"A(HX)": 6},
+        "look": {"packing": "honeycomb", "dot_diameter": 8.0, "central_longitude": 11.5},
+        "figure_config": {"path": "/r/config/figures.toml", "sha256": "c" * 64},
+        "coastline": {"path": "/s/coast.shp", "sha256": "d" * 64},
+        "fonts": {"font_sans": {"family": "Sans A"}, "font_mono": {"family": "Mono B"}},
+        "drawn": 3 if month == "2026-01" else 2,
+        "no_coordinates": {"NOWHERE": 1} if month == "2026-02" else {},
+        "moved_inside_edge": {"EDGETOWN": 2} if month == "2026-01" else {},
+        "clades_behind": {"x1": ["behind"], "x2": ["another subtype's"]},
+    }  # fmt: skip
+    if full:
+        prov |= {"table_subtype": "A(HX)", "undated": 7, "no_location": 1,
+                 "colour_source": {"x1": {"source": "store", "scheme": "x1 clades",
+                                          "user_tables": {"/d/tables.py": "e" * 64}}}}  # fmt: skip
+    return {"provenance": prov, "geo": {"subtype": "x1", "month": month, "locations": []}}
+
+
+def _geo_row(month: str) -> dict[str, Any]:
+    checks = [{"check": "dots by location, frac diff", "value": 0.06, "limit": 0.05,
+               "ok": "expected", "expected": "expected difference: one dot per virus (approved "
+               "by a reviewer, 2026-10-01); found 0.060 against limit 0.05"},
+              {"check": "same month", "value": 1.0, "limit": 1.0, "ok": True}]  # fmt: skip
+    return {"slot": f"geo/x1/{month}", "status": "ok (expected differences)",
+            "geo_checks": checks}  # fmt: skip
+
+
+CLADE_KEY = {"sections": {"HX geographic data": "x1"},
+             "uncoloured_classes": {"HX geographic data": {"not_sequenced": 4,
+                                                           "clade_not_defined": 1}}}  # fmt: skip
+
+
+def _geo_store(tmp_path: Path) -> tuple[Store, list[StoreRef]]:
+    store = Store.create(tmp_path / "store")
+    refs = [_published(store, "serology", "all"), _published(store, "sequences", "x1"),
+            _published(store, "clades", "x1")]  # fmt: skip
+    return store, refs
+
+
+def test_a_geo_slot_note_reads_every_fact_from_its_month_figures(tmp_path: Path) -> None:
+    store, refs = _geo_store(tmp_path)
+    figures = [_geo_figure(refs, m, full=True) for m in ("2026-02", "2026-01")]
+    drawn_by = {"commit": "fedcba9876543210", "dirty": False,
+                "release": {"commit": "fedcba9876543210"}}  # fmt: skip
+    rows = [_geo_row("2026-01"), _geo_row("2026-02")]
+    note = howmade.geo_note("x1", figures, store, rows, drawn_by, CLADE_KEY)
+    text = "\n".join(note.lines)
+    assert note.missing == [], note.missing
+    assert note.mode == "geo" and note.source == f"serology/all@{refs[0].version}"
+    assert note.folder == "geo-x1" and text.startswith("# geo/x1: how these geographic maps")
+    for expected in (
+        f"Serology `all` version `{refs[0].version}` (the CURRENT version)",
+        f"Clades `x1` version `{refs[2].version}` (the CURRENT version)",
+        "Store read 2026-10-02T00:00:00+00:00 (geo-build): 1 CURRENT(s) read",
+        "Figures drawn by af `fedcba987654` (release `fedcba987654`)",
+        "Look `[geo.x1]` of figures.toml `cccccccccccc`: honeycomb packing, dots 8.0 pt",
+        "Coastline: coast.shp `dddddddddddd`", "Fonts: Sans A (font_sans); Mono B (font_mono)",
+        "One dot per virus; dots drawn in 2 month(s): 2026-01 3, 2026-02 2",  # in month order
+        "5 A(HX) viruses in the window, from 6 preparations; each virus's colour: one "
+        "preparation 4, preparations agree 1",
+        "Not drawn: 7 viruses with no collection date (so in no month); 1 names in the window",
+        "Not drawn, the location has no coordinates: NOWHERE 1 (2026-02)",
+        "Clusters moved inward so the map's edge cuts no dot: EDGETOWN 2 (2026-01)",
+        "Colours, subtype row x1: scheme `x1 clades` (source: store); the user's tables: "
+        "tables.py `eeeeeeeeeeee`",
+        'Clades behind, x1: ["behind"]',
+        "Uncoloured dots in the window, by class (the key on the HX geographic data page): not "
+        "sequenced 4, clade not defined 1",
+        "Report comparison, 2026-01: ok (expected differences); dots by location, frac diff "
+        "0.060 (limit 0.050, approved); same month 1.000 (limit 1.000)",
+        "Approved difference, dots by location, frac diff (2026-01, 2026-02): one dot per virus",
+    ):  # fmt: skip
+        assert expected in text, expected
+    assert "another subtype's" not in text  # the build's record for the other slots
+
+
+def test_a_geo_figure_drawn_before_the_slot_facts_says_what_it_lacks(tmp_path: Path) -> None:
+    store, refs = _geo_store(tmp_path)
+    figures = [_geo_figure(refs, "2026-01", full=False)]
+    del figures[0]["provenance"]["moved_inside_edge"]  # drawn before clusters were moved in
+    note = howmade.geo_note("x1", figures, store, [])
+    assert sorted(note.missing) == sorted([
+        "the af that drew the figures", "how each virus's preparations were merged",
+        "the viruses not drawn for want of a date or a location", "moved inside edge per month",
+        "the colour scheme and the user's tables", "the key's uncoloured dots by class",
+        "the report's comparison of these maps",
+    ])  # fmt: skip
+    assert note.lines[-1].startswith(f"_{len(note.missing)} fact(s) MISSING")
+
+
+def test_a_geo_slot_citing_a_version_the_store_lacks_says_so(tmp_path: Path) -> None:
+    store, refs = _geo_store(tmp_path)
+    bad = StoreRef(refs[1].kind, refs[1].dataset, refs[1].version, refs[1].version + "0" * 48)
+    newer = _published(store, "clades", "x1", "b")
+    note = howmade.geo_note("x1", [_geo_figure([refs[0], bad, refs[2]], "2026-01", full=True)],
+                            store, [], None, CLADE_KEY)  # fmt: skip
+    text = "\n".join(note.lines)
+    assert f"sequences/x1 {refs[1].version}" in note.missing
+    assert f"(not CURRENT: CURRENT is {newer.version})" in text
+    note = howmade.geo_note("x1", [_geo_figure(refs, "2026-01", full=True)], None, [])
+    assert f"serology/all {refs[0].version}" in note.missing  # no store: nothing checked
+
+
+def test_a_geo_declaration_is_quoted_on_its_serology_version_only(tmp_path: Path) -> None:
+    store, refs = _geo_store(tmp_path)
+    path = tmp_path / "declarations.toml"
+    path.write_text(
+        '[[declaration]]\nruling = "Q2 a"\nfigure = "geo/x1"\n'
+        f'version = "{refs[0].version}"\ntext = "the key keeps the legend text"\n'
+        'file = "declarations/geo-key.md"\n'
+        '\n[[declaration]]\nruling = "Q2 a"\nfigure = "geo/x2"\n'
+        f'version = "{refs[0].version}"\ntext = "another slot"\nfile = "declarations/geo-key.md"\n'
+    )
+    declarations = howmade.load_declarations(path)
+    figures = [_geo_figure(refs, "2026-01", full=True)]
+    note = howmade.geo_note("x1", figures, store, [], None, CLADE_KEY, declarations)
+    text = "\n".join(note.lines)
+    assert "## Declared" in text and "another slot" not in text
+    assert "- Q2 a: the key keeps the legend text (in full: declarations/geo-key.md)" in text
+    newer = _published(store, "serology", "all", "b")
+    figures = [_geo_figure([newer, *refs[1:]], "2026-01", full=True)]
+    note = howmade.geo_note("x1", figures, store, [], None, CLADE_KEY, declarations)
+    assert (f"declared for version {refs[0].version}, not for the serology these figures read, "
+            f"{newer.version}, so not applied") in "\n".join(note.lines)  # fmt: skip
+    assert "the Q2 a declaration for this version" in note.missing
+
+
+def test_a_declaration_names_a_chain_or_a_figure_never_both(tmp_path: Path) -> None:
+    path = tmp_path / "declarations.toml"
+    path.write_text('[[declaration]]\nruling = "Q1 a"\nversion = "1"\ntext = "t"\nfile = "f"\n')
+    with pytest.raises(ValueError, match="declaration 1 lacks dataset or figure"):
+        howmade.load_declarations(path)
+    path.write_text('[[declaration]]\nruling = "Q1 a"\ndataset = "d"\nfigure = "geo/x1"\n'
+                    'version = "1"\ntext = "t"\nfile = "f"\n')  # fmt: skip
+    with pytest.raises(ValueError, match="declaration 1 names both dataset and figure"):
+        howmade.load_declarations(path)
+
+
+def test_a_geo_figures_warnings_are_listed_by_month(tmp_path: Path) -> None:
+    store, refs = _geo_store(tmp_path)
+    figure = _geo_figure(refs, "2026-01", full=True)
+    figure["provenance"]["decisions"] = {"unpainted_clades": [{"warning": WARNING}]}
+    note = howmade.geo_note("x1", [figure], store, [], None, CLADE_KEY)
+    assert note.warnings == ["**WARNING** (2026-01): " + WARNING.removeprefix("WARNING: ")]
+
+
+def test_write_notes_writes_a_note_per_geo_slot_beside_the_maps(tmp_path: Path) -> None:
+    store, refs = _geo_store(tmp_path)
+    figures = []
+    for month in ("2026-01", "2026-02"):
+        path = tmp_path / f"geo-{month}.i7.json"
+        path.write_text(json.dumps(_geo_figure(refs, month, full=True)))
+        figures.append({"slot": f"geo/x1/{month}", "i7": str(path)})
+    af = {"commit": "fedcba9876543210", "dirty": False, "release": {"commit": "fedcba9876543210"}}
+    record = {"report": "rep-1", "figures": figures, "af": af, "clade_key": CLADE_KEY}
+    rows = [_geo_row("2026-01"), _geo_row("2026-02")]
+    notes = howmade.write_notes(record, store, None, rows, tmp_path / "out")
+    assert [n.folder for n in notes] == ["geo-x1"] and notes[0].missing == []
+    assert "Report comparison, 2026-02" in (tmp_path / "out/geo-x1.md").read_text()
+    index = (tmp_path / "out/README.md").read_text()
+    assert "0 maps, 1 geographic slot(s); 0 fact(s) MISSING in all" in index
+    assert f"| [geo-x1](geo-x1.md) | serology/all@{refs[0].version} | geo | 0 | 0 |" in index
