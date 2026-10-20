@@ -1,5 +1,7 @@
 """The figure fonts installed with af: TeX Gyre Heros (Helvetica metrics) and TeX Gyre Cursor
-(Courier metrics), under the GUST Font License (an instance of the LPPL 1.3c).
+(Courier metrics), under the GUST Font License (an instance of the LPPL 1.3c), and Courier Prime
+Regular (Courier metrics, heavier strokes), under the SIL Open Font License 1.1. Both licences
+are installed with them (GUST-FONT-LICENSE.txt, OFL-COURIER-PRIME.txt; in git under fonts/).
 
 Why they come with af: a figure must not depend on what a machine happens to have installed,
 and matplotlib falls back to DejaVu silently when a family is missing. The fonts are not in
@@ -45,8 +47,8 @@ def source() -> dict[str, Any]:
 
 
 def names() -> list[str]:
-    """The installed font files (.otf), by file name."""
-    return sorted(name for name in source()["files"] if name.endswith(".otf"))
+    """The installed font files (.otf and .ttf), by file name."""
+    return sorted(name for name in source()["files"] if name.endswith((".otf", ".ttf")))
 
 
 def path(name: str) -> Path:

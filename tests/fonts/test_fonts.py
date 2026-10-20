@@ -18,6 +18,7 @@ from tests.helpers import REPO_ROOT
 
 FAMILIES = {"heros": "TeX Gyre Heros", "cursor": "TeX Gyre Cursor"}
 STYLES = ("regular", "bold", "italic", "bolditalic")
+COURIER_PRIME = "CourierPrime-Regular.ttf"
 
 
 def test_the_fonts_come_from_the_archive_the_build_pins() -> None:
@@ -31,25 +32,41 @@ def test_the_fonts_come_from_the_archive_the_build_pins() -> None:
     assert source["archive_url"].endswith(".zip")
 
 
+def test_courier_prime_is_the_file_the_build_pins() -> None:
+    recipe = (REPO_ROOT / "fonts" / "CMakeLists.txt").read_text()
+    pinned = re.search(r'set\(AF_COURIER_PRIME_SHA256 "([0-9a-f]{64})"\)', recipe)
+    version = re.search(r'set\(AF_COURIER_PRIME_VERSION "([^"]+)"\)', recipe)
+    assert pinned and version
+    record = fonts.source()["courier_prime"]
+    assert (record["sha256"], record["version"]) == (pinned[1], version[1])
+    assert record["url"].endswith(COURIER_PRIME) and record["licence"] == "OFL-COURIER-PRIME.txt"
+    assert fonts.source()["files"][COURIER_PRIME] == pinned[1]
+
+
 def test_every_installed_file_is_the_one_the_build_recorded() -> None:
     files = fonts.source()["files"]
     assert {
         "GUST-FONT-LICENSE.txt",
         "README-TeX-Gyre-Heros.txt",
         "MANIFEST-TeX-Gyre-Cursor.txt",
+        "OFL-COURIER-PRIME.txt",
     } <= set(files)
     for name, sha256 in files.items():
         installed = fonts.directory() / name
         assert hashlib.sha256(installed.read_bytes()).hexdigest() == sha256, name
 
 
-def test_the_licence_text_is_the_committed_one() -> None:
-    committed = (REPO_ROOT / "fonts" / "GUST-FONT-LICENSE.txt").read_bytes()
-    assert (fonts.directory() / "GUST-FONT-LICENSE.txt").read_bytes() == committed
+def test_the_licence_texts_are_the_committed_ones() -> None:
+    for licence in ("GUST-FONT-LICENSE.txt", "OFL-COURIER-PRIME.txt"):
+        committed = (REPO_ROOT / "fonts" / licence).read_bytes()
+        assert (fonts.directory() / licence).read_bytes() == committed, licence
+    ofl = (REPO_ROOT / "fonts" / "OFL-COURIER-PRIME.txt").read_bytes()
+    assert b"SIL Open Font License, Version 1.1" in ofl
 
 
 def test_fonts_are_named_by_file_and_an_unknown_name_is_an_error() -> None:
-    expected = sorted(f"texgyre{family}-{style}.otf" for family in FAMILIES for style in STYLES)
+    gyre = [f"texgyre{family}-{style}.otf" for family in FAMILIES for style in STYLES]
+    expected = sorted([*gyre, COURIER_PRIME])
     assert fonts.names() == expected
     assert all(fonts.path(name).is_file() for name in expected)
     with pytest.raises(fonts.FontsMissing, match=r"no installed font 'helvetica\.otf'; af has: "):
@@ -66,7 +83,11 @@ def test_registered_families_resolve_to_these_files_without_a_fallback() -> None
     from matplotlib import font_manager
 
     families = fonts.register()
-    assert set(families.values()) == set(FAMILIES.values())
+    assert set(families.values()) == {*FAMILIES.values(), "Courier Prime"}
+    found = font_manager.findfont(
+        font_manager.FontProperties(family="Courier Prime"), fallback_to_default=False
+    )
+    assert Path(found).read_bytes() == fonts.path(COURIER_PRIME).read_bytes()
     for family, name in FAMILIES.items():
         for weight, style in (("normal", "regular"), ("bold", "bold")):
             found = font_manager.findfont(
@@ -79,7 +100,7 @@ def test_registered_families_resolve_to_these_files_without_a_fallback() -> None
 
 @pytest.mark.parametrize("fonttype", [3, 42])
 def test_matplotlib_embeds_both_families_in_a_pdf(tmp_path: Path, fonttype: int) -> None:
-    """Embedded and subset (a "XXXXXX+" prefix), not merely referenced by name."""
+    """Embedded and subset (a "XXXXXX+" prefix), not merely referenced by name: all three."""
     import matplotlib
 
     matplotlib.use("pdf", force=True)
@@ -90,9 +111,11 @@ def test_matplotlib_embeds_both_families_in_a_pdf(tmp_path: Path, fonttype: int)
         fig = plt.figure(figsize=(2, 1))
         fig.text(0.1, 0.6, "Sans text 0123", family="TeX Gyre Heros")
         fig.text(0.1, 0.2, "Mono text 0123", family="TeX Gyre Cursor")
+        fig.text(0.1, 0.4, "Mono text 0123", family="Courier Prime")
         fig.savefig(tmp_path / "fonts.pdf")
         plt.close(fig)
     pdf = (tmp_path / "fonts.pdf").read_bytes()
-    for postscript_name in (b"TeXGyreHeros-Regular", b"TeXGyreCursor-Regular"):
+    postscript_names = (b"TeXGyreHeros-Regular", b"TeXGyreCursor-Regular", b"CourierPrime-Regular")
+    for postscript_name in postscript_names:
         assert re.search(rb"/BaseFont /[A-Z]{6}\+" + postscript_name, pdf), postscript_name
     assert b"DejaVu" not in pdf, "a fallback font was used"
