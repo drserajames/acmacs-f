@@ -28,6 +28,9 @@ MapResult = dict[str, Any]
 # 20261020.txt); distinct minima of one chain map differ by ~3e-9 (AD h1pdm-cdc step 34; 06).
 # 1e-12 accepts the first with ~2,000x margin and refuses the second with ~3,000x; 1e-9, the value
 # before, passed the second with only 3x. At stress ~10,000 it is ~1e-8 absolute, ~5,000 ULPs.
+# Relies on the core summing stress in a fixed order (stress.cc: serial, no threads): a reordered
+# sum moves stored maps by up to ~8e-14 relative at 141k titres (06, 20 Oct 2026), so re-check the
+# published maps (chain-work/tools/finish-tolerance-check.py) before changing that summation.
 FINISH_STRESS_TOLERANCE = 1e-12
 ADOPT_STRESS_TOLERANCE = FINISH_STRESS_TOLERANCE  # the same claim, the same evidence
 
