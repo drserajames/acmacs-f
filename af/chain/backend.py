@@ -19,20 +19,20 @@ import numpy as np
 
 MapResult = dict[str, Any]
 
-# How far a published layout's stress, evaluated again, may be from the one its map recorded
-# before a finish refuses it: last-bit differences between the optimiser's own final value and a
-# fresh evaluation, never a different problem (CoreOptimiser.finish). RELATIVE (math.isclose
-# rel_tol, abs_tol 0).
-FINISH_STRESS_TOLERANCE = 1e-9
-
-# The same for an adopted layout against its source map's recorded stress (CoreOptimiser.adopt),
-# RELATIVE. Tighter, because here the check is the evidence that the layout is that map's, placed
-# point for point. The same layout re-evaluated under another arithmetic agrees to 5e-16 relative
-# (notes/optimiser/reproducibility; 15 o-made maps re-evaluated, Q195); distinct minima of one
-# chain map differ by ~3e-9 relative (AD h1pdm-cdc step 34). 1e-12 accepts the first with ~2,000x
-# margin and refuses the second with ~3,000x (06, 18 Oct 2026); 1e-9 would pass the second with
-# only 3x. At stress ~10,000 it is ~1e-8 absolute, some 5,000 ULPs: no re-summation trips it.
-ADOPT_STRESS_TOLERANCE = 1e-12
+# How far a layout's stress, evaluated again, may be from the stress its map recorded before a
+# finish (CoreOptimiser.finish) or an adoption (CoreOptimiser.adopt) refuses it. RELATIVE
+# (math.isclose rel_tol, abs_tol 0). The check is the evidence that the arrays are the problem the
+# layout was made for, and that the layout is that map's. The same layout re-evaluated, even under
+# another arithmetic or on another machine, agrees to 5e-16 relative: all 36 published merge_all
+# maps, worst 4.7e-16 (07, OWED 43, 20 Oct 2026; chain-work/logs/owed43-finish-tolerance-check-
+# 20261020.txt); distinct minima of one chain map differ by ~3e-9 (AD h1pdm-cdc step 34; 06).
+# 1e-12 accepts the first with ~2,000x margin and refuses the second with ~3,000x; 1e-9, the value
+# before, passed the second with only 3x. At stress ~10,000 it is ~1e-8 absolute, ~5,000 ULPs.
+# Relies on the core summing stress in a fixed order (stress.cc: serial, no threads): a reordered
+# sum moves stored maps by up to ~8e-14 relative at 141k titres (06, 20 Oct 2026), so re-check the
+# published maps (chain-work/tools/finish-tolerance-check.py) before changing that summation.
+FINISH_STRESS_TOLERANCE = 1e-12
+ADOPT_STRESS_TOLERANCE = FINISH_STRESS_TOLERANCE  # the same claim, the same evidence
 
 # The move-lower rules a chain or a finish may name (MapOptions.move_lower_rule), by the name each
 # rule records, with the af.map.optimise constant that holds it. Names, not the rules, so a

@@ -247,3 +247,23 @@ def test_a_layout_whose_stress_is_not_its_own_is_refused(made, monkeypatch):
     with pytest.raises(FinishError, match="not the arrays it was made from"):
         _finish(made, "--move-lower")
     assert _current(made.root) == made.version
+
+
+def test_the_finish_check_is_1e12_relative(tmp_path):
+    """OWED 43: a recorded stress 1e-10 off (inside the old 1e-9) is refused; last-bit noise is
+    not. Re-evaluation agrees to 5e-16 on every published merge_all map."""
+    import af.map.optimise as optimise
+    from af.chain.backend import CoreOptimiser
+    from af.chart.ace import read_chart
+
+    make_tables(tmp_path / "t", GROUP, n_tables=1)
+    chart = read_chart(sorted((tmp_path / "t").glob("*.ace"))[0])
+    arrays = chart.optimiser_arrays("none", disconnect_threshold=None)
+    core = CoreOptimiser(threads=1)
+    problem = core._problem(arrays)
+    layout = optimise.optimise(problem, np.random.default_rng(1).normal(size=(chart.n_points, 2)))
+    recorded = optimise.stress(problem, layout.layout)
+    rule = FinishRule(move_groups=True)
+    core.finish(arrays, layout.layout, rule, recorded * (1 + 1e-15))  # accepted
+    with pytest.raises(ValueError, match="not the arrays it was made from"):
+        core.finish(arrays, layout.layout, rule, recorded * (1 + 1e-10))
