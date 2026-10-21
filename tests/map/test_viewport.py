@@ -143,6 +143,23 @@ def test_one_frame_serves_every_window() -> None:
     assert hidden_counts(shared.frame, xy, six, ()).hidden == {"recent": 0, "in window": 1}
 
 
+def test_the_first_page_is_framed_before_the_next() -> None:
+    # The first page wants one point on the left in, the second three on the right; no frame
+    # holds both. Summed, the second page's three would win; page by page, the first page is
+    # framed as it would be alone and the second takes what is left (h1-cnic, R6 review).
+    xy = np.array([[4.0, 0.0], [6.0, 0.0], [-1.0, 0.0], [11.0, 0.0], [11.2, 0.0], [11.4, 0.0]])
+    recent = np.array([True, True, False, False, False, False])
+    first = (Priority("recent", recent), Priority("in window", np.arange(6) == 2))
+    second = (Priority("recent", recent), Priority("in window", np.arange(6) >= 3))
+    alone = choose_frame(xy, first, size=8.0, furniture=()).frame
+    shared = choose_frame(xy, first, size=8.0, furniture=(), also=(View(second, ()),))
+    assert shared.frame == alone and shared.hidden == {"recent": 0, "in window": 0}
+    assert hidden_counts(shared.frame, xy, second, ()).hidden == {"recent": 0, "in window": 3}
+    # the control: the other way round, the right-hand points are in
+    other = choose_frame(xy, second, size=8.0, furniture=(), also=(View(first, ()),))
+    assert other.hidden == {"recent": 0, "in window": 0}
+
+
 def test_every_page_must_show_the_required_points() -> None:
     # The second page's title box covers where the first page would put a recent point.
     xy = np.array([[0.0, 0.0], [5.0, -5.0]])
