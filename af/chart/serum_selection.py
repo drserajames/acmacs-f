@@ -324,7 +324,8 @@ def candidates(
     :meth:`af.map.colouring.StoreColours.for_sera`, one per serum in chart order), its passage
     class, and its last titration (:func:`titration_dates`). ``chart_name`` names the map and
     ``centre`` its collaborating centre, both from the caller's config. A serum is keyed by
-    map, name and serum id, never by its index (design rule 2)."""
+    map, name, serum id, passage, reassortant and annotations (a lab can give a cell and an egg
+    serum one id), never by its index (design rule 2)."""
     from af.map.vaccines import passage_class
 
     if len(strains) != chart.n_sera:
@@ -336,7 +337,14 @@ def candidates(
             raise SelectionError(f"serum strain {strain.serum} given for serum {sr}")
         out.append(
             Candidate(
-                key=(chart_name, serum.name, serum.serum_id),
+                key=(
+                    chart_name,
+                    serum.name,
+                    serum.serum_id,
+                    serum.passage,
+                    serum.reassortant,
+                    *serum.annotations,
+                ),  # fmt: skip
                 designation=serum.designation(),
                 passage_class=passage_class(serum.passage, serum.reassortant),
                 name=serum.name,

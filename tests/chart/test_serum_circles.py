@@ -129,28 +129,56 @@ def test_the_coverage_antigen_is_the_best_ranked_one_with_a_titre():
     assert coverage_antigen(antigens, serum, t) == 2  # passage and its type differ (6)
 
 
-def test_the_circle_and_coverage_rules_are_named_and_swappable():
+def test_the_figure_takes_the_best_match_and_keeps_the_other_rule():
     """Two homologous antigens. Antigen 1 (640, boundary 4) protects the antigens at 1 and 1.5
-    only: radius 1.75. Antigen 0 (320, boundary 3) protects 80 at 2 as well: radius 2.5. The
-    circle takes the smaller; the coverage antigen is the exact passage, antigen 0."""
+    only: radius 1.75, floored to 2. Antigen 0 (320, boundary 3) protects 80 at 2 as well:
+    radius 2.5. The best match is the exact passage, antigen 0; ae's circle took the smaller
+    radius, antigen 1 (Q228: the figure takes the best match, the other is declared)."""
     antigens = [Antigen(NAME, "MDCK1"), Antigen(NAME, "SIAT1"), *others(3)]
     c = chart(antigens, [Serum(NAME, "F1", "MDCK1")], [["320", "640", "80", "40", "20"]])
     layout = ruler(1.5, 1, 2, 3, 4)
     (a,) = serum_circles(c, layout)
-    assert a.circle.rule == "ae-circle" and a.coverage.rule == "ae-coverage"
+    assert a.circle.rule == "best-match" and a.coverage.rule == "best-match"
     assert [h.empirical for h in a.homologous] == [2.5, 1.75]
-    assert a.circle.empirical_antigen == 1 and a.circle.empirical == 2.0  # floored
+    assert (a.circle.empirical_antigen, a.circle.empirical, a.circle.titre) == (0, 2.5, "320")
     assert a.coverage.antigen == 0
-    (b,) = serum_circles(c, layout, coverage_rule="circle-antigen")
-    assert b.coverage.antigen == 1 and b.coverage.rule == "circle-antigen"
-    assert b.circle == a.circle
-    (d,) = serum_circles(c, layout, circle_rule="coverage-antigen")
-    assert d.circle.empirical_antigen == 0 and d.circle.empirical == 2.5
-    assert d.coverage == a.coverage
-    with pytest.raises(SerumCircleError, match="circle rule"):
+    assert (a.other_circle.rule, a.other_circle.empirical_antigen) == ("ae-circle", 1)
+    assert (a.other_circle.empirical, a.other_circle.titre) == (2.0, "640")
+    assert a.other_coverage.antigen == 1
+    assert a.disagreement() == "visible"
+    # the shipped maps: ae's circle, best-match colouring
+    (s,) = serum_circles(c, layout, circle_rule="ae-circle", coverage_rule="best-match")
+    assert s.circle == a.other_circle and s.coverage == a.coverage
+    with pytest.raises(SerumCircleError, match="circle rule 'nearest'"):
         serum_circles(c, layout, circle_rule="nearest")
     with pytest.raises(SerumCircleError, match="layout has 5 points"):
         serum_circles(c, layout[:-1])
+
+
+def test_disagreements_are_named_by_what_the_map_shows():
+    # one homologous antigen: both rules agree
+    assert one_serum(["640", "320", "40", "20"], [1, 2, 3, 4]).disagreement() is None
+    # the best match (exact passage SIAT1, 330) and ae's circle (first of equal radii, 320)
+    # differ in titre only: the same radius 2.5 and the same within/outside sets
+    antigens = [Antigen(NAME, "MDCK1"), Antigen(NAME, "SIAT1"), *others(3)]
+    c = chart(antigens, [Serum(NAME, "F1", "SIAT1")], [["320", "330", "160", "40", "20"]])
+    (rec,) = serum_circles(c, ruler(1, 1, 2, 3, 4))
+    assert (rec.circle.titre, rec.other_circle.titre) == ("330", "320")
+    assert rec.circle.empirical == rec.other_circle.empirical == 2.5
+    assert rec.disagreement() == "titre-only"
+    # an egg antigen of the serum's name: no homologous antigen for ae, a best match for af
+    c = chart(
+        [Antigen(NAME, "E3"), *others(2)], [Serum(NAME, "F1", "MDCK1")], [["640", "40", "20"]]
+    )
+    (rec,) = serum_circles(c, ruler(1, 2, 3))
+    assert rec.other_circle.status == "no_homologous" and rec.circle.status == "good"
+    assert rec.disagreement() == "no-homologous"
+    # its antigen untitrated: no circle and no colouring
+    c = chart(
+        [Antigen(NAME, "MDCK2"), *others(2)], [Serum(NAME, "F1", "MDCK1")], [["*", "40", "20"]]
+    )
+    (rec,) = serum_circles(c, ruler(1, 2, 3))
+    assert rec.coverage.status == "no_homologous_titre" and rec.disagreement() == "neither"
 
 
 def test_a_serum_without_coordinates_or_homologous_antigen_has_no_circle():
