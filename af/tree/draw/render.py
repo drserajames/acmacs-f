@@ -139,6 +139,13 @@ class Geometry:
     # No aa label starts left of this x. With margin strain labels, set it right of their
     # column, so the margin is theirs alone as shipped (R5 review: aa labels from x 3).
     label_left: float = 2.0
+    # The title's baseline-centre height (the shipped report pages: 16).
+    title_y: float = 16.0
+    # Signature pages (addendum 4): the lettered-band column after the clade brackets, this wide
+    # (0 = none), with letters of this size; and row bars (FigureSpec.row_bars) this wide each.
+    section_marker_width: float = 0.0
+    section_font: float = 7.0
+    row_bar_width: float = 4.0
 
 
 @dataclass
@@ -148,6 +155,16 @@ class DashBar:
     pos: int
     colours: dict[str, str]
     legend: list[tuple[str, str]] = field(default_factory=list)  # (text, colour)
+
+
+@dataclass
+class RowBar:
+    """One colour on given rows, in its own column after the clade brackets (the signature
+    page's "matches a chart antigen" bar). Rows are resolved from leaf ids by the caller."""
+
+    name: str
+    rows: frozenset[int]
+    colour: str = "#808080"
 
 
 @dataclass
@@ -180,6 +197,7 @@ class FigureSpec:
     # Drawn in a round's figure fonts (FigureConfig.fonts, af.util.fonts): text uses the rc sans
     # and mono families. False: DejaVu Sans and DejaVu Sans Mono, as before the figure fonts.
     figure_fonts: bool = False
+    row_bars: list[RowBar] = field(default_factory=list)
 
 
 @dataclass
@@ -442,6 +460,31 @@ def _draw_hz_rules(
         if 0 < r < spec.layout.n_rows:
             y = pg.row_edge(r)
             ax.plot([g.ts_left, edges.get(r, matrix_right)], [y, y], color=g.rule_colour, lw=0.5)
+
+
+def _draw_row_bars(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> float:
+    """Each row bar's rows, one dash per row; the x where the next column starts."""
+    g, x = pg.g, left
+    for bar in spec.row_bars:
+        rows = sorted(bar.rows)
+        segs = [((x, float(pg.row_y(r))), (x + g.row_bar_width, float(pg.row_y(r)))) for r in rows]
+        ax.add_collection(LineCollection(segs, colors=bar.colour, linewidths=pg.dash_width))
+        x += g.row_bar_width + g.bar_gap
+    return x
+
+
+def _draw_section_marker(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> float:
+    """The lettered bands as AD's signature pages draw them: a line down each band's right
+    edge, a tick in at each end, the letter beside its middle. The x after the column."""
+    g = pg.g
+    if not g.section_marker_width:
+        return left
+    tick, x = g.section_marker_width / 3, left + g.section_marker_width / 3
+    for band in spec.hz:
+        y0, y1 = pg.row_edge(band.first), pg.row_edge(band.last + 1)
+        ax.plot([x - tick, x, x, x - tick], [y0, y0, y1, y1], color="black", lw=0.6)
+        ax.text(x + 1, (y0 + y1) / 2, band.letter, fontsize=g.section_font, ha="left", va="center")
+    return left + g.section_marker_width + g.bar_gap
 
 
 def _draw_dash_bars(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> None:
@@ -730,9 +773,26 @@ def _draw_key(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid) -> Box | None:
 def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     """Write the PDF and return what was drawn."""
     g = spec.geometry
-    pg = _Page(spec)
     fig = plt.figure(figsize=(g.width / 72, g.height / 72))
     ax = fig.add_axes((0, 0, 1, 1))
+    drawn = draw(ax, spec)
+    # Without figure fonts the name layer is written Type 42 (a Unicode map, so viewers can search
+    # it), and only with the layer, so other figures keep their bytes. The figure fonts set their
+    # own type (af.util.fonts.pdf_fonttype; TeX Gyre is Type 3, whose
+    # text stays searchable): forcing 42 there only makes readers flag a font type mismatch.
+    searchable = spec.leaf_names and not spec.figure_fonts
+    with plt.rc_context({"pdf.fonttype": 42} if searchable else {}):
+        fig.savefig(pdf_path, metadata={"CreationDate": None, "Creator": "acmacs-f"})
+    plt.close(fig)
+    return drawn
+
+
+def draw(ax: Axes, spec: FigureSpec) -> Drawn:
+    """Draw the figure into ``ax``, which must be ``geometry.width`` x ``geometry.height``
+    points on its page (a whole report page, or the tree panel of a signature page): text sizes
+    are in points, and the panels are laid out in the same units."""
+    g = spec.geometry
+    pg = _Page(spec)
     ax.set_xlim(0, g.width)
     ax.set_ylim(g.height, 0)
     ax.axis("off")
@@ -746,7 +806,9 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     edges = _draw_brackets(ax, spec, pg, bracket_left)
     _draw_hz_rules(ax, spec, pg, matrix_right, edges)
     last_column = bracket_left + max(spec.selection.slots.values(), default=0) * g.clade_slot + 2
-    _draw_dash_bars(ax, spec, pg, last_column + g.bars_gap)
+    x = _draw_row_bars(ax, spec, pg, last_column + g.bars_gap)
+    x = _draw_section_marker(ax, spec, pg, x)
+    _draw_dash_bars(ax, spec, pg, x)
     inset = _draw_key(ax, spec, pg, grid)
     if g.strain_x is None:  # strain labels beside the tree: the aa labels keep off them
         strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid)
@@ -757,17 +819,8 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     # The shipped pages start the title just left of the tree's root (H1 4, H3 4 units).
     title = spec.title if spec.drawn_title is None else spec.drawn_title
     if title:
-        ax.text(g.tree_left - 4, 16, title, fontsize=g.title_font, ha="left", va="center")
+        ax.text(g.tree_left - 4, g.title_y, title, fontsize=g.title_font, ha="left", va="center")
     names = _draw_leaf_names(ax, spec, pg) if spec.leaf_names else None
-
-    # Without figure fonts the name layer is written Type 42 (a Unicode map, so viewers can search
-    # it), and only with the layer, so other figures keep their bytes. The figure fonts set their
-    # own type (af.util.fonts.pdf_fonttype; TeX Gyre is Type 3, whose
-    # text stays searchable): forcing 42 there only makes readers flag a font type mismatch.
-    searchable = spec.leaf_names and not spec.figure_fonts
-    with plt.rc_context({"pdf.fonttype": 42} if searchable else {}):
-        fig.savefig(pdf_path, metadata={"CreationDate": None, "Creator": "acmacs-f"})
-    plt.close(fig)
     return Drawn(placed, metrics, strain_report, continents_not_in_legend(spec), names, inset)
 
 

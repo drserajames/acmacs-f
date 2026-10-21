@@ -22,7 +22,7 @@ from .defaults import load_defaults
 from .i7 import tree_block, write_i7
 from .layout import HideRules, Layout, compute_layout, rows_matching
 from .model import DrawTree
-from .render import DashBar, FigureSpec, Geometry, render, with_centre_column
+from .render import DashBar, FigureSpec, Geometry, RowBar, render, with_centre_column
 from .sections import (
     BandParams,
     HzBand,
@@ -46,6 +46,16 @@ class Overrides:
     hide_clades: frozenset[str] = frozenset()
     hide_hz_starting_at: frozenset[str] = frozenset()  # leaf name that starts a lettered band
     reasons: dict[str, str] = field(default_factory=dict)  # "hide:<clade>" -> why, who decided
+
+
+@dataclass(frozen=True)
+class RowBarIds:
+    """A row bar (render.RowBar) named by leaf ids (design rule 2): drawn on the rows of the
+    drawn leaves it names. Naming none of them is an error (rule 1); the rest are counted."""
+
+    name: str
+    leaf_ids: frozenset[str]
+    colour: str = "#808080"
 
 
 @dataclass
@@ -81,23 +91,34 @@ class FigureConfig:
     # The round's figure fonts (af.util.fonts, figures.toml): the whole figure, label placement
     # included, is drawn in them and their files are recorded in the I7. None: DejaVu, as before.
     fonts: FigureFonts | None = None
+    # Columns of single-colour dashes after the clade brackets (the signature page's "matches a
+    # chart antigen" bar); none on the report pages.
+    row_bars: list[RowBarIds] = field(default_factory=list)
 
 
-def make_figure(
+@dataclass
+class Prepared:
+    """Everything a tree figure is drawn from, decided before drawing: shared by the report
+    figure (make_figure) and the signature page's tree panel (af.report.addenda.sigpage)."""
+
+    spec: FigureSpec
+    layout: Layout
+    timeseries: TimeSeries
+    selection: Selection
+    hz: list[HzBand]
+    label_counts: dict[str, Any]
+    dash_bars: list[dict[str, Any]]
+    marked: Any  # np.ndarray | None
+    row_bars: dict[str, dict[str, int]]  # name -> ids named / drawn rows
+
+
+def prepare(
     tree: DrawTree,
     parents: Mapping[str, str | None],
     config: FigureConfig,
-    pdf: Path,
-    inputs: Mapping[str, str],
     flags: Mapping[str, list[str]] | None = None,
-    store_refs: Sequence[StoreRef] = (),
-    depth_unit: str = "",
-) -> dict[str, Any]:
-    """Render ``pdf`` and write its I7 and draw report; return the draw report.
-
-    ``flags`` (leaf id -> reasons, from the tree store) are counted, never acted on: whether a
-    flagged leaf is drawn is a hide rule's decision, not the flag's.
-    """
+) -> Prepared:
+    """Rows, clades, bands, labels and bars for ``config``: the figure's spec, not yet drawn."""
     layout, ts, selection, hz = arrange(tree, parents, config, flags)
     shown = {cs.clade for cs in selection.shown}
     unknown = sorted(set(config.clade_label_sizes) - shown)
@@ -112,6 +133,7 @@ def make_figure(
         label_counts["labels"] = len(labels)
 
     dash_bars = dash_bar_counts(tree, layout.leaf_nodes, config.dash_bars)
+    row_bars, row_bar_counts = _row_bars(tree, layout, config.row_bars)
 
     marked = None
     geometry = config.geometry
@@ -138,12 +160,66 @@ def make_figure(
         drawn_title=config.drawn_title,
         clade_display=dict(config.clade_display),
         figure_fonts=config.fonts is not None,
+        row_bars=row_bars,
     )
-    # Every text, label placement included, is measured and drawn in the figure fonts. They are
-    # registered here, in the process that draws: a spawned worker (af.tree.draw.stage) starts
-    # with matplotlib's own fonts only, and would draw in its fallback with just a warning.
+    return Prepared(
+        spec, layout, ts, selection, hz, label_counts, dash_bars, marked, row_bar_counts
+    )
+
+
+def _row_bars(
+    tree: DrawTree, layout: Layout, bars: Sequence[RowBarIds]
+) -> tuple[list[RowBar], dict[str, dict[str, int]]]:
+    row_of = {str(tree.leaf_id[i]): r for r, i in enumerate(layout.leaf_nodes)}
+    out, counts = [], {}
+    for bar in bars:
+        rows = frozenset(row_of[i] for i in bar.leaf_ids if i in row_of)
+        if not rows:  # design rule 1
+            raise ValueError(f"row bar {bar.name!r}: none of its {len(bar.leaf_ids)} ids is drawn")
+        out.append(RowBar(bar.name, rows, bar.colour))
+        counts[bar.name] = {"ids": len(bar.leaf_ids), "rows": len(rows)}
+    return out, counts
+
+
+def fonts_context(config: FigureConfig) -> Any:
+    """The figure fonts' rc context (or none): every text, label placement included, is
+    measured and drawn in it. Registered in the process that draws: a spawned worker
+    (af.tree.draw.stage) starts with matplotlib's own fonts only, and would draw in its
+    fallback with just a warning."""
     fonts = config.fonts.files.resolve() if config.fonts is not None else None
-    with fonts.context() if fonts is not None else contextlib.nullcontext():
+    return fonts.context() if fonts is not None else contextlib.nullcontext()
+
+
+def make_figure(
+    tree: DrawTree,
+    parents: Mapping[str, str | None],
+    config: FigureConfig,
+    pdf: Path,
+    inputs: Mapping[str, str],
+    flags: Mapping[str, list[str]] | None = None,
+    store_refs: Sequence[StoreRef] = (),
+    depth_unit: str = "",
+) -> dict[str, Any]:
+    """Render ``pdf`` and write its I7 and draw report; return the draw report.
+
+    ``flags`` (leaf id -> reasons, from the tree store) are counted, never acted on: whether a
+    flagged leaf is drawn is a hide rule's decision, not the flag's.
+    """
+    prepared = prepare(tree, parents, config, flags)
+    spec, layout, ts, selection, hz = (
+        prepared.spec,
+        prepared.layout,
+        prepared.timeseries,
+        prepared.selection,
+        prepared.hz,
+    )
+    labels, label_counts, dash_bars, marked = (
+        spec.labels,
+        prepared.label_counts,
+        prepared.dash_bars,
+        prepared.marked,
+    )
+    with fonts_context(config):
         drawn = render(spec, pdf)
     if config.fonts is not None:  # the font files are inputs (rule 5)
         inputs = {**inputs, **{k: v["sha256"] for k, v in config.fonts.inputs().items()}}
@@ -201,6 +277,8 @@ def make_figure(
         "overrides": {k: len(v) for k, v in asdict(config.overrides).items() if k != "reasons"},
         "override_reasons": dict(config.overrides.reasons),
     }
+    if prepared.row_bars:  # only when drawn, so other figures' reports keep their bytes
+        report["row_bars"] = prepared.row_bars
     pdf.with_suffix(".draw.json").write_text(json.dumps(report, indent=1, default=str))
     return report
 
