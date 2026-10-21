@@ -88,6 +88,7 @@ MIXED: dict[str, tuple[set[str], set[str], str]] = {
 }  # fmt: skip
 
 AF_SIDE = {
+    "af/chart/serum_circles.py", "af/chart/serum_selection.py",  # egg passages, clades: the addenda
     "af/map/build.py", "af/map/colouring.py", "af/map/config.py", "af/map/i7.py",
     "af/map/matching.py", "af/map/roundconfig.py", "af/map/vaccine_colours.py",
     "af/map/vaccines.py",
