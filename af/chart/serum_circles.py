@@ -217,7 +217,7 @@ def homologous_antigens(antigens: Sequence[Antigen], serum: Serum) -> list[int]:
             if a.name == serum.name
             and a.reassortant == serum.reassortant
             and (not respect_annotations or a.annotations == serum.annotations)
-            and _ae_is_egg(a.passage) == _serum_is_egg(serum)
+            and last_step_is_egg(a.passage) == _serum_is_egg(serum)
         ]
 
     return matching(True) or matching(False)
@@ -243,7 +243,8 @@ def coverage_antigen(
     return None if best is None else best[1]
 
 
-def _ae_is_egg(passage: str) -> bool:
+def last_step_is_egg(passage: str) -> bool:
+    """ae ``Passage::is_egg``: is the LAST step egg (or, unparsed, does it say EGG or EMBRYON)."""
     steps = _STEP.findall(_NOTE.sub("", passage.upper()))
     if not steps:
         return False
@@ -255,7 +256,7 @@ def _ae_is_egg(passage: str) -> bool:
 def _serum_is_egg(serum: Serum) -> bool:
     if not serum.passage.strip():
         return "EGG" in serum.serum_id
-    return _ae_is_egg(serum.passage)
+    return last_step_is_egg(serum.passage)
 
 
 def _passage_type(passage: str, reassortant: str) -> str | None:
@@ -263,7 +264,7 @@ def _passage_type(passage: str, reassortant: str) -> str | None:
     else none."""
     if reassortant.strip():
         return "r"
-    if _ae_is_egg(passage):
+    if last_step_is_egg(passage):
         return "e"
     return "c" if passage_class(passage, "") == "cell" else None
 

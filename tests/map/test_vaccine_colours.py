@@ -132,3 +132,48 @@ def test_a_vaccine_takes_its_strains_original_clade(
     assert (split.style, split.changed) == (own[2], False)
     assert split.warning.endswith("its strain's cell records disagree (Clade P 1, Clade P.1 1).")
     assert split.record()["warning"] == split.warning
+
+
+def test_a_serum_takes_the_record_of_its_strain_closest_to_its_passage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sera are found by strain name, as ae's seqdb lookup does. An egg serum takes the egg
+    record, a cell serum the cell one; among records equally far, one whose alignment reads
+    (not a partial sequence of gaps) wins over a lower EPI_ISL."""
+    from af.chart.model import Serum
+    from af.map.colouring import serum_record_rank
+
+    colours, _ = vaccine_setup(tmp_path, monkeypatch)
+    names = ["/".join(("A", "PLACE", str(n), "2021")) for n in (11, 13, 13, 14)]
+    sera = [
+        Serum(names[0], "F1", passage="E?"),  # E3 or an unreadable passage: the egg record
+        Serum(names[1], "F2", passage="MDCK1"),  # the exact passage wins, partial or not
+        Serum(names[2], "F3"),  # no passage: both rank 90, the one that reads wins
+        Serum(names[3], "F4", passage="MDCK1"),  # no record of its strain
+    ]
+    chart = Chart({"V": "A(H3N2)"}, [], sera, Titres([]))
+    full = "MKAG" + "N" * 6  # position 3 is A, position 4 G
+    gaps = "-" * 10
+
+    def aligned(row: str, records: list[StrainRecord]) -> AlignedSequences:
+        reads = {"EPI_4": gaps, "EPI_5": full}  # the lower EPI_ISL is a partial sequence
+        return AlignedSequences(
+            {(r.epi_isl, r.accession): AlignedSequence(reads.get(r.epi_isl, full)) for r in records}
+        )
+
+    monkeypatch.setattr(colours, "_strain_aligned", aligned)
+    egg, exact, unread, none = colours.for_sera(chart, residues=(3, 4))
+    assert (egg.epi_isl, egg.clade, egg.lineage) == ("EPI_1", "P.1.1", ("P", "P.1", "P.1.1"))
+    assert egg.aa == {3: "A", 4: "G"} and egg.record_passage == "E3"
+    assert (exact.epi_isl, exact.aa) == ("EPI_4", {3: "-", 4: "-"})
+    assert (unread.epi_isl, unread.clade, unread.lineage) == ("EPI_5", "P.2", ("P", "P.2"))
+    assert (none.epi_isl, none.clade, none.lineage, none.aa) == (None, None, None, {})
+    assert none.why == "no sequence record"
+    passages = colours.rules.passages
+    assert serum_record_rank("E2", "E2", passages) == 0
+    assert serum_record_rank("MDCK1/SIAT2", "SIAT2", passages) == 10
+    assert serum_record_rank("SIAT?", "SIAT1", passages) == 20
+    assert serum_record_rank("E?", "E3/E2", passages) == 20
+    assert serum_record_rank("SIAT1", "MDCK2", passages) == 50
+    assert serum_record_rank("E2", "MDCK2", passages) == 90
+    assert serum_record_rank("", "MDCK2", passages) == 90
