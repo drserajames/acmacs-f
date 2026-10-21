@@ -115,6 +115,9 @@ class Candidate:
     key: tuple[str, ...]
     designation: str
     passage_class: str | None
+    name: str = ""  # the strain: a cell serum and an egg serum of one strain share a column
+    centre: str = ""  # the collaborating centre: its sera are kept together on a page
+    chart: str = ""  # the map the serum is on: a column pairs sera of one map
     clades: frozenset[str] = frozenset()
     aa: Mapping[int, str] = field(default_factory=dict)
     last_titrated: dt.date | None = None
@@ -240,3 +243,75 @@ def _date(text: Any) -> dt.date | None:
     if m is None:
         raise SelectionError(f"table date {text!r} is not YYYYMMDD")
     return dt.date(int(m[1]), int(m[2]), int(m[3]))
+
+
+Column = tuple[Candidate | None, Candidate | None]  # (top: cell, bottom: egg or reassortant)
+PAGE_COLUMNS = 3
+
+
+def columns(chosen: Sequence[Chosen]) -> list[tuple[str, list[Column]]]:
+    """A section's sera as page columns, grouped by centre in order of first appearance, and
+    within a centre by map: each cell serum over the egg or reassortant serum of the same
+    strain on the same map, then the unpaired ones side by side (as the Sep 2026 addenda were
+    laid out)."""
+    by_centre: dict[str, dict[str, list[Candidate]]] = {}
+    for c in chosen:
+        by_centre.setdefault(c.serum.centre, {}).setdefault(c.serum.chart, []).append(c.serum)
+    return [
+        (centre, [col for sera in charts.values() for col in _chart_columns(sera)])
+        for centre, charts in by_centre.items()
+    ]
+
+
+def _chart_columns(sera: list[Candidate]) -> list[Column]:
+    """Cell over egg of the same strain, in the sera's order; then the unpaired, packed."""
+    cells = [s for s in sera if not _bottom(s)]
+    eggs: dict[str, list[Candidate]] = {}
+    for s in sera:
+        if _bottom(s):
+            eggs.setdefault(s.name, []).append(s)
+    cols: list[Column] = []
+    unpaired = []
+    for s in cells:
+        if eggs.get(s.name):
+            cols.append((s, eggs[s.name].pop(0)))
+        else:
+            unpaired.append(s)
+    left = [e for es in eggs.values() for e in es]
+    for i in range(max(len(unpaired), len(left))):
+        cols.append(
+            (unpaired[i] if i < len(unpaired) else None, left[i] if i < len(left) else None)
+        )
+    return cols
+
+
+def pages(centre_columns: Sequence[tuple[str, list[Column]]]) -> list[list[Column]]:
+    """Columns onto pages of three. A centre is split only when it has more than three
+    columns; a part-filled page takes the first later centre that fits whole, so small centres
+    fill gaps while the centre order is otherwise kept."""
+    queue = [list(cols) for _, cols in centre_columns if cols]
+    out: list[list[Column]] = []
+    page: list[Column] = []
+    while queue or page:
+        if page:
+            space = PAGE_COLUMNS - len(page)
+            fits = next((i for i, cols in enumerate(queue) if len(cols) <= space), None)
+            if fits is None:
+                out.append(page)
+                page = []
+                continue
+            page += queue.pop(fits)
+        else:
+            block = queue.pop(0)
+            while len(block) > PAGE_COLUMNS:
+                out.append(block[:PAGE_COLUMNS])
+                block = block[PAGE_COLUMNS:]
+            page = block
+        if len(page) == PAGE_COLUMNS:
+            out.append(page)
+            page = []
+    return out
+
+
+def _bottom(c: Candidate) -> bool:
+    return c.passage_class in ("egg", "reassortant")

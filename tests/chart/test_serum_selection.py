@@ -115,3 +115,43 @@ def test_titration_dates_come_from_the_tables_each_serum_is_in():
     assert titration_dates(single) == [D(2024, 3, 1)] * 3
     with pytest.raises(SelectionError, match="3 titre layers but 2 sources"):
         titration_dates(Chart({"S": sources[:2]}, c.antigens, sera, Titres(table, layers)))
+
+
+def test_columns_pair_cell_over_egg_per_map_and_pages_keep_centres_whole():
+    from af.chart.serum_selection import Chosen, columns, pages
+
+    def s(n, strain, passage, centre, chart):
+        return Chosen(
+            Candidate(("x", str(n)), f"S{n}", passage, name=strain, centre=centre, chart=chart),
+            "test",
+        )
+
+    chosen = [
+        s(1, "A", "cell", "lab1", "lab1-hi"),
+        s(2, "B", "cell", "lab1", "lab1-hi"),
+        s(3, "A", "egg", "lab1", "lab1-hi"),
+        s(4, "A", "egg", "lab1", "lab1-neut"),  # another map: not paired with 1
+        s(5, "C", "cell", "lab2", "lab2-hi"),
+        s(6, "D", "reassortant", "lab3", "lab3-hi"),
+    ]
+    cols = columns(chosen)
+    key = lambda c: c and c.key[1]  # noqa: E731
+    assert [(centre, [(key(t), key(b)) for t, b in cc]) for centre, cc in cols] == [
+        ("lab1", [("1", "3"), ("2", None), (None, "4")]),
+        ("lab2", [("5", None)]),
+        ("lab3", [(None, "6")]),
+    ]
+    laid = [[(key(t), key(b)) for t, b in page] for page in pages(cols)]
+    # lab1 fills a page; lab2 and lab3 share the next
+    assert laid == [[("1", "3"), ("2", None), (None, "4")], [("5", None), (None, "6")]]
+
+
+def test_a_part_filled_page_takes_the_first_later_centre_that_fits():
+    from af.chart.serum_selection import pages
+
+    c = lambda n: (Candidate(("x", n), n, "cell"), None)  # noqa: E731
+    blocks = [("a", [c("a1"), c("a2")]), ("b", [c("b1"), c("b2")]), ("c", [c("c1")])]
+    laid = [[t.key[1] for t, _ in page] for page in pages(blocks)]
+    assert laid == [["a1", "a2", "c1"], ["b1", "b2"]]
+    big = [("a", [c(f"a{i}") for i in range(7)])]
+    assert [len(p) for p in pages(big)] == [3, 3, 1]
