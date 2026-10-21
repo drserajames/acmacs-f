@@ -19,6 +19,7 @@ from af.map.i7 import check_provenance_inputs, i7_document, write_i7
 from af.map.labels import Placed, place_labels
 from af.map.render import (
     DEFAULT_LOOK,
+    CircleMark,
     Look,
     PointStyle,
     draw_pdf,
@@ -95,6 +96,10 @@ def _page(
     return _Page(scene, np.where(shown[:, None], xy, np.nan), priorities, furniture, radii)
 
 
+def _ordinal(day: dt.date | None) -> int:
+    return day.toordinal() if day is not None else 0
+
+
 def shared_frame(
     points: Sequence[PointIn],
     *,
@@ -110,13 +115,18 @@ def shared_frame(
     use one viewport on the all, 12m and 6m pages: a reader turning the pages sees the same
     square. It is chosen as :func:`finish_map` chooses one window's frame, over every window's
     page at once (:class:`af.map.viewport.View`): each window's recent antigens visible, then
-    each priority's hidden markers summed over the windows. Positions and marker sizes are the
-    first window's: windows grey points, they do not move, hide or resize them."""
+    the pages in turn, the most recent window's first and the all page last. The newest
+    window's page is framed as it would be alone, and the older pages take what is left; the
+    all page, where every antigen is in the window, no longer pulls the frame off the recent
+    viruses (h1-cnic, R6 review). Positions and marker sizes are the same on every page:
+    windows grey points, they do not move, hide or resize them."""
     if not windows:
         raise ValueError("shared_frame needs at least one window")
+    # the most recent window first (stable among equal dates); a window of every antigen last
+    by_recency = sorted(windows, key=lambda wt: (wt[0].since is None, -_ordinal(wt[0].since)))
     pages = [
         _page(points, scheme, w, t, must_show_since, vaccine_labels, look, styles)
-        for w, t in windows
+        for w, t in by_recency
     ]
     first, *rest = pages
     choice = choose_frame(
@@ -148,6 +158,7 @@ def finish_map(
     look: Look = DEFAULT_LOOK,
     styles: Mapping[str, PointStyle] | None = None,
     frame: Frame | None = None,
+    circles: Sequence[CircleMark] = (),
 ) -> FinishedMap:
     """Produce ``out_pdf`` and its I7 for one chart and window.
 
@@ -160,7 +171,10 @@ def finish_map(
     ``in_viewport`` for each), then antigens in the window, sera, and everything else.
 
     ``frame``: draw in this frame (a map's :func:`shared_frame`) instead of choosing one for
-    this window alone; it is still checked to show the recent antigens."""
+    this window alone; it is still checked to show the recent antigens.
+
+    ``circles``: drawn round their points (serum circles, :mod:`af.map.circles`) and recorded
+    in the I7. They do not move the frame: a circle may run off the page, as ae's did."""
     # fail before drawing anything
     if created.tzinfo is None:
         raise ValueError("I7 'created' needs a time zone")
@@ -190,7 +204,7 @@ def finish_map(
         gap=look.label_gap / look.page_points,
     )
     labels = dict(zip(ids, placed, strict=True))
-    draw_pdf(scene, frame, labels, out_pdf, look, styles)
+    draw_pdf(scene, frame, labels, out_pdf, look, styles, circles)
     doc = i7_document(
         scene,
         frame,
@@ -203,6 +217,7 @@ def finish_map(
         flags=flags,
         look=look,
         styles=styles,
+        circles=circles,
     )
     i7 = write_i7(doc, out_pdf)
     return FinishedMap(

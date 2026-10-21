@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 
 from af.map.labels import Placed
-from af.map.render import DEFAULT_LOOK, Look, PointStyle, grey_of, look_opt_ins
+from af.map.render import DEFAULT_LOOK, CircleMark, Look, PointStyle, grey_of, look_opt_ins
 from af.map.style import Scene, ScenePoint
 from af.map.viewport import Frame
 
@@ -58,6 +58,7 @@ def i7_document(
     flags: Sequence[str] = (),
     look: Look = DEFAULT_LOOK,
     styles: Mapping[str, PointStyle] | None = None,
+    circles: Sequence[CircleMark] = (),
 ) -> dict[str, Any]:
     """The I7 JSON for a rendered map (eu-23's I7 draft v1). ``created`` must carry a time zone.
 
@@ -117,6 +118,8 @@ def i7_document(
         "antigens": [point(i, p) for i, p in enumerate(scene.points) if p.kind == "antigen"],
         "sera": [point(i, p) for i, p in enumerate(scene.points) if p.kind == "serum"],
     }
+    if circles:
+        map_block["circles"] = [c.recorded() for c in circles]
     if opt_ins := look_opt_ins(look):
         map_block["look"] = opt_ins
     shown_ag = [p for p in scene.points if p.kind == "antigen" and p.shown]

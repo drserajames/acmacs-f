@@ -511,7 +511,7 @@ def preparation_sequences(
 
     refused = _sql_list(DOUBTFUL - USABLE_DOUBTS - {AMBIGUOUS})
     usable = _sql_list(USABLE_DOUBTS)
-    no_refused_doubt = f"len(list_filter(s.flags, f -> f IN ({refused}))) = 0"
+    no_refused_doubt = f"len([f for f in s.flags if f IN ({refused})]) = 0"
     out = _single_sequences(con, passages, "s.status = 'matched'")
     doubtful = _single_sequences(
         con,
@@ -539,7 +539,7 @@ def _single_sequences(
 ) -> dict[PreparationKey, PreparationSequence]:
     """One sequence per preparation from the rows ``where`` selects, or a conflict."""
     doubts = (
-        f"list_sort(list_distinct(flatten(list(list_filter(s.flags, f -> f IN ({usable}))))))"
+        f"list_sort(list_distinct(flatten(list([f for f in s.flags if f IN ({usable})]))))"
         if usable
         else "[]::VARCHAR[]"
     )
@@ -653,7 +653,7 @@ def _tied_preparations(
     rows = con.execute(
         f"""
         SELECT {_PREP}, s.tied, s.ranked_epi_isl, s.ranked_accession, s.pairing,
-               list_filter(s.flags, f -> f IN ({usable}))
+               [f for f in s.flags if f IN ({usable})]
         {_ROWS}
         WHERE {where}
         """

@@ -257,7 +257,7 @@ def from_store(
     ]
     rows = duckdb.execute(
         "select split_part(name, '/', 2), country, place from read_parquet(?, union_by_name=true)"
-        " where len(list_filter(problems, x -> x like 'name.%')) = 0",
+        " where len([x for x in problems if x like 'name.%']) = 0",
         [paths],
     ).fetchall()
     stated = new_locations(stated_by_location(rows), tables.places.by_location)
