@@ -34,7 +34,11 @@ def record(
         HomologousAntigen(2, "EX/1/2020 SIAT1", "1280", theoretical, None, "good"),
     )
     status = "good" if theoretical is not None else "no_radius"
-    circle = Circle("best-match", None, None, "1280", theoretical, antigen, False, status)
+    circle = Circle(
+        rule="best-match", empirical=None, empirical_antigen=None, titre="1280",
+        theoretical=theoretical, theoretical_antigen=antigen,
+        theoretical_titre="1280" if antigen == 2 else None, floored=False, status=status,
+    )  # fmt: skip
     return SerumCircle(
         0, "EX/1/2020", "EX/1/2020 S1", "S1", "SIAT1", "", (), "cell", xy, 2.0, 9.0, "none",
         "computed", homologous, circle, NO_COVERAGE, circle, NO_COVERAGE,

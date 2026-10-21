@@ -78,6 +78,7 @@ class Circle:
     titre: str | None  # the homologous titre of the empirical radius's antigen
     theoretical: float | None
     theoretical_antigen: int | None
+    theoretical_titre: str | None  # the homologous titre of the theoretical radius's antigen
     floored: bool  # either radius was raised to MIN_RADIUS
     status: str  # good, no_homologous, no_radius
 
@@ -128,25 +129,33 @@ class SerumCircle:
     def to_json(self) -> dict:
         return asdict(self)
 
-    def disagreement(self) -> str | None:
+    def disagreement(self, drawn: str = "empirical") -> str | None:
         """How the two rules' answers for this serum's map differ, or None when they draw the
-        same map. In order: ``neither`` - no circle and no colouring under the drawn rule;
+        same map. ``drawn`` is the radius the figure draws: ``empirical`` (the coverage pages)
+        or ``theoretical`` (the circle panels); each radius is its own minimum, so the two can
+        come from different antigens and differ apart.
+
+        In order: ``neither`` - no circle and no colouring under the drawn rule;
         ``no-homologous`` - one rule finds no homologous antigen; ``visible`` - the drawn radius
         or the within/outside sets differ; ``titre-only`` - the titres differ and the map does
         not."""
-        drawn_nothing = self.circle.empirical is None and self.coverage.status != "good"
-        if drawn_nothing:
+        if drawn not in ("empirical", "theoretical"):
+            raise SerumCircleError(f"drawn {drawn!r}: empirical or theoretical")
+        radius = getattr(self.circle, drawn)
+        other = getattr(self.other_circle, drawn)
+        titre = "titre" if drawn == "empirical" else "theoretical_titre"
+        if radius is None and self.coverage.status != "good":
             return "neither"
         circles = {self.circle.status, self.other_circle.status}
         if "no_homologous" in circles and len(circles) > 1:
             return "no-homologous"
-        if _radius_differs(self.circle.empirical, self.other_circle.empirical) or (
-            self.coverage.within,
-            self.coverage.outside,
-        ) != (self.other_coverage.within, self.other_coverage.outside):
+        if _radius_differs(radius, other) or (self.coverage.within, self.coverage.outside) != (
+            self.other_coverage.within,
+            self.other_coverage.outside,
+        ):
             return "visible"
-        if (self.circle.titre, self.coverage.titre) != (
-            self.other_circle.titre,
+        if (getattr(self.circle, titre), self.coverage.titre) != (
+            getattr(self.other_circle, titre),
             self.other_coverage.titre,
         ):
             return "titre-only"
@@ -414,7 +423,7 @@ def _first_min(entries: Sequence[HomologousAntigen], field: str) -> HomologousAn
 
 def _circle(rule: str, entries: Sequence[HomologousAntigen], has_homologous: bool) -> Circle:
     if not has_homologous:
-        return Circle(rule, None, None, None, None, None, False, "no_homologous")
+        return Circle(rule, None, None, None, None, None, None, False, "no_homologous")
     e = _first_min(entries, "empirical")
     t = _first_min(entries, "theoretical")
     e_radius = None if e is None or e.empirical is None else max(e.empirical, MIN_RADIUS)
@@ -430,6 +439,7 @@ def _circle(rule: str, entries: Sequence[HomologousAntigen], has_homologous: boo
         None if e is None else e.titre,
         t_radius,
         None if t is None else t.antigen,
+        None if t is None else t.titre,
         floored,
         status,
     )

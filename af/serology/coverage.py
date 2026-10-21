@@ -42,6 +42,7 @@ from af.util.artefacts import sha256_path
 RULING = "Q228"
 KINDS = ("visible", "titre-only", "no-homologous", "neither")
 WINDOW = "all"  # coverage maps are drawn on the lab's whole map
+DRAWN = "empirical"  # the radius a coverage map draws (af.chart.serum_circles)
 
 
 class CoverageError(RuntimeError):
@@ -129,7 +130,7 @@ def shown_sera(
 
 def declaration(shown: Shown, md_file: str) -> dict[str, str]:
     r = shown.record
-    kind = r.disagreement()
+    kind = r.disagreement(drawn=DRAWN)
     assert kind is not None
     return {
         "ruling": RULING,
@@ -166,11 +167,11 @@ def write_fragment(
     sources: Mapping[str, str],
 ) -> dict[str, Any]:
     """The declaration fragment and its page; returns the counts."""
-    disagree = [s for s in shown if s.record.disagreement() is not None]
+    disagree = [s for s in shown if s.record.disagreement(drawn=DRAWN) is not None]
     counts: dict[str, Any] = {
         "shown": len(shown),
         "disagree": len(disagree),
-        "by_kind": dict(Counter(s.record.disagreement() for s in disagree)),
+        "by_kind": dict(Counter(s.record.disagreement(drawn=DRAWN) for s in disagree)),
         "by_addendum": dict(Counter(f"addendum {s.addendum}" for s in disagree)),
         "hand": len(also),
     }
@@ -200,7 +201,7 @@ def write_fragment(
         r = s.record
         lines.append(
             f"| {s.addendum} | {s.section} | {s.map.chart_name} | {r.designation} | "
-            f"{r.disagreement()} | {_rule(r.circle, r.coverage)} | "
+            f"{r.disagreement(drawn=DRAWN)} | {_rule(r.circle, r.coverage)} | "
             f"{_rule(r.other_circle, r.other_coverage)} |"
         )
     if also:
