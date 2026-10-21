@@ -97,3 +97,21 @@ def test_sections_from_config_are_checked():
         Section("a", aa=("E155",))
     with pytest.raises(SelectionError, match="labels repeat"):
         select_sera(SERA, [Section("a", clade="X"), Section("a", clade="X.1")], since=None)
+
+
+def test_titration_dates_come_from_the_tables_each_serum_is_in():
+    from af.chart.model import Antigen, Chart, Serum, Titres
+    from af.chart.serum_selection import titration_dates
+    from af.chart.titre import Titre
+
+    t = Titre.parse
+    table = [[t("40"), t("80"), t("*")]]
+    layers = [{(0, 0): t("40")}, {(0, 0): t("40"), (0, 1): t("80")}, {(0, 2): t("*")}]
+    sources = [{"D": "20250105"}, {"D": "20260210-002"}, {"D": "20260301"}]
+    sera = [Serum(f"A(H3N2)/EXAMPLETOWN/{i}/2025", f"F{i}") for i in range(3)]
+    c = Chart({"S": sources}, [Antigen("A(H3N2)/EXAMPLEOTHER/1/2025")], sera, Titres(table, layers))
+    assert titration_dates(c) == [D(2026, 2, 10), D(2026, 2, 10), None]
+    single = Chart({"D": "20240301"}, c.antigens, sera, Titres(table))
+    assert titration_dates(single) == [D(2024, 3, 1)] * 3
+    with pytest.raises(SelectionError, match="3 titre layers but 2 sources"):
+        titration_dates(Chart({"S": sources[:2]}, c.antigens, sera, Titres(table, layers)))

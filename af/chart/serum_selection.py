@@ -25,6 +25,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from af.chart.model import Chart
+
 _RESIDUE = re.compile(r"^(?P<pos>[1-9][0-9]*)(?P<aa>[A-Z-])$")
 
 
@@ -204,3 +206,37 @@ def select_sera(
         ]
         (dropped if s.drop else shown)[s.label] = mine
     return Selection(shown, dropped, excluded)
+
+
+def titration_dates(chart: Chart) -> list[dt.date | None]:
+    """Each serum's last titration: the latest date of the source tables in which it has a
+    titre (a merged chart's layers and their sources' dates, as ae's addenda read them), or
+    the chart's own date for a single table. None where no table is dated."""
+    sources = chart.info.get("S") or []
+    if not chart.titres.layers:
+        when = _date(chart.info.get("D"))
+        return [when] * chart.n_sera
+    if len(sources) != len(chart.titres.layers):
+        raise SelectionError(
+            f"{len(chart.titres.layers)} titre layers but {len(sources)} sources: cannot date sera"
+        )
+    dates = [_date(s.get("D")) for s in sources]
+    last: list[dt.date | None] = [None] * chart.n_sera
+    for layer, when in zip(chart.titres.layers, dates, strict=True):
+        if when is None:
+            continue
+        for (_, sr), titre in layer.items():
+            before = last[sr]
+            if not titre.is_missing and (before is None or when > before):
+                last[sr] = when
+    return last
+
+
+def _date(text: Any) -> dt.date | None:
+    """A table date as ae writes it, YYYYMMDD with an optional suffix; None when absent."""
+    if not text:
+        return None
+    m = re.match(r"^(\d{4})(\d{2})(\d{2})", str(text))
+    if m is None:
+        raise SelectionError(f"table date {text!r} is not YYYYMMDD")
+    return dt.date(int(m[1]), int(m[2]), int(m[3]))

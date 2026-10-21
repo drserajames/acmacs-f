@@ -31,7 +31,7 @@ from fractions import Fraction
 
 import numpy as np
 
-from af.chart.model import Antigen, Chart, Serum
+from af.chart.model import Antigen, Chart, Projection, Serum
 from af.chart.titre import Titre, TitreType
 from af.map.vaccines import passage_class
 
@@ -115,6 +115,7 @@ class SerumCircle:
     fold: float
     column_basis: float
     minimum_column_basis: str
+    column_bases_from: str  # projection-forced, chart-forced or computed
     homologous: tuple[HomologousAntigen, ...]
     circle: Circle
     coverage: Coverage
@@ -129,14 +130,17 @@ def serum_circles(
     fold: float = 2.0,
     *,
     minimum_column_basis: str = "none",
+    projection: Projection | None = None,
     circle_rule: str = "ae-circle",
     coverage_rule: str = "ae-coverage",
 ) -> list[SerumCircle]:
     """One record per serum of ``chart``, on ``layout`` (the drawn map: n_points x 2, NaN rows
     for points without coordinates). ``fold`` is in log2 units: 2.0 is 4-fold, 3.0 is 8-fold.
 
-    The column bases are the chart's at ``minimum_column_basis`` (the map's), as ae's
-    serum_circles takes them: a projection's own forced bases are not used.
+    The column bases are the ones the map was drawn with: ``projection``'s forced bases when it
+    has them (a round's column-base override goes there), else the chart's at
+    ``minimum_column_basis``. Lowering a serum's basis by 1 shrinks its theoretical radius by
+    exactly 1, as the Sep 2026 bvic-vidrl override did in ae.
     """
     if circle_rule not in CIRCLE_RULES:
         raise SerumCircleError(f"circle rule {circle_rule!r}: not one of {CIRCLE_RULES}")
@@ -147,7 +151,13 @@ def serum_circles(
         raise SerumCircleError(
             f"layout has {layout.shape[0] if layout.ndim else 0} points, the chart {chart.n_points}"
         )
-    bases = chart.column_bases(minimum_column_basis)
+    bases = chart.column_bases(minimum_column_basis, projection)
+    if projection is not None and projection.forced_column_bases is not None:
+        bases_from = "projection-forced"
+    elif chart.forced_column_bases is not None:
+        bases_from = "chart-forced"
+    else:
+        bases_from = "computed"
     out = []
     for sr, serum in enumerate(chart.sera):
         cb = float(bases[sr])
@@ -185,6 +195,7 @@ def serum_circles(
                 fold=fold,
                 column_basis=cb,
                 minimum_column_basis=minimum_column_basis,
+                column_bases_from=bases_from,
                 homologous=tuple(found),
                 circle=circle,
                 coverage=_coverage(coverage_rule, cov_ag, titres, fold),

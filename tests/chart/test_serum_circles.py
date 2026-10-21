@@ -185,3 +185,19 @@ def test_distances_are_the_same_with_and_without_math_fma(monkeypatch):
     monkeypatch.delattr(math, "fma", raising=False)
     without = sc._distances(layout, 3, 3)
     assert np.array_equal(with_fma, without, equal_nan=True) and np.isnan(without[2])
+
+
+def test_a_projections_forced_basis_moves_the_circle():
+    """The map's projection forces the serum's basis from 6 to 5: the theoretical radius,
+    2 + cb - 6 floored at 2, is unchanged, so use fold 3: 3 + 6 - 6 = 3 becomes 3 + 5 - 6 = 2."""
+    from af.chart.model import Projection
+
+    antigens = [Antigen(NAME, "MDCK2"), *others(3)]
+    c = chart(antigens, [Serum(NAME, "F1/20", "MDCK1")], [["640", "320", "40", "20"]])
+    layout = ruler(1, 2, 3, 4)
+    (plain,) = serum_circles(c, layout, 3.0)
+    forced = Projection(layout, forced_column_bases=np.array([5.0]))
+    (moved,) = serum_circles(c, layout, 3.0, projection=forced)
+    assert plain.column_bases_from == "computed" and moved.column_bases_from == "projection-forced"
+    assert plain.circle.theoretical == 3.0 and moved.circle.theoretical == 2.0
+    assert moved.column_basis == 5.0
