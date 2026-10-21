@@ -8,7 +8,7 @@ from af.chart.model import Antigen, Chart, Titres
 from af.map.build import BuildError, map_title
 from af.map.config import TitlesConfig
 from af.map.labels import Placed, place_labels
-from af.map.render import DEFAULT_LOOK, draw_scene, title_box
+from af.map.render import DEFAULT_LOOK, draw_scene, text_size, title_box
 from af.map.style import Scene, Window
 from af.map.viewport import Frame
 
@@ -62,6 +62,17 @@ def test_the_title_box_is_the_drawn_title_measured() -> None:
         title_box(scene("i" * 20), DEFAULT_LOOK),
     )
     assert wide.right > 2 * narrow.right
+
+
+def test_a_marker_in_the_titles_line_10_points_past_it_is_under_the_title() -> None:
+    """A marker edge 10 points right of the title's last letter reads as part of the title
+    (R6 review: 8 and 10 points), so the frame search counts it hidden; 20 points past is clear."""
+    title = "Ex Lab A(H0N0) by clade"
+    box = title_box(scene(title), DEFAULT_LOOK)
+    end = 0.024 + text_size(title, DEFAULT_LOOK.title_size, bold=True)[0] / DEFAULT_LOOK.page_points
+    pt = 1 / DEFAULT_LOOK.page_points
+    assert box.right >= end + 10 * pt
+    assert box.right < end + 20 * pt
 
 
 def test_labels_carry_a_white_halo() -> None:
