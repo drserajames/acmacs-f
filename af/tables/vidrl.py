@@ -42,7 +42,7 @@ from .cdc import ReadResult
 from .model import Antigen, Serum, Table
 from .passage import PassageParser
 from .rules import Rules
-from .sheet import Sheet, SheetError, apply_cell_fixes, load_or_error
+from .sheet import Sheet, SheetError, apply_cell_fixes, load_or_error, sheet_rules
 
 TEST_DATE = re.compile(r"\s*Test\s+Date\s*:\s*(.*)", re.IGNORECASE)
 RBC_TYPE = re.compile(r"\s*RBC\s+Type\s*:\s*([A-Za-z ]+?)\s*(#\s*\d+)?\s*", re.IGNORECASE)
@@ -140,12 +140,32 @@ class SheetReader:
             raise VIDRLError(f"no lab_conventions rule for {lab}")
         self.date_order = convention["date_order"]
         self.warnings: list[str] = apply_cell_fixes(sheet, rules.cell_fixes, lab)
+        self.panel = self._panel()
+        self.dropped_rows = {
+            int(r["row"]) - 1: r for r in sheet_rules(sheet, rules.dropped_rows, lab)
+        }
         self.dropped: Counter[str] = Counter()
         self.header = self._header()
         self.test_date = self._test_date()
 
     def fail(self, r: int, c: int | None, message: str) -> VIDRLError:
         return VIDRLError(f"{self.s.where(r, c)}: {message}")
+
+    def _panel(self) -> int | None:
+        """The highest index that marks a reference antigen, where a reference_panels row
+        names this sheet. Some sheets (2019) number the test antigens on from the panel, and
+        nothing in the sheet shows where the panel ends."""
+        rows = sheet_rules(self.s, self.rules.reference_panels, self.lab)
+        if len(rows) > 1:
+            raise self.fail(0, None, f"{len(rows)} reference_panels rows name this sheet")
+        if not rows:
+            return None
+        rows[0].hits += 1
+        self.warnings.append(
+            f"{self.s.where(0)}: indexes above {rows[0]['panel']} are test antigens"
+            f" ({rows[0].where})"
+        )
+        return int(rows[0]["panel"])
 
     # -- layout ---------------------------------------------------------------------------
 
@@ -448,6 +468,17 @@ class SheetReader:
         antigens, titres = [], []
         for r in range(self.header.first_antigen_row, len(self.s.rows)):
             raw = self.s.cell(r, name_col)
+            if (drop := self.dropped_rows.get(r)) is not None:
+                if raw != drop["name"]:
+                    raise self.fail(
+                        r,
+                        name_col,
+                        f"{drop.where} expects {drop['name']!r}, the cell holds {raw!r}",
+                    )
+                drop.hits += 1
+                self.dropped["antigens: dropped_rows"] += 1
+                self.warnings.append(f"{self.s.where(r, name_col)}: row not read ({drop.where})")
+                continue
             if QC_BLOCK.match(raw):
                 # QC standards' median titres under the table ("A. A/<strain>"): not this test
                 self.warnings.append(f"{self.s.where(r, name_col)}: {raw!r} block not read")
@@ -488,6 +519,8 @@ class SheetReader:
             collected, lab_id = ("" if _is_label(v) else v for v in (collected, lab_id))
             if re.fullmatch(r"[\s/.-]*", collected):  # "//": a date left blank
                 collected = ""
+            left = [self.s.cell(r, c) for c in range(name_col)]
+            numbers = [v for v in left if re.fullmatch(r"\d+", v)]
             antigen = Antigen(
                 name=name.name,
                 raw_name=raw,
@@ -495,14 +528,13 @@ class SheetReader:
                 passage_class=self.passages.passage_class(passage),
                 date=self._date(collected, r, date_col) if collected else None,
                 lab_ids=[f"{self.lab}#{lab_id}"] if lab_id else [],
-                reference=any(re.fullmatch(r"\d+", self.s.cell(r, c)) for c in range(name_col)),
+                reference=bool(numbers) and (self.panel is None or int(numbers[0]) <= self.panel),
                 reassortant=name.reassortant,
                 annotations=name.annotations,
                 lineage=self.lineage,
                 source={"row": r + 1, "passage": raw_passage},
             )
-            left = [self.s.cell(r, c) for c in range(name_col)]
-            if numbers := [v for v in left if re.fullmatch(r"\d+", v)]:
+            if numbers:
                 antigen.source["index"] = int(numbers[0])
             if renamed:
                 antigen.source[aliases.SOURCE_KEY] = renamed

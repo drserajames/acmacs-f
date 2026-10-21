@@ -128,6 +128,15 @@ RULES: dict[str, list[str]] = {
         "CDC\tfix.xlsx\tRUN 1\tH9\tS1(07/19/2030)\tS1(07/18/2030)" + META + "yes",
         "LABN\tlabn-fix-20300102.xlsx\t20300102\tE5\t640\t1280" + META + "yes",
     ],
+    "reference_panels": [
+        "lab\tfile\tsheet\tpanel\tevidence\tadded_by\tadded_on\toptional",
+        "LABV\tlabv-panel-20300102.xlsx\tWorksheet\t4" + META + "yes",
+    ],
+    "dropped_rows": [
+        "lab\tfile\tsheet\trow\tname\tevidence\tadded_by\tadded_on\toptional",
+        "LABV\tlabv-drop-20300102.xlsx\tWorksheet\t15\tB/EXAMPLEVILLE/5/2030" + META + "yes",
+        "LABV\tlabv-unnamed-20300102.xlsx\tWorksheet\t16\t" + META + "yes",
+    ],
     "lab_conventions": [
         "lab\tdate_order\tpassage_plus\tevidence\tadded_by\tadded_on\toptional",
         "CDC\tMDY\t" + META + "yes",

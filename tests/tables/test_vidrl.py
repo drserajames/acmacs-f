@@ -210,3 +210,37 @@ def test_a_qc_standard_block_under_the_table_is_not_read(tmp_path, rules):
     t = one_table(read(workbook(tmp_path / "labv-20300102.xlsx", antigens=antigens), rules))
     assert len(t.antigens) == len(ANTIGENS)
     assert any("'QC Standard Median Titres' block not read" in w for w in t.warnings)
+
+
+def test_a_reference_panel_row_ends_the_panel_where_every_antigen_is_numbered(tmp_path, rules):
+    # 2019 sheets number the test antigens on from the reference panel
+    antigens = [(str(n), *a[1:]) for n, a in enumerate(ANTIGENS, start=1)]
+    path = workbook(tmp_path / "labv-panel-20300102.xlsx", antigens=antigens)
+    t = one_table(read(path, rules))
+    assert [a.reference for a in t.antigens] == [True, True, True, True, False, False]
+    assert [a.source["index"] for a in t.antigens] == [1, 2, 3, 4, 5, 6]
+    assert any("indexes above 4 are test antigens" in w for w in t.warnings)
+    assert rules.reference_panels.rules[0].hits == 1
+    # without the row every numbered antigen is a reference
+    t = one_table(read(workbook(tmp_path / "labv-20300102.xlsx", antigens=antigens), rules))
+    assert all(a.reference for a in t.antigens)
+
+
+def test_a_dropped_row_is_not_read_and_a_stale_one_is_an_error(tmp_path, rules):
+    t = one_table(read(workbook(tmp_path / "labv-drop-20300102.xlsx"), rules))
+    assert "B/EXAMPLEVILLE/5/2030" not in [a.name for a in t.antigens]
+    assert len(t.antigens) == len(ANTIGENS) - 1
+    assert t.dropped["antigens: dropped_rows"] == 1
+    assert any("row not read (dropped_rows.tsv:2)" in w for w in t.warnings)
+    # the row now holds another virus: the rule no longer describes the sheet
+    antigens = [*ANTIGENS[:4], ANTIGENS[5], ANTIGENS[4]]
+    res = read(workbook(tmp_path / "labv-drop-20300102.xlsx", antigens=antigens), rules)
+    assert res.tables == [] and "expects 'B/EXAMPLEVILLE/5/2030'" in res.errors[0]
+
+
+def test_a_dropped_row_can_be_an_unnamed_row_with_titres(tmp_path, rules):
+    antigens = [*ANTIGENS[:5], ("", "", *ANTIGENS[5][2:])]
+    res = read(workbook(tmp_path / "labv-20300102.xlsx", antigens=antigens), rules)
+    assert res.tables == [] and "row with titres but no strain name" in res.errors[0]
+    t = one_table(read(workbook(tmp_path / "labv-unnamed-20300102.xlsx", antigens=antigens), rules))
+    assert len(t.antigens) == 5 and t.dropped["antigens: dropped_rows"] == 1

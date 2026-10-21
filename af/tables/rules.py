@@ -218,6 +218,27 @@ class Rules:
             else RuleTable.empty(fixes, cell_scope)
         )
 
+        # Where a sheet numbers every antigen, the highest index that marks a reference antigen
+        # (af.tables.vidrl): the sheet itself does not show where the panel ends. Absent: none.
+        panels = directory / "reference_panels.tsv"
+        self.reference_panels = (
+            RuleTable(panels, scope=("lab",), required=("file", "sheet", "panel"))
+            if panels.exists()
+            else RuleTable.empty(panels, ("lab",))
+        )
+        # Workbook rows not read, each checked against its strain cell as written
+        # (af.tables.vidrl): a repeated or unnamed row a curator removed. Absent: none.
+        dropped = directory / "dropped_rows.tsv"
+        self.dropped_rows = (
+            RuleTable(dropped, scope=("lab",), required=("file", "sheet", "row", "name"))
+            if dropped.exists()
+            else RuleTable.empty(dropped, ("lab",))
+        )
+        for table, column in ((self.reference_panels, "panel"), (self.dropped_rows, "row")):
+            for rule in table.rules:
+                if not rule[column].isdigit() or int(rule[column]) < 1:
+                    raise ValueError(f"{rule.where}: {column} {rule[column]!r} is not a number")
+
         # Allowed shapes of lab ids, by lab, field and test-date range (af.tables.ids).
         shapes = directory / "id_shapes.tsv"
         shape_required = ("field", "kind", "pattern", "date_from", "date_to")
@@ -275,6 +296,8 @@ class Rules:
     def tables(self) -> list[RuleTable]:
         return [
             self.cell_fixes,
+            self.reference_panels,
+            self.dropped_rows,
             self.id_shapes,
             self.identity_tags,
             self.excluded_tables,
