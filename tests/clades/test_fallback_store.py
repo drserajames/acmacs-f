@@ -170,7 +170,7 @@ def test_one_table_tree_calls_for_leaves_fallback_for_the_rest(tmp_path: Path) -
     assert report["not_on_tree"]["labelled_by"] == "fallback, in this table"
     # the fixture's 9-base sequences cannot show any clade's own loci: every labelled tree row
     # is unobserved (drawn unsequenced), its label kept; fallback rows carry no state (Q124c)
-    states = duckdb.sql(
+    states = duckdb.execute(
         f"select method, clade_evidence, count(*) from "
         f"read_parquet('{store.resolve(ref) / ASSIGNMENTS_FILE}') group by all order by all"
     ).fetchall()

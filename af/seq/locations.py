@@ -87,7 +87,7 @@ def _store_rows(store: Store, datasets: Iterable[str]) -> list[tuple[str, str | 
         raise ValueError("no sequence datasets given")
     rows: list[tuple[str, str | None, str | None]] = duckdb.execute(
         "select name, country, region from read_parquet(?)"
-        " where len(list_filter(problems, x -> x like 'name.%')) = 0",
+        " where len([x for x in problems if x like 'name.%']) = 0",
         [paths],
     ).fetchall()
     return rows
