@@ -234,6 +234,17 @@ class Rules:
             if dropped.exists()
             else RuleTable.empty(dropped, ("lab",))
         )
+        # A lab's original workbooks and the names they are read under (af.tables.update), in
+        # named sets, one per root a folder entry reads (fludata's tree, one delivery): the
+        # names carry the test date and same-day order, which the labs' own names do not
+        # reliably. Absent: no folder entry may ask for them.
+        names = directory / "source_names.tsv"
+        self.source_names = (
+            RuleTable(names, scope=("lab",), required=("set", "file", "read_as"))
+            if names.exists()
+            else RuleTable.empty(names, ("lab",))
+        )
+        self._check_source_names()
         for table, column in ((self.reference_panels, "panel"), (self.dropped_rows, "row")):
             for rule in table.rules:
                 if not rule[column].isdigit() or int(rule[column]) < 1:
@@ -274,6 +285,23 @@ class Rules:
         )
         self._check_alias_canonicals()
 
+    def _check_source_names(self) -> None:
+        """A source path stays inside its folder entry's root, and a read name is a plain,
+        dated workbook name, once per set: two originals under one name would be one test."""
+        seen: dict[tuple[str, str, str], str] = {}
+        for rule in self.source_names.rules:
+            file = Path(rule["file"])
+            if file.is_absolute() or ".." in file.parts:
+                raise ValueError(f"{rule.where}: file {rule['file']!r} must be inside the root")
+            if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", rule["set"]):
+                raise ValueError(f"{rule.where}: set {rule['set']!r} is not a set name")
+            if not re.fullmatch(r"[^/\\]*\d{8}[^/\\]*\.xlsx?", rule["read_as"]):
+                raise ValueError(f"{rule.where}: read_as {rule['read_as']!r} is not a dated name")
+            key = (rule["lab"].casefold(), rule["set"], rule["read_as"])
+            if key in seen:
+                raise ValueError(f"{rule.where}: read_as {rule['read_as']!r} repeats {seen[key]}")
+            seen[key] = rule.where
+
     def _check_alias_canonicals(self) -> None:
         """A strain_aliases canonical is a curated name, so it must parse cleanly. A name
         the parser cannot read is only a warning in a table (1,700 CDC sample ids are), so
@@ -298,6 +326,7 @@ class Rules:
             self.cell_fixes,
             self.reference_panels,
             self.dropped_rows,
+            self.source_names,
             self.id_shapes,
             self.identity_tags,
             self.excluded_tables,

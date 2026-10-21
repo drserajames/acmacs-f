@@ -18,6 +18,13 @@ with a config such as (paths relative to the config file)::
     sequence_ids = ["../fludata/CDC-Atlanta-WHO-CC/raw-data/<season>_GISAID.tsv"]  # optional
     sequence_id_ties = "closest-passage"  # required with sequence_ids (Q221; af.tables.cdc_seqids)
 
+    [[tables.vidrl]]                         # a lab's own workbooks, read under source_names names
+    lab = "VIDRL"
+    dir = "../fludata/VIDRL-Melbourne-WHO-CC/raw-data"   # the originals' root
+    names = "vidrl-fludata-h1"              # a source_names set: file -> read_as rows
+    start = "2019-04-02"
+    subtype = "A(H1N1)"
+
 Every run reads every input (a full re-read), so a rule that matched nothing is an error.
 Nothing is published if anything went wrong: format errors, broken tables, unmatched
 rules, a workbook duplicating a TSV test. Exit status 1 then.
@@ -35,10 +42,11 @@ import argparse
 import datetime as dt
 import json
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +58,7 @@ from af.util.config import load_config, parse_config
 from . import cdc, identity, ids, warnings
 from .model import Table
 from .passage import PassageParser
-from .rules import Rules
+from .rules import Rule, Rules
 from .store import KIND, current_tables, previous_index, publish
 
 STEP = "tables-update"
@@ -90,12 +98,18 @@ class AC21Inputs:
     bounds what is read: a workbook is read when the YYYYMMDD in its file name is on or after
     it, and its test date must then equal that file-name date (checked), so the bound is on
     the test date. ``exclude`` names workbooks in the folder not to read at all (e.g. one
-    whose file name has no usable date); each must exist, so a stale entry is an error."""
+    whose file name has no usable date); each must exist, so a stale entry is an error.
+
+    ``names`` reads a lab's original workbooks instead of copies: ``dir`` is then their root,
+    and the files are the source_names rows of this lab and set, each read under its
+    ``read_as`` name (see :func:`_stage_sources`). ``start`` and ``exclude`` apply to those
+    names."""
 
     lab: str
     dir: Path
     start: str  # ISO date
     exclude: list[str] = field(default_factory=list)  # file names
+    names: str = ""  # a source_names set, e.g. "vidrl-fludata-h1"
 
 
 @dataclass(frozen=True)
@@ -111,6 +125,7 @@ class VIDRLInputs:
     subtype: str
     lineage: str = ""
     exclude: list[str] = field(default_factory=list)  # file names
+    names: str = ""  # a source_names set: read originals (as AC21Inputs)
 
 
 @dataclass(frozen=True)
@@ -152,6 +167,8 @@ class TablesConfig:
 
 REPORT = "tables-report.txt"
 PUBLISHED = "tables-published.json"
+SOURCES = "sources"  # in the run's work area: originals linked under their read names
+WORKBOOKS = (".xlsx", ".xls", ".xlsm")
 
 
 def state_dir(paths: PathsConfig, settings: TablesSettings) -> Path:
@@ -167,7 +184,10 @@ def update(
     store = Store.open(paths.store)
     state = state_dir(paths, settings)
     previous = previous_index(store)
-    tables, report, errors = _read_all(settings, rules)
+    sources = Work.open(paths.work).dataset(KIND, settings.run).root / SOURCES
+    staged, staging = _stage_sources(settings, rules, sources)
+    tables, report, errors = _read_all(staged, rules)
+    report[:0] = staging
     tables, repeats = exact_repeats(tables)
     report.append(f"tests entered twice (dropped, the first kept): {len(repeats)}")
     report.extend(f"  {line}" for line in repeats)
@@ -202,7 +222,7 @@ def update(
         return (1 if errors else 0), report
     provenance = Provenance(
         step=STEP,
-        inputs=tuple(_external(p) for p in (settings.rules, *_input_files(settings))),
+        inputs=tuple(_external(p) for p in (settings.rules, *_input_files(settings, rules))),
         parameters={},
         started=started,
         finished=dt.datetime.now(dt.UTC),
@@ -485,7 +505,9 @@ def _join_sequence_ids(
     )
 
 
-def _input_files(settings: TablesSettings) -> list[Path]:
+def _input_files(settings: TablesSettings, rules: Rules | None = None) -> list[Path]:
+    """Every raw input of a run; for a ``names`` entry the originals themselves, not the links
+    the run reads them through."""
     files: list[Path] = []
     if settings.cdc:
         files += [settings.cdc.tsv, *settings.cdc.xlsx, *settings.cdc.season]
@@ -499,9 +521,135 @@ def _input_files(settings: TablesSettings) -> list[Path]:
         *settings.crick,
     ]
     for inputs in folders:
+        if inputs.names:
+            rules = rules or Rules(settings.rules)
+            start = dt.date.fromisoformat(inputs.start).isoformat()
+            files += [
+                original
+                for rule, original in _source_rows(inputs, rules)
+                if (day := _file_date(Path(rule["read_as"]))) is not None
+                and day >= start
+                and rule["read_as"] not in inputs.exclude
+            ]
+            continue
         files += _dated_files(inputs)[0]  # an undated name is no input: the read reports it
     files += [s.file for s in settings.crick_sheets]
     return files
+
+
+def _source_rows(inputs: AC21Inputs | VIDRLInputs, rules: Rules) -> list[tuple[Rule, Path]]:
+    """The source_names rows of a ``names`` entry, each with its original under the entry's
+    root. A set with no rows, or a row whose original is missing, is fatal (design rule 4)."""
+    table = rules.source_names
+    rows = [
+        (rule, inputs.dir / rule["file"])
+        for rule in table.rules
+        if table.in_scope(rule, lab=inputs.lab) and rule["set"] == inputs.names
+    ]
+    if not rows:
+        raise ValueError(f"{inputs.dir}: no source_names rows for {inputs.lab} {inputs.names}")
+    if missing := [f"{rule.where}: {path}" for rule, path in rows if not path.is_file()]:
+        raise FileNotFoundError("originals not found: " + "; ".join(missing))
+    return rows
+
+
+def _stage_sources(
+    settings: TablesSettings, rules: Rules, sources: Path
+) -> tuple[TablesSettings, list[str]]:
+    """Link each ``names`` entry's originals under their read names in a folder of the run's
+    work area, and point the entry at that folder: the readers then see the names they key
+    rules and dates on (af.tables.vidrl reads the test date from the file name), and the
+    originals stay where they are. The folder is rebuilt every run, so it never holds a link
+    the rules no longer name. Also reports originals under a root that no row names, so that
+    a new workbook dropped into the root is seen, not silently left out."""
+    report: list[str] = []
+
+    def stage(inputs: Any) -> Any:
+        if not inputs.names:
+            return inputs
+        folder = sources / inputs.names
+        if folder.exists():
+            shutil.rmtree(folder)
+        folder.mkdir(parents=True)
+        rows = _source_rows(inputs, rules)
+        for rule, original in rows:
+            (folder / rule["read_as"]).symlink_to(original.resolve())
+            rule.hits += 1
+        report.append(
+            f"{inputs.lab} {inputs.names}: {len(rows)} originals in {inputs.dir},"
+            " read under their source_names names"
+        )
+        return replace(inputs, dir=folder)
+
+    seen: dict[tuple[str, str], str] = {}
+
+    def once(inputs: Any) -> None:
+        """Two sets of a lab staging one read name would read as two tests of one day."""
+        if not inputs.names:
+            return
+        for rule, _ in _source_rows(inputs, rules):
+            key = (inputs.lab.casefold(), rule["read_as"])
+            if key in seen and seen[key] != inputs.names:
+                raise ValueError(
+                    f"{rule.where}: {rule['read_as']} is read from sets {seen[key]} and"
+                    f" {inputs.names}"
+                )
+            seen[key] = inputs.names
+
+    for inputs in [*settings.ac21, *settings.niid, *settings.vidrl, *settings.crick]:
+        once(inputs)
+    staged = replace(
+        settings,
+        ac21=[stage(i) for i in settings.ac21],
+        niid=[stage(i) for i in settings.niid],
+        vidrl=[stage(i) for i in settings.vidrl],
+        crick=[stage(i) for i in settings.crick],
+    )
+    report += _unnamed_originals(settings, rules)
+    return staged, report
+
+
+def _unnamed_originals(settings: TablesSettings, rules: Rules) -> list[str]:
+    """Workbooks under a ``names`` root that no source_names row of that lab names: counted,
+    and listed when the file name dates them on or after the earliest start on that root."""
+    roots: dict[tuple[str, Path], list[str]] = {}
+    folders: list[AC21Inputs | VIDRLInputs] = [
+        *settings.ac21,
+        *settings.niid,
+        *settings.vidrl,
+        *settings.crick,
+    ]
+    for inputs in folders:
+        if inputs.names:
+            roots.setdefault((inputs.lab, inputs.dir), []).append(inputs.start)
+    lines = []
+    for (lab, root), starts in sorted(roots.items()):
+        table = rules.source_names
+        named = {(root / r["file"]).resolve() for r in table.rules if table.in_scope(r, lab=lab)}
+        start = min(dt.date.fromisoformat(s) for s in starts).isoformat()
+        unnamed = [
+            p
+            for p in sorted(root.rglob("*"))
+            if p.suffix.lower() in WORKBOOKS
+            and not p.name.startswith("~$")
+            and p.resolve() not in named
+        ]
+        recent = [p for p in unnamed if (_safe_file_date(p) or "") >= start]
+        lines.append(
+            f"{lab} workbooks in {root} with no source_names row: {len(unnamed)},"
+            f" {len(recent)} dated on or after {start}"
+        )
+        lines += [f"  {p.relative_to(root)}" for p in recent]
+    return lines
+
+
+def _safe_file_date(path: Path) -> str | None:
+    """A file-name date, or None when the eight digits are not a date (an original's name is
+    the lab's, not ours)."""
+    try:
+        return _file_date(path)
+    except ValueError:
+        return None
 
 
 def _check_round_trip(store: Store, tables: list[Table]) -> None:
@@ -587,7 +735,7 @@ def make_step(parameters: Mapping[str, Any], *, base_dir: Path, paths: PathsConf
     Inputs are named by role, so the step's record does not depend on where files live."""
     settings = parse_config(dict(parameters), TablesSettings, base_dir=base_dir)
     inputs = {"rules": settings.rules}
-    for path in _input_files(settings):
+    for path in _input_files(settings):  # loads the rules only for a names entry
         inputs[f"input:{path.parent.name}/{path.name}"] = path
     state = state_dir(paths, settings)
 
