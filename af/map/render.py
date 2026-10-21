@@ -99,7 +99,8 @@ class PointStyle:
     the opacity of the point's fill and outline, over :attr:`Look.alpha`. ``scale`` multiplies
     the point's size
     (the Look's antigen radius or serum half-side, and a mark's enlargement on top), as R draws
-    removed points larger.
+    removed points larger. ``on_top`` draws the point over every other point (ae's raise: the
+    circled sera of the circle addenda).
     """
 
     fill: str | None = None
@@ -107,6 +108,7 @@ class PointStyle:
     outline_width: float | None = None
     alpha: float | None = None
     scale: float | None = None
+    on_top: bool | None = None
 
     def __post_init__(self) -> None:
         if self.scale is not None and self.scale <= 0:
@@ -115,6 +117,38 @@ class PointStyle:
     def recorded(self) -> dict[str, Any]:
         """The fields set, for the figure's I7 (an unset field is the scene's own drawing)."""
         return {k: v for k, v in vars(self).items() if v is not None}
+
+
+@dataclass(frozen=True)
+class CircleMark:
+    """A circle round a point, such as a serum circle: centred on point ``point`` (its id),
+    ``radius`` in map units. Drawn as ae's circle addenda draw them: over the points, under the
+    labels, legend and title, a translucent fill and then a solid outline. ``dashed`` is ae's
+    drawing of a serum with no radius (a circle of radius fold)."""
+
+    point: str
+    radius: float
+    fill: str
+    fill_alpha: float = 0.2
+    outline: str = "black"
+    outline_width: float = 1.0
+    dashed: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.radius > 0:
+            raise ValueError(f"CircleMark {self.point}: radius must be positive, got {self.radius}")
+
+    def recorded(self) -> dict[str, Any]:
+        """For the figure's I7."""
+        return {
+            "point": self.point,
+            "radius": round(self.radius, 4),
+            "fill": self.fill,
+            "fill_alpha": self.fill_alpha,
+            "outline": self.outline,
+            "outline_width": self.outline_width,
+            "dashed": self.dashed,
+        }
 
 
 def ugly_egg_path(x: float, y: float, r: float) -> Any:
@@ -201,6 +235,7 @@ def draw_pdf(
     out_pdf: Path,
     look: Look = DEFAULT_LOOK,
     styles: Mapping[str, PointStyle] | None = None,
+    circles: Sequence[CircleMark] = (),
 ) -> None:
     """Draw ``scene`` inside ``frame`` to ``out_pdf`` (one page). The drawing itself is
     :func:`draw_scene`, shared with :func:`af.map.figure.draw_axes`."""
@@ -212,7 +247,7 @@ def draw_pdf(
     side = look.page_points / 72.0
     fig = plt.figure(figsize=(side, side * frame.aspect), dpi=72)
     ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
-    draw_scene(ax, scene, frame, labels, look, styles=styles)
+    draw_scene(ax, scene, frame, labels, look, styles=styles, circles=circles)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_pdf)
     plt.close(fig)
@@ -231,10 +266,13 @@ def draw_scene(
     legend: bool = True,
     title: bool = True,
     styles: Mapping[str, PointStyle] | None = None,
+    circles: Sequence[CircleMark] = (),
 ) -> tuple[str, ...]:
     """Draw a scene on an Axes whose data limits become the page (0..1, y down).
 
-    ``styles`` override single points' drawing, by point id. Returns the ids of shown points
+    ``styles`` override single points' drawing, by point id. ``circles`` are drawn round their
+    points (a point not shown, or with no coordinates, is an error: nothing to centre on).
+    Returns the ids of shown points
     that lie outside the frame, which the Axes clips: a caller can mark where they went.
 
     ``scale`` multiplies every text size and line width: 1.0 on the report page; the Axes'
@@ -259,6 +297,8 @@ def draw_scene(
     styles = styles or {}
 
     def order(p: ScenePoint) -> int:
+        if p.id in styles and styles[p.id].on_top:
+            return 5
         if p.kind == "serum":
             return 0
         if p.mark:
@@ -294,6 +334,7 @@ def draw_scene(
         if alpha is not None:
             style["alpha"] = alpha
         ax.add_patch(_marker_patch(p.marker, x, y, s, style))
+    _draw_circles(ax, scene, drawn, frame, circles, scale)
     from matplotlib import patheffects
 
     for lab in labels.values():
@@ -363,6 +404,32 @@ def _marker_patch(marker: str, x: float, y: float, size: float, style: dict[str,
     if marker == "uglyegg":
         return PathPatch(ugly_egg_path(x, y, size), **style)
     raise ValueError(f"unknown marker shape {marker!r} (known: {', '.join(MARKERS)})")
+
+
+def _draw_circles(
+    ax: Any,
+    scene: Scene,
+    drawn: np.ndarray,
+    frame: Frame,
+    circles: Sequence[CircleMark],
+    scale: float,
+) -> None:
+    """Each circle's fill (translucent), then its outline (solid), over every point."""
+    from matplotlib.patches import Circle
+
+    at = {p.id: i for i, p in enumerate(scene.points)}
+    for c in circles:
+        i = at.get(c.point)
+        if i is None or not scene.points[i].shown or not np.isfinite(drawn[i]).all():
+            raise ValueError(f"circle round {c.point}: no drawn point to centre it on")
+        centre, r = (float(drawn[i][0]), float(drawn[i][1])), c.radius / frame.size
+        ax.add_patch(Circle(centre, r, fc=c.fill, ec="none", alpha=c.fill_alpha, zorder=7))
+        ax.add_patch(
+            Circle(
+                centre, r, fc="none", ec=c.outline, lw=c.outline_width * scale, zorder=7,
+                linestyle=(0, (3.0, 3.0)) if c.dashed else "solid",
+            )
+        )  # fmt: skip
 
 
 def _draw_legend(
