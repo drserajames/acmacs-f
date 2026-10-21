@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from af.map.labels import label_text, place_labels
-from af.map.style import ColourRow, ColourScheme, PointIn, Window, style_points
+from af.map.style import ColourRow, ColourScheme, PointIn, PointKind, Window, style_points
 from af.map.viewport import Box
 
 pytest.importorskip("matplotlib")
@@ -320,3 +320,30 @@ def test_a_maps_windows_share_one_frame(tmp_path: Path) -> None:
         assert result.frame.frame == frame and result.recent_hidden == 0
         viewports.append(json.loads(result.i7.read_text())["map"]["viewport"])
     assert viewports[0] == viewports[1] == [frame.x, frame.y, 14.0, 14.0]
+
+
+def test_the_newest_windows_page_frames_first_whatever_the_order_given() -> None:
+    """Recent antigens in the middle, old ones on the left, sera on the right; an 8-unit frame
+    holds the recent ones and one side. On the all page the old antigens are in the window and
+    outrank the sera; on the 12m and 6m pages they are greyed and the sera outrank them. The
+    newest window's page decides, so the sera are in, however the round lists its windows."""
+
+    def at(i: str, kind: PointKind, x: float, date: dt.date | None) -> PointIn:
+        return PointIn(i, i, kind, (x, 3.0), frozenset({"A"}) if kind == "antigen" else frozenset(),
+                       date=date, sequenced=kind == "antigen")  # fmt: skip
+
+    new, old = dt.date(2026, 5, 1), dt.date(2020, 1, 1)
+    points = [at("ag0", "antigen", 4.0, new), at("ag1", "antigen", 6.0, new)]
+    points += [at(f"ag{i}", "antigen", -1.0 - 0.3 * i, old) for i in (2, 3, 4)]
+    points += [at("sr0", "serum", 11.0, None), at("sr1", "serum", 11.3, None)]
+    common = dict(scheme=SCHEME, frame_size=8.0, must_show_since=SINCE, vaccine_labels={})
+    six = (Window("6m", dt.date(2026, 3, 1)), "6m")
+    twelve = (Window("12m", SINCE), "12m")
+    every = (Window("all", None), "all")
+    frames = {
+        shared_frame(points, windows=order, **common)  # type: ignore[arg-type]
+        for order in ([every, twelve, six], [six, twelve, every], [twelve, every, six])
+    }
+    assert len(frames) == 1
+    frame = frames.pop()
+    assert frame.x > -1.0 and frame.x + frame.size > 11.3  # the sera in, the old antigens out
