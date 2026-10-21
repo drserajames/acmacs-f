@@ -41,7 +41,9 @@ from af.util.subtypes import Subtype
 if TYPE_CHECKING:
     from af.clades.groups import GroupSet
     from af.clades.nomenclature import CladeSet
+    from af.clades.sequence import AlignedSequence
     from af.map.vaccine_colours import StrainRecord, VaccineColour
+    from af.seq.passage_match import PassageMatcher
     from af.serology.outputs import AlignedSequences, SubtypeColouring
 
 
@@ -346,7 +348,7 @@ class StoreColours:
         (Sarah, 2 Oct 2026: a caller's groups stay in the caller's config); each anchor must be a
         clade of that same set. Without them, the rows may name the user's groups.
         """
-        from af.serology.outputs import SubtypeColouring, clade_set_of
+        from af.serology.outputs import SubtypeColouring
         from af.util.subtypes import subtypes
 
         clade_subtype = subtypes().by_key(row).name  # the scheme names it: "B/Vic"
@@ -355,12 +357,7 @@ class StoreColours:
                 f"colour scheme {scheme.name!r} is for {scheme.subtype}, the chart is "
                 f"{clade_subtype}"
             )
-        if row not in self._sets:  # clade_set_of refuses a row without clade labels (B/Yam)
-            self._sets[row] = (
-                clade_set_of(self._store, self._clones, row, self._clade_refs.get(row)),
-                self._user.group_set(clade_subtype),
-            )
-        clade_set, group_set = self._sets[row]
+        clade_set, group_set = self._clade_sets(row)
         if groups is not None:
             unknown = [g.name for g in groups.groups if g.anchor and g.anchor not in clade_set]
             if groups.subtype != clade_subtype or unknown:
@@ -393,6 +390,19 @@ class StoreColours:
         return SubtypeColouring(
             checked, clade_set, group_set, self._user.inputs if uses_groups else ()
         )
+
+    def _clade_sets(self, row: str) -> tuple[CladeSet, GroupSet | None]:
+        """The row's clade set (the one its ``clades`` table was labelled with) and the user's
+        groups for it, read once per run."""
+        from af.serology.outputs import clade_set_of
+        from af.util.subtypes import subtypes
+
+        if row not in self._sets:  # clade_set_of refuses a row without clade labels (B/Yam)
+            self._sets[row] = (
+                clade_set_of(self._store, self._clones, row, self._clade_refs.get(row)),
+                self._user.group_set(subtypes().by_key(row).name),
+            )
+        return self._sets[row]
 
     def for_chart(
         self,
@@ -630,6 +640,61 @@ class StoreColours:
             )  # fmt: skip
         return out
 
+    def for_sera(self, chart: Chart, residues: Collection[int] = ()) -> list[SerumStrain]:
+        """Each serum's strain as a sequence says it: the clade, its lineage and the amino acids
+        at ``residues`` (mature HA numbering) of one sequence record of the serum's strain.
+
+        A serum is not a preparation the tables pair with a sequence, so, as ae does (its seqdb
+        lookup by name, cc/chart/v3/chart-seqdb.cc), the strain's records are found by name in
+        the sequence version this run's join read, and the one whose passage is closest to the
+        serum's is taken (:func:`serum_record_rank`); among equals, one with an alignment, then
+        the fewest unread amino acids (gaps, X: a partial sequence), then the lowest EPI_ISL. The
+        serum-coverage addenda select their sections with these (af.chart.serum_selection).
+        """
+        from af.clades.nomenclature import lineage
+
+        row = chart_subtype(chart).key
+        strains = self._strain_index(row)
+        clade_set, _ = self._clade_sets(row)
+        out = []
+        for sr, serum in enumerate(chart.sera):
+            key = _strain_key(serum.name)
+            found = strains.get(key, []) if key is not None else []
+            if not found:
+                out.append(SerumStrain(sr, None, None, None, None, None, {}, "no sequence record"))
+                continue
+            records = self._strain_records([(e, a, "") for e, a, _ in found])
+            aligned = self._strain_aligned(row, records)
+            passage_of = {(e, a): p for e, a, p in found}
+
+            record = min(
+                records,
+                key=lambda r: _serum_record_order(
+                    serum.passage,  # noqa: B023 (used at once, inside this iteration)
+                    passage_of[(r.epi_isl, r.accession)],  # noqa: B023
+                    aligned.get_pair(r.epi_isl, r.accession),  # noqa: B023
+                    r.epi_isl,
+                    self.rules.passages,
+                ),
+            )
+            epi_isl, accession = record.epi_isl, record.accession
+            passage = passage_of[(epi_isl, accession)]
+            seq = aligned.get_pair(epi_isl, accession)
+            aa = {}
+            if seq is not None:
+                for pos in residues:
+                    if 0 < pos <= len(seq.amino_acids):
+                        aa[pos] = seq.amino_acids[pos - 1]
+            rank = serum_record_rank(serum.passage, passage, self.rules.passages)
+            out.append(
+                SerumStrain(
+                    sr, epi_isl, accession, passage, record.clade,
+                    lineage(clade_set, record.clade), aa,
+                    f"record by name, passage rank {rank} of {len(found)} record(s)",
+                )
+            )  # fmt: skip
+        return out
+
     def _strain_index(self, row: str) -> dict[tuple[str, str, str], list[tuple[str, str, str]]]:
         """Every record of the row's sequence version the join read, by strain name key."""
         import duckdb
@@ -768,6 +833,78 @@ def _strain_key(name: str) -> tuple[str, str, str] | None:
     from af.seq.names import normalise
 
     return name_key(normalise(name).name)
+
+
+@dataclass(frozen=True)
+class SerumStrain:
+    """A serum's strain as one of its sequence records says it (:meth:`StoreColours.for_sera`).
+    ``clade`` None: unknown (no record, or no clade row); ``lineage`` as
+    :func:`af.clades.nomenclature.lineage` gives it, root first."""
+
+    serum: int  # chart index: internal, never a selector
+    epi_isl: str | None
+    accession: str | None
+    record_passage: str | None
+    clade: str | None
+    lineage: tuple[str, ...] | None
+    aa: dict[int, str]
+    why: str
+
+
+def serum_record_rank(serum_passage: str, record_passage: str, passages: PassageMatcher) -> int:
+    """How far a sequence record's passage is from a serum's, as ae ranks seqdb records
+    (SeqdbSelected::filter_name): 0 the same passage, 10 the same last step, 20 the same last
+    step name, 50 both egg or both not, 90 otherwise or when either has none. Passages are
+    compared written canonically (:class:`af.seq.passage_match.PassageMatcher`)."""
+    from af.chart.serum_circles import last_step_is_egg
+
+    mine = _canonical_passage(serum_passage, passages)
+    theirs = _canonical_passage(record_passage, passages)
+    if not mine or not theirs:
+        return 90
+    if mine == theirs:
+        return 0
+    a, b = _STEPS.findall(mine), _STEPS.findall(theirs)
+    if a and b and a[-1] == b[-1]:
+        return 10
+    if a and b and a[-1][0] == b[-1][0]:
+        return 20
+    return 50 if last_step_is_egg(mine) == last_step_is_egg(theirs) else 90
+
+
+def _canonical_passage(text: str, passages: PassageMatcher) -> str | None:
+    """A passage written canonically; a count of "?" (a serum's "SIAT?", "E?") is read as the
+    tables write an unknown count, "X"."""
+    if not text.strip():
+        return None
+    steps, _ = passages.canonical(re.sub(r"(?<=[A-Za-z])\?", "X", text))
+    return steps
+
+
+_STEPS = re.compile(r"([A-Z]+)(\d+|\?)?")
+
+
+def _serum_record_order(
+    serum_passage: str,
+    record_passage: str,
+    seq: AlignedSequence | None,
+    epi_isl: str,
+    passages: PassageMatcher,
+) -> tuple[int, bool, int, int]:
+    """Closest passage first; among equals one with an alignment, then the fewest unread amino
+    acids (a partial sequence reads as gaps), then the lowest EPI_ISL."""
+    rank = serum_record_rank(serum_passage, record_passage, passages)
+    unread = 0 if seq is None else _unread(seq.amino_acids)
+    return (rank, seq is None, unread, _epi_number(epi_isl))
+
+
+def _unread(amino_acids: str) -> int:
+    return sum(1 for a in amino_acids if a in "-X")
+
+
+def _epi_number(epi_isl: str) -> int:
+    digits = "".join(ch for ch in epi_isl if ch.isdigit())
+    return int(digits) if digits else 0
 
 
 def _record_key(i: int) -> PreparationKey:

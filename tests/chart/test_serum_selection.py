@@ -157,3 +157,38 @@ def test_a_part_filled_page_takes_the_first_later_centre_that_fits():
     assert laid == [["a1", "a2", "c1"], ["b1", "b2"]]
     big = [("a", [c(f"a{i}") for i in range(7)])]
     assert [len(p) for p in pages(big)] == [3, 3, 1]
+
+
+def test_candidates_carry_each_serums_strain_passage_and_date():
+    from af.chart.model import Antigen, Chart, Serum, Titres
+    from af.chart.serum_selection import candidates
+    from af.chart.titre import Titre
+    from af.map.colouring import SerumStrain
+
+    t = Titre.parse
+    sera = [
+        Serum("A(H3N2)/EXAMPLETOWN/1/2025", "F1/25", passage="SIAT1"),
+        Serum("A(H3N2)/EXAMPLETOWN/1/2025", "F2/25", passage="E3"),
+    ]
+    chart = Chart({"D": "20260110"}, [Antigen("A(H3N2)/EXAMPLEOTHER/1/2025")], sera,
+                  Titres([[t("80"), t("40")]]))  # fmt: skip
+    strains = [
+        SerumStrain(0, "EPI_1", "A1", "SIAT1", "X.1", ("X", "X.1"), {155: "E"}, "test"),
+        SerumStrain(1, None, None, None, None, None, {}, "no sequence record"),
+    ]
+    cell, egg = candidates(chart, strains, chart_name="lab-a-hi", centre="lab-a")
+    assert cell.key == ("lab-a-hi", sera[0].name, "F1/25") and cell.centre == "lab-a"
+    assert (cell.passage_class, cell.clades, cell.aa) == (
+        "cell",
+        frozenset({"X", "X.1"}),
+        {155: "E"},
+    )
+    assert (egg.passage_class, egg.clades, egg.last_titrated) == (
+        "egg",
+        frozenset(),
+        D(2026, 1, 10),
+    )
+    sel = select_sera([cell, egg], [Section("X.1 155E", clade="X.1", aa=("155E",))], since=None)
+    assert [c.serum.key[2] for c in sel.sections["X.1 155E"]] == ["F1/25"]
+    with pytest.raises(SelectionError, match="1 serum strains for 2 sera"):
+        candidates(chart, strains[:1], chart_name="lab-a-hi", centre="lab-a")

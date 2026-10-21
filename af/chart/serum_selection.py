@@ -23,7 +23,7 @@ import datetime as dt
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from af.chart.model import Chart
 
@@ -315,3 +315,47 @@ def pages(centre_columns: Sequence[tuple[str, list[Column]]]) -> list[list[Colum
 
 def _bottom(c: Candidate) -> bool:
     return c.passage_class in ("egg", "reassortant")
+
+
+def candidates(
+    chart: Chart, strains: Sequence[SerumStrainLike], *, chart_name: str, centre: str
+) -> list[Candidate]:
+    """Every serum of one map as selection sees it: its strain's clades and amino acids (from
+    :meth:`af.map.colouring.StoreColours.for_sera`, one per serum in chart order), its passage
+    class, and its last titration (:func:`titration_dates`). ``chart_name`` names the map and
+    ``centre`` its collaborating centre, both from the caller's config. A serum is keyed by
+    map, name and serum id, never by its index (design rule 2)."""
+    from af.map.vaccines import passage_class
+
+    if len(strains) != chart.n_sera:
+        raise SelectionError(f"{len(strains)} serum strains for {chart.n_sera} sera")
+    dates = titration_dates(chart)
+    out = []
+    for sr, (serum, strain) in enumerate(zip(chart.sera, strains, strict=True)):
+        if strain.serum != sr:
+            raise SelectionError(f"serum strain {strain.serum} given for serum {sr}")
+        out.append(
+            Candidate(
+                key=(chart_name, serum.name, serum.serum_id),
+                designation=serum.designation(),
+                passage_class=passage_class(serum.passage, serum.reassortant),
+                name=serum.name,
+                centre=centre,
+                chart=chart_name,
+                clades=frozenset(strain.lineage or ()),
+                aa=dict(strain.aa),
+                last_titrated=dates[sr],
+            )
+        )
+    return out
+
+
+class SerumStrainLike(Protocol):
+    """What :func:`candidates` reads of a serum's strain (af.map.colouring.SerumStrain)."""
+
+    @property
+    def serum(self) -> int: ...
+    @property
+    def lineage(self) -> tuple[str, ...] | None: ...
+    @property
+    def aa(self) -> Mapping[int, str]: ...
