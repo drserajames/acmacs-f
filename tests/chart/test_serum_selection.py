@@ -147,11 +147,13 @@ def test_columns_pair_cell_over_egg_per_map_and_pages_keep_centres_whole():
 
 
 def test_a_part_filled_page_takes_the_first_later_centre_that_fits():
-    from af.chart.serum_selection import pages
+    from af.chart.serum_selection import Column, pages
 
-    c = lambda n: (Candidate(("x", n), n, "cell"), None)  # noqa: E731
+    def c(n: str) -> Column:
+        return (Candidate(("x", n), n, "cell"), None)
+
     blocks = [("a", [c("a1"), c("a2")]), ("b", [c("b1"), c("b2")]), ("c", [c("c1")])]
-    laid = [[t.key[1] for t, _ in page] for page in pages(blocks)]
+    laid = [[t.key[1] if t else None for t, _ in page] for page in pages(blocks)]
     assert laid == [["a1", "a2", "c1"], ["b1", "b2"]]
     big = [("a", [c(f"a{i}") for i in range(7)])]
     assert [len(p) for p in pages(big)] == [3, 3, 1]
