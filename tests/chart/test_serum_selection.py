@@ -177,7 +177,7 @@ def test_candidates_carry_each_serums_strain_passage_and_date():
         SerumStrain(1, None, None, None, None, None, {}, "no sequence record"),
     ]
     cell, egg = candidates(chart, strains, chart_name="lab-a-hi", centre="lab-a")
-    assert cell.key == ("lab-a-hi", sera[0].name, "F1/25") and cell.centre == "lab-a"
+    assert cell.key == ("lab-a-hi", sera[0].name, "F1/25", "SIAT1", "") and cell.centre == "lab-a"
     assert (cell.passage_class, cell.clades, cell.aa) == (
         "cell",
         frozenset({"X", "X.1"}),
@@ -190,5 +190,9 @@ def test_candidates_carry_each_serums_strain_passage_and_date():
     )
     sel = select_sera([cell, egg], [Section("X.1 155E", clade="X.1", aa=("155E",))], since=None)
     assert [c.serum.key[2] for c in sel.sections["X.1 155E"]] == ["F1/25"]
+    twin = Serum(sera[0].name, "F1/25", passage="E3")  # one id for a cell and an egg serum
+    pair = Chart(chart.info, chart.antigens, [sera[0], twin], chart.titres)
+    keys = [c.key for c in candidates(pair, strains, chart_name="lab-a-hi", centre="lab-a")]
+    assert len(set(keys)) == 2
     with pytest.raises(SelectionError, match="1 serum strains for 2 sera"):
         candidates(chart, strains[:1], chart_name="lab-a-hi", centre="lab-a")

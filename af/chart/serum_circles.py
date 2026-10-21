@@ -9,16 +9,19 @@ marks every antigen titrated against the serum as within or outside that fold, b
 
 This module computes; it draws nothing (08's map looks draw circles and coverage from these
 records). Everything follows ae as the Sep 2026 addenda were made, so that af's pages can be
-compared with them, with one difference made explicit: ae chooses the homologous titre one way
-for the circle and another for the coverage colouring. Which one af should use is Sarah's choice
-(Q228), so each is a named rule here, and her answer is a change of rule name:
+compared with them, except one thing: ae took the homologous titre one way for the circle and
+another for the coverage colouring, so a shipped map could draw a circle and colour its antigens
+from two different titres. Two rules choose the homologous antigen:
 
-- circle rules: ``ae-circle`` - the radius is the minimum over the serum's homologous antigens
-  (ae ``serum_circles_for_serum_t``); ``coverage-antigen`` - the radius of the antigen the
-  coverage rule chose.
-- coverage rules: ``ae-coverage`` - the best-ranked same-name antigen with a titre (ae
-  ``homologous_titer_for_serum``); ``circle-antigen`` - the antigen whose empirical radius the
-  circle drew.
+- ``best-match``: the best-ranked antigen of the serum's name with a titre, passage matched
+  (ae ``homologous_titer_for_serum``, which coloured the shipped coverage);
+- ``ae-circle``: of the antigens ae's ``Antigens::homologous`` finds, the one giving the
+  smallest radius (ae ``serum_circles_for_serum_t``, which drew the shipped circles).
+
+Sarah, Q228 (21 Oct 2026): "keep both rules, use the best match for the figure but declare the
+maps which disagree". So a figure's circle and colouring both come from ``best-match`` by
+default, every record keeps the other rule's answer too (``other_circle``,
+``other_coverage``), and :meth:`SerumCircle.disagreement` says how a map's two answers differ.
 """
 
 from __future__ import annotations
@@ -36,8 +39,7 @@ from af.chart.titre import Titre, TitreType
 from af.map.vaccines import passage_class
 
 MIN_RADIUS = 2.0  # ae serum_circle_min_radius: applies to every fold, and to both radii
-CIRCLE_RULES = ("ae-circle", "coverage-antigen")
-COVERAGE_RULES = ("ae-coverage", "circle-antigen")
+RULES = ("best-match", "ae-circle")
 
 # ae Passage::is_egg reads the LAST step only (cc/virus/passage.hh), unlike af's passage_class,
 # which reads every step; the homologous match is ae's, so it reads the last step too.
@@ -73,6 +75,7 @@ class Circle:
     rule: str
     empirical: float | None
     empirical_antigen: int | None
+    titre: str | None  # the homologous titre of the empirical radius's antigen
     theoretical: float | None
     theoretical_antigen: int | None
     floored: bool  # either radius was raised to MIN_RADIUS
@@ -117,11 +120,37 @@ class SerumCircle:
     minimum_column_basis: str
     column_bases_from: str  # projection-forced, chart-forced or computed
     homologous: tuple[HomologousAntigen, ...]
-    circle: Circle
-    coverage: Coverage
+    circle: Circle  # drawn
+    coverage: Coverage  # drawn
+    other_circle: Circle  # the other rule's answer, kept to declare where they differ (Q228)
+    other_coverage: Coverage
 
     def to_json(self) -> dict:
         return asdict(self)
+
+    def disagreement(self) -> str | None:
+        """How the two rules' answers for this serum's map differ, or None when they draw the
+        same map. In order: ``neither`` - no circle and no colouring under the drawn rule;
+        ``no-homologous`` - one rule finds no homologous antigen; ``visible`` - the drawn radius
+        or the within/outside sets differ; ``titre-only`` - the titres differ and the map does
+        not."""
+        drawn_nothing = self.circle.empirical is None and self.coverage.status != "good"
+        if drawn_nothing:
+            return "neither"
+        circles = {self.circle.status, self.other_circle.status}
+        if "no_homologous" in circles and len(circles) > 1:
+            return "no-homologous"
+        if _radius_differs(self.circle.empirical, self.other_circle.empirical) or (
+            self.coverage.within,
+            self.coverage.outside,
+        ) != (self.other_coverage.within, self.other_coverage.outside):
+            return "visible"
+        if (self.circle.titre, self.coverage.titre) != (
+            self.other_circle.titre,
+            self.other_coverage.titre,
+        ):
+            return "titre-only"
+        return None
 
 
 def serum_circles(
@@ -131,8 +160,8 @@ def serum_circles(
     *,
     minimum_column_basis: str = "none",
     projection: Projection | None = None,
-    circle_rule: str = "ae-circle",
-    coverage_rule: str = "ae-coverage",
+    circle_rule: str = "best-match",
+    coverage_rule: str = "best-match",
 ) -> list[SerumCircle]:
     """One record per serum of ``chart``, on ``layout`` (the drawn map: n_points x 2, NaN rows
     for points without coordinates). ``fold`` is in log2 units: 2.0 is 4-fold, 3.0 is 8-fold.
@@ -142,10 +171,9 @@ def serum_circles(
     ``minimum_column_basis``. Lowering a serum's basis by 1 shrinks its theoretical radius by
     exactly 1, as the Sep 2026 bvic-vidrl override did in ae.
     """
-    if circle_rule not in CIRCLE_RULES:
-        raise SerumCircleError(f"circle rule {circle_rule!r}: not one of {CIRCLE_RULES}")
-    if coverage_rule not in COVERAGE_RULES:
-        raise SerumCircleError(f"coverage rule {coverage_rule!r}: not one of {COVERAGE_RULES}")
+    for what, rule in (("circle", circle_rule), ("coverage", coverage_rule)):
+        if rule not in RULES:
+            raise SerumCircleError(f"{what} rule {rule!r}: not one of {RULES}")
     layout = np.asarray(layout, dtype=float)
     if layout.ndim != 2 or layout.shape[0] != chart.n_points:
         raise SerumCircleError(
@@ -171,16 +199,20 @@ def serum_circles(
             return _homologous(antigen, ag, titres, distances, has_xy, cb, fold)  # noqa: B023
 
         found = [radii(ag) for ag in homologous_antigens(chart.antigens, serum)]
-        by_coverage = coverage_antigen(chart.antigens, serum, titres)
-        if circle_rule == "ae-circle":
-            circle = _circle(circle_rule, found, bool(found))
-        else:
-            chosen = [radii(by_coverage)] if by_coverage is not None else []
-            circle = _circle(circle_rule, chosen, by_coverage is not None)
-        drawn = _first_min(found, "empirical")
-        cov_ag = (
-            by_coverage if coverage_rule == "ae-coverage" else (drawn.antigen if drawn else None)
-        )
+        best = coverage_antigen(chart.antigens, serum, titres)
+        best_entry = [radii(best)] if best is not None else []
+        circles = {
+            "best-match": _circle("best-match", best_entry, best is not None),
+            "ae-circle": _circle("ae-circle", found, bool(found)),
+        }
+        smallest = _first_min(found, "empirical")
+        coverages = {
+            "best-match": _coverage("best-match", best, titres, fold),
+            "ae-circle": _coverage(
+                "ae-circle", smallest.antigen if smallest else None, titres, fold
+            ),
+        }
+        other = {"best-match": "ae-circle", "ae-circle": "best-match"}
         out.append(
             SerumCircle(
                 serum=sr,
@@ -197,8 +229,10 @@ def serum_circles(
                 minimum_column_basis=minimum_column_basis,
                 column_bases_from=bases_from,
                 homologous=tuple(found),
-                circle=circle,
-                coverage=_coverage(coverage_rule, cov_ag, titres, fold),
+                circle=circles[circle_rule],
+                coverage=coverages[coverage_rule],
+                other_circle=circles[other[circle_rule]],
+                other_coverage=coverages[other[coverage_rule]],
             )
         )
     return out
@@ -380,7 +414,7 @@ def _first_min(entries: Sequence[HomologousAntigen], field: str) -> HomologousAn
 
 def _circle(rule: str, entries: Sequence[HomologousAntigen], has_homologous: bool) -> Circle:
     if not has_homologous:
-        return Circle(rule, None, None, None, None, False, "no_homologous")
+        return Circle(rule, None, None, None, None, None, False, "no_homologous")
     e = _first_min(entries, "empirical")
     t = _first_min(entries, "theoretical")
     e_radius = None if e is None or e.empirical is None else max(e.empirical, MIN_RADIUS)
@@ -393,11 +427,16 @@ def _circle(rule: str, entries: Sequence[HomologousAntigen], has_homologous: boo
         rule,
         e_radius,
         None if e is None else e.antigen,
+        None if e is None else e.titre,
         t_radius,
         None if t is None else t.antigen,
         floored,
         status,
     )
+
+
+def _radius_differs(a: float | None, b: float | None) -> bool:
+    return (a is None) != (b is None) or (a is not None and b is not None and abs(a - b) > 1e-9)
 
 
 def _coverage(rule: str, ag: int | None, titres: Sequence[Titre], fold: float) -> Coverage:
