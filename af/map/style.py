@@ -65,6 +65,38 @@ class Window:
     since: dt.date | None
 
 
+#: Why a serum has no SequenceLink: colouring joins preparations (antigens) only.
+SERUM_NOT_RESOLVED = "serum: not resolved"
+
+
+@dataclass(frozen=True)
+class SequenceLink:
+    """The one sequence a point is, or why it has none: what joins a map point to a tree leaf.
+
+    Taken from the same join colouring paints from (:class:`af.serology.joins.PreparationSequence`),
+    so a map and a figure joined to it by sequence cannot disagree about which virus a point is.
+    ``why`` is empty exactly when there is a sequence."""
+
+    epi_isl: str | None
+    accession: str | None
+    pairing: str  # "exact", "proxy" or "" as the lab's pairing was recorded
+    why: str
+
+    def __post_init__(self) -> None:
+        if (self.epi_isl is None) != bool(self.why):
+            raise ValueError(f"SequenceLink: a sequence xor a reason, got {self}")
+
+    @classmethod
+    def none(cls, why: str) -> SequenceLink:
+        return cls(None, None, "", why)
+
+    def record(self) -> dict[str, str] | None:
+        """The I7 ``sequence`` value: the sequence, or None (then ``why`` says why)."""
+        if self.epi_isl is None:
+            return None
+        return {"epi_isl": self.epi_isl, "accession": self.accession or "", "pairing": self.pairing}
+
+
 @dataclass(frozen=True)
 class PointIn:
     """What styling needs to know about one point (built by the caller from the chart)."""
@@ -86,6 +118,7 @@ class PointIn:
     # The marker shape, chosen when the scene is built (af side: af.map.vaccines.marker_for);
     # None draws the plain shape for the kind. The renderer draws what it is given.
     marker: Marker | None = None
+    sequence: SequenceLink | None = None  # None: no join was made (a stand-in chart's colours)
 
 
 @dataclass(frozen=True)
@@ -109,6 +142,7 @@ class ScenePoint:
     sequenced: bool = False
     marker: Marker = "circle"
     passage: str | None = None  # the full passage string (PointIn.passage)
+    sequence: SequenceLink | None = None  # PointIn.sequence
 
     @property
     def vaccine(self) -> str | None:
@@ -252,6 +286,7 @@ def style_points(
                 sequenced=p.sequenced,
                 serum_id=p.serum_id,
                 passage=p.passage,
+                sequence=p.sequence,
                 mark=vaccines.get(p.id),
                 marker=p.marker or PLAIN_MARKER[p.kind],
             )

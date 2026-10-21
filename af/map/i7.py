@@ -22,6 +22,9 @@ from af.map.render import DEFAULT_LOOK, Look, PointStyle, grey_of, look_opt_ins
 from af.map.style import Scene, ScenePoint
 from af.map.viewport import Frame
 
+#: sequence_why of a point no join looked up (a stand-in chart's colours, a scene built by hand)
+NOT_JOINED = "not joined"
+
 
 def drawn_fill(p: ScenePoint) -> str:
     """The fill actually drawn (I7 never has a null colour): sera are outline-only; a greyed or
@@ -85,6 +88,10 @@ def i7_document(
             "reference": p.reference,
             "sequenced": p.sequenced,
         }
+        # Which virus the point is, for joining it to a tree leaf (09's sig pages): null with
+        # the reason when there is no one sequence; "not joined" when nothing was looked up.
+        d["sequence"] = p.sequence.record() if p.sequence else None
+        d["sequence_why"] = p.sequence.why if p.sequence else NOT_JOINED
         if p.hidden_reason:
             d["hidden_reason"] = p.hidden_reason
         if p.kind == "serum":
