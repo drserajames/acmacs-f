@@ -31,6 +31,8 @@ Run: ``python -m af.report.howmade BUILD_RECORD --store S --maps-config config/m
 from __future__ import annotations
 
 import argparse
+import calendar
+import datetime as dt
 import json
 import math
 import sys
@@ -936,6 +938,36 @@ def _geo_built(
     )
 
 
+def _geo_cutoff(note: Note, figures: list[dict[str, Any]]) -> None:
+    """The day the data were fetched, when the window's last month was not over (Q243): that
+    month is drawn to that day, and its page title says so (af.geo.records.partial_title)."""
+    if any("cutoff" not in fig.get("provenance", {}) for fig in figures):
+        note.item(note.gap("the day the data were fetched", "figure provenance.cutoff"))
+        return
+    found = {fig["provenance"]["cutoff"] for fig in figures}
+    if found == {None}:
+        note.item("No cut-off given: every month's page is titled as the whole month")
+        return
+    if len(found) > 1:
+        note.warnings.append(
+            f"the slot's figures record different cut-offs: {sorted(map(str, found))}"
+        )
+        return
+    (cutoff,) = found
+    day = dt.date.fromisoformat(cutoff)
+    month = f"{day.year:04d}-{day.month:02d}"
+    cut = [fig for fig in figures if (fig.get("geo") or {}).get("month") == month]
+    last_day = calendar.monthrange(day.year, day.month)[1]
+    if cut and day.day < last_day:
+        note.item(
+            f"Data fetched on {day.day} {calendar.month_name[day.month]} {day.year}: "
+            f"{calendar.month_name[day.month]} {day.year} is drawn to that day, and its title "
+            "says so"
+        )
+    else:
+        note.item(f"Data fetched on {cutoff}, after the window's months: every month is whole")
+
+
 def _geo_dots(note: Note, figures: list[dict[str, Any]]) -> None:
     prov = figures[0].get("provenance", {})
     months = []
@@ -949,6 +981,7 @@ def _geo_dots(note: Note, figures: list[dict[str, Any]]) -> None:
         )
     rule = _recorded(note, prov, "dot_rule", "figure provenance.dot_rule", "the dot rule")
     note.item(f"One dot per {rule}; dots drawn in {len(figures)} month(s): {', '.join(months)}")
+    _geo_cutoff(note, figures)
     subtype = prov.get("table_subtype")
     merges = (prov.get("merges") or {}).get(subtype) if subtype else None
     if merges is None:

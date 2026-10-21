@@ -601,9 +601,11 @@ def _published(store: Store, kind: str, dataset: str, content: str = "a") -> Sto
         return build.publish(Provenance("a step", (), {}, T0, T0))
 
 
-def _geo_figure(refs: list[StoreRef], month: str, *, full: bool) -> dict[str, Any]:
+def _geo_figure(
+    refs: list[StoreRef], month: str, *, full: bool, cutoff: str | None = None
+) -> dict[str, Any]:
     """One month of a geographic slot as af.geo.build records it; ``full`` = with the slot's
-    own facts (table subtype, colour source, undated and unlocated counts)."""
+    own facts (table subtype, colour source, undated and unlocated counts, the cut-off)."""
     prov: dict[str, Any] = {
         "store_refs": [r.to_json() for r in refs],
         "store_read": {"read": "geo-build", "started": "2026-10-02T00:00:00+00:00",
@@ -621,7 +623,7 @@ def _geo_figure(refs: list[StoreRef], month: str, *, full: bool) -> dict[str, An
         "clades_behind": {"x1": ["behind"], "x2": ["another subtype's"]},
     }  # fmt: skip
     if full:
-        prov |= {"table_subtype": "A(HX)", "undated": 7, "no_location": 1,
+        prov |= {"table_subtype": "A(HX)", "undated": 7, "no_location": 1, "cutoff": cutoff,
                  "colour_source": {"x1": {"source": "store", "scheme": "x1 clades",
                                           "user_tables": {"/d/tables.py": "e" * 64}}}}  # fmt: skip
     return {"provenance": prov, "geo": {"subtype": "x1", "month": month, "locations": []}}
@@ -694,9 +696,27 @@ def test_a_geo_figure_drawn_before_the_slot_facts_says_what_it_lacks(tmp_path: P
         "the af that drew the figures", "how each virus's preparations were merged",
         "the viruses not drawn for want of a date or a location", "moved inside edge per month",
         "the colour scheme and the user's tables", "the key's uncoloured dots by class",
-        "the report's comparison of these maps",
+        "the report's comparison of these maps", "the day the data were fetched",
     ])  # fmt: skip
     assert note.lines[-1].startswith(f"_{len(note.missing)} fact(s) MISSING")
+
+
+def test_a_geo_note_says_when_the_data_were_cut_off(tmp_path: Path) -> None:
+    """Q243: a monthly report's last month is drawn to the day the data were fetched."""
+    store, refs = _geo_store(tmp_path)
+
+    def text(cutoff: str | None) -> str:
+        figures = [_geo_figure(refs, m, full=True, cutoff=cutoff) for m in ("2026-01", "2026-02")]
+        return "\n".join(howmade.geo_note("x1", figures, store, [], None, CLADE_KEY).lines)
+
+    assert "No cut-off given: every month's page is titled as the whole month" in text(None)
+    assert (
+        "Data fetched on 21 February 2026: February 2026 is drawn to that day, and its title "
+        "says so" in text("2026-02-21")
+    )
+    assert "Data fetched on 2026-02-28, after the window's months: every month is whole" in text(
+        "2026-02-28"
+    )
 
 
 def test_a_geo_slot_citing_a_version_the_store_lacks_says_so(tmp_path: Path) -> None:
