@@ -57,7 +57,7 @@ from af.map.finish import finish_map, shared_frame
 from af.map.labels import LabelAbbreviations, label_text
 from af.map.orient import Orientation, RotationOverride, drawn_pairs, orient
 from af.map.render import DEFAULT_LOOK
-from af.map.style import ColourRow, ColourScheme, PointIn, Window
+from af.map.style import ColourRow, ColourScheme, PointIn, SequenceLink, Window
 from af.map.vaccines import (
     MapAntigen,
     VaccineChoice,
@@ -497,12 +497,14 @@ def build_map(
         labels = list(coloured.labels)
         dots: Sequence[DotStyle] = coloured.styles
         sequenced = list(coloured.sequenced)
+        sequences: Sequence[SequenceLink] | None = coloured.sequences
         store_refs.extend(colours.store_refs(coloured.provenance["datasets"]))
         colour_note: dict[str, Any] = coloured.provenance
     else:
         dots = ()
         scheme, labels = _stand_in_colours(chart, cfg, inputs)
         sequenced = [bool(a.extra.get("A")) for a in chart.antigens]
+        sequences = None  # no join: a stand-in chart's own rows colour it
         colour_note = {
             "source": "stand-in",
             "note": "STAND-IN: the chart's own rows, until user colour schemes are wired in",
@@ -686,7 +688,11 @@ def build_map(
         decisions["vaccine_colours"] = [v.record() for v in found]
         vaccine_flags = [v.warning for v in found if v.warning]
 
-    points = chart_points(chart, xy, labels=labels, sequenced=sequenced, hidden=hidden)
+    # A vaccine recoloured from its named strain keeps its own preparation's sequence: the link
+    # says which virus the point is, not where its colour came from.
+    points = chart_points(
+        chart, xy, labels=labels, sequenced=sequenced, hidden=hidden, sequences=sequences
+    )
     unpainted = unpainted_clades(chart, points, dots, scheme.name)
     if unpainted:
         decisions["unpainted_clades"] = unpainted

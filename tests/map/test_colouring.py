@@ -1,6 +1,7 @@
 """The map's side of the shared clade colouring: scheme -> legend rows, chosen style -> label."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -9,14 +10,25 @@ from af.clades.colours import ColourEntry
 from af.clades.colours import ColourScheme as CladeColourScheme
 from af.clades.sequence import AlignedSequence
 from af.map.colouring import (
+    CONFLICT,
+    NO_SEQUENCE,
+    TIE,
     MapColouringError,
     StoreColours,
     key_for_legend,
     labels_for,
     map_scheme,
+    sequence_link,
 )
+from af.map.style import SequenceLink
 from af.seq.matching_rules import matching_rules
-from af.serology.joins import LinkCounts, PreparationSequence
+from af.serology.joins import (
+    ROWS_NONE_MATCH,
+    ROWS_PASSAGE_MATCHED,
+    LinkCounts,
+    PreparationSequence,
+    TiedSequence,
+)
 from af.serology.outputs import AlignedSequences, SubtypeColouring
 from tests.clades.synthetic import build_clone, load_synthetic
 from tests.seq.test_matching_rules import write_af_data
@@ -106,6 +118,34 @@ def test_chart_antigens_take_the_shared_choice(tmp_path: Path) -> None:
     assert len(got.provenance["matching_rules"]) == 6  # every rule table, with its hash
     assert "scheme_origin" not in got.provenance  # a named scheme: its tables are its origin
     assert got.provenance["lineage_minority"] == {}  # every antigen is the map's lineage
+    # the sequence each antigen IS comes from the same join the colours came from
+    assert [s.record() for s in got.sequences] == [
+        {"epi_isl": "EPI_1", "accession": "A1", "pairing": "exact"},
+        {"epi_isl": "EPI_2", "accession": "A2", "pairing": "exact"},
+        None,
+    ]
+    assert [s.why for s in got.sequences] == ["", "", NO_SEQUENCE]
+
+
+def test_a_sequence_link_names_one_sequence_or_why_none() -> None:
+    def prep(epi: str | None, **kw: Any) -> PreparationSequence:
+        return PreparationSequence(epi, epi and "A1", None, "proxy", **kw)
+
+    tied = (TiedSequence("EPI_1", "A1", "P"), TiedSequence("EPI_2", "A2", "P"))
+    assert sequence_link(None).why == NO_SEQUENCE
+    assert sequence_link(prep("EPI_1", conflict=False)).record() == {
+        "epi_isl": "EPI_1", "accession": "A1", "pairing": "proxy",
+    }  # fmt: skip
+    # passage chose one of a conflict's records: the point is that virus
+    chosen = prep("EPI_1", conflict=True, resolution=ROWS_PASSAGE_MATCHED)
+    assert sequence_link(chosen).why == ""
+    unresolved = prep(None, conflict=True, alternatives=tied, resolution=ROWS_NONE_MATCH)
+    assert sequence_link(unresolved).why == f"{CONFLICT}:{ROWS_NONE_MATCH}"
+    # a tie's candidates may agree on a colour, but never decide which virus it is
+    assert sequence_link(prep(None, conflict=False, tied=tied, ranked=tied[0])).why == TIE
+    assert sequence_link(prep(None, conflict=False)).why == NO_SEQUENCE
+    with pytest.raises(ValueError, match="xor"):
+        SequenceLink("EPI_1", "A1", "exact", TIE)
 
 
 # ---------------------------------------------------------------- a scheme the caller built

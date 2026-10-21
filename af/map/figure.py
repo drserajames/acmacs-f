@@ -52,7 +52,17 @@ from af.map.render import (
     egg_path,
     ugly_egg_path,
 )
-from af.map.style import ColourRow, ColourScheme, Marker, PointIn, Scene, Window, style_points
+from af.map.style import (
+    SERUM_NOT_RESOLVED,
+    ColourRow,
+    ColourScheme,
+    Marker,
+    PointIn,
+    Scene,
+    SequenceLink,
+    Window,
+    style_points,
+)
 from af.map.vaccines import marker_for, passage_class
 from af.map.viewport import Frame
 
@@ -142,13 +152,16 @@ def chart_points(
     labels: Sequence[frozenset[str]] | None = None,
     sequenced: Sequence[bool] | None = None,
     hidden: Mapping[int, str] | None = None,
+    sequences: Sequence[SequenceLink] | None = None,
 ) -> list[PointIn]:
     """One :class:`PointIn` per antigen then serum, ids "ag<i>" / "sr<j>".
 
     ``xy`` is the displayed layout (antigens then sera, NaN rows for points with no
     coordinates). ``labels`` are each antigen's colour labels (from
     :class:`~af.map.colouring.ChartColours` or a stand-in chart); none means unpainted.
-    ``hidden`` names the rule that hides an antigen.
+    ``hidden`` names the rule that hides an antigen. ``sequences`` are each antigen's
+    :class:`~af.map.style.SequenceLink` from the colouring join; none means no join was made.
+    A serum is never a preparation the join resolves, so each says so.
     """
     n = chart.n_antigens + chart.n_sera
     if xy.ndim != 2 or xy.shape[0] != n:
@@ -174,6 +187,7 @@ def chart_points(
                 sequenced=sequenced[i],
                 hide=hidden.get(i),
                 passage=a.passage,
+                sequence=sequences[i] if sequences is not None else None,
                 marker=marker_for("antigen", passage_class(a.passage, a.reassortant)),
             )
         )
@@ -190,6 +204,7 @@ def chart_points(
                 serum_id=s.serum_id,
                 marker=marker_for("serum", passage_class(s.passage, s.reassortant)),
                 passage=s.passage,
+                sequence=SequenceLink.none(SERUM_NOT_RESOLVED),
             )
         )
     return points
@@ -206,7 +221,10 @@ def chart_scene(
 ) -> Scene:
     """The styled scene for a chart drawn at ``xy`` with ``colours``: the report maps' colours,
     greying (``window``; default: nothing greyed) and vaccine marks (point id -> label)."""
-    points = chart_points(chart, xy, labels=colours.labels, sequenced=colours.sequenced)
+    points = chart_points(
+        chart, xy, labels=colours.labels, sequenced=colours.sequenced,
+        sequences=colours.sequences or None,
+    )  # fmt: skip
     return style_points(
         points,
         colours.scheme,

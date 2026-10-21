@@ -419,3 +419,43 @@ def test_i7_points_carry_the_full_passage(tmp_path: Any) -> None:
     assert [a["passage_class"] for a in ags[:2]] == ["cell", "cell"]  # the class cannot tell
     assert [a["passage"] for a in ags] == ["SIAT1", "SIAT2", ""]  # the passage can; none is ""
     assert doc["map"]["sera"][0]["passage"] == "E4"
+
+
+def test_i7_points_say_which_sequence_they_are(tmp_path: Any) -> None:
+    """A joined map's antigens carry the sequence colouring found, or why none, so a figure
+    joined to a tree by sequence agrees with the map. Sera are never resolved, and a scene with
+    no join says so rather than looking unsequenced."""
+    import datetime as dt
+
+    from af.map.colouring import NO_SEQUENCE, TIE
+    from af.map.i7 import NOT_JOINED, i7_document
+    from af.map.render import draw_pdf
+    from af.map.style import SERUM_NOT_RESOLVED, SequenceLink
+    from af.map.viewport import Frame
+
+    def points(colours: ChartColours) -> dict[str, Any]:
+        scene = chart_scene(chart(), XY, colours, title="T")
+        pdf = tmp_path / "s.pdf"
+        frame = Frame(-1.0, 4.0, 5.0)
+        draw_pdf(scene, frame, {}, pdf)
+        doc = i7_document(
+            scene, frame, {}, chart="c", pdf=pdf,
+            created=dt.datetime(2026, 10, 20, tzinfo=dt.UTC),
+            provenance={"inputs": {"x": {"sha256": "0" * 64}}},
+        )  # fmt: skip
+        return {p["id"]: p for p in doc["map"]["antigens"] + doc["map"]["sera"]}
+
+    links = (
+        SequenceLink("EPI_1", "A1", "exact", ""),
+        SequenceLink.none(TIE),
+        SequenceLink.none(NO_SEQUENCE),
+    )
+    joined = points(ChartColours(SCHEME, COLOURS.labels, COLOURS.sequenced, {}, sequences=links))
+    assert joined["ag0"]["sequence"] == {"epi_isl": "EPI_1", "accession": "A1", "pairing": "exact"}
+    assert joined["ag0"]["sequence_why"] == ""
+    assert (joined["ag1"]["sequence"], joined["ag1"]["sequence_why"]) == (None, TIE)
+    assert joined["ag2"]["sequence_why"] == NO_SEQUENCE  # no coordinates, still identified
+    assert (joined["sr0"]["sequence"], joined["sr0"]["sequence_why"]) == (None, SERUM_NOT_RESOLVED)
+    unjoined = points(COLOURS)  # no sequences: nothing was looked up
+    assert {p["sequence_why"] for k, p in unjoined.items() if k.startswith("ag")} == {NOT_JOINED}
+    assert unjoined["sr0"]["sequence_why"] == SERUM_NOT_RESOLVED
