@@ -160,6 +160,7 @@ def finish_map(
     frame: Frame | None = None,
     circles: Sequence[CircleMark] = (),
     caption: Sequence[str] = (),
+    addendum: dict[str, Any] | None = None,
 ) -> FinishedMap:
     """Produce ``out_pdf`` and its I7 for one chart and window.
 
@@ -176,7 +177,8 @@ def finish_map(
 
     ``circles``: drawn round their points (serum circles, :mod:`af.map.circles`) and recorded
     in the I7. They do not move the frame: a circle may run off the page, as ae's did.
-    ``caption``: lines printed under the title (the circled sera), recorded in the I7."""
+    ``caption``: lines printed under the title (the circled sera), recorded in the I7.
+    ``addendum``: what an addendum figure adds (af.map.addenda), recorded in the I7 as is."""
     # fail before drawing anything
     if created.tzinfo is None:
         raise ValueError("I7 'created' needs a time zone")
@@ -221,6 +223,7 @@ def finish_map(
         styles=styles,
         circles=circles,
         caption=caption,
+        addendum=addendum,
     )
     i7 = write_i7(doc, out_pdf)
     return FinishedMap(
