@@ -31,7 +31,7 @@ from af.clades.colours import ColourScheme as CladeColourScheme
 from af.clades.colours import ColourSchemeError, scheme_from_rows, shadowed_entries
 from af.geo.colours import BASIS_GROUP_NO_CLADE, STATE_UNOBSERVED, DotStyle
 from af.map.config import ColouringConfig
-from af.map.style import ColourRow, ColourScheme
+from af.map.style import ColourRow, ColourScheme, SequenceLink
 from af.seq.matching_rules import MatchingRules
 from af.serology.joins import PreparationKey, PreparationSequence, preparation_key
 from af.store.ref import StoreRef
@@ -113,6 +113,32 @@ class ChartColours:
     basis: tuple[str, ...] = ()
     # per antigen: the shared path's style, with the clade-evidence state of an unpainted one
     styles: tuple[DotStyle, ...] = ()
+    # per antigen: the one sequence it is (sequence_link), from the join the colours came from
+    sequences: tuple[SequenceLink, ...] = ()
+
+
+#: SequenceLink reasons: no usable row matched a sequence; the rows refused a name tie (a tie's
+#: candidates may agree on a colour, never on which virus it is); or the rows name records that
+#: passage could not choose between (followed by the PreparationSequence resolution).
+NO_SEQUENCE = "no sequence"
+TIE = "tie"
+CONFLICT = "conflict"
+
+
+def sequence_link(found: PreparationSequence | None) -> SequenceLink:
+    """The one sequence a preparation is, as the colouring join found it, or why none.
+
+    A conflict that passage resolved (or records of one sequence) has a chosen record and so a
+    sequence; only an unresolved one is a reason."""
+    if found is None:
+        return SequenceLink.none(NO_SEQUENCE)
+    if found.epi_isl is not None:
+        return SequenceLink(found.epi_isl, found.accession, found.pairing, "")
+    if found.conflict:
+        return SequenceLink.none(f"{CONFLICT}:{found.resolution}")
+    if found.tied:
+        return SequenceLink.none(TIE)
+    return SequenceLink.none(NO_SEQUENCE)
 
 
 @dataclass(frozen=True)
@@ -399,7 +425,7 @@ class StoreColours:
         )
         return ChartColours(
             found.scheme, found.labels, found.sequenced, found.provenance, found.basis,
-            found.styles,
+            found.styles, tuple(sequence_link(self._sequences.get(k)) for k in keys),
         )  # fmt: skip
 
     def for_preparations(
