@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -132,8 +132,13 @@ def make_geo_and_stat(
     dot_rule: DotRule = DotRule.PREPARATION,
     store_colours: StoreColours | None = None,
     schemes: Mapping[str, str] | None = None,
+    empty_subtypes: Collection[str] = (),
 ) -> OutputsReport:
     """Write ``geo/<st>-records.json``, ``geo/<st>-YYYY-MM.pdf`` and ``stat/`` for a window.
+
+    ``empty_subtypes``: table subtypes drawn even when the window has no dots for them (blank
+    maps, as ae drew an empty month), for a caller that expects a page whatever the data; any
+    other subtype appears only when it has dots.
 
     Refuses when ``serology/all`` is behind the tables store (:func:`require_current`; the
     identity rules it must have been built with default to the chain rules).
@@ -176,7 +181,7 @@ def make_geo_and_stat(
     report.geo_merged_preparations = dict(geo.merged_preparations)
     geo_dir = out_dir / "geo"
     geo_dir.mkdir(parents=True, exist_ok=True)
-    for subtype in sorted({s for s, _, _, _ in geo.dots}):
+    for subtype in sorted({s for s, _, _, _ in geo.dots} | set(empty_subtypes)):
         prefix = subtypes().table_subtype(subtype).geo
         doc = to_i7(geo, subtype)
         report.geo_docs[subtype] = doc

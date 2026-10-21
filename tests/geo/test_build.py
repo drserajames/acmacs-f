@@ -88,7 +88,14 @@ def _style(tmp_path: Path, tables: str = H3_LOOK, fonts: str | None = None) -> P
     return path
 
 
-def _geo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Store, list[StoreRef], Path]:
+def _geo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cutoff: dt.date | None = None,
+    allow_empty: tuple[str, ...] = (),
+    doc: dict[str, Any] | None = None,
+    seen: dict[str, Any] | None = None,
+) -> tuple[Store, list[StoreRef], Path]:
     """Run build_geo over a test store, its reads stood in for: serology, h3 sequences and the
     h3 clades labelled from them, as StoreColours' join would have read them."""
     store = Store.create(tmp_path / "store")
@@ -103,20 +110,27 @@ def _geo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Store, list[S
     )
     scheme = ColourScheme("h3 test", (ColourRow("Clade R", "#aa0000", frozenset({"R"})),))
     report = OutputsReport(
-        serology=serology, geo_docs={"A(H3N2)": _doc()}, coordinates=lambda _: (10.0, 20.0),
+        serology=serology, geo_docs={"A(H3N2)": doc or _doc()}, coordinates=lambda _: (10.0, 20.0),
         colour_schemes={"h3": scheme},
         colour_provenance={"h3": {"datasets": ["h3"], "source": "store", "scheme": "h3 test",
                                   "user_tables": {"tables.py": "ab" * 32}, "coloured": {}}},
     )  # fmt: skip
     monkeypatch.setattr(geo_build, "StoreColours", lambda *args, **kwargs: colours)
     monkeypatch.setattr(geo_build, "matching_rules", lambda _: None)
-    monkeypatch.setattr(geo_build, "make_geo_and_stat", lambda *args, **kwargs: report)
+
+    def make(*args: Any, **kwargs: Any) -> OutputsReport:
+        if seen is not None:
+            seen.update(kwargs)
+        return report
+
+    monkeypatch.setattr(geo_build, "make_geo_and_stat", make)
     monkeypatch.setattr(geo_build, "load_fonts", lambda path: load_fonts(path, bundled))
     figures = tmp_path / "figures"
     geo_build.build_geo(
         store, tmp_path, tmp_path, tmp_path, coastline_file(tmp_path),
         geo_build.Month(2021, 1), geo_build.Month(2021, 2), figures, tmp_path / "work",
-        {"h3": "h3 test"}, {"A(H3N2)": "h3"}, _style(tmp_path), created=T0,
+        {"h3": "h3 test"}, {"A(H3N2)": "h3"}, _style(tmp_path), created=T0, cutoff=cutoff,
+        allow_empty=allow_empty,
     )  # fmt: skip
     return store, [serology, sequences, clades], figures
 
@@ -149,6 +163,51 @@ def test_geo_figures_carry_created_and_the_store_versions_read(
             Store.open(tmp_path / "store"), tmp_path, tmp_path, tmp_path, tmp_path,
             geo_build.Month(2021, 1), geo_build.Month(2021, 1), figures, tmp_path / "work",
             {}, {}, _style(tmp_path, ""), created=dt.datetime(2026, 9, 1),  # noqa: DTZ001
+        )  # fmt: skip
+
+
+def test_a_cut_off_inside_the_last_month_is_in_its_title(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q243: the window's last month was fetched on the 10th, the month before is whole; a
+    cut-off before the last month is refused before the store is read."""
+    _, _, figures = _geo(tmp_path, monkeypatch, cutoff=dt.date(2021, 2, 10))
+    titles = {}
+    for month in ("2021-01", "2021-02"):
+        i7 = json.loads((figures / "geo" / "h3" / month / "af" / "figure.i7.json").read_text())
+        titles[month] = i7["title"]
+        assert i7["provenance"]["cutoff"] == "2021-02-10"
+    assert titles == {"2021-01": "h3 January 2021", "2021-02": "h3 February 2021 (to 10 February)"}
+    with pytest.raises(ValueError, match="cut-off 2021-01-20 is before the window's last month"):
+        geo_build.build_geo(
+            Store.open(tmp_path / "store"), tmp_path, tmp_path, tmp_path, tmp_path,
+            geo_build.Month(2021, 1), geo_build.Month(2021, 2), tmp_path / "unwritten",
+            tmp_path / "work", {}, {}, _style(tmp_path), created=T0, cutoff=dt.date(2021, 1, 20),
+        )  # fmt: skip
+    assert not (tmp_path / "unwritten").exists()
+
+
+def test_a_slot_allowed_empty_is_drawn_blank_and_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A monthly report's month can have no viruses of a subtype: a slot the round allows empty
+    is still drawn (blank maps) and its record says so; an unknown slot name is refused."""
+    empty = _doc()
+    empty["periods"][0]["locations"] = []
+    seen: dict[str, Any] = {}
+    _, _, figures = _geo(tmp_path, monkeypatch, allow_empty=("h3",), doc=empty, seen=seen)
+    assert seen["empty_subtypes"] == ["A(H3N2)"]  # the outputs make its document anyway
+    record = json.loads((figures / "geo" / "af-build.json").read_text())
+    assert record["slots"]["h3"]["empty"] is True
+    assert record["slots"]["h3"]["drawn"] == {"2021-01": 0, "2021-02": 0}
+    i7 = json.loads((figures / "geo" / "h3" / "2021-01" / "af" / "figure.i7.json").read_text())
+    assert i7["provenance"]["allowed_empty"] is True
+    with pytest.raises(ValueError, match=r"allow_empty names slots that are not drawn: \['bvic'\]"):
+        geo_build.build_geo(
+            Store.open(tmp_path / "store"), tmp_path, tmp_path, tmp_path, tmp_path,
+            geo_build.Month(2021, 1), geo_build.Month(2021, 1), tmp_path / "unwritten",
+            tmp_path / "work", {}, {"A(H3N2)": "h3"}, _style(tmp_path), created=T0,
+            allow_empty=("bvic",),
         )  # fmt: skip
 
 

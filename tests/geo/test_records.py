@@ -3,7 +3,7 @@ import datetime
 import pytest
 
 from af.geo.colours import UNCOLOURED
-from af.geo.records import Month, geo_counts, months, to_i7
+from af.geo.records import Month, geo_counts, months, partial_title, to_i7
 from af.report.compare import geo as compare_geo
 from af.serology.query import Preparation
 
@@ -267,3 +267,13 @@ def test_why_a_clade_is_not_defined_has_a_stable_id() -> None:
     assert undefined_state([unassigned]) == "no_assignment"
     assert undefined_state([DotStyle("Clade R", "#aa0000"), unobserved]) == "preparations_disagree"
     assert undefined_state([UNCOLOURED]) == "other"
+
+
+def test_a_month_cut_off_before_its_end_says_so_in_its_title() -> None:
+    """Q243: a monthly report's data are fetched mid-month; its page says to which day."""
+    oct26 = Month(2026, 10)
+    assert partial_title(oct26, None) == "October 2026"
+    assert partial_title(oct26, datetime.date(2026, 10, 21)) == "October 2026 (to 21 October)"
+    assert partial_title(oct26, datetime.date(2026, 10, 31)) == "October 2026"  # its last day
+    assert partial_title(oct26, datetime.date(2026, 11, 2)) == "October 2026"  # after it
+    assert partial_title(Month(2026, 2), datetime.date(2026, 2, 28)) == "February 2026"

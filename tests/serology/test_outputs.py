@@ -154,6 +154,23 @@ def test_geo_and_stat_from_the_stores(tmp_path: Path, syn: Any) -> None:
     assert report.links is None and report.colours == {}  # no colouring asked for
 
 
+def test_a_subtype_asked_for_is_drawn_blank_when_the_window_has_none(
+    tmp_path: Path, syn: Any
+) -> None:
+    """A monthly report's page for a subtype with no viruses that month: blank maps, every
+    month listed; a subtype not asked for still appears only with dots."""
+    store, tables, coastline = _roots(tmp_path, syn)
+    out = tmp_path / "out"
+    report = make_geo_and_stat(
+        store, tables, coastline, Month(2021, 1), Month(2021, 1), out,
+        identity_rules=syn.rules, empty_subtypes=["B"],
+    )  # fmt: skip
+    assert report.geo_drawn == {H3: {"2021-01": 1}, "B": {"2021-01": 0}}
+    doc = report.geo_docs["B"]
+    assert [p["period"] for p in doc["periods"]] == ["2021-01"]
+    assert doc["periods"][0]["locations"] == [] and doc["undated"] == 0
+
+
 def test_geo_colours_from_clade_store_and_scheme(tmp_path: Path, syn: Any) -> None:
     store, tables, coastline = _roots(tmp_path, syn)
     _clades(store, tmp_path)
