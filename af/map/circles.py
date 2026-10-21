@@ -20,6 +20,8 @@ from dataclasses import dataclass
 
 from af.chart.serum_circles import SerumCircle
 from af.map.render import CircleMark, PointStyle
+from af.map.vaccines import display_serum_id
+from af.tables.labs import Lab
 
 RADII = ("theoretical", "empirical")
 NO_COLOUR = "#808080"  # ae multiple_circles' GREY: a homologous antigen with no map colour
@@ -98,3 +100,14 @@ def serum_circle_marks(
             on_top=True,
         )
     return marks, styles
+
+
+def names_lines(records: Sequence[SerumCircle], lab: Lab) -> list[str]:
+    """The circled sera listed under the title, as the shipped addenda listed them (Sarah, Q247
+    a): name, serum id as maps print it (``lab``'s rule, Q123) and passage, the passage with its
+    harvest date where the lab gives one (CDC's are the only dated ones). The last serum first,
+    as ae's list ran."""
+    return [
+        " ".join(x for x in (r.name, display_serum_id(r.serum_id, lab), r.passage) if x)
+        for r in reversed(records)
+    ]

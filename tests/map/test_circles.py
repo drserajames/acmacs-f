@@ -104,3 +104,47 @@ def test_a_styled_point_on_top_is_drawn_over_every_other_point() -> None:
     assert len(circles) == 2  # the translucent fill, then the outline
     assert circles[0].get_alpha() == pytest.approx(0.2)
     plt.close(fig)
+
+
+def test_the_names_list_runs_last_serum_first_with_the_passage_as_the_lab_gave_it() -> None:
+    from dataclasses import replace
+
+    from af.map.circles import names_lines
+    from af.tables.labs import Lab
+
+    dated = replace(record(), serum=1, name="EX/2/2021", serum_id="LABA 2021-001",
+                    passage="SIAT1 (2021-02-03)")  # fmt: skip
+    plain = replace(record(), serum_id="LABA S1")
+    bare = Lab("LABA", "Lab A", "none yet", "bare")
+    assert names_lines([plain, dated], bare) == [
+        "EX/2/2021 2021-001 SIAT1 (2021-02-03)",  # the harvest date, as the lab gave it
+        "EX/1/2020 S1 SIAT1",  # the id as maps print it (Q123)
+    ]
+    with_lab = Lab("LABA", "Lab A", "none yet", "with-lab")
+    assert names_lines([plain], with_lab) == ["EX/1/2020 LABA S1 SIAT1"]
+
+
+def test_a_caption_is_printed_under_the_title_and_recorded(tmp_path: Path) -> None:
+    common: dict[str, Any] = dict(
+        chart="synthetic", scheme=SCHEME, window=Window("all", None), title="Synthetic",
+        frame_size=14.0, must_show_since=SINCE, vaccine_labels={},
+        created=dt.datetime(2026, 10, 21, tzinfo=dt.UTC),
+        provenance={"inputs": {"chain": {"name": "synthetic", "sha256": "0" * 64}}},
+    )  # fmt: skip
+    lines = ["EX/2/2021 LAB 2021-001 SIAT1", "EX/1/2020 S1 SIAT1"]
+    result = finish_map(synthetic_points(), out_pdf=tmp_path / "n.pdf", caption=lines, **common)
+    assert json.loads(result.i7.read_text())["map"]["caption"] == lines
+    import matplotlib.pyplot as plt
+
+    from af.map.render import DEFAULT_LOOK, draw_scene
+    from af.map.style import style_points
+
+    scene = style_points(synthetic_points(), SCHEME, Window("all", None), title="t")
+    fig = plt.figure(figsize=(4, 4), dpi=72)
+    ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+    draw_scene(ax, scene, result.frame.frame, {}, DEFAULT_LOOK, caption=lines)
+    drawn = [t for t in ax.texts if t.get_text() in lines]
+    assert [t.get_text() for t in drawn] == lines  # in order, first line on top
+    assert drawn[0].get_position()[1] < drawn[1].get_position()[1]  # the page runs downward
+    assert drawn[0].get_fontsize() == DEFAULT_LOOK.caption_size
+    plt.close(fig)

@@ -150,6 +150,7 @@ def finish_map(
     styles: Mapping[str, PointStyle] | None = None,
     frame: Frame | None = None,
     circles: Sequence[CircleMark] = (),
+    caption: Sequence[str] = (),
 ) -> FinishedMap:
     """Produce ``out_pdf`` and its I7 for one chart and window.
 
@@ -165,7 +166,8 @@ def finish_map(
     this window alone; it is still checked to show the recent antigens.
 
     ``circles``: drawn round their points (serum circles, :mod:`af.map.circles`) and recorded
-    in the I7. They do not move the frame: a circle may run off the page, as ae's did."""
+    in the I7. They do not move the frame: a circle may run off the page, as ae's did.
+    ``caption``: lines printed under the title (the circled sera), recorded in the I7."""
     # fail before drawing anything
     if created.tzinfo is None:
         raise ValueError("I7 'created' needs a time zone")
@@ -195,7 +197,7 @@ def finish_map(
         gap=look.label_gap / look.page_points,
     )
     labels = dict(zip(ids, placed, strict=True))
-    draw_pdf(scene, frame, labels, out_pdf, look, styles, circles)
+    draw_pdf(scene, frame, labels, out_pdf, look, styles, circles, caption)
     doc = i7_document(
         scene,
         frame,
@@ -209,6 +211,7 @@ def finish_map(
         look=look,
         styles=styles,
         circles=circles,
+        caption=caption,
     )
     i7 = write_i7(doc, out_pdf)
     return FinishedMap(

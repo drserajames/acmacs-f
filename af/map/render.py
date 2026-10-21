@@ -57,6 +57,7 @@ class Look:
         2.0  # points kept clear between two labels (abutting boxes looked stacked, R4 review)
     )
     title_clear: float = 6.0  # points kept clear right of the title's last letter (R5 review)
+    caption_size: float = 7.0  # the circle addenda's list of sera under the title (ae: 7 points)
     legend_pad: float = 0.0125  # the legend box's distance from the page's left and bottom
     # The legend, in points of the 800-point page, as the shipped report draws it (style 08-07/08,
     # measured from its figures): text size and row pitch, the text's and the marker's distance
@@ -236,6 +237,7 @@ def draw_pdf(
     look: Look = DEFAULT_LOOK,
     styles: Mapping[str, PointStyle] | None = None,
     circles: Sequence[CircleMark] = (),
+    caption: Sequence[str] = (),
 ) -> None:
     """Draw ``scene`` inside ``frame`` to ``out_pdf`` (one page). The drawing itself is
     :func:`draw_scene`, shared with :func:`af.map.figure.draw_axes`."""
@@ -247,7 +249,7 @@ def draw_pdf(
     side = look.page_points / 72.0
     fig = plt.figure(figsize=(side, side * frame.aspect), dpi=72)
     ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
-    draw_scene(ax, scene, frame, labels, look, styles=styles, circles=circles)
+    draw_scene(ax, scene, frame, labels, look, styles=styles, circles=circles, caption=caption)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_pdf)
     plt.close(fig)
@@ -267,11 +269,13 @@ def draw_scene(
     title: bool = True,
     styles: Mapping[str, PointStyle] | None = None,
     circles: Sequence[CircleMark] = (),
+    caption: Sequence[str] = (),
 ) -> tuple[str, ...]:
     """Draw a scene on an Axes whose data limits become the page (0..1, y down).
 
     ``styles`` override single points' drawing, by point id. ``circles`` are drawn round their
     points (a point not shown, or with no coordinates, is an error: nothing to centre on).
+    ``caption`` lines are printed small under the title, as the circle addenda list their sera.
     Returns the ids of shown points
     that lie outside the frame, which the Axes clips: a caller can mark where they went.
 
@@ -353,6 +357,17 @@ def draw_scene(
             path_effects=[
                 patheffects.withStroke(linewidth=look.label_halo * scale, foreground="white")
             ],
+        )
+    for k, line in enumerate(caption):
+        # ae's names overlay: 7 points, 1.25 line pitch, its first line's top 0.115 of the page down
+        ax.text(
+            0.024,
+            0.115 * a + k * look.caption_size * 1.25 / look.page_points,
+            line,
+            fontsize=look.caption_size * scale,
+            va="top",
+            ha="left",
+            zorder=9,
         )
     if title:
         # The shipped maps' title: baseline 37.5 and left edge 19 page units from the top-left
