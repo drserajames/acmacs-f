@@ -12,7 +12,7 @@ Units are page points, y down; a box is (x0, y0, x1, y1).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -163,14 +163,18 @@ def place_labels(
     obstacles: Sequence[Box] = (),
     weights: Weights | None = None,
     search: Search | None = None,
+    fixed: Mapping[int, Box] | None = None,
 ) -> list[Placed]:
     """Place ``items`` = [(key, text, anchor)]; a multi-line text uses '\\n'.
 
     Greedy top to bottom, each label taking its cheapest candidate given those already placed;
-    then up to ``passes`` rounds re-placing each label against all the others.
+    then up to ``passes`` rounds re-placing each label against all the others. ``fixed``
+    (item index -> box): labels pinned by hand. They keep their boxes, are placed before all
+    the others and count against them like any label, and are never moved.
     """
     w, s = weights or Weights(), search or Search()
-    boxes: dict[int, Box] = {}
+    pinned = dict(fixed or {})
+    boxes: dict[int, Box] = dict(pinned)
     order = sorted(range(len(items)), key=lambda k: (items[k][2][1], items[k][0]))
 
     # Speed (18 Oct 2026: placement was 11% of the tree stage) without changing any result:
@@ -249,6 +253,8 @@ def place_labels(
         swapped = False
         for a_i, a in enumerate(order):
             for b in order[a_i + 1 :]:
+                if a in pinned or b in pinned:
+                    continue
                 ba, bb = boxes[a], boxes[b]
                 if not segments_cross(leader_end(ba), items[a][2], leader_end(bb), items[b][2]):
                     continue
@@ -283,6 +289,8 @@ def place_labels(
         the two together finds the arrangement the single moves stall short of."""
         improved = False
         for a, b in clashes():
+            if a in pinned or b in pinned:
+                continue
             keep_a, keep_b = boxes[a], boxes[b]
             before = cost_of(a, keep_a) + cost_of(b, keep_b)
             top_a = sorted(candidates(a), key=lambda c: cost_of(a, c))[: s.pair_candidates]
@@ -299,11 +307,12 @@ def place_labels(
             improved |= best_pair != (keep_a, keep_b)
         return improved
 
-    for k in order:
+    free = [k for k in order if k not in pinned]
+    for k in free:
         boxes[k] = best(k)[1]
     for _ in range(s.passes):
         changed = False
-        for k in order:
+        for k in free:
             c, b = best(k)
             if b != boxes[k] and c < cost_of(k, boxes[k]) - 1e-9:
                 boxes[k], changed = b, True

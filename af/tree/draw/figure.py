@@ -17,7 +17,7 @@ from typing import Any, Protocol
 from af.store import StoreRef
 from af.util.fonts import FigureFonts
 
-from .aa_labels import LabelHide, LabelParams, hide_labels, select_labels
+from .aa_labels import AALabel, LabelHide, LabelParams, hide_labels, select_labels
 from .defaults import load_defaults
 from .i7 import tree_block, write_i7
 from .layout import HideRules, Layout, compute_layout, rows_matching
@@ -48,6 +48,31 @@ class Overrides:
     reasons: dict[str, str] = field(default_factory=dict)  # "hide:<clade>" -> why, who decided
 
 
+@dataclass(frozen=True)
+class LabelPin:
+    """A substitution label held where a hand put it (Sarah, M1: the shipped report's
+    positions), as ae's label editor keys it: the node is the MRCA of two leaves, and the label
+    box's top-left sits at the node point plus ``dx``, ``dy`` times the page (x by the page's
+    height, or by its width when ``x_by`` is "width", as the old ``offset`` did; y by height).
+    Named data (design rule 9): counted in the draw report. A pin whose node carries no label of
+    its text is an error unless ``optional`` (the label is drawn elsewhere, or not at all, on
+    this tree), and an optional one left unused is listed with its reason."""
+
+    first: str  # leaf id
+    last: str  # leaf id
+    text: str  # the substitutions, space separated, as the label prints them
+    dx: float
+    dy: float
+    reason: str
+    x_by: str = "height"
+    optional: bool = False
+
+
+class LabelPinError(ValueError):
+    """A label pin that cannot apply: a leaf the tree does not have, a pin matching no label
+    and not optional, or two pins on one label."""
+
+
 @dataclass
 class FigureConfig:
     title: str  # the figure's name: I7 title, report heading and caption
@@ -63,6 +88,12 @@ class FigureConfig:
     overrides: Overrides = field(default_factory=Overrides)
     dash_bars: list[DashBar] = field(default_factory=list)
     strains: list[tuple[str, str]] = field(default_factory=list)  # (leaf id, label text)
+    # Strain label leaf id -> its offset below its row, in figure units: the shipped .tal's
+    # hand offsets, which set two near strains' order (named data, rule 9; an id that is not
+    # a strain row's is an error).
+    strain_dy: dict[str, float] = field(default_factory=dict)
+    # Substitution labels pinned by hand (LabelPin); the others are placed automatically.
+    label_pins: list[LabelPin] = field(default_factory=list)
     colour_by: str = "continent"
     clade_colours: dict[str, str] = field(default_factory=dict)
     marked_ids: frozenset[str] = frozenset()  # centre-marked variant (leaf ids)
@@ -112,6 +143,7 @@ def make_figure(
         label_counts["labels"] = len(labels)
 
     dash_bars = dash_bar_counts(tree, layout.leaf_nodes, config.dash_bars)
+    pins, pin_report = resolve_pins(tree, labels, config.label_pins)
 
     marked = None
     geometry = config.geometry
@@ -138,6 +170,8 @@ def make_figure(
         drawn_title=config.drawn_title,
         clade_display=dict(config.clade_display),
         figure_fonts=config.fonts is not None,
+        strain_dy=_strain_dy(config),
+        label_pins=pins,
     )
     # Every text, label placement included, is measured and drawn in the figure fonts. They are
     # registered here, in the process that draws: a spawned worker (af.tree.draw.stage) starts
@@ -201,8 +235,72 @@ def make_figure(
         "overrides": {k: len(v) for k, v in asdict(config.overrides).items() if k != "reasons"},
         "override_reasons": dict(config.overrides.reasons),
     }
+    if config.label_pins:  # only when there are pins, so other figures keep their bytes
+        report["label_pins"] = pin_report
     pdf.with_suffix(".draw.json").write_text(json.dumps(report, indent=1, default=str))
     return report
+
+
+def resolve_pins(
+    tree: DrawTree, labels: Sequence[AALabel], pins: Sequence[LabelPin]
+) -> tuple[dict[int, tuple[float, float, str]], dict[str, Any]]:
+    """Label index -> (dx, dy, x_by) for each pinned label, and what the pins did.
+
+    A pin applies to the label on the MRCA of its two leaves whose substitutions are the
+    pin's (in any order). It is never moved to another node to fit (00, 21 Oct 2026)."""
+    node_of = {str(tree.leaf_id[i]): i for i in tree.leaves()}
+    missing = sorted({x for p in pins for x in (p.first, p.last) if x not in node_of})
+    if missing:  # design rule 1
+        raise LabelPinError(f"{len(missing)} label pin leaf id(s) not in the tree: {missing[:5]}")
+    by_key: dict[tuple[int, tuple[str, ...]], int] = {}
+    for k, lab in enumerate(labels):
+        by_key.setdefault((lab.node, tuple(sorted(lab.subs))), k)
+    out: dict[int, tuple[float, float, str]] = {}
+    unused: list[dict[str, str]] = []
+    errors: list[str] = []
+    for p in pins:
+        if p.x_by not in ("height", "width"):
+            errors.append(f"{p.text}: x_by {p.x_by!r} is neither 'height' nor 'width'")
+            continue
+        node = _mrca(tree, node_of[p.first], node_of[p.last])
+        found = by_key.get((node, tuple(sorted(p.text.split()))))
+        if found is None:
+            if p.optional:
+                unused.append({"text": p.text, "reason": p.reason})
+            else:
+                errors.append(f"{p.text}: no label of that text on the MRCA of {p.first}, {p.last}")
+        elif found in out:
+            errors.append(f"{p.text}: a second pin on the same label")
+        else:
+            out[found] = (p.dx, p.dy, p.x_by)
+    if errors:
+        raise LabelPinError(f"{len(errors)} label pin(s) refused:\n  " + "\n  ".join(errors))
+    report = {
+        "pins": len(pins),
+        "pinned": len(out),
+        "optional pins unused": unused,
+        "placed automatically": [
+            " ".join(lab.subs) for k, lab in enumerate(labels) if k not in out
+        ],
+    }
+    return out, report
+
+
+def _mrca(tree: DrawTree, a: int, b: int) -> int:
+    up = set()
+    while a != -1:
+        up.add(a)
+        a = tree.parent[a]
+    while b not in up:
+        b = tree.parent[b]
+    return b
+
+
+def _strain_dy(config: FigureConfig) -> dict[str, float]:
+    unknown = sorted(set(config.strain_dy) - {leaf for leaf, _ in config.strains})
+    if unknown:  # design rule 1
+        raise ValueError(f"strain offsets for leaves with no strain label: {unknown}")
+    return dict(config.strain_dy)
 
 
 class OlderNames(Protocol):

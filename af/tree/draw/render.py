@@ -9,7 +9,7 @@ draw report; the caller writes those.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
@@ -33,6 +33,7 @@ from .place import (  # noqa: E402
     Grid,
     Placed,
     Search,
+    Weights,
     leader_end,
     place_labels,
     placement_metrics,
@@ -128,6 +129,10 @@ class Geometry:
     # A margin strain label whose own row is taken moves off it in steps of this (None: the
     # label's height), so two strains on near rows sit this far apart.
     strain_step: float | None = None
+    # Margin strain labels placed before the aa labels, which then keep off them. For a tree
+    # whose strain labels sit at fixed (shipped) offsets: placed last, an automatic aa label
+    # takes their spot and pushes them off their rows (R7, B/Vic).
+    strains_first: bool = False
     # The continent inset's preferred corner (left x, bottom y): the clear spot nearest to it is
     # taken, never one over ink; None: the lowest, then leftmost clear spot. And its width.
     inset_left: float | None = None
@@ -139,6 +144,23 @@ class Geometry:
     # No aa label starts left of this x. With margin strain labels, set it right of their
     # column, so the margin is theirs alone as shipped (R5 review: aa labels from x 3).
     label_left: float = 2.0
+    # The label placer's weights (place.Weights) for this tree, where they differ from its
+    # defaults (None keeps a default): a dense tree's labels sit beside their branches, over
+    # thin leaf lines, only when ink costs less and leader length more (R6 review, H3).
+    label_ink_weight: float | None = None
+    label_length_weight: float | None = None
+    label_flat_weight: float | None = None
+    # Clade bracket arrowheads, in points (FancyArrowPatch head length and half-width), and
+    # the largest share of its bracket a head may take (None: no cap); past it the head
+    # shrinks, so a short bracket's two heads never meet (R6 review: a bow-tie on J.1.1).
+    bracket_head_length: float = 5.76
+    bracket_head_width: float = 1.44
+    bracket_head_share: float | None = None
+    # How far each bracket end is moved out, so the drawn tip lands on its band's edge:
+    # matplotlib stops an arrowhead's tip short of its end point (about 1.2 points for these
+    # heads at a 1-point line), which left adjacent brackets' tips 2 points apart where the
+    # shipped pages' touch (R6 review). Scaled down with the head on a short bracket.
+    bracket_tip_extend: float = 0.0
 
 
 @dataclass
@@ -180,6 +202,12 @@ class FigureSpec:
     # Drawn in a round's figure fonts (FigureConfig.fonts, af.util.fonts): text uses the rc sans
     # and mono families. False: DejaVu Sans and DejaVu Sans Mono, as before the figure fonts.
     figure_fonts: bool = False
+    # Strain label -> how far below its row it sits, in figure units (the shipped .tal's per
+    # strain offsets: they set the labels' order where two strains are on near rows).
+    strain_dy: dict[str, float] = field(default_factory=dict)
+    # Label index (into ``labels``) -> (dx, dy, x_by): labels pinned by hand
+    # (figure.LabelPin); the placer keeps them where they are and places the rest around them.
+    label_pins: dict[int, tuple[float, float, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -366,17 +394,19 @@ def _draw_brackets(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> dict[i
     g, sel = pg.g, spec.selection
     names: list[tuple[float, float, str]] = []
     edges: dict[int, float] = {}
-    style = ArrowStyle("<|-|>", head_length=5.76, head_width=1.44)
+    style = ArrowStyle("<|-|>", head_length=g.bracket_head_length, head_width=g.bracket_head_width)
     for cs in sel.shown:
         x = left + sel.slots[cs.clade] * g.clade_slot + 2
         for b in cs.bands:
             y0, y1 = pg.row_edge(b.first), pg.row_edge(b.last + 1)
+            scale = _head_scale(g, y1 - y0)
+            tip = g.bracket_tip_extend * scale
             ax.add_patch(
                 FancyArrowPatch(
-                    (x, y1),
-                    (x, y0),
+                    (x, y1 + tip),
+                    (x, y0 - tip),
                     arrowstyle=style,
-                    mutation_scale=1,
+                    mutation_scale=scale,
                     lw=g.bracket_width,
                     color="black",
                     shrinkA=0,
@@ -390,6 +420,13 @@ def _draw_brackets(ax: Axes, spec: FigureSpec, pg: _Page, left: float) -> dict[i
         ax, names, g.clade_font, spec.clade_label_sizes, spec.clade_display, g.clade_name_gap
     )
     return edges
+
+
+def _head_scale(g: Geometry, span: float) -> float:
+    """1, or less where the bracket is too short for two whole heads (bracket_head_share)."""
+    if g.bracket_head_share is None or g.bracket_head_length <= g.bracket_head_share * span:
+        return 1
+    return g.bracket_head_share * span / g.bracket_head_length
 
 
 def _place_clade_names(
@@ -493,7 +530,7 @@ def _draw_strains(
         if r is None:
             report.append({"leaf": leaf_id, "text": text, "drawn": False})
             continue
-        y = float(pg.row_y(r))
+        y = float(pg.row_y(r)) + spec.strain_dy.get(leaf_id, 0.0)
         if g.strain_x is not None:
             at = _margin_strain_box(
                 g.strain_x, y, width(text), g.strain_font * 1.1, boxes, grid, placed, g.strain_step
@@ -607,7 +644,11 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
         top=g.top - 4,
         bottom=pg.bottom + 2,
     )
-    placed = place_labels(items, grid, _text_width(font), g.label_font * 1.2, search=search)
+    width, line_height = _text_width(font), g.label_font * 1.2
+    fixed = {k: _pinned_box(spec, pg, k, width, line_height) for k in spec.label_pins}
+    placed = place_labels(
+        items, grid, width, line_height, search=search, weights=_weights(g), fixed=fixed or None
+    )
     for p in placed:
         x0, y0, x1, y1 = p.box
         ax.text(
@@ -623,6 +664,32 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
         ex, ey = leader_end(p.box)
         ax.plot([ex, p.anchor[0]], [ey, p.anchor[1]], color="#4d4d4d", lw=0.35)
     return placed, placement_metrics(placed, grid)
+
+
+def _pinned_box(
+    spec: FigureSpec, pg: _Page, k: int, width: Callable[[str], float], line_height: float
+) -> Box:
+    """A pinned label's box: its top-left at the node point plus the pin's offset times the
+    page (ae's convention), sized as the placer sizes every label. The text is drawn one unit
+    in from the box's right edge, so the box starts one unit left of ae's text."""
+    g, lab = pg.g, spec.labels[k]
+    dx, dy, x_by = spec.label_pins[k]
+    bw = max(width(t) for t in lab.subs) + 2
+    bh = line_height * len(lab.subs) + 1
+    x0 = float(pg.nx[lab.node]) + dx * (g.height if x_by == "height" else g.width) - 1
+    y0 = float(pg.ny[lab.node]) + dy * g.height
+    return (x0, y0, x0 + bw, y0 + bh)
+
+
+def _weights(g: Geometry) -> Weights | None:
+    """The placer's weights with this tree's own values, or None for its defaults."""
+    given = {
+        "ink": g.label_ink_weight,
+        "length": g.label_length_weight,
+        "flat": g.label_flat_weight,
+    }
+    own: dict[str, float] = {k: v for k, v in given.items() if v is not None}
+    return Weights(**own) if own else None
 
 
 class InsetPlacementError(ValueError):
@@ -748,7 +815,7 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     last_column = bracket_left + max(spec.selection.slots.values(), default=0) * g.clade_slot + 2
     _draw_dash_bars(ax, spec, pg, last_column + g.bars_gap)
     inset = _draw_key(ax, spec, pg, grid)
-    if g.strain_x is None:  # strain labels beside the tree: the aa labels keep off them
+    if g.strain_x is None or g.strains_first:  # strain labels first: the aa labels keep off them
         strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid)
         placed, metrics = _draw_labels(ax, spec, pg, grid, strain_boxes)
     else:  # margin strain labels go where the aa labels and their leaders leave room
