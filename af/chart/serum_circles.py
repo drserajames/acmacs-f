@@ -129,11 +129,13 @@ class SerumCircle:
     def to_json(self) -> dict:
         return asdict(self)
 
-    def disagreement(self, drawn: str = "empirical") -> str | None:
+    def disagreement(self, drawn: str = "empirical", coverage: bool = True) -> str | None:
         """How the two rules' answers for this serum's map differ, or None when they draw the
         same map. ``drawn`` is the radius the figure draws: ``empirical`` (the coverage pages)
         or ``theoretical`` (the circle panels); each radius is its own minimum, so the two can
-        come from different antigens and differ apart.
+        come from different antigens and differ apart. ``coverage``: whether the figure draws
+        the within/outside colouring too (a circle panel does not, so its sets cannot differ
+        visibly, and its titre is the radius's antigen's alone).
 
         In order: ``neither`` - no circle and no colouring under the drawn rule;
         ``no-homologous`` - one rule finds no homologous antigen; ``visible`` - the drawn radius
@@ -144,20 +146,21 @@ class SerumCircle:
         radius = getattr(self.circle, drawn)
         other = getattr(self.other_circle, drawn)
         titre = "titre" if drawn == "empirical" else "theoretical_titre"
-        if radius is None and self.coverage.status != "good":
+        if radius is None and (not coverage or self.coverage.status != "good"):
             return "neither"
         circles = {self.circle.status, self.other_circle.status}
         if "no_homologous" in circles and len(circles) > 1:
             return "no-homologous"
-        if _radius_differs(radius, other) or (self.coverage.within, self.coverage.outside) != (
-            self.other_coverage.within,
-            self.other_coverage.outside,
-        ):
+        sets = (self.coverage.within, self.coverage.outside)
+        other_sets = (self.other_coverage.within, self.other_coverage.outside)
+        if _radius_differs(radius, other) or (coverage and sets != other_sets):
             return "visible"
-        if (getattr(self.circle, titre), self.coverage.titre) != (
+        titres = (getattr(self.circle, titre), self.coverage.titre if coverage else None)
+        other_titres = (
             getattr(self.other_circle, titre),
-            self.other_coverage.titre,
-        ):
+            self.other_coverage.titre if coverage else None,
+        )
+        if titres != other_titres:
             return "titre-only"
         return None
 
