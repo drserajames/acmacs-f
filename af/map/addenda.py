@@ -73,6 +73,7 @@ class MapPage:
     windows: tuple[tuple[Window, str], ...]  # each window and its page title
     must_show_since: dt.date
     provenance: dict[str, Any]
+    vaccine_labels: dict[str, str] = field(default_factory=dict)  # point id -> the map's label
 
     def layout(self) -> np.ndarray:
         """The drawn layout in chart order (antigens then sera), NaN where the chart has no
@@ -91,10 +92,12 @@ class MapPage:
             raise AddendaError(f"{self.folder}: no window {name!r} (has {names})")
         return found[0]
 
-    def scene(self, window: str) -> Scene:
-        """The map's styled scene in ``window``, as its page draws it (no vaccine marks)."""
+    def scene(self, window: str, *, vaccines: bool = False) -> Scene:
+        """The map's styled scene in ``window``, as its page draws it, with its vaccine marks
+        or (the circle addenda, as ae drew them) without."""
         w, title = self.window(window)
-        return style_points(list(self.points), self.scheme, w, title=title)
+        marks = self.vaccine_labels if vaccines else {}
+        return style_points(list(self.points), self.scheme, w, title=title, vaccines=dict(marks))
 
 
 @dataclass(frozen=True)
@@ -205,12 +208,14 @@ def draw_addendum_figure(
     caption: Sequence[str] = (),
     vaccine_labels: dict[str, str] | None = None,
     addendum: dict[str, Any] | None = None,
+    title: str | None = None,
 ) -> Path:
     """One addendum figure: the map's page in ``window`` and its frame, with the addendum's
-    serum styles, circles and caption. Returns the figure's I7."""
+    serum styles, circles and caption (and ``title`` for the page's own). Returns its I7."""
     from af.map.finish import finish_map
 
-    w, title = page.window(window)
+    w, page_title = page.window(window)
+    title = title if title is not None else page_title
     result = finish_map(
         list(page.points),
         chart=page.folder,
@@ -242,9 +247,31 @@ def render_coverage(
     out_pdf: Path,
     created: dt.datetime,
     addendum: dict[str, Any],
+    lab: Lab,
+    window: str = "all",
 ) -> Path:
-    """One serum-coverage figure (10-serology's [[coverage]] blocks): to come, in 08's look."""
-    raise NotImplementedError("the serum-coverage look is not drawn yet")
+    """One serum-coverage figure (10-serology's [[coverage]] blocks), as ae's sc-* maps: the map
+    pale with its vaccine labels and legend, the serum's titrated antigens outlined within or
+    outside fold, the serum and its circle (:func:`af.map.circles.coverage_marks`), and a
+    three-line title: the map's, the serum (its id as maps print it), ``clade_line``.
+    Returns the figure's I7."""
+    from af.map.circles import coverage_marks
+    from af.map.vaccines import display_serum_id
+
+    marks, styles = coverage_marks(record, page.scene(window, vaccines=True), radius)
+    map_title = page.window("all")[1] if window == "all" else page.window(window)[1]
+    serum = " ".join(x for x in (record.name, display_serum_id(record.serum_id, lab)) if x)
+    return draw_addendum_figure(
+        page,
+        out_pdf,
+        window=window,
+        created=created,
+        styles=styles,
+        circles=marks,
+        vaccine_labels=page.vaccine_labels,
+        addendum=addendum,
+        title="\n".join([map_title, serum, clade_line]),
+    )
 
 
 # ---------------------------------------------------------------- serum circles

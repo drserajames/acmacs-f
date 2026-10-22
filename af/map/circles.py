@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from af.chart.serum_circles import SerumCircle
 from af.map.render import CircleMark, PointStyle
@@ -111,3 +112,79 @@ def names_lines(records: Sequence[SerumCircle], lab: Lab) -> list[str]:
         " ".join(x for x in (r.name, display_serum_id(r.serum_id, lab), r.passage) if x)
         for r in reversed(records)
     ]
+
+
+# ---------------------------------------------------------------- the serum-coverage look
+
+#: The coverage maps' circle, by the serum's passage class (ae serum_coverage_circle_style):
+#: the outline in the colour, the fill the same colour at 0x18 of 0xFF.
+PASSAGE_CIRCLE = {"cell": "#0000ff", "egg": "#ff0000", "reassortant": "#ffa500"}
+COVERAGE_FILL_ALPHA = 0x18 / 0xFF
+WITHIN_OUTLINE = "#ffc0cb"  # pink: titrated within fold of the homologous titre
+OUTSIDE_OUTLINE = "#000000"
+COVERAGE_OUTLINE_WIDTH = 3.0
+COVERAGE_SERUM_SCALE = 1.8  # ae's 36 points over af's 20
+PALE_FACTOR = 0.4  # kateri's :pale
+
+
+def pale(colour: str) -> str:
+    """kateri's ":pale" (ColorAndModifier, factor 0.4): saturation down, value up; a grey is
+    only lightened, and black becomes mid grey. "none" and "transparent" stay as they are."""
+    import colorsys
+
+    from matplotlib.colors import to_hex, to_rgb
+
+    if colour in ("none", "transparent"):
+        return colour
+    h, s, v = colorsys.rgb_to_hsv(*to_rgb(colour))
+    if s > 0.0:
+        s, v = s * PALE_FACTOR, v + (1.0 - v) * (1.0 - PALE_FACTOR)
+    else:
+        v = 0.5 if v == 0.0 else min(1.0, v / PALE_FACTOR)
+    return str(to_hex(colorsys.hsv_to_rgb(h, s, v)))
+
+
+def coverage_marks(
+    record: SerumCircle, scene: Any, radius: str = "empirical"
+) -> tuple[list[CircleMark], dict[str, PointStyle]]:
+    """The serum-coverage look of one serum on its map's ``scene`` (ae's sc-* maps): every
+    point pale; the antigens titrated against the serum in full colour, outlined pink within
+    fold of the homologous titre and black outside it, raised (outside over within); the serum
+    a black square on top; its circle in its passage class's colour (dashed at radius fold when
+    it has none)."""
+    from af.map.render import point_colours
+
+    if radius not in RADII:
+        raise CircleError(f"circle radius {radius!r}: not one of {RADII}")
+    within, outside = set(record.coverage.within), set(record.coverage.outside)
+    styles: dict[str, PointStyle] = {}
+    for p in scene.points:
+        fill, edge = point_colours(p)
+        k = int(p.id[2:]) if p.kind == "antigen" and p.id[2:].isdigit() else -1
+        if k in within or k in outside:
+            styles[p.id] = PointStyle(
+                fill=fill,
+                outline=WITHIN_OUTLINE if k in within else OUTSIDE_OUTLINE,
+                outline_width=COVERAGE_OUTLINE_WIDTH,
+                on_top=True,
+                raise_rank=0 if k in within else 1,
+            )
+        else:
+            styles[p.id] = PointStyle(fill=pale(fill), outline=pale(edge))
+    point = serum_point(record)
+    if record.xy is None:
+        raise CircleError(f"{record.designation}: the serum has no coordinates on this map")
+    styles[point] = PointStyle(
+        fill="black", outline="black", scale=COVERAGE_SERUM_SCALE, on_top=True, raise_rank=2
+    )
+    colour = PASSAGE_CIRCLE.get(record.passage_class or "", NO_COLOUR)
+    r = getattr(record.circle, radius)
+    circle = CircleMark(
+        point,
+        r if r is not None else record.fold,
+        colour,
+        fill_alpha=COVERAGE_FILL_ALPHA,
+        outline=colour,
+        dashed=r is None,
+    )
+    return [circle], styles

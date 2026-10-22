@@ -91,7 +91,7 @@ def block(**kw: Any) -> dict[str, Any]:
         "radius": "theoretical",
         "passage_classes": ["cell"],
         "maps": [{"chart": "lab-a-hi"}, {"empty": True}, {"chart": "lab-a-neut"}],
-        "sections": [{"label": "X", "clade": "X"}],
+        "sections": [{"label": "X", "clade": "X", "reason": "the example clade"}],
         **kw,
     }
 
@@ -136,7 +136,7 @@ def test_a_circle_block_draws_three_pages_per_map_and_writes_its_plan(tmp_path: 
 
 def test_a_section_matching_no_serum_in_the_whole_addendum_is_an_error(tmp_path: Path) -> None:
     pages = {f: page(f) for f in ("lab-a-hi", "lab-a-neut")}
-    none = block(sections=[{"label": "Y", "clade": "Y"}])
+    none = block(sections=[{"label": "Y", "clade": "Y", "reason": "a clade no serum has"}])
     with pytest.raises(SelectionError, match="matches no serum"):
         run_addenda(AddendaConfig(dt.date(2026, 9, 21), 12, {"circles": [none]}), pages,
                     context(tmp_path))  # fmt: skip
@@ -164,3 +164,22 @@ def test_recency_is_counted_back_from_the_meetings_month(tmp_path: Path) -> None
     path.write_text("[[circles]]\naddendum = 5\n")
     with pytest.raises(AddendaError, match="meeting"):
         load_addenda(path)
+
+
+def test_a_coverage_figure_has_the_three_line_title_and_its_record(tmp_path: Path) -> None:
+    from af.chart.serum_circles import serum_circles
+    from af.map.addenda import render_coverage
+
+    p = page("lab-a-hi")
+    record = serum_circles(p.chart, p.layout(), 2.0, projection=p.projection)[0]
+    i7 = render_coverage(
+        p, record, radius="empirical", clade_line="X", out_pdf=tmp_path / "c.pdf",
+        created=dt.datetime(2026, 10, 22, tzinfo=dt.UTC), addendum={"section": "X"}, lab=LAB,
+    )  # fmt: skip
+    doc = json.loads(i7.read_text())
+    assert doc["title"] == f"lab-a-hi by clade\n{STRAIN} F1/25\nX"
+    assert doc["map"]["addendum"] == {"section": "X"}
+    (circle,) = doc["map"]["circles"]
+    assert circle["point"] == "sr0" and circle["fill"] == "#0000ff"  # a cell serum: blue
+    styled = {a["id"]: a.get("style", {}) for a in doc["map"]["antigens"] + doc["map"]["sera"]}
+    assert styled["sr0"]["fill"] == "black" and styled["ag0"]["outline_width"] == 3.0

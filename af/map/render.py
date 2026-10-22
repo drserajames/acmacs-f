@@ -28,6 +28,7 @@ GREY = "#cccccc"  # an antigen with no colour (unpainted, or unsequenced)
 GREY_WINDOW = "#bebebe"  # an antigen outside the map's window, greyed by it (never a vaccine mark)
 OPEN = "transparent"  # no fill, GREY outline: a reference antigen with no colour
 SERUM_OUTLINE = "#cccccc"  # as the shipped report maps
+TITLE_PITCH = 1.2  # a title's line pitch, in title sizes (several lines: the coverage maps)
 
 
 def grey_of(p: ScenePoint) -> str | None:
@@ -103,7 +104,8 @@ class PointStyle:
     the point's size
     (the Look's antigen radius or serum half-side, and a mark's enlargement on top), as R draws
     removed points larger. ``on_top`` draws the point over every other point (ae's raise: the
-    circled sera of the circle addenda).
+    circled sera of the circle addenda); among raised points a higher ``raise_rank`` is drawn
+    later (the coverage maps raise the within antigens, then the outside ones, then the serum).
     """
 
     fill: str | None = None
@@ -112,6 +114,7 @@ class PointStyle:
     alpha: float | None = None
     scale: float | None = None
     on_top: bool | None = None
+    raise_rank: int | None = None
 
     def __post_init__(self) -> None:
         if self.scale is not None and self.scale <= 0:
@@ -227,9 +230,12 @@ def title_box(scene: Scene, look: Look) -> Box:
     ``look.title_clear`` past the last letter: ending AT it, a marker could touch the title's
     "e" (R5 review, 19 Oct 2026), and ending 6 points past it, markers 8 points from the title
     sat in its line (R6 review, 20 Oct 2026)."""
-    width, _ = text_size(scene.title, look.title_size, bold=True)
+    lines = scene.title.split("\n")
+    width = max(text_size(line, look.title_size, bold=True)[0] for line in lines)
     right = 0.024 + (width + look.title_clear) / look.page_points
-    return Box("title", 0.0, 0.0, min(0.95, right), 0.06)
+    # one line keeps the 0.06 the report maps have always had; each further line adds its pitch
+    bottom = 0.06 + (len(lines) - 1) * TITLE_PITCH * look.title_size / look.page_points
+    return Box("title", 0.0, 0.0, min(0.95, right), bottom)
 
 
 def draw_pdf(
@@ -303,9 +309,9 @@ def draw_scene(
     drawn = page * [1.0, a]  # in width units: what the Axes draws
     styles = styles or {}
 
-    def order(p: ScenePoint) -> int:
+    def order(p: ScenePoint) -> float:
         if p.id in styles and styles[p.id].on_top:
-            return 5
+            return 5 + 0.1 * min(styles[p.id].raise_rank or 0, 9)  # still under circles (7)
         if p.kind == "serum":
             return 0
         if p.mark:
@@ -320,17 +326,15 @@ def draw_scene(
         z = order(p) + 1
         own = styles.get(p.id, PointStyle())
         s = marker_extent(p, look, own)
+        fill, edge = point_colours(p)
         if p.kind == "serum":
             style: dict[str, Any] = {
-                "fc": own.fill or "none",
-                "ec": own.outline or SERUM_OUTLINE,
+                "fc": own.fill or fill,
+                "ec": own.outline or edge,
                 "lw": (own.outline_width if own.outline_width is not None else 1.0) * scale,
                 "zorder": z,
             }
         else:
-            grey = grey_of(p)
-            fill = "none" if grey == OPEN else (grey or p.colour)
-            edge = "black" if p.mark else (GREY if grey == OPEN else (grey or "black"))
             style = {
                 "fc": own.fill or fill,
                 "ec": own.outline or edge,
@@ -374,16 +378,18 @@ def draw_scene(
         )
     if title:
         # The shipped maps' title: baseline 37.5 and left edge 19 page units from the top-left
-        # corner. The title box (furniture) is unchanged: the title stays inside its 0.06.
-        ax.text(
-            19.0 / look.page_points,
-            37.5 / look.page_points,
-            scene.title,
-            fontsize=look.title_size * scale,
-            weight="bold",
-            va="baseline",
-            zorder=9,
-        )
+        # corner. The title box (furniture) is unchanged: the title stays inside its 0.06. A
+        # title of several lines (the coverage maps': map, serum, clade) runs on down.
+        for k, line in enumerate(scene.title.split("\n")):
+            ax.text(
+                19.0 / look.page_points,
+                (37.5 + k * TITLE_PITCH * look.title_size) / look.page_points,
+                line,
+                fontsize=look.title_size * scale,
+                weight="bold",
+                va="baseline",
+                zorder=9,
+            )
     if legend:
         _draw_legend(ax, scene, look, scale, drop=a - 1.0)
     # Spelled out with np.asarray (as rows_with_coordinates is): older numpy stubs type a reduced
@@ -394,6 +400,19 @@ def draw_scene(
     return tuple(
         p.id for p, out in zip(scene.points, outside.tolist(), strict=True) if p.shown and out
     )
+
+
+def point_colours(p: ScenePoint) -> tuple[str, str]:
+    """A point's fill and outline as the page draws them, before any :class:`PointStyle`: a
+    serum is an open grey box; a greyed or uncoloured antigen its grey (an uncoloured
+    reference antigen an open grey ring); a marked one has a black outline."""
+    if p.kind == "serum":
+        return "none", SERUM_OUTLINE
+    grey = grey_of(p)
+    fill = "none" if grey == OPEN else (grey or p.colour)
+    assert fill is not None  # grey_of gives a grey whenever the colour is None
+    edge = "black" if p.mark else (GREY if grey == OPEN else (grey or "black"))
+    return fill, edge
 
 
 def marker_extent(p: ScenePoint, look: Look, own: PointStyle | None = None) -> float:

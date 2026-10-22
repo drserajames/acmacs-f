@@ -152,3 +152,61 @@ def test_a_caption_is_printed_under_the_title_and_recorded(tmp_path: Path) -> No
     assert drawn[0].get_position()[1] < drawn[1].get_position()[1]  # the page runs downward
     assert drawn[0].get_fontsize() == DEFAULT_LOOK.caption_size
     plt.close(fig)
+
+
+def test_pale_follows_kateri() -> None:
+    from af.map.circles import pale
+
+    assert pale("#ff0000") == "#ff9999"  # saturation x 0.4, value up by (1 - v) x 0.6: v stays 1
+    assert pale("#000000") == "#808080"  # black becomes mid grey
+    assert pale("#666666") == "#ffffff"  # a grey is only lightened (0.4 / 0.4, capped)
+    assert pale("none") == "none" and pale("transparent") == "transparent"
+
+
+def test_the_coverage_look_outlines_titrated_antigens_and_raises_the_serum() -> None:
+    from dataclasses import replace
+
+    from af.map.circles import (
+        OUTSIDE_OUTLINE,
+        PASSAGE_CIRCLE,
+        WITHIN_OUTLINE,
+        coverage_marks,
+        pale,
+    )
+    from af.map.style import style_points
+
+    scene = style_points(synthetic_points(), SCHEME, Window("all", None), title="t")
+    covered = Coverage("best-match", 2, "1280", 8.3, (0, 3), (6,), 1, "good")
+    rec = replace(
+        record(), serum=1, circle=replace(record().circle, empirical=3.0), coverage=covered
+    )
+    (circle,), styles = coverage_marks(rec, scene, "empirical")
+    assert circle == CircleMark("sr1", 3.0, PASSAGE_CIRCLE["cell"], fill_alpha=0x18 / 0xFF,
+                                outline=PASSAGE_CIRCLE["cell"])  # fmt: skip
+    assert (styles["ag0"].outline, styles["ag6"].outline) == (WITHIN_OUTLINE, OUTSIDE_OUTLINE)
+    assert styles["ag0"].raise_rank < styles["ag6"].raise_rank < styles["sr1"].raise_rank  # type: ignore[operator]
+    by_id = {p.id: p for p in scene.points}
+    assert styles["ag0"].fill == by_id["ag0"].colour  # titrated: full colour
+    assert styles["ag1"].fill == pale(by_id["ag1"].colour or "")  # not titrated: pale
+    assert styles["sr1"].fill == "black" and styles["sr1"].on_top
+    (none,), _ = coverage_marks(replace(rec, circle=replace(rec.circle, empirical=None)), scene)
+    assert none.dashed and none.radius == 2.0
+
+
+def test_a_title_of_several_lines_runs_down_and_its_box_grows() -> None:
+    import matplotlib.pyplot as plt
+
+    from af.map.render import DEFAULT_LOOK, draw_scene, title_box
+    from af.map.style import style_points
+    from af.map.viewport import Frame
+
+    one = style_points(synthetic_points(), SCHEME, Window("all", None), title="Map")
+    three = style_points(synthetic_points(), SCHEME, Window("all", None), title="Map\nSerum\nX")
+    assert title_box(one, DEFAULT_LOOK).bottom == 0.06  # the report maps' box, unchanged
+    assert title_box(three, DEFAULT_LOOK).bottom > 0.06 + 2 * 25 / 800
+    fig = plt.figure(figsize=(4, 4), dpi=72)
+    ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+    draw_scene(ax, three, Frame(-7.0, 7.0, 14.0), {}, DEFAULT_LOOK)
+    ys = [t.get_position()[1] for t in ax.texts if t.get_text() in ("Map", "Serum", "X")]
+    assert len(ys) == 3 and ys == sorted(ys)
+    plt.close(fig)

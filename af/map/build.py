@@ -783,7 +783,19 @@ def build_map(
         dict(decisions.get("lineage_minority", {}).get("other", {})),
         non_ferret_count,
         (*(u["warning"] for u in [*unpainted, *placed]), *vaccine_flags),
-        _map_page(cfg, chart, projection, points, scheme, frame, look, windows, config, provenance)
+        _map_page(
+            cfg,
+            chart,
+            projection,
+            points,
+            scheme,
+            frame,
+            look,
+            windows,
+            config,
+            provenance,
+            vlabels,
+        )  # fmt: skip
         if keep_page
         else None,
     )
@@ -800,6 +812,7 @@ def _map_page(
     windows: Sequence[tuple[Window, str]],
     config: MapsConfig,
     provenance: dict[str, Any],
+    vaccine_labels: Mapping[str, str],
 ) -> MapPage:
     if not cfg.chain:
         raise BuildError(f"{cfg.folder}: an addendum needs a map drawn from a chain")
@@ -816,6 +829,7 @@ def _map_page(
         windows=tuple(windows),
         must_show_since=config.defaults.must_show_since,
         provenance=provenance,
+        vaccine_labels=dict(vaccine_labels),
     )
 
 
