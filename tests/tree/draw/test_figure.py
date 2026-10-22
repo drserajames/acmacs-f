@@ -523,3 +523,109 @@ def test_margin_strain_labels_keep_off_aa_labels_and_their_leaders():
     box = _margin_strain_box(3.0, 100.0, 40.0, 8.0, [], grid, [on_row, leader])
     assert box[0] == 3.0 and box[1] >= 104.0 or box[3] <= 96.0
     assert box[1] >= 118.0 or box[3] <= 96.0  # not between the leader's ends either
+
+
+# R7 (21-22 Oct 2026): pinned labels, per-tree placer weights, arrowhead size, strain offsets.
+def _pin_config(pins, **kw):
+    labels = replace(load_defaults().labels, target_labels=0, min_share=0.05)
+    return config(labels=labels, label_pins=pins, **kw)
+
+
+def _capture(monkeypatch):
+    import af.tree.draw.figure as figure_module
+
+    seen = []
+    real_render = figure_module.render
+
+    def capture(spec, pdf):
+        seen.append((spec, real_render(spec, pdf)))
+        return seen[-1][1]
+
+    monkeypatch.setattr(figure_module, "render", capture)
+    return seen
+
+
+def test_a_pinned_label_sits_at_its_offset_from_its_node_and_is_counted(tmp_path, monkeypatch):
+    from af.tree.draw.figure import LabelPin
+    from af.tree.draw.render import _Page
+
+    pin = LabelPin("EPI_ISL_0000010", "EPI_ISL_0000019", "L7F", -0.05, 0.02, "invented")
+    seen = _capture(monkeypatch)
+    report = make_figure(standard_tree(), PARENTS, _pin_config([pin]), tmp_path / "p.pdf", {})
+    spec, drawn = seen[0]
+    (k,) = spec.label_pins
+    lab = spec.labels[k]
+    page = _Page(spec)
+    (box,) = [p.box for p in drawn.placed if p.text == "L7F"]
+    g = spec.geometry
+    assert box[0] == pytest.approx(float(page.nx[lab.node]) - 0.05 * g.height - 1)
+    assert box[1] == pytest.approx(float(page.ny[lab.node]) + 0.02 * g.height)
+    assert report["label_pins"]["pins"] == 1 and report["label_pins"]["pinned"] == 1
+    assert sorted(report["label_pins"]["placed automatically"]) == ["A6S", "K2N"]
+
+
+def test_a_pin_matching_no_label_is_an_error_unless_optional(tmp_path):
+    from af.tree.draw.figure import LabelPin, LabelPinError
+
+    wrong = LabelPin("EPI_ISL_0000010", "EPI_ISL_0000019", "Q9R", -0.05, 0.0, "invented")
+    with pytest.raises(LabelPinError, match="no label of that text"):
+        make_figure(standard_tree(), PARENTS, _pin_config([wrong]), tmp_path / "a.pdf", {})
+    optional = replace(wrong, optional=True, reason="invented: drawn elsewhere")
+    report = make_figure(standard_tree(), PARENTS, _pin_config([optional]), tmp_path / "b.pdf", {})
+    assert report["label_pins"]["optional pins unused"] == [
+        {"text": "Q9R", "reason": "invented: drawn elsewhere"}
+    ]
+    missing = replace(wrong, first="EPI_ISL_9999999")
+    with pytest.raises(LabelPinError, match="not in the tree"):
+        make_figure(standard_tree(), PARENTS, _pin_config([missing]), tmp_path / "c.pdf", {})
+
+
+def test_no_pins_no_report_entry(tmp_path):
+    report = make_figure(standard_tree(), PARENTS, _pin_config([]), tmp_path / "n.pdf", {})
+    assert "label_pins" not in report
+
+
+def test_placer_keeps_fixed_boxes_and_places_the_rest_clear_of_them():
+    from af.tree.draw.place import Grid, place_labels
+
+    grid = Grid(200, 200)
+    items = [(1, "K2N", (150.0, 100.0)), (2, "A6S", (150.0, 101.0))]
+    pinned = (60.0, 95.0, 90.0, 107.0)
+    placed = place_labels(items, grid, lambda t: 6.0 * len(t), 10.0, fixed={0: pinned})
+    boxes = {p.key: p.box for p in placed}
+    assert boxes[1] == pinned
+    other = boxes[2]
+    assert min(other[2], pinned[2]) <= max(other[0], pinned[0]) or min(other[3], pinned[3]) <= max(
+        other[1], pinned[1]
+    )
+
+
+def test_tree_weights_heads_and_strain_offsets_come_from_the_round(tmp_path):
+    from af.tree.draw.place import Weights
+    from af.tree.draw.render import Geometry, _head_scale, _weights
+
+    assert _weights(Geometry()) is None  # defaults: the placer's own
+    assert _weights(Geometry(label_ink_weight=50.0, label_flat_weight=0.0)) == Weights(
+        ink=50.0, flat=0.0
+    )
+    g = Geometry(bracket_head_length=4.0, bracket_head_share=0.4)
+    assert _head_scale(g, 100.0) == 1 and _head_scale(g, 5.0) == pytest.approx(0.5)
+    assert _head_scale(Geometry(), 1.0) == 1  # no cap set: heads as before
+    with pytest.raises(ValueError, match="no strain label"):
+        make_figure(
+            standard_tree(),
+            PARENTS,
+            config(strain_dy={"EPI_ISL_0000001": 3.0}),
+            tmp_path / "s.pdf",
+            {},
+        )
+    report = make_figure(
+        standard_tree(),
+        PARENTS,
+        config(
+            strain_dy={"EPI_ISL_0000012": 3.0}, geometry=Geometry(strain_x=3.0, strains_first=True)
+        ),
+        tmp_path / "t.pdf",
+        {},
+    )
+    assert report["strains"][0]["drawn"]
