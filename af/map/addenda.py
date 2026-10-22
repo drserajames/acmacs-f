@@ -172,7 +172,9 @@ Handler = Callable[[Mapping[str, Any], Mapping[str, MapPage], AddendaContext], A
 
 def handlers() -> dict[str, Handler]:
     """Each block kind's handler, looked up by the block's array name."""
-    return {"circles": run_circles}
+    from af.serology.coverage import run_coverage  # 10-serology's; lazy: it imports this module
+
+    return {"circles": run_circles, "coverage": run_coverage}
 
 
 def run_addenda(

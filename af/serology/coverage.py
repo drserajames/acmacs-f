@@ -1,64 +1,83 @@
-"""The serum-coverage addenda's sera and the maps whose two homologous rules disagree.
+"""The serum-coverage addenda (1-3): ``[[coverage]]`` blocks of af.map.build's addenda pass.
 
-``python -m af.serology.coverage``: for each subtype in a round's section table (acmacs-f-data
-``config/addenda/serum-coverage/<round>.toml``), take every map it lists as the round drew it
-(the map figure's chain version, chart and finished layout), give each serum its strain's
-clades and amino acids from the stores (:meth:`af.map.colouring.StoreColours.for_sera`), choose
-the sera each section shows (:mod:`af.chart.serum_selection`), and compute their circles and
-coverage (:mod:`af.chart.serum_circles`).
+Each block is one addendum: the maps it covers, in page order, and its sections (a round's
+section table, :mod:`af.chart.serum_selection`). :func:`run_coverage` gives every serum of those
+maps its strain's clades and amino acids from the stores (:meth:`af.map.colouring.StoreColours
+.for_sera`), chooses the sera each section shows across all the maps at once, computes their
+circles and coverage on each map's drawn projection (:mod:`af.chart.serum_circles`), and draws
+one figure per shown serum in 08's coverage look (af.map.addenda.render_coverage). The page plan
+is the fixed description page, then six maps to a page: cell sera over the egg sera of the same
+strain, a centre's maps kept together (:func:`af.chart.serum_selection.pages`), with each
+section's caption.
 
 Sarah, Q228 (21 Oct 2026): "keep both rules, use the best match for the figure but declare the
-maps which disagree". The output is a round declaration fragment: one ``[[declaration]]`` per
-shown serum whose two rules disagree (af.report.howmade reads them per chain version), and a
-Markdown page listing them with their counts, for the round's ``declarations/`` (11 adds both).
-Hand declarations about the same pages (``--also``) are appended as given, and counted.
+maps which disagree". Each block also writes a round declaration fragment: one
+``[[declaration]]`` per shown serum whose two rules draw different coverage maps (af.report.
+howmade reads them per chain version), with a Markdown page listing them and their counts, for
+the round's ``declarations/`` (11 adds both). Hand declarations about the block's maps
+(``declarations = [{ map, ruling, text }]``) are appended, on that map's chain version, and
+counted.
 """
 
 from __future__ import annotations
 
-import argparse
-import datetime as dt
 import json
-import tomllib
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
-from af.chart.ace import content_hash, read_chart
-from af.chart.model import Chart
-from af.chart.serum_circles import SerumCircle, serum_circles
-from af.chart.serum_selection import Section, candidates, select_sera
-from af.map.colouring import StoreColours
-from af.map.config import ColouringConfig
-from af.report.figures import resolve
-from af.seq.matching_rules import matching_rules
-from af.store import Store, StoreRef
-from af.util.artefacts import sha256_path
+from af.chart.serum_circles import SerumCircle
 
 RULING = "Q228"
 KINDS = ("visible", "titre-only", "no-homologous", "neither")
-WINDOW = "all"  # coverage maps are drawn on the lab's whole map
-DRAWN = "empirical"  # the radius a coverage map draws (af.chart.serum_circles)
+RADIUS = "empirical"  # the radius a coverage map draws, as the Sep 2026 addenda did
+FOLD = 2.0
+CAPTION = "Ferret serum coverage maps for {label} sera."
+LEGEND = "Cell passage serum circles in blue, egg passage serum circles in red"
+TEXT_MARGINS = {"top": "5em", "bottom": "5em", "left": "2.5em", "right": "10em"}
+
+#: The description page before the maps (the Sep 2026 addenda's, as plain paragraphs).
+DESCRIPTION = (
+    "Ferret serum circle description",
+    "Ferret serum circles shown in blue are for sera raised against cell passaged-viruses, in "
+    "red for sera raised against egg-passaged viruses, in orange for sera raised against "
+    "reassortant viruses.",
+    "Strains outside a serum circle are >4-fold low-reactors to the homologous titer for the "
+    "serum.",
+    "Here we describe why serum circles have different radii. One might expect the serum circle "
+    "delimiting >4-fold low-reactors to have radius 2. However, this would only be the case "
+    "when the homologous titer is the same as the maximum titer for a serum - and this is not "
+    "always the case.",
+    'The theoretical (or "target") distance in an antigenic map from serum S to a antigen A is '
+    "log2 (max titer for serum S against any antigen) - log2 (titer for serum S against antigen "
+    "A). In other words, the number of 2-folds between the maximum titer for serum S, and the "
+    "titer of serum S to antigen A.",
+    "Thus the theoretical distance between a serum and antigen is dependent on both the maximum "
+    "titer observed for the serum and its homologous titer.",
+    "If low reactors were defined as >4-fold from the max titer for a serum then the "
+    "theoretical radius for all serum circles would be 2 units, and this text would not be "
+    "necessary. But low reactors are defined as >4-fold from the homologous titer, hence the "
+    "radius is 2 units plus the number of 2-folds between max titer and the homologous titer for "
+    "a serum. Saying the same thing mathematically the theoretical radius for a serum circle is "
+    "2 + log2 (max titer for serum S against any antigen A) - log2 (homologous titer for serum "
+    "S).",
+    "In addition to the theoretical serum circle radius, we also calculate an empirical radius. "
+    "The difference is that the theoretical radius is calculated from the target distance "
+    "between sera and antigens as specified by the HI titers, whereas the empirical radius is "
+    "determined from the antigenic map and thus the actual distances in the antigenic map "
+    "between the sera and antigens. There are some extra details about the empirical "
+    "calculation but they are not central, and are omitted here.",
+    "The theoretical and empirical radii are similar to each other, and are on average only "
+    "about 0.5 antigenic units different. The empirical radius is the one shown on the "
+    "antigenic maps.",
+    "The center of a serum circle for serum S is at the serum point in the map for serum S.",
+)
 
 
 class CoverageError(RuntimeError):
-    """A map, chart or serum the section table names that the round does not have."""
-
-
-@dataclass(frozen=True)
-class MapInput:
-    """One map of the round as its figure records it."""
-
-    chart_name: str
-    centre: str
-    chain: StoreRef
-    chart: Chart
-    layout: np.ndarray
-    minimum_column_basis: str
+    """A block the round's maps cannot draw: a map, serum or declaration it names is missing."""
 
 
 @dataclass(frozen=True)
@@ -68,74 +87,145 @@ class Shown:
     addendum: int
     section: str
     reason: str
-    map: MapInput
+    chart_name: str  # the map folder
+    chain: Mapping[str, Any]  # the map's chain input: dataset and version (and the rest as given)
     record: SerumCircle
 
 
-def map_input(store: Store, figures: Path, chart_name: str, centre: str) -> MapInput:
-    """The chart and finished layout a round's map was drawn with: the chain version and chart
-    its figure names (the step the figure's content hash picks out, as af.map.build recorded
-    it), and the figure's point positions."""
-    doc = resolve(figures, f"map/{chart_name}/{WINDOW}").figure.doc
-    chain = dict(doc["provenance"]["inputs"]["chain"])
-    chart_hash = chain.pop("sha256")
-    chain.pop("until_table", None)
-    ref = StoreRef.from_json(chain)
-    root = store.resolve(ref)
-    steps = json.loads((root / "chain.json").read_text())["steps"]
-    found = [
-        root / s["directory"] / s["chosen_file"]
-        for s in steps
-        if content_hash(root / s["directory"] / s["chosen_file"]) == chart_hash
-    ]
-    if len(found) != 1:
-        raise CoverageError(f"{chart_name}: {len(found)} steps of {ref} match the figure's chart")
-    chart = read_chart(found[0])
-    layout = np.full((chart.n_points, 2), np.nan)
-    for kind, offset in (("antigens", 0), ("sera", chart.n_antigens)):
-        for point in doc["map"][kind]:
-            if point["xy"] is not None:
-                layout[offset + int(point["id"][2:])] = point["xy"]
-    mcb = chart.projections[0].minimum_column_basis if chart.projections else "none"
-    return MapInput(chart_name, centre, ref, chart, layout, mcb)
+def run_coverage(block: Mapping[str, Any], pages: Mapping[str, Any], ctx: Any) -> Any:
+    """One serum-coverage addendum (af.map.addenda's handler for ``[[coverage]]`` blocks)."""
+    from af.chart.serum_circles import serum_circles
+    from af.chart.serum_selection import Section, candidates, columns, select_sera
+    from af.chart.serum_selection import pages as page_plan
+    from af.map.addenda import AddendumResult, block_maps, directory_name, render_coverage
 
-
-def shown_sera(
-    colours: StoreColours, maps: Sequence[MapInput], config: Mapping[str, Any], since: dt.date
-) -> list[Shown]:
-    """The sera one addendum shows, section by section, each with its circle record."""
-    sections = [Section.from_config(s) for s in config["sections"]]
+    name = directory_name(block)
+    out_dir = ctx.out_root / "addenda" / name
+    if str(block.get("radius", RADIUS)) != RADIUS or float(block.get("fold", FOLD)) != FOLD:
+        raise CoverageError(f"{name}: coverage draws the {RADIUS} radius at fold {FOLD}")
+    sections = [Section.from_config(s) for s in block.get("sections", ())]
+    if not sections:
+        raise CoverageError(f"{name}: no sections")
     residues = {int(r[:-1]) for s in sections for r in s.aa}
-    by_key: dict[tuple[str, ...], tuple[MapInput, SerumCircle]] = {}
+    folders = block_maps(block)
+    if None in folders:
+        raise CoverageError(f"{name}: coverage pages are laid out by centre; no empty map slots")
+    found: dict[tuple[str, ...], tuple[str, SerumCircle, str]] = {}
     cands = []
-    for m in maps:
-        strains = colours.for_sera(m.chart, residues)
-        records = serum_circles(m.chart, m.layout, 2.0, minimum_column_basis=m.minimum_column_basis)
-        for c, rec in zip(
-            candidates(m.chart, strains, chart_name=m.chart_name, centre=m.centre),
-            records,
-            strict=True,
-        ):
-            if c.key in by_key:
-                raise CoverageError(f"{m.chart_name}: two sera are {c.key[1:]}")
-            by_key[c.key] = (m, rec)
-            cands.append(c)
-    selection = select_sera(cands, sections, since=since)
-    return [
-        Shown(int(config["addendum"]), label, chosen.reason, *by_key[chosen.serum.key])
-        for label, sera in selection.sections.items()
-        for chosen in sera
-    ]
+    for f in folders:
+        assert f is not None
+        page = pages[f]
+        strains = ctx.colours.for_sera(page.chart, residues)
+        records = serum_circles(page.chart, page.layout(), FOLD, projection=page.projection)
+        mine = candidates(page.chart, strains, chart_name=f, centre=page.centre)
+        for cand, rec, strain in zip(mine, records, strains, strict=True):
+            found[cand.key] = (f, rec, _clade_line(strain))
+        cands += mine
+    classes = block.get("passage_classes")
+    selection = select_sera(
+        cands, sections, since=ctx.since,
+        passage_classes=frozenset(classes) if classes is not None else None,
+    )  # fmt: skip
+    figure_of: dict[tuple[str, ...], Path] = {}
+    shown: list[Shown] = []
+    for label, chosen in selection.sections.items():
+        for c in chosen:
+            f, rec, clade_line = found[c.serum.key]
+            page = pages[f]
+            shown.append(Shown(int(block["addendum"]), label, c.reason, f, _chain(page), rec))
+            figure_of[c.serum.key] = render_coverage(
+                page, rec, radius=RADIUS, clade_line=clade_line, created=ctx.created,
+                out_pdf=out_dir / f / f"sr{rec.serum}" / "v1" / "figure.pdf",
+                addendum={"name": name, "kind": "coverage", "section": label,
+                          "reason": c.reason, "rules": [rec.circle.rule, rec.coverage.rule],
+                          "radius": RADIUS, "record": rec.to_json()},
+            )  # fmt: skip
+
+    def cell(c: Any) -> str | None:
+        return None if c is None else str(figure_of[c.key].relative_to(out_dir))
+
+    plan: list[dict[str, Any]] = [{"text": list(DESCRIPTION), "margins": dict(TEXT_MARGINS)}]
+    for label, chosen in selection.sections.items():
+        for laid in page_plan(columns(chosen)):
+            tops = [cell(t) for t, _ in laid] + [None] * (3 - len(laid))
+            bottoms = [cell(b) for _, b in laid] + [None] * (3 - len(laid))
+            plan.append({"caption": CAPTION.format(label=label), "legend": LEGEND,
+                         "cells": tops + bottoms})  # fmt: skip
+    hand = [_hand_declaration(name, d, pages, folders) for d in block.get("declarations", ())]
+    md_file = f"declarations/{name}-homologous-rules.md"
+    toml_path = out_dir / f"{name}-homologous-rules.toml"
+    md_path = out_dir / f"{name}-homologous-rules.md"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sources = {"addendum": name, "serology": str(getattr(ctx.colours, "serology", "?"))}
+    counts = write_fragment(shown, hand, toml_path, md_path, md_file, sources)
+    manifest = {
+        "kind": "coverage",
+        "addendum": int(block["addendum"]),
+        "subtype": block["subtype"],
+        "title": block.get("title", ""),
+        "pages": plan,
+        "figures": [str(p.relative_to(out_dir)) for p in figure_of.values()],
+        "declarations": [toml_path.name, md_path.name],
+        "selection": selection.report(),
+        "disagreements": counts,
+    }
+    return AddendumResult(
+        out_dir, manifest, tuple(figure_of.values()), selection.report(),
+        [_shown_json(s, name) for s in shown],
+    )  # fmt: skip
+
+
+def _clade_line(strain: Any) -> str:
+    """The figure's third title line: the serum's strain's clade (its lineage's last), or none
+    when no sequence of the strain is known."""
+    if strain.clade:
+        return str(strain.clade)
+    return str(strain.lineage[-1]) if strain.lineage else ""
+
+
+def _chain(page: Any) -> Mapping[str, Any]:
+    """The chain version a map was drawn from: a declaration is made on its dataset and
+    version (af.report.howmade quotes it on that version only)."""
+    ref = dict(page.chain_ref)
+    if not ref.get("dataset") or not ref.get("version"):
+        raise CoverageError(f"{page.folder}: its chain input names no dataset and version: {ref}")
+    return ref
+
+
+def _shown_json(s: Shown, name: str) -> dict[str, Any]:
+    return {"addendum": name, "section": s.section, "reason": s.reason, "map": s.chart_name,
+            "serum": s.record.designation, "chain": dict(s.chain),
+            "disagreement": s.record.disagreement(drawn=RADIUS),
+            "record": s.record.to_json()}  # fmt: skip
+
+
+def _hand_declaration(
+    name: str, entry: Mapping[str, Any], pages: Mapping[str, Any], folders: Sequence[Any]
+) -> dict[str, str]:
+    """A hand declaration about one of the block's maps, on the chain version it was drawn
+    from: ``{ map, ruling, text }``."""
+    if set(entry) != {"map", "ruling", "text"}:
+        raise CoverageError(f"{name}: a declaration needs map, ruling and text: {dict(entry)}")
+    if entry["map"] not in folders:
+        raise CoverageError(f"{name}: declaration about {entry['map']!r}, not one of its maps")
+    chain = _chain(pages[entry["map"]])
+    return {
+        "ruling": str(entry["ruling"]),
+        "dataset": str(chain["dataset"]),
+        "version": str(chain["version"]),
+        "text": str(entry["text"]),
+        "file": f"declarations/{name}-homologous-rules.md",
+    }
 
 
 def declaration(shown: Shown, md_file: str) -> dict[str, str]:
     r = shown.record
-    kind = r.disagreement(drawn=DRAWN)
+    kind = r.disagreement(drawn=RADIUS)
     assert kind is not None
     return {
         "ruling": RULING,
-        "dataset": shown.map.chain.dataset,
-        "version": shown.map.chain.version,
+        "dataset": str(shown.chain["dataset"]),
+        "version": str(shown.chain["version"]),
         "text": (
             f"serum coverage addendum {shown.addendum}, {shown.section}: {r.designation} "
             f"({kind}): drawn from the best match ({_rule(r.circle, r.coverage)}); "
@@ -167,11 +257,11 @@ def write_fragment(
     sources: Mapping[str, str],
 ) -> dict[str, Any]:
     """The declaration fragment and its page; returns the counts."""
-    disagree = [s for s in shown if s.record.disagreement(drawn=DRAWN) is not None]
+    disagree = [s for s in shown if s.record.disagreement(drawn=RADIUS) is not None]
     counts: dict[str, Any] = {
         "shown": len(shown),
         "disagree": len(disagree),
-        "by_kind": dict(Counter(s.record.disagreement(drawn=DRAWN) for s in disagree)),
+        "by_kind": dict(Counter(s.record.disagreement(drawn=RADIUS) for s in disagree)),
         "by_addendum": dict(Counter(f"addendum {s.addendum}" for s in disagree)),
         "hand": len(also),
     }
@@ -200,8 +290,8 @@ def write_fragment(
     for s in disagree:
         r = s.record
         lines.append(
-            f"| {s.addendum} | {s.section} | {s.map.chart_name} | {r.designation} | "
-            f"{r.disagreement(drawn=DRAWN)} | {_rule(r.circle, r.coverage)} | "
+            f"| {s.addendum} | {s.section} | {s.chart_name} | {r.designation} | "
+            f"{r.disagreement(drawn=RADIUS)} | {_rule(r.circle, r.coverage)} | "
             f"{_rule(r.other_circle, r.other_coverage)} |"
         )
     if also:
@@ -219,43 +309,3 @@ def _toml(entry: Mapping[str, str]) -> str:
     if set(entry) != set(keys):
         raise CoverageError(f"declaration keys {sorted(entry)}: expected {list(keys)}")
     return "[[declaration]]\n" + "".join(f"{k} = {q(entry[k])}\n" for k in keys)
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--store", type=Path, required=True)
-    parser.add_argument("--af-data", type=Path, required=True, help="acmacs-f-data checkout")
-    parser.add_argument("--clones", type=Path, required=True, help="clade nomenclature clones")
-    parser.add_argument("--acmacs-data", type=Path, required=True, help="the user's clade tables")
-    parser.add_argument("--figures", type=Path, required=True, help="the round's figure root")
-    parser.add_argument("--sections", type=Path, required=True, help="the round's section table")
-    parser.add_argument("--since", type=dt.date.fromisoformat, required=True,
-                        help="YYYY-MM-DD: sera titrated on or after it")  # fmt: skip
-    parser.add_argument("--also", type=Path, help="hand [[declaration]]s to append")
-    parser.add_argument("--md-file", required=True, help="the page's path as declarations cite it")
-    parser.add_argument("--out-toml", type=Path, required=True)
-    parser.add_argument("--out-md", type=Path, required=True)
-    args = parser.parse_args(argv)
-    config = tomllib.loads(args.sections.read_text())["coverage"]
-    store = Store.open(args.store)
-    colours = StoreColours(
-        store,
-        ColouringConfig("store", args.acmacs_data, args.clones),
-        matching_rules(args.af_data),
-    )
-    shown: list[Shown] = []
-    for cfg in config.values():
-        if not isinstance(cfg, dict) or "sections" not in cfg:
-            continue  # recency_months and other round-wide keys
-        maps = [map_input(store, args.figures, m["chart"], m["centre"]) for m in cfg["maps"]]
-        shown += shown_sera(colours, maps, cfg, args.since)
-    also = tomllib.loads(args.also.read_text()).get("declaration", []) if args.also else []
-    sources = {"sections": f"{args.sections.name} ({sha256_path(args.sections)[:12]})",
-               "serology": str(colours.serology)}  # fmt: skip
-    counts = write_fragment(shown, also, args.out_toml, args.out_md, args.md_file, sources)
-    print(json.dumps(counts))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
