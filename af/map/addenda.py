@@ -236,6 +236,8 @@ def draw_addendum_figure(
         circles=circles,
         caption=caption,
         addendum=addendum,
+        # the map's zoom on every addendum figure: a taller title may cover points, counted
+        require_shown=False,
     )
     return result.i7
 
@@ -328,6 +330,7 @@ def run_circles(
     from af.chart.serum_circles import serum_circles
     from af.chart.serum_selection import Section, candidates, select_sera
     from af.map.circles import CircleLook, names_lines, serum_circle_marks
+    from af.serology.coverage import Shown, write_fragment
 
     name = directory_name(block)
     out_dir = ctx.out_root / "addenda" / name
@@ -355,6 +358,7 @@ def run_circles(
     )
     figures: dict[str, dict[str, Path]] = {}
     shown: list[dict[str, Any]] = []
+    declared: list[Shown] = []
     for f in folders:
         page = pages[f]
         index = _serum_index(page.chart)
@@ -391,6 +395,20 @@ def run_circles(
             {**s, "addendum": name, "map": f, "chain": page.chain_ref, "record": r.to_json()}
             for s, r in zip(sera, picked, strict=True)
         ]
+        declared += [
+            Shown(int(block["addendum"]), label, c.reason, f, dict(page.chain_ref), r)
+            for r, (label, c) in zip(picked, chosen, strict=True)
+        ]
+    # Sarah, Q228: draw the best match, declare the sera where ae's rule would draw another
+    # circle; a circle panel draws only its radius, so the coverage sets do not count
+    out_dir.mkdir(parents=True, exist_ok=True)
+    toml_path = out_dir / f"{name}-homologous-rules.toml"
+    md_path = out_dir / f"{name}-homologous-rules.md"
+    sources = {"addendum": name, "serology": str(getattr(ctx.colours, "serology", "?"))}
+    disagreements = write_fragment(
+        declared, [], toml_path, md_path, f"declarations/{md_path.name}", sources,
+        radius=look.radius, kind="serum circle", coverage=False,
+    )  # fmt: skip
     plan = []
     for kind in PAGE_KINDS:
         for start in range(0, len(slots), PAGE_CELLS):
@@ -412,8 +430,9 @@ def run_circles(
         "title": block.get("title", ""),
         "pages": plan,
         "figures": [str(p.relative_to(out_dir)) for fs in figures.values() for p in fs.values()],
-        "declarations": [],
+        "declarations": [toml_path.name, md_path.name],
         "selection": {**selection.report(), "passage_class_overrides": overridden},
+        "disagreements": disagreements,
     }
     return AddendumResult(
         out_dir,

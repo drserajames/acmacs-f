@@ -21,7 +21,7 @@ import numpy as np
 
 from af.map.labels import Placed
 from af.map.orient import rows_with_coordinates
-from af.map.style import MARKERS, Scene, ScenePoint
+from af.map.style import MARKERS, Marker, Scene, ScenePoint
 from af.map.viewport import Box, Frame
 
 GREY = "#cccccc"  # an antigen with no colour (unpainted, or unsequenced)
@@ -115,6 +115,7 @@ class PointStyle:
     scale: float | None = None
     on_top: bool | None = None
     raise_rank: int | None = None
+    marker: Marker | None = None  # another shape than the point's own (a coverage map's serum)
 
     def __post_init__(self) -> None:
         if self.scale is not None and self.scale <= 0:
@@ -344,7 +345,7 @@ def draw_scene(
         alpha = own.alpha if own.alpha is not None else look.alpha
         if alpha is not None:
             style["alpha"] = alpha
-        ax.add_patch(_marker_patch(p.marker, x, y, s, style))
+        ax.add_patch(_marker_patch(own.marker or p.marker, x, y, s, style))
     _draw_circles(ax, scene, drawn, frame, circles, scale)
     from matplotlib import patheffects
 

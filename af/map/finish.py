@@ -161,6 +161,7 @@ def finish_map(
     circles: Sequence[CircleMark] = (),
     caption: Sequence[str] = (),
     addendum: dict[str, Any] | None = None,
+    require_shown: bool = True,
 ) -> FinishedMap:
     """Produce ``out_pdf`` and its I7 for one chart and window.
 
@@ -178,7 +179,10 @@ def finish_map(
     ``circles``: drawn round their points (serum circles, :mod:`af.map.circles`) and recorded
     in the I7. They do not move the frame: a circle may run off the page, as ae's did.
     ``caption``: lines printed under the title (the circled sera), recorded in the I7.
-    ``addendum``: what an addendum figure adds (af.map.addenda), recorded in the I7 as is."""
+    ``addendum``: what an addendum figure adds (af.map.addenda), recorded in the I7 as is.
+    ``require_shown`` False draws in the given ``frame`` even where this page's furniture covers
+    a recent antigen (an addendum figure keeps its map's zoom), and records in the I7 what each
+    priority has hidden."""
     # fail before drawing anything
     if created.tzinfo is None:
         raise ValueError("I7 'created' needs a time zone")
@@ -191,7 +195,9 @@ def finish_map(
             pg.xy, pg.priorities, size=frame_size, furniture=furniture, radii=pg.radii
         )
     else:
-        choice = hidden_counts(frame, pg.xy, pg.priorities, furniture, pg.radii)
+        choice = hidden_counts(
+            frame, pg.xy, pg.priorities, furniture, pg.radii, strict=require_shown
+        )
     frame = choice.frame
     page = frame.page(xy)
     ids = [p.id for p in scene.points if p.mark is not None and p.shown]
@@ -224,6 +230,7 @@ def finish_map(
         circles=circles,
         caption=caption,
         addendum=addendum,
+        hidden=None if require_shown else choice.hidden,
     )
     i7 = write_i7(doc, out_pdf)
     return FinishedMap(

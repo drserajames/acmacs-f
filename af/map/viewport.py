@@ -228,12 +228,16 @@ def hidden_counts(
     priorities: tuple[Priority, ...],
     furniture: tuple[Box, ...],
     radii: Array | float = 0.0,
+    *,
+    strict: bool = True,
 ) -> FrameChoice:
     """A given frame's hidden counts per priority, as :func:`choose_frame` reports them (whole
     markers), for a page drawn in a frame chosen for several (:class:`View`). Raises
-    :class:`FrameError` if a centre of the first, required group is hidden."""
+    :class:`FrameError` if a centre of the first, required group is hidden, unless not
+    ``strict``: a figure drawn in another page's frame with its own furniture (an addendum's
+    taller title) counts what its furniture covers instead."""
     page = frame.page(xy)
-    if (hidden_mask(page, furniture) & priorities[0].mask).any():
+    if strict and (hidden_mask(page, furniture) & priorities[0].mask).any():
         raise FrameError(f"the given frame hides points of {priorities[0].name!r}")
     hidden = hidden_mask(page, furniture, radii)
     return FrameChoice(frame, {p.name: int((hidden & p.mask).sum()) for p in priorities})
