@@ -14,7 +14,9 @@ against every serum of the labs the addendum covers. A section selects by design
   first in the table; ``drop`` claims sera and shows none of them, and ``extra`` shows its
   sera without claiming them.
 
-A section that matches nothing is an error unless it is marked optional (design rule 1).
+A section that matches nothing is an error unless it is marked optional (design rule 1). Each
+section says in one sentence why it is there, and each exclusion is a named entry with its own
+reason (hand overrides are named data, counted and reported: design rule 9).
 """
 
 from __future__ import annotations
@@ -35,6 +37,18 @@ class SelectionError(ValueError):
 
 
 @dataclass(frozen=True)
+class Exclusion:
+    """Sera a section leaves out: those whose designation contains ``text``, and why."""
+
+    text: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not self.text.strip() or not self.reason.strip():
+            raise SelectionError(f"exclusion {self.text!r}: needs text and a reason")
+
+
+@dataclass(frozen=True)
 class Section:
     """One section of an addendum. Exactly one kind of selector: ``strains`` (designation
     substrings), or ``clade`` and/or ``aa`` (residues such as "155E", all required)."""
@@ -43,11 +57,12 @@ class Section:
     strains: tuple[str, ...] = ()
     clade: str | None = None
     aa: tuple[str, ...] = ()
-    exclude: tuple[str, ...] = ()
+    exclude: tuple[Exclusion, ...] = ()
     priority: int = 0
     drop: bool = False
     extra: bool = False
     optional: bool = False
+    reason: str = ""  # why the section is there, one sentence (required in config)
 
     def __post_init__(self) -> None:
         if bool(self.strains) == bool(self.clade or self.aa):
@@ -70,21 +85,33 @@ class Section:
             "drop",
             "extra",
             "optional",
+            "reason",
         }
         if unknown := sorted(set(entry) - known):
             raise SelectionError(f"section {entry.get('label')!r}: unknown keys {unknown}")
         if "label" not in entry:
             raise SelectionError(f"section without a label: {dict(entry)}")
+        if not str(entry.get("reason", "")).strip():
+            raise SelectionError(f"section {entry['label']!r}: no reason given")
+        exclude = []
+        for x in entry.get("exclude", ()):
+            if not isinstance(x, Mapping) or set(x) != {"text", "reason"}:
+                raise SelectionError(
+                    f"section {entry['label']!r}: exclude {x!r} must be "
+                    "{ text = ..., reason = ... }"
+                )
+            exclude.append(Exclusion(str(x["text"]), str(x["reason"])))
         return cls(
             label=str(entry["label"]),
             strains=tuple(entry.get("strains", ())),
             clade=entry.get("clade"),
             aa=tuple(entry.get("aa", ())),
-            exclude=tuple(entry.get("exclude", ())),
+            exclude=tuple(exclude),
             priority=int(entry.get("priority", 0)),
             drop=bool(entry.get("drop", False)),
             extra=bool(entry.get("extra", False)),
             optional=bool(entry.get("optional", False)),
+            reason=str(entry["reason"]),
         )
 
     def matches(self, serum: Candidate) -> str | None:
@@ -137,12 +164,14 @@ class Selection:
     sections: dict[str, list[Chosen]]
     dropped: dict[str, list[Chosen]]
     excluded: dict[str, int]  # reason -> number of sera
+    reasons: dict[str, str] = field(default_factory=dict)  # section -> why it is there
 
     def report(self) -> dict[str, Any]:
         return {
             "sections": {k: len(v) for k, v in self.sections.items()},
             "dropped": {k: len(v) for k, v in self.dropped.items()},
             "excluded": dict(self.excluded),
+            "reasons": dict(self.reasons),
         }
 
 
@@ -181,8 +210,8 @@ def select_sera(
             reason = s.matches(c)
             if reason is None:
                 continue
-            if any(x.upper() in c.designation.upper() for x in s.exclude):
-                skip(f"excluded from {s.label!r} by designation")
+            if hit := next((x for x in s.exclude if x.text.upper() in c.designation.upper()), None):
+                skip(f"excluded from {s.label!r}: {hit.reason}")
                 continue
             found[c.key] = reason
         if not found and not s.optional:
@@ -208,7 +237,7 @@ def select_sera(
             if c.key in matched[s.label] and (s.extra or owner.get(c.key) == s.label)
         ]
         (dropped if s.drop else shown)[s.label] = mine
-    return Selection(shown, dropped, excluded)
+    return Selection(shown, dropped, excluded, {s.label: s.reason for s in sections})
 
 
 def titration_dates(chart: Chart) -> list[dt.date | None]:
