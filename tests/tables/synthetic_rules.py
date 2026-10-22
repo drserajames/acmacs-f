@@ -132,6 +132,10 @@ RULES: dict[str, list[str]] = {
         "lab\tfile\tsheet\tpanel\tevidence\tadded_by\tadded_on\toptional",
         "LABV\tlabv-panel-20300102.xlsx\tWorksheet\t4" + META + "yes",
     ],
+    "source_names": [
+        "lab\tset\tfile\tread_as\tevidence\tadded_by\tadded_on\toptional",
+        "LABV\tlabv-own-2030\t2030/LabV first test A.xlsx\tlabv-20300102.xlsx" + META + "yes",
+    ],
     "dropped_rows": [
         "lab\tfile\tsheet\trow\tname\tevidence\tadded_by\tadded_on\toptional",
         "LABV\tlabv-drop-20300102.xlsx\tWorksheet\t15\tB/EXAMPLEVILLE/5/2030" + META + "yes",
