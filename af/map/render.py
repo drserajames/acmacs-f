@@ -56,7 +56,9 @@ class Look:
     label_gap: float = (
         2.0  # points kept clear between two labels (abutting boxes looked stacked, R4 review)
     )
-    title_clear: float = 6.0  # points kept clear right of the title's last letter (R5 review)
+    # points kept clear right of the title's last letter: 6 (R5 review) let markers 8 and 10
+    # points away read as part of the title (R6 review, 20 Oct 2026)
+    title_clear: float = 12.0
     caption_size: float = 7.0  # the circle addenda's list of sera under the title (ae: 7 points)
     legend_pad: float = 0.0125  # the legend box's distance from the page's left and bottom
     # The legend, in points of the 800-point page, as the shipped report draws it (style 08-07/08,
@@ -223,7 +225,8 @@ def title_box(scene: Scene, look: Look) -> Box:
     """The title's room, measured in the figure font: an estimate from the character count
     ran up to 13 u short of the drawn title, which then sat on points (style 08-20). It ends
     ``look.title_clear`` past the last letter: ending AT it, a marker could touch the title's
-    "e" (R5 review, 19 Oct 2026)."""
+    "e" (R5 review, 19 Oct 2026), and ending 6 points past it, markers 8 points from the title
+    sat in its line (R6 review, 20 Oct 2026)."""
     width, _ = text_size(scene.title, look.title_size, bold=True)
     right = 0.024 + (width + look.title_clear) / look.page_points
     return Box("title", 0.0, 0.0, min(0.95, right), 0.06)

@@ -99,6 +99,19 @@ class Month:
         return Month(self.year + self.month // 12, self.month % 12 + 1)
 
 
+def partial_title(month: Month, cutoff: datetime.date | None) -> str:
+    """A month's page title: "October 2026", or "October 2026 (to 21 October)" when the data
+    were cut off inside it (a monthly report fetched mid-month, Q243). A cut-off on the month's
+    last day or after it leaves the month whole."""
+    name = calendar.month_name[month.month]
+    whole = f"{name} {month.year}"
+    if cutoff is None or Month.of(cutoff) != month:
+        return whole
+    if cutoff.day == calendar.monthrange(cutoff.year, cutoff.month)[1]:
+        return whole
+    return f"{whole} (to {cutoff.day} {name})"
+
+
 def months(first: Month, last: Month) -> list[Month]:
     """Every month from ``first`` to ``last`` inclusive; empty months still get a map."""
     if (last.year, last.month) < (first.year, first.month):

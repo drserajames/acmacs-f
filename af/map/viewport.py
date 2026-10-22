@@ -161,9 +161,12 @@ def choose_frame(
     centre fits (h1-vidrl, R4, 15-unit frame).
 
     ``also``: further pages the same frame must serve, each with as many priority groups, in the
-    same ranks. The required group must then be visible on every page, and each rank's hidden
-    counts are summed over the pages. Choosing a frame per window moved h1-cnic's frame 3 units
-    between its all and 12m pages (R5 review, 19 Oct 2026). ``hidden`` reports the first page.
+    same ranks. The required group must then be visible on every page; after it, the pages are
+    compared in turn, every rank of the first page before the next page's. Choosing a frame per
+    window moved h1-cnic's frame 3 units between its all and 12m pages (R5 review, 19 Oct 2026).
+    Summing each rank over the pages instead let the all page, where every antigen is in the
+    window, outweigh the windows' own: h1-cnic's shared frame was the all page's, 2.9 units above
+    its 12m and 6m frames (R6 review, 20 Oct 2026). ``hidden`` reports the first page.
     """
     views = (View(priorities, furniture), *also)
     if not priorities:
@@ -198,16 +201,14 @@ def choose_frame(
             frame = Frame(round(float(x), 6), -round(float(y), 6), size)
             page = frame.page(pts)
             required = 0.0
-            ranks = np.zeros(len(priorities))
-            own: list[float] = []
+            ranks: list[float] = []  # page by page, each page's ranks in order
             for v, ms in zip(views, masks, strict=True):
                 required += float((hidden_mask(page, v.furniture) & ms[0]).sum())
                 hidden = hidden_mask(page, v.furniture, rad)
-                counts = [float((hidden & m).sum()) for m in ms]
-                ranks += counts
-                own = own or counts
+                ranks += [float((hidden & m).sum()) for m in ms]
+            own = ranks[: len(priorities)]
             offset = float(np.hypot(*(centre - [x + size / 2, y + size / 2])))
-            cost = (required, *ranks.tolist(), offset)
+            cost = (required, *ranks, offset)
             if best is None or cost < best[0]:
                 best = (cost, frame, own)
     assert best is not None

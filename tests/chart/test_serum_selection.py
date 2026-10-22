@@ -70,13 +70,16 @@ def test_drop_claims_and_extra_shares():
 
 
 def test_passage_classes_and_exclusions():
-    sections = [Section("vaccine", strains=("EXAMPLEVILLE/1/2025",), exclude=("F2/25",))]
+    from af.chart.serum_selection import Exclusion
+
+    older = Exclusion("F2/25", "an older pair")
+    sections = [Section("vaccine", strains=("EXAMPLEVILLE/1/2025",), exclude=(older,))]
     sel = select_sera(SERA, sections, since=None, passage_classes=frozenset({"cell"}))
     assert labels(sel, "vaccine") == ["1"]
     assert sel.excluded == {"passage class egg": 1}
     sel = select_sera(SERA, sections, since=None)
     assert labels(sel, "vaccine") == ["1"]
-    assert sel.excluded == {"excluded from 'vaccine' by designation": 1}
+    assert sel.excluded == {"excluded from 'vaccine': an older pair": 1}
 
 
 def test_a_section_matching_nothing_is_an_error_unless_optional():
@@ -87,16 +90,35 @@ def test_a_section_matching_nothing_is_an_error_unless_optional():
 
 
 def test_sections_from_config_are_checked():
-    s = Section.from_config({"label": "X 96R", "clade": "X", "aa": ["96R"], "priority": -1})
-    assert s == Section("X 96R", clade="X", aa=("96R",), priority=-1)
+    """Each section says why it is there, and each exclusion is a named entry with a reason
+    (design rule 9); the reasons reach the selection's report."""
+    from af.chart.serum_selection import Exclusion
+
+    why = "a test section"
+    s = Section.from_config(
+        {"label": "X 96R", "clade": "X", "aa": ["96R"], "priority": -1, "reason": why,
+         "exclude": [{"text": "F9/25", "reason": "raised against another virus"}]}
+    )  # fmt: skip
+    assert s == Section(
+        "X 96R", clade="X", aa=("96R",), priority=-1, reason=why,
+        exclude=(Exclusion("F9/25", "raised against another virus"),),
+    )  # fmt: skip
+    with pytest.raises(SelectionError, match="'X 96R': no reason given"):
+        Section.from_config({"label": "X 96R", "clade": "X"})
+    with pytest.raises(SelectionError, match=r"exclude 'F9/25' must be \{ text"):
+        Section.from_config({"label": "a", "clade": "X", "reason": why, "exclude": ["F9/25"]})
+    with pytest.raises(SelectionError, match="needs text and a reason"):
+        Exclusion("F9/25", " ")
     with pytest.raises(SelectionError, match="unknown keys"):
-        Section.from_config({"label": "a", "strain": ["x"]})
+        Section.from_config({"label": "a", "strain": ["x"], "reason": why})
     with pytest.raises(SelectionError, match="give strains, or clade"):
-        Section.from_config({"label": "a", "strains": ["x"], "clade": "X"})
+        Section.from_config({"label": "a", "strains": ["x"], "clade": "X", "reason": why})
     with pytest.raises(SelectionError, match="not like 155E"):
         Section("a", aa=("E155",))
     with pytest.raises(SelectionError, match="labels repeat"):
         select_sera(SERA, [Section("a", clade="X"), Section("a", clade="X.1")], since=None)
+    sel = select_sera(SERA, [Section("X.1", clade="X.1", reason=why)], since=None)
+    assert sel.report()["reasons"] == {"X.1": why}
 
 
 def test_titration_dates_come_from_the_tables_each_serum_is_in():

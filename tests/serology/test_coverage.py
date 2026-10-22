@@ -52,8 +52,8 @@ def map_input() -> MapInput:
 SECTIONS = {
     "addendum": 2,
     "sections": [
-        {"label": "vaccine", "strains": ["EXAMPLETOWN/1/2025"]},
-        {"label": "X.1", "clade": "X.1"},
+        {"label": "vaccine", "strains": ["EXAMPLETOWN/1/2025"], "reason": "the vaccine strain"},
+        {"label": "X.1", "clade": "X.1", "reason": "the clade"},
     ],
 }
 

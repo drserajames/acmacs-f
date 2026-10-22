@@ -19,6 +19,8 @@ from .test_cdc import read, row
             "review",
         ),
         ("x.xlsx[S]!E9: '32' fixed as '320' by cell_fixes.tsv:9", "applied"),
+        ("x.xlsx[S]!1: indexes above 4 are test antigens (reference_panels.tsv:2)", "applied"),
+        ("x.xlsx[S]!C15: row not read (dropped_rows.tsv:2)", "applied"),
         ("x.xlsx[S]!N9: passage 'EX9_1': cannot read '_1'", "tolerated"),
         ("x.xlsx[S]!N9: something no reader has said before", "review"),
     ],

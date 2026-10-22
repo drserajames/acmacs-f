@@ -96,6 +96,10 @@ def _page(
     return _Page(scene, np.where(shown[:, None], xy, np.nan), priorities, furniture, radii)
 
 
+def _ordinal(day: dt.date | None) -> int:
+    return day.toordinal() if day is not None else 0
+
+
 def shared_frame(
     points: Sequence[PointIn],
     *,
@@ -111,13 +115,18 @@ def shared_frame(
     use one viewport on the all, 12m and 6m pages: a reader turning the pages sees the same
     square. It is chosen as :func:`finish_map` chooses one window's frame, over every window's
     page at once (:class:`af.map.viewport.View`): each window's recent antigens visible, then
-    each priority's hidden markers summed over the windows. Positions and marker sizes are the
-    first window's: windows grey points, they do not move, hide or resize them."""
+    the pages in turn, the most recent window's first and the all page last. The newest
+    window's page is framed as it would be alone, and the older pages take what is left; the
+    all page, where every antigen is in the window, no longer pulls the frame off the recent
+    viruses (h1-cnic, R6 review). Positions and marker sizes are the same on every page:
+    windows grey points, they do not move, hide or resize them."""
     if not windows:
         raise ValueError("shared_frame needs at least one window")
+    # the most recent window first (stable among equal dates); a window of every antigen last
+    by_recency = sorted(windows, key=lambda wt: (wt[0].since is None, -_ordinal(wt[0].since)))
     pages = [
         _page(points, scheme, w, t, must_show_since, vaccine_labels, look, styles)
-        for w, t in windows
+        for w, t in by_recency
     ]
     first, *rest = pages
     choice = choose_frame(

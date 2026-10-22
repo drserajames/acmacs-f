@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .rules import RuleTable
+from .rules import Rule, RuleTable
 
 _WS = re.compile(r"\s+")
 
@@ -67,11 +67,7 @@ def apply_cell_fixes(sheet: Sheet, fixes: RuleTable, lab: str) -> list[str]:
     silent overwrite. Each row is a hand repair someone would otherwise have made in the
     file itself, kept where it can be counted and reviewed."""
     warnings = []
-    for rule in fixes.rules:
-        if not fixes.in_scope(rule, lab=lab):
-            continue
-        if rule["file"] != sheet.path.name or rule["sheet"] != sheet.name:
-            continue
+    for rule in sheet_rules(sheet, fixes, lab):
         r, c = _cell_ref(rule["cell"])
         if sheet.cell(r, c) != rule["raw"]:
             raise SheetError(
@@ -88,6 +84,18 @@ def apply_cell_fixes(sheet: Sheet, fixes: RuleTable, lab: str) -> list[str]:
             f"{sheet.where(r, c)}: {rule['raw']!r} fixed as {rule['value']!r} by {rule.where}"
         )
     return warnings
+
+
+def sheet_rules(sheet: Sheet, table: RuleTable, lab: str) -> list[Rule]:
+    """The rows of a file-keyed rule table (``file``, ``sheet`` columns) for this workbook
+    sheet. Hits are counted by the caller, when it applies a row."""
+    return [
+        rule
+        for rule in table.rules
+        if table.in_scope(rule, lab=lab)
+        and rule["file"] == sheet.path.name
+        and rule["sheet"] == sheet.name
+    ]
 
 
 def _cell_ref(ref: str) -> tuple[int, int]:

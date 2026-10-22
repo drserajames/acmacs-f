@@ -229,3 +229,20 @@ def test_a_projections_forced_basis_moves_the_circle():
     assert plain.column_bases_from == "computed" and moved.column_bases_from == "projection-forced"
     assert plain.circle.theoretical == 3.0 and moved.circle.theoretical == 2.0
     assert moved.column_basis == 5.0
+
+
+def test_a_circle_panel_judges_the_theoretical_radius():
+    """Each radius is its own minimum. Both antigens give empirical 2.5, so ae's circle takes
+    antigen 0, the best match too: the coverage map is the same. The theoretical minimum is
+    antigen 1's (640: 2 + 6 - 6 = 2 against 320's 3), so a circle panel drawing the
+    theoretical radius differs."""
+    antigens = [Antigen(NAME, "MDCK1"), Antigen(NAME, "SIAT1"), *others(3)]
+    c = chart(antigens, [Serum(NAME, "F1", "MDCK1")], [["320", "640", "160", "40", "20"]])
+    (rec,) = serum_circles(c, ruler(1, 1.5, 2, 3, 4))
+    assert rec.circle.empirical_antigen == rec.other_circle.empirical_antigen == 0
+    assert (rec.circle.theoretical, rec.circle.theoretical_titre) == (3.0, "320")
+    assert (rec.other_circle.theoretical, rec.other_circle.theoretical_titre) == (2.0, "640")
+    assert rec.disagreement() is None and rec.disagreement(drawn="empirical") is None
+    assert rec.disagreement(drawn="theoretical") == "visible"
+    with pytest.raises(SerumCircleError, match="drawn 'both'"):
+        rec.disagreement(drawn="both")

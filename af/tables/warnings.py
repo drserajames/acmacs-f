@@ -34,6 +34,8 @@ APPLIED = {
     "repeated rows of one sample merged": r"repeats row \d+; readings merged",
     "serum named by a strain_aliases rule": r"named by strain_aliases",
     "cell repaired by a cell_fixes rule": r"fixed as .* by cell_fixes",
+    "reference panel ended by a reference_panels rule": r"are test antigens \(reference_panels",
+    "row not read by a dropped_rows rule": r"row not read \(dropped_rows",
     "name renamed by a strain_aliases rule": r"renamed .* by strain_aliases",
     "serum lot restored by a serum_ids rule": r"restored as .* by serum_ids",
     "Cyrillic letter in the type": r"Cyrillic letter in the type",

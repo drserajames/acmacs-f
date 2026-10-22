@@ -14,12 +14,12 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from af.geo.figures import clade_key, write_geo_figures
-from af.geo.records import DotRule, Month
+from af.geo.records import DotRule, Month, partial_title
 from af.geo.style import read_geo_looks
 from af.map.colouring import StoreColours
 from af.map.config import ColouringConfig
@@ -52,6 +52,8 @@ def build_geo(
     *,
     ignore_busy: bool = False,
     created: dt.datetime | None = None,
+    cutoff: dt.date | None = None,
+    allow_empty: Collection[str] = (),
 ) -> dict[str, Any]:
     """Write the geo figures, key and run record; returns the run record.
 
@@ -69,7 +71,20 @@ def build_geo(
     drawn with its ``[geo.<slot>]`` look (:func:`af.geo.style.read_geo_looks`), and every
     figure in the round's ``[fonts]`` (:func:`af.util.fonts.load_fonts`), as the maps are; the
     font files go into each figure's provenance.
+
+    ``cutoff``: the day the data were fetched, for a window whose last month is not over (a
+    monthly report, Q243). That month's page says so ("October 2026 (to 21 October)"); a cut-off
+    before the last month is refused, since the months after it would be drawn empty.
+
+    ``allow_empty``: slots the round expects even when their subtype has no dots in the window
+    (a monthly report's month can have none): drawn as blank maps and recorded as empty. Any
+    other slot with no dots is still an error (design rule 1).
     """
+    if cutoff is not None and (cutoff.year, cutoff.month) < (last.year, last.month):
+        raise ValueError(f"cut-off {cutoff.isoformat()} is before the window's last month {last}")
+    if unknown := sorted(set(allow_empty) - set(slots.values())):
+        raise ValueError(f"allow_empty names slots that are not drawn: {unknown}")
+    empty_ok = sorted(s for s, slot in slots.items() if slot in allow_empty)
     looks = read_geo_looks(figure_config, set(slots.values()))
     fonts = load_fonts(figure_config)
     with store.reading("geo-build", kinds=KINDS_READ, override=ignore_busy) as guard:
@@ -82,6 +97,7 @@ def build_geo(
         report = make_geo_and_stat(
             store, af_data / "rules" / "locations", coastline, first, last, work,
             dot_rule=DotRule.VIRUS, store_colours=colours, schemes=schemes,
+            empty_subtypes=empty_ok,
         )  # fmt: skip
     created = created or dt.datetime.now(dt.UTC)
     if created.tzinfo is None:
@@ -138,7 +154,12 @@ def build_geo(
             },
             "undated": doc["undated"],
             "no_location": len(doc["no_location"]),
+            "cutoff": cutoff.isoformat() if cutoff else None,
+            "allowed_empty": slot in allow_empty,
         }
+        for period in doc["periods"]:
+            year, month = (int(x) for x in period["period"].split("-"))
+            period["title"] = partial_title(Month(year, month), cutoff)
         with fonts.context():  # the whole drawing: the title's placement measures its ink
             written = write_geo_figures(
                 doc, slot, report.coordinates, coastline, figures, slot_provenance,
@@ -154,6 +175,7 @@ def build_geo(
             "moved_inside_edge": dict(sorted(written.moved_inside.items())),
             "undated": doc["undated"],
             "no_location": len(doc["no_location"]),
+            "empty": not any(written.drawn.values()),
         }
     record["colours"] = {
         row: {"coloured": dict(c.coloured), "uncoloured": dict(c.uncoloured)}
@@ -205,12 +227,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--figure-config", type=Path, required=True,
         help="the round's figures.toml: [fonts] and [geo.<slot>] looks",
     )  # fmt: skip
+    parser.add_argument(
+        "--cutoff", type=dt.date.fromisoformat,
+        help="YYYY-MM-DD the data were fetched, when the last month is not over",
+    )  # fmt: skip
+    parser.add_argument(
+        "--allow-empty", action="append", default=[], metavar="SLOT",
+        help="a slot drawn as blank maps when its subtype has no dots in the window",
+    )  # fmt: skip
     parser.add_argument("--ignore-busy", action="store_true", help="diagnosis only")
     args = parser.parse_args(argv)
     record = build_geo(
         Store.open(args.store), args.af_data, args.clones, args.acmacs_data, args.coastline,
         args.first, args.last, args.figures, args.work, _pairs(args.scheme, "scheme"),
         _pairs(args.slot, "slot"), args.figure_config, ignore_busy=args.ignore_busy,
+        cutoff=args.cutoff, allow_empty=args.allow_empty,
     )  # fmt: skip
     for slot, info in record["slots"].items():
         print(f"{slot:6s} {sum(info['drawn'].values()):6d} dots  {info['drawn']}")
