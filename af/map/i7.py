@@ -61,6 +61,7 @@ def i7_document(
     circles: Sequence[CircleMark] = (),
     caption: Sequence[str] = (),
     addendum: dict[str, Any] | None = None,
+    hidden: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """The I7 JSON for a rendered map (eu-23's I7 draft v1). ``created`` must carry a time zone.
 
@@ -126,6 +127,8 @@ def i7_document(
         map_block["caption"] = list(caption)
     if addendum is not None:
         map_block["addendum"] = addendum
+    if hidden is not None:  # a figure drawn in its map's frame: what its own furniture hides
+        map_block["hidden"] = dict(hidden)
     if opt_ins := look_opt_ins(look):
         map_block["look"] = opt_ins
     shown_ag = [p for p in scene.points if p.kind == "antigen" and p.shown]

@@ -122,6 +122,12 @@ def test_a_circle_block_draws_three_pages_per_map_and_writes_its_plan(tmp_path: 
     assert all(len(p["cells"]) == 6 and p["caption"] is None for p in manifest["pages"])
     # only the cell serum: the egg one is left out by passage class, and counted
     assert manifest["selection"]["sections"] == {"X": 2}
+    # Q228 rows go through the one writer, judged on the radius a circle panel draws
+    assert manifest["declarations"] == [
+        "addendum-5-h3-homologous-rules.toml", "addendum-5-h3-homologous-rules.md",
+    ]  # fmt: skip
+    assert all((out / d).is_file() for d in manifest["declarations"])
+    assert manifest["disagreements"]["shown"] == 2
     assert manifest["selection"]["excluded"] == {"passage class egg": 2}
     shown = json.loads((out / "shown.json").read_text())
     assert [(s["map"], s["section"]) for s in shown] == [("lab-a-hi", "X"), ("lab-a-neut", "X")]
@@ -183,3 +189,39 @@ def test_a_coverage_figure_has_the_three_line_title_and_its_record(tmp_path: Pat
     assert circle["point"] == "sr0" and circle["fill"] == "#0000ff"  # a cell serum: blue
     styled = {a["id"]: a.get("style", {}) for a in doc["map"]["antigens"] + doc["map"]["sera"]}
     assert styled["sr0"]["fill"] == "black" and styled["ag0"]["outline_width"] == 3.0
+
+
+def test_a_figure_keeps_its_maps_frame_when_its_taller_title_covers_a_recent_antigen(
+    tmp_path: Path,
+) -> None:
+    """A recent antigen 1 unit below the frame's top is clear of a map's one-line title and
+    under a coverage figure's three-line one: the map page would refuse the frame; the figure
+    keeps its map's zoom and records what its title hides."""
+    from dataclasses import replace
+
+    from af.chart.serum_circles import serum_circles
+    from af.map.addenda import render_coverage
+    from af.map.finish import finish_map
+    from af.map.viewport import FrameError
+
+    p = page("lab-a-hi")
+    moved = [replace(q, xy=(-4.0, 4.0)) if q.id == "ag3" else q for q in p.points]
+    p = replace(p, points=tuple(moved), must_show_since=dt.date(2025, 1, 1))
+    record = serum_circles(p.chart, p.layout(), 2.0, projection=p.projection)[0]
+    created = dt.datetime(2026, 10, 22, tzinfo=dt.UTC)
+    one_line: dict[str, Any] = dict(
+        chart=p.folder, scheme=p.scheme, window=p.windows[0][0], frame_size=10.0, frame=p.frame,
+        must_show_since=p.must_show_since, vaccine_labels={}, created=created,
+        provenance=p.provenance,
+    )  # fmt: skip
+    finish_map(list(p.points), title="Map", out_pdf=tmp_path / "m.pdf", **one_line)  # clear
+    with pytest.raises(FrameError, match="hides points"):
+        finish_map(list(p.points), title="Map\nA long serum line\nX", out_pdf=tmp_path / "x.pdf",
+                   **one_line)  # fmt: skip
+    i7 = render_coverage(
+        p, record, radius="empirical", clade_line="X", out_pdf=tmp_path / "c.pdf",
+        created=created, addendum={}, lab=LAB,
+    )  # fmt: skip
+    doc = json.loads(i7.read_text())["map"]
+    assert doc["viewport"][:3] == [p.frame.x, p.frame.y, p.frame.size]  # the map's zoom
+    assert doc["hidden"]["recent antigens"] == 1

@@ -174,9 +174,11 @@ def coverage_marks(
     point = serum_point(record)
     if record.xy is None:
         raise CircleError(f"{record.designation}: the serum has no coordinates on this map")
+    # a square whatever the serum's passage, as ae's coverage maps marked every serum
     styles[point] = PointStyle(
-        fill="black", outline="black", scale=COVERAGE_SERUM_SCALE, on_top=True, raise_rank=2
-    )
+        fill="black", outline="black", scale=COVERAGE_SERUM_SCALE, on_top=True, raise_rank=2,
+        marker="box",
+    )  # fmt: skip
     colour = PASSAGE_CIRCLE.get(record.passage_class or "", NO_COLOUR)
     r = getattr(record.circle, radius)
     circle = CircleMark(

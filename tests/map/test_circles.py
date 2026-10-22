@@ -189,6 +189,7 @@ def test_the_coverage_look_outlines_titrated_antigens_and_raises_the_serum() -> 
     assert styles["ag0"].fill == by_id["ag0"].colour  # titrated: full colour
     assert styles["ag1"].fill == pale(by_id["ag1"].colour or "")  # not titrated: pale
     assert styles["sr1"].fill == "black" and styles["sr1"].on_top
+    assert styles["sr1"].marker == "box"  # a square, egg serum or not (ae's coverage maps)
     (none,), _ = coverage_marks(replace(rec, circle=replace(rec.circle, empirical=None)), scene)
     assert none.dashed and none.radius == 2.0
 
