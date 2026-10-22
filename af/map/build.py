@@ -42,6 +42,13 @@ from af.chart.column_bases import (
 from af.chart.model import Chart
 from af.chart.sera import FERRET_ONLY, Marker, non_ferret, read_markers
 from af.geo.colours import DotStyle
+from af.map.addenda import (
+    AddendaConfig,
+    AddendaContext,
+    MapPage,
+    load_addenda,
+    run_addenda,
+)
 from af.map.colouring import MapColouringError, StoreColours
 from af.map.config import MapConfig, MapsConfig, TitlesConfig
 from af.map.curate import (
@@ -437,6 +444,8 @@ class MapResult:
     # Sentences for antigens left unpainted by clade evidence (af.geo.colours.unpainted_warning),
     # also in each figure's decisions.unpainted_clades; printed in the build log.
     warnings: tuple[str, ...] = ()
+    # What an addendum draws from the map (af.map.addenda); kept only when addenda are built.
+    page: MapPage | None = None
 
 
 def build_map(
@@ -453,8 +462,11 @@ def build_map(
     guard: ReadGuard | None = None,
     fonts: FigureFonts | None = None,
     abbreviations: LabelAbbreviations | None = None,
+    keep_page: bool = False,
 ) -> MapResult:
     """Build every window of one map. Raises :class:`BuildError` with the folder named.
+
+    ``keep_page`` keeps what the map's addenda draw from it (:class:`af.map.addenda.MapPage`).
 
     ``colours`` is the run's store colouring when the round's ``[colouring] source`` is
     "store"; without it the map is painted from its stand-in chart, as in bring-up.
@@ -771,6 +783,53 @@ def build_map(
         dict(decisions.get("lineage_minority", {}).get("other", {})),
         non_ferret_count,
         (*(u["warning"] for u in [*unpainted, *placed]), *vaccine_flags),
+        _map_page(
+            cfg,
+            chart,
+            projection,
+            points,
+            scheme,
+            frame,
+            look,
+            windows,
+            config,
+            provenance,
+            vlabels,
+        )  # fmt: skip
+        if keep_page
+        else None,
+    )
+
+
+def _map_page(
+    cfg: MapConfig,
+    chart: Chart,
+    projection: Any,
+    points: Sequence[PointIn],
+    scheme: ColourScheme,
+    frame: Any,
+    look: Any,
+    windows: Sequence[tuple[Window, str]],
+    config: MapsConfig,
+    provenance: dict[str, Any],
+    vaccine_labels: Mapping[str, str],
+) -> MapPage:
+    if not cfg.chain:
+        raise BuildError(f"{cfg.folder}: an addendum needs a map drawn from a chain")
+    return MapPage(
+        folder=cfg.folder,
+        centre=cfg.chain.split("/")[0],
+        chain_ref=dict(provenance["inputs"]["chain"]),
+        chart=chart,
+        projection=projection,
+        points=tuple(points),
+        scheme=scheme,
+        frame=frame,
+        look=look,
+        windows=tuple(windows),
+        must_show_since=config.defaults.must_show_since,
+        provenance=provenance,
+        vaccine_labels=dict(vaccine_labels),
     )
 
 
@@ -919,8 +978,12 @@ def build(
     created: dt.datetime | None = None,
     log: Any = print,
     ignore_busy: bool = False,
+    addenda: Path | None = None,
 ) -> list[MapResult]:
     """Build every configured map (or just ``only``). Raises on the first failure.
+
+    ``addenda`` (a round's addenda.toml): after the maps, draw the addenda from them
+    (:mod:`af.map.addenda`). Without it nothing about the maps changes.
 
     ``ignore_busy`` builds while a batch is writing the store, for diagnosis only (the command
     line's explicit ``--ignore-busy``); every figure's provenance then says it did."""
@@ -930,6 +993,7 @@ def build(
     missing = sorted(set(only) - {m.folder for m in config.maps})
     if missing:
         raise BuildError(f"no such map(s) in the config: {', '.join(missing)}")
+    addenda_config = load_addenda(addenda) if addenda is not None else None  # fail early
     with ExitStack() as stack:
         # One guarded read of the store for the whole run: no build while a batch is writing
         # it, and none whose inputs moved while it ran (af.store.busy). Each figure records it.
@@ -939,7 +1003,9 @@ def build(
             else None
         )
         colours = None
-        if any(config.colour_source(m) == "store" for m in wanted):
+        # An addendum reads its sera's strains from the store join, whatever colours its maps
+        # take: a stand-in map keeps its stand-in colours (only the maps below get colours).
+        if addenda_config is not None or any(config.colour_source(m) == "store" for m in wanted):
             if store is None:
                 raise BuildError("store colouring configured but no --store given")
             started = time.monotonic()
@@ -989,6 +1055,7 @@ def build(
                 guard=guard,
                 fonts=fonts,
                 abbreviations=abbreviations,
+                keep_page=addenda_config is not None,
             )
             results.append(result)
             flags = f" flags={len(result.flags)}" if result.flags else ""
@@ -1002,7 +1069,40 @@ def build(
                 log(f"    flag: {f}")
             for w in result.warnings:
                 log(f"    {w}")
+        if addenda_config is not None:
+            _build_addenda(addenda_config, results, colours, config, out_root, created, log)
         return results
+
+
+def _build_addenda(
+    addenda_config: AddendaConfig,
+    results: Sequence[MapResult],
+    colours: StoreColours | None,
+    config: MapsConfig,
+    out_root: Path,
+    created: dt.datetime,
+    log: Any,
+) -> None:
+    from af.seq.matching_rules import LABS
+    from af.tables.labs import read_labs
+
+    assert colours is not None  # built whenever addenda are
+    if config.af_data is None:
+        raise BuildError("addenda need af_data (the labs table)")
+    pages = {r.folder: r.page for r in results if r.page is not None}
+    ctx = AddendaContext(
+        colours=colours,
+        since=addenda_config.since,
+        out_root=out_root,
+        created=created,
+        labs={lab.code: lab for lab in read_labs(config.af_data / LABS)},
+    )
+    started = time.monotonic()
+    for a in run_addenda(addenda_config, pages, ctx):
+        log(
+            f"{a.directory.name:24s} {time.monotonic() - started:5.1f}s  "
+            f"{len(a.figures)} figures, sera {a.selection['sections']}"
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1019,6 +1119,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="build while a batch is writing the store (diagnosis only; recorded in provenance)",
     )
+    parser.add_argument(
+        "--addenda", type=Path, help="round config/addenda.toml: also draw the addenda's figures"
+    )
     args = parser.parse_args(argv)
     try:
         from af.map.roundconfig import load_maps_config, load_vaccine_list
@@ -1032,6 +1135,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             vaccine_defaults=load_vaccine_defaults(config.vaccine_defaults),
             only=args.only,
             ignore_busy=args.ignore_busy,
+            addenda=args.addenda,
         )
     except (BuildError, StoreError, ValueError, OSError) as exc:  # FontError is a ValueError
         print(f"af.map.build: {exc}", file=sys.stderr)

@@ -93,6 +93,7 @@ AF_SIDE = {
     "af/map/matching.py", "af/map/roundconfig.py", "af/map/vaccine_colours.py",
     "af/map/vaccines.py",
     "af/map/circles.py",  # draws af.chart.serum_circles records: the addenda's serum circles
+    "af/map/addenda.py",  # the addenda pass: serum selection and circles over a round's maps
 }  # fmt: skip
 
 
