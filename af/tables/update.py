@@ -55,7 +55,7 @@ from af.store import ExternalInput, PathsConfig, Provenance, Store, Work
 from af.util.artefacts import Artefact
 from af.util.config import load_config, parse_config
 
-from . import cdc, identity, ids, warnings
+from . import archive, cdc, identity, ids, warnings
 from .model import Table
 from .passage import PassageParser
 from .rules import Rule, Rules
@@ -185,7 +185,7 @@ def update(
     state = state_dir(paths, settings)
     previous = previous_index(store)
     sources = Work.open(paths.work).dataset(KIND, settings.run).root / SOURCES
-    staged, staging = _stage_sources(settings, rules, sources)
+    staged, staging, sets = _stage_sources(settings, rules, sources, store)
     tables, report, errors = _read_all(staged, rules)
     report[:0] = staging
     tables, repeats = exact_repeats(tables)
@@ -219,10 +219,22 @@ def update(
         report.append(f"first run: {len(manifest.tables)} tables")
     report.extend(f"ERROR {e}" for e in errors)
     if errors or dry_run:
+        report += [
+            f"would archive {len(s.pending)} originals into raw/{s.dataset}"
+            for s in sets
+            if s.pending
+        ]
         return (1 if errors else 0), report
+    archived = [archive.archive(store, s) for s in sets]
+    report += [
+        f"archived {len(s.pending)} originals: {ref}"
+        for s, ref in zip(sets, archived, strict=True)
+        if s.pending
+    ]
+    external = (settings.rules, *_input_files(settings, rules, names=False))
     provenance = Provenance(
         step=STEP,
-        inputs=tuple(_external(p) for p in (settings.rules, *_input_files(settings, rules))),
+        inputs=(*(_external(p) for p in external), *archived),
         parameters={},
         started=started,
         finished=dt.datetime.now(dt.UTC),
@@ -505,9 +517,12 @@ def _join_sequence_ids(
     )
 
 
-def _input_files(settings: TablesSettings, rules: Rules | None = None) -> list[Path]:
-    """Every raw input of a run; for a ``names`` entry the originals themselves, not the links
-    the run reads them through."""
+def _input_files(
+    settings: TablesSettings, rules: Rules | None = None, *, names: bool = True
+) -> list[Path]:
+    """Every raw input of a run outside the store. For a ``names`` entry, the originals still
+    in its root (archived ones may have left it); ``names=False`` leaves them out, for a
+    version's provenance, which cites the archive instead (af.tables.archive)."""
     files: list[Path] = []
     if settings.cdc:
         files += [settings.cdc.tsv, *settings.cdc.xlsx, *settings.cdc.season]
@@ -522,6 +537,8 @@ def _input_files(settings: TablesSettings, rules: Rules | None = None) -> list[P
     ]
     for inputs in folders:
         if inputs.names:
+            if not names:
+                continue
             rules = rules or Rules(settings.rules)
             start = dt.date.fromisoformat(inputs.start).isoformat()
             files += [
@@ -530,6 +547,7 @@ def _input_files(settings: TablesSettings, rules: Rules | None = None) -> list[P
                 if (day := _file_date(Path(rule["read_as"]))) is not None
                 and day >= start
                 and rule["read_as"] not in inputs.exclude
+                and original.is_file()
             ]
             continue
         files += _dated_files(inputs)[0]  # an undated name is no input: the read reports it
@@ -539,7 +557,8 @@ def _input_files(settings: TablesSettings, rules: Rules | None = None) -> list[P
 
 def _source_rows(inputs: AC21Inputs | VIDRLInputs, rules: Rules) -> list[tuple[Rule, Path]]:
     """The source_names rows of a ``names`` entry, each with its original under the entry's
-    root. A set with no rows, or a row whose original is missing, is fatal (design rule 4)."""
+    root (which may since have been archived and removed: af.tables.archive.plan decides). A
+    set with no rows is fatal."""
     table = rules.source_names
     rows = [
         (rule, inputs.dir / rule["file"])
@@ -548,21 +567,21 @@ def _source_rows(inputs: AC21Inputs | VIDRLInputs, rules: Rules) -> list[tuple[R
     ]
     if not rows:
         raise ValueError(f"{inputs.dir}: no source_names rows for {inputs.lab} {inputs.names}")
-    if missing := [f"{rule.where}: {path}" for rule, path in rows if not path.is_file()]:
-        raise FileNotFoundError("originals not found: " + "; ".join(missing))
     return rows
 
 
 def _stage_sources(
-    settings: TablesSettings, rules: Rules, sources: Path
-) -> tuple[TablesSettings, list[str]]:
-    """Link each ``names`` entry's originals under their read names in a folder of the run's
+    settings: TablesSettings, rules: Rules, sources: Path, store: Store
+) -> tuple[TablesSettings, list[str], list[archive.SetFiles]]:
+    """Link each ``names`` entry's workbooks under their read names in a folder of the run's
     work area, and point the entry at that folder: the readers then see the names they key
-    rules and dates on (af.tables.vidrl reads the test date from the file name), and the
-    originals stay where they are. The folder is rebuilt every run, so it never holds a link
-    the rules no longer name. Also reports originals under a root that no row names, so that
-    a new workbook dropped into the root is seen, not silently left out."""
+    rules and dates on (af.tables.vidrl reads the test date from the file name). Each link
+    goes to the set's archived copy in the store, or to the root original while it is not
+    archived yet (af.tables.archive). The folder is rebuilt every run, so it never holds a
+    link the rules no longer name. Also reports workbooks under a root that no row names,
+    so that a new workbook dropped into the root is seen, not silently left out."""
     report: list[str] = []
+    sets: list[archive.SetFiles] = []
 
     def stage(inputs: Any) -> Any:
         if not inputs.names:
@@ -572,21 +591,29 @@ def _stage_sources(
             shutil.rmtree(folder)
         folder.mkdir(parents=True)
         rows = _source_rows(inputs, rules)
-        for rule, original in rows:
-            (folder / rule["read_as"]).symlink_to(original.resolve())
+        files = archive.plan(store, inputs.lab, inputs.names, rows)
+        for rule, _ in rows:
+            (folder / rule["read_as"]).symlink_to(files.read[rule["file"]].resolve())
             rule.hits += 1
+        sets.append(files)
+        kept = len(files.read) - len(files.pending)
         report.append(
-            f"{inputs.lab} {inputs.names}: {len(rows)} originals in {inputs.dir},"
-            " read under their source_names names"
+            f"{inputs.lab} {inputs.names}: {len(rows)} workbooks read under their source_names"
+            f" names; {kept} from raw/{files.dataset}, {len(files.pending)} from {inputs.dir}"
         )
         return replace(inputs, dir=folder)
 
     seen: dict[tuple[str, str], str] = {}
+    entries: dict[tuple[str, str], Path] = {}
 
     def once(inputs: Any) -> None:
         """Two sets of a lab staging one read name would read as two tests of one day."""
         if not inputs.names:
             return
+        key = (inputs.lab.casefold(), inputs.names)
+        if key in entries:
+            raise ValueError(f"set {inputs.names} is named by two folder entries ({inputs.dir})")
+        entries[key] = inputs.dir
         for rule, _ in _source_rows(inputs, rules):
             key = (inputs.lab.casefold(), rule["read_as"])
             if key in seen and seen[key] != inputs.names:
@@ -606,7 +633,7 @@ def _stage_sources(
         crick=[stage(i) for i in settings.crick],
     )
     report += _unnamed_originals(settings, rules)
-    return staged, report
+    return staged, report, sets
 
 
 def _unnamed_originals(settings: TablesSettings, rules: Rules) -> list[str]:
@@ -636,6 +663,7 @@ def _unnamed_originals(settings: TablesSettings, rules: Rules) -> list[str]:
             for p in sorted(root.rglob("*"))
             if p.suffix.lower() in WORKBOOKS
             and not p.name.startswith("~$")
+            and not any(part.startswith(".") for part in p.relative_to(root).parts)
             and p.resolve() not in named
             and p.name not in read_as
         ]
