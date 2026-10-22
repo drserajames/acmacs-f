@@ -59,6 +59,7 @@ def i7_document(
     look: Look = DEFAULT_LOOK,
     styles: Mapping[str, PointStyle] | None = None,
     circles: Sequence[CircleMark] = (),
+    caption: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The I7 JSON for a rendered map (eu-23's I7 draft v1). ``created`` must carry a time zone.
 
@@ -120,6 +121,8 @@ def i7_document(
     }
     if circles:
         map_block["circles"] = [c.recorded() for c in circles]
+    if caption:
+        map_block["caption"] = list(caption)
     if opt_ins := look_opt_ins(look):
         map_block["look"] = opt_ins
     shown_ag = [p for p in scene.points if p.kind == "antigen" and p.shown]
