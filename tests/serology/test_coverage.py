@@ -135,6 +135,31 @@ def test_a_serum_whose_rules_draw_different_maps_is_declared(tmp_path: Path) -> 
     (entry,) = tomllib.loads(toml.read_text())["declaration"]
     assert (entry["ruling"], entry["dataset"], entry["version"]) == ("Q228", *CHAIN.values())
     assert entry["text"].startswith(f"serum coverage addendum 2, vaccine: {NAME} F1/25 (visible)")
-    assert "titre 320, radius 2.50" in entry["text"]  # drawn: the best match
-    assert "titre 640, radius 2.00" in entry["text"]  # ae's circle rule
+    assert "titre 320, empirical radius 2.50" in entry["text"]  # drawn: the best match
+    assert "titre 640, empirical radius 2.00" in entry["text"]  # ae's circle rule
     assert "1 of 2 shown sera disagree: 1 visible" in md.read_text()
+
+
+def test_the_one_writer_declares_circle_panels_by_their_theoretical_radius(tmp_path: Path) -> None:
+    """A serum-circle panel draws the theoretical radius and no colouring: the same writer,
+    told so, judges and quotes that radius (fold 3: 3 + 6 - 5 = 4 for the best match's 320,
+    3 + 6 - 6 = 3 for ae's 640) and no within/outside sets."""
+    antigens = [Antigen(NAME, "MDCK1"), Antigen(NAME, "SIAT1"),
+                *(Antigen(OTHER, f"MDCK{i}") for i in (1, 2, 3))]  # fmt: skip
+    sera = [Serum(NAME, "F1/25", "MDCK1")]
+    t = [[Titre.parse(v)] for v in ("320", "640", "80", "40", "20")]
+    chart = Chart({"D": "20260110"}, antigens, sera, Titres(t))
+    layout = np.array([[1.5, 0], [1, 0], [2, 0], [3, 0], [4, 0], [0, 0]])
+    (rec,) = serum_circles(chart, layout, 3.0)
+    shown = [Shown(5, "X", "r", "h3-hi-lab-a", CHAIN, rec)]
+    toml, md = tmp_path / "circles.toml", tmp_path / "circles.md"
+    counts = write_fragment(shown, [], toml, md, "declarations/c.md", {"addendum": "test"},
+                            radius="theoretical", kind="serum circle", coverage=False)  # fmt: skip
+    assert counts["by_kind"] == {"visible": 1}
+    (entry,) = tomllib.loads(toml.read_text())["declaration"]
+    assert entry["text"].startswith("serum circle addendum 5, X:")
+    assert (
+        "titre 320, theoretical radius 4.00); ae's circle rule gives titre 640, " in entry["text"]
+    )
+    assert "within" not in entry["text"]
+    assert md.read_text().startswith("# Serum circle maps whose two homologous rules disagree")

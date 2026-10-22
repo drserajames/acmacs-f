@@ -126,15 +126,20 @@ def run_coverage(block: Mapping[str, Any], pages: Mapping[str, Any], ctx: Any) -
         cands, sections, since=ctx.since,
         passage_classes=frozenset(classes) if classes is not None else None,
     )  # fmt: skip
+    window = str(block.get("window", "all"))
     figure_of: dict[tuple[str, ...], Path] = {}
     shown: list[Shown] = []
     for label, chosen in selection.sections.items():
         for c in chosen:
             f, rec, clade_line = found[c.serum.key]
             page = pages[f]
+            lab = ctx.labs.get(str(page.chart.info.get("l", "")))
+            if lab is None:
+                raise CoverageError(f"{f}: lab {page.chart.info.get('l')!r} not in the labs table")
             shown.append(Shown(int(block["addendum"]), label, c.reason, f, _chain(page), rec))
             figure_of[c.serum.key] = render_coverage(
-                page, rec, radius=RADIUS, clade_line=clade_line, created=ctx.created,
+                page, rec, radius=RADIUS, clade_line=clade_line, created=ctx.created, lab=lab,
+                window=window,
                 out_pdf=out_dir / f / f"sr{rec.serum}" / "v1" / "figure.pdf",
                 addendum={"name": name, "kind": "coverage", "section": label,
                           "reason": c.reason, "rules": [rec.circle.rule, rec.coverage.rule],
@@ -218,34 +223,51 @@ def _hand_declaration(
     }
 
 
-def declaration(shown: Shown, md_file: str) -> dict[str, str]:
+def declaration(
+    shown: Shown,
+    md_file: str,
+    *,
+    radius: str = RADIUS,
+    kind: str = "serum coverage",
+    coverage: bool = True,
+) -> dict[str, str]:
+    """One shown serum's [[declaration]]: what the figure draws from the best match, and what
+    ae's circle rule would have drawn. ``radius``, ``kind`` and ``coverage`` describe the
+    figure: a coverage map draws the empirical radius and the colouring, a circle panel the
+    theoretical radius alone."""
     r = shown.record
-    kind = r.disagreement(drawn=RADIUS)
-    assert kind is not None
+    found = r.disagreement(drawn=radius, coverage=coverage)
+    assert found is not None
     return {
         "ruling": RULING,
         "dataset": str(shown.chain["dataset"]),
         "version": str(shown.chain["version"]),
         "text": (
-            f"serum coverage addendum {shown.addendum}, {shown.section}: {r.designation} "
-            f"({kind}): drawn from the best match ({_rule(r.circle, r.coverage)}); "
-            f"ae's circle rule gives {_rule(r.other_circle, r.other_coverage)}"
+            f"{kind} addendum {shown.addendum}, {shown.section}: {r.designation} ({found}): "
+            f"drawn from the best match ({_rule(r.circle, r.coverage, radius, coverage)}); "
+            f"ae's circle rule gives {_rule(r.other_circle, r.other_coverage, radius, coverage)}"
         ),
         "file": md_file,
     }
 
 
-def _rule(circle: Any, coverage: Any) -> str:
-    if circle.empirical is None and coverage.status != "good":
-        return "no circle and no colouring"
-    titre = coverage.titre or circle.titre or "no titre"
-    radius = "no circle" if circle.empirical is None else f"radius {circle.empirical:.2f}"
-    sets = (
-        f"{len(coverage.within)} within, {len(coverage.outside)} outside"
-        if coverage.status == "good"
-        else f"no colouring ({coverage.status})"
-    )
-    return f"titre {titre}, {radius}, {sets}"
+def _rule(circle: Any, cov: Any, radius: str, coverage: bool) -> str:
+    """What one rule draws, as a declaration quotes it."""
+    value = getattr(circle, radius)
+    if value is None and (not coverage or cov.status != "good"):
+        return "no circle and no colouring" if coverage else "no circle"
+    titre = circle.titre if radius == "empirical" else circle.theoretical_titre
+    if coverage:
+        titre = cov.titre or titre
+    drawn = "no circle" if value is None else f"{radius} radius {value:.2f}"
+    parts = [f"titre {titre or 'no titre'}", drawn]
+    if coverage:
+        parts.append(
+            f"{len(cov.within)} within, {len(cov.outside)} outside"
+            if cov.status == "good"
+            else f"no colouring ({cov.status})"
+        )
+    return ", ".join(parts)
 
 
 def write_fragment(
@@ -255,25 +277,37 @@ def write_fragment(
     md_path: Path,
     md_file: str,
     sources: Mapping[str, str],
+    *,
+    radius: str = RADIUS,
+    kind: str = "serum coverage",
+    coverage: bool = True,
 ) -> dict[str, Any]:
-    """The declaration fragment and its page; returns the counts."""
-    disagree = [s for s in shown if s.record.disagreement(drawn=RADIUS) is not None]
+    """The declaration fragment and its page; returns the counts. The one writer for every
+    addendum kind: ``radius``, ``kind`` and ``coverage`` describe what its figures draw (the
+    serum-circle panels: radius="theoretical", kind="serum circle", coverage=False)."""
+
+    def found(s: Shown) -> str | None:
+        return s.record.disagreement(drawn=radius, coverage=coverage)
+
+    disagree = [s for s in shown if found(s) is not None]
     counts: dict[str, Any] = {
         "shown": len(shown),
         "disagree": len(disagree),
-        "by_kind": dict(Counter(s.record.disagreement(drawn=RADIUS) for s in disagree)),
+        "by_kind": dict(Counter(found(s) for s in disagree)),
         "by_addendum": dict(Counter(f"addendum {s.addendum}" for s in disagree)),
         "hand": len(also),
     }
-    entries = [declaration(s, md_file) for s in disagree] + [dict(e) for e in also]
+    entries = [
+        declaration(s, md_file, radius=radius, kind=kind, coverage=coverage) for s in disagree
+    ] + [dict(e) for e in also]
     made_from = ", ".join(f"{k} {v}" for k, v in sources.items())
     head = (
-        f"# For declarations.toml: serum-coverage maps whose two homologous rules disagree "
+        f"# For declarations.toml: {kind} maps whose two homologous rules disagree "
         f"({RULING}), made by af.serology.coverage from {made_from}.\n"
     )
     toml_path.write_text(head + "".join("\n" + _toml(e) for e in entries))
     lines = [
-        f"# Serum-coverage maps whose two homologous rules disagree ({RULING})",
+        f"# {kind[0].upper()}{kind[1:]} maps whose two homologous rules disagree ({RULING})",
         "",
         'Sarah, 21 Oct 2026: "keep both rules, use the best match for the figure but declare the '
         'maps which disagree". Each map is drawn from the best match (the best-ranked antigen of '
@@ -290,9 +324,9 @@ def write_fragment(
     for s in disagree:
         r = s.record
         lines.append(
-            f"| {s.addendum} | {s.section} | {s.chart_name} | {r.designation} | "
-            f"{r.disagreement(drawn=RADIUS)} | {_rule(r.circle, r.coverage)} | "
-            f"{_rule(r.other_circle, r.other_coverage)} |"
+            f"| {s.addendum} | {s.section} | {s.chart_name} | {r.designation} | {found(s)} | "
+            f"{_rule(r.circle, r.coverage, radius, coverage)} | "
+            f"{_rule(r.other_circle, r.other_coverage, radius, coverage)} |"
         )
     if also:
         lines += ["", "## Hand declarations", ""]

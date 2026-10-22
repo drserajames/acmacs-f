@@ -246,3 +246,19 @@ def test_a_circle_panel_judges_the_theoretical_radius():
     assert rec.disagreement(drawn="theoretical") == "visible"
     with pytest.raises(SerumCircleError, match="drawn 'both'"):
         rec.disagreement(drawn="both")
+
+
+def test_a_circle_panel_without_a_radius_draws_nothing():
+    """The serum has no coordinates: no empirical radius. The best match still colours its
+    antigens, ae's circle rule (no radius, so no antigen) colours none: a coverage map differs.
+    A circle panel (coverage=False) draws no circle under either rule: nothing."""
+    c = chart(
+        [Antigen(NAME, "MDCK1"), *others(2)], [Serum(NAME, "F1", "MDCK1")], [["640", "40", "20"]]
+    )
+    layout = ruler(1, 2, 3)
+    layout[-1] = np.nan
+    (rec,) = serum_circles(c, layout)
+    assert rec.circle.empirical is None and rec.coverage.status == "good"
+    assert rec.other_coverage.status == "no_homologous_titre"
+    assert rec.disagreement() == "visible"
+    assert rec.disagreement(coverage=False) == "neither"
