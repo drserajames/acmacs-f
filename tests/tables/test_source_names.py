@@ -43,7 +43,7 @@ def test_originals_are_read_under_their_read_names(tmp_path, rules_dir, rules):
     assert rules.source_names.rules[0].hits == 1
     assert report[0] == f"LABV {SET}: 1 originals in {root}, read under their source_names names"
     assert report[1:] == [
-        f"LABV workbooks in {root} with no source_names row: 2, 1 dated on or after 2030-01-01",
+        f"LABV workbooks in {root} not named by source_names: 2, 1 dated on or after 2030-01-01",
         "  2030/20300105 LabV.xlsx",
     ]
     # provenance names the original, not the link the run read it through
@@ -121,3 +121,30 @@ def test_two_sets_reading_one_name_are_an_error(tmp_path):
     given = update.TablesSettings(rules=directory, run="t", vidrl=entries)
     with pytest.raises(ValueError, match="read from sets labv-own-2030 and labv-delivery"):
         update._stage_sources(given, rules, tmp_path / "s")
+
+
+def test_a_copy_named_as_a_read_name_is_accounted_for(tmp_path):
+    """A root of curated copies: the copy of a test now read from its original is not new."""
+    directory = write_rules(tmp_path / "rules")
+    meta = "\tinvented for tests\ttest\t2030-01-01\tyes"
+    rows = [
+        *RULES["source_names"],
+        "LABV\tlabv-copies\tlabv-20291230.xlsx\tlabv-20291230.xlsx" + meta,
+    ]
+    (directory / "source_names.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    root = originals(tmp_path / "originals")
+    copies = tmp_path / "copies"
+    copies.mkdir()
+    workbook(copies / "labv-20291230.xlsx")  # read from this root
+    workbook(copies / "labv-20300102.xlsx")  # the read name of the original in `root`
+    workbook(copies / "labv-20300109.xlsx")  # a copy nothing accounts for
+    entries = [
+        update.VIDRLInputs("LABV", root, "2030-01-01", "B", "VICTORIA", names=SET),
+        update.VIDRLInputs("LABV", copies, "2029-12-01", "B", "VICTORIA", names="labv-copies"),
+    ]
+    given = update.TablesSettings(rules=directory, run="t", vidrl=entries)
+    _, report = update._stage_sources(given, Rules(directory), tmp_path / "s")
+    i = report.index(
+        f"LABV workbooks in {copies} not named by source_names: 1, 1 dated on or after 2029-12-01"
+    )
+    assert report[i + 1] == "  labv-20300109.xlsx"

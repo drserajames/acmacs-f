@@ -611,7 +611,9 @@ def _stage_sources(
 
 def _unnamed_originals(settings: TablesSettings, rules: Rules) -> list[str]:
     """Workbooks under a ``names`` root that no source_names row of that lab names: counted,
-    and listed when the file name dates them on or after the earliest start on that root."""
+    and listed when the file name dates them on or after the earliest start on that root.
+    A workbook named as one of the lab's read names is accounted for: a curated copy whose
+    test is now read from its original (a root of copies holds many)."""
     roots: dict[tuple[str, Path], list[str]] = {}
     folders: list[AC21Inputs | VIDRLInputs] = [
         *settings.ac21,
@@ -625,7 +627,9 @@ def _unnamed_originals(settings: TablesSettings, rules: Rules) -> list[str]:
     lines = []
     for (lab, root), starts in sorted(roots.items()):
         table = rules.source_names
-        named = {(root / r["file"]).resolve() for r in table.rules if table.in_scope(r, lab=lab)}
+        rows = [r for r in table.rules if table.in_scope(r, lab=lab)]
+        named = {(root / r["file"]).resolve() for r in rows}
+        read_as = {r["read_as"] for r in rows}
         start = min(dt.date.fromisoformat(s) for s in starts).isoformat()
         unnamed = [
             p
@@ -633,10 +637,11 @@ def _unnamed_originals(settings: TablesSettings, rules: Rules) -> list[str]:
             if p.suffix.lower() in WORKBOOKS
             and not p.name.startswith("~$")
             and p.resolve() not in named
+            and p.name not in read_as
         ]
         recent = [p for p in unnamed if (_safe_file_date(p) or "") >= start]
         lines.append(
-            f"{lab} workbooks in {root} with no source_names row: {len(unnamed)},"
+            f"{lab} workbooks in {root} not named by source_names: {len(unnamed)},"
             f" {len(recent)} dated on or after {start}"
         )
         lines += [f"  {p.relative_to(root)}" for p in recent]
