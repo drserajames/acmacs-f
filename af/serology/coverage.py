@@ -156,7 +156,7 @@ def run_coverage(block: Mapping[str, Any], pages: Mapping[str, Any], ctx: Any) -
             bottoms = [cell(b) for _, b in laid] + [None] * (3 - len(laid))
             plan.append({"caption": CAPTION.format(label=label), "legend": LEGEND,
                          "cells": tops + bottoms})  # fmt: skip
-    hand = [_hand_declaration(name, d, pages, folders) for d in block.get("declarations", ())]
+    hand = [hand_declaration(name, d, pages, folders) for d in block.get("declarations", ())]
     md_file = f"declarations/{name}-homologous-rules.md"
     toml_path = out_dir / f"{name}-homologous-rules.toml"
     md_path = out_dir / f"{name}-homologous-rules.md"
@@ -204,11 +204,12 @@ def _shown_json(s: Shown, name: str) -> dict[str, Any]:
             "record": s.record.to_json()}  # fmt: skip
 
 
-def _hand_declaration(
+def hand_declaration(
     name: str, entry: Mapping[str, Any], pages: Mapping[str, Any], folders: Sequence[Any]
 ) -> dict[str, str]:
     """A hand declaration about one of the block's maps, on the chain version it was drawn
-    from: ``{ map, ruling, text }``."""
+    from: ``{ map, ruling, text }``. Every addendum kind reads its block's ``declarations``
+    with this and passes them to :func:`write_fragment` as ``also``."""
     if set(entry) != {"map", "ruling", "text"}:
         raise CoverageError(f"{name}: a declaration needs map, ruling and text: {dict(entry)}")
     if entry["map"] not in folders:
