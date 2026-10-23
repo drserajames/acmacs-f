@@ -74,6 +74,10 @@ class MapPage:
     must_show_since: dt.date
     provenance: dict[str, Any]
     vaccine_labels: dict[str, str] = field(default_factory=dict)  # point id -> the map's label
+    # how the map is coloured: the user's clade scheme it names, and "store" (the store join,
+    # as vaccines are coloured) or "stand-in" (the chart's own rows and labels); None: unknown
+    clade_scheme: str | None = None
+    colour_source: str | None = None
 
     def layout(self) -> np.ndarray:
         """The drawn layout in chart order (antigens then sera), NaN where the chart has no

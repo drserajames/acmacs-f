@@ -70,7 +70,8 @@ def test_a_coverage_block_draws_a_figure_per_serum_and_plans_its_pages(
         ("lab-a-hi", "LABA F1/25"), ("lab-a-hi", "LABA F2/25"),
         ("lab-a-neut", "LABA F1/25"), ("lab-a-neut", "LABA F2/25"),
     ]  # fmt: skip
-    assert {(c["radius"], c["clade_line"]) for c in drawn} == {("empirical", "X")}
+    # Q255 b: the map's legend row; these invented maps are stand-ins: the best-match antigen's
+    assert {(c["radius"], c["clade_line"]) for c in drawn} == {("empirical", "Clade X")}
     first = drawn[0]["addendum"]
     assert (first["section"], first["reason"], first["rules"]) == (
         "X", "clade X", ["best-match", "best-match"]
@@ -86,6 +87,7 @@ def test_a_coverage_block_draws_a_figure_per_serum_and_plans_its_pages(
     ]  # fmt: skip
     assert manifest["selection"]["reasons"] == {"X": "the test clade"}
     assert manifest["disagreements"]["shown"] == 4 and manifest["disagreements"]["hand"] == 1
+    assert manifest["title_clade"] == {"legend row (best-match antigen, stand-in map)": 4}
     shown = json.loads((out / "shown.json").read_text())
     assert [s["map"] for s in shown] == ["lab-a-hi", "lab-a-hi", "lab-a-neut", "lab-a-neut"]
     assert shown[0]["chain"]["dataset"] == "laba/lab-a-hi/merged"
@@ -176,3 +178,43 @@ def test_a_hand_declaration_is_made_on_its_maps_chain_version() -> None:
     }  # fmt: skip
     with pytest.raises(CoverageError, match="needs map, ruling and text"):
         hand_declaration("addendum-5-h3", {"map": "lab-a-hi", "text": "t"}, pages, ["lab-a-hi"])
+
+
+def test_a_store_coloured_map_titles_a_serum_by_its_strains_legend_row(
+    tmp_path: Path, drawn: list[dict[str, Any]]
+) -> None:
+    """Q255 b on a store-coloured map: the serum's strain is styled through the store join (as
+    vaccines are), with the map's clade scheme, and its legend row titles the figure; a strain
+    no row paints falls back to its clade, said so."""
+    import dataclasses
+
+    from af.map.colouring import SerumStrain
+
+    class Join:
+        def __init__(self, labels: frozenset[str]) -> None:
+            self.labels = labels
+            self.schemes: list[Any] = []
+
+        def for_sera(self, chart: Chart, residues: Any = (), scheme: Any = None) -> list[Any]:
+            self.schemes.append(scheme)
+            return [
+                SerumStrain(i, "EPI_1", "A1", "SIAT1", "X.9", ("X", "X.9"), {}, "t", self.labels)
+                for i in range(chart.n_sera)
+            ]
+
+    pages = {
+        f: dataclasses.replace(page(f), colour_source="store", clade_scheme="test clades")
+        for f in ("lab-a-hi", "lab-a-neut")
+    }
+    for labels, line, source in (
+        (frozenset({"X"}), "Clade X", "legend row (store join)"),
+        (frozenset({"Y"}), "X.9", "clade (no legend row paints the strain)"),
+    ):
+        join = Join(labels)
+        ctx = dataclasses.replace(context(tmp_path), colours=join)
+        drawn.clear()
+        result = addenda.handlers()["coverage"](coverage_block(), pages, ctx)
+        assert join.schemes == ["test clades", "test clades"]  # the map's own scheme
+        assert {c["clade_line"] for c in drawn} == {line}
+        assert drawn[0]["addendum"]["title_clade"] == {"line": line, "from": source}
+        assert result.manifest["title_clade"] == {source: 4}

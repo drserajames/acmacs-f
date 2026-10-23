@@ -110,16 +110,21 @@ def run_coverage(block: Mapping[str, Any], pages: Mapping[str, Any], ctx: Any) -
     folders = block_maps(block)
     if None in folders:
         raise CoverageError(f"{name}: coverage pages are laid out by centre; no empty map slots")
-    found: dict[tuple[str, ...], tuple[str, SerumCircle, str]] = {}
+    found: dict[tuple[str, ...], tuple[str, SerumCircle, dict[str, str]]] = {}
     cands = []
     for f in folders:
         assert f is not None
         page = pages[f]
-        strains = ctx.colours.for_sera(page.chart, residues)
+        store = page.colour_source == "store"
+        strains = (
+            ctx.colours.for_sera(page.chart, residues, scheme=page.clade_scheme)
+            if store
+            else ctx.colours.for_sera(page.chart, residues)
+        )
         records = serum_circles(page.chart, page.layout(), FOLD, projection=page.projection)
         mine = candidates(page.chart, strains, chart_name=f, centre=page.centre)
         for cand, rec, strain in zip(mine, records, strains, strict=True):
-            found[cand.key] = (f, rec, _clade_line(strain))
+            found[cand.key] = (f, rec, title_clade(page, rec, strain, store))
         cands += mine
     classes = block.get("passage_classes")
     selection = select_sera(
@@ -129,21 +134,23 @@ def run_coverage(block: Mapping[str, Any], pages: Mapping[str, Any], ctx: Any) -
     window = str(block.get("window", "all"))
     figure_of: dict[tuple[str, ...], Path] = {}
     shown: list[Shown] = []
+    title_from: dict[str, int] = {}  # where each shown figure's third title line came from
     for label, chosen in selection.sections.items():
         for c in chosen:
-            f, rec, clade_line = found[c.serum.key]
+            f, rec, clade = found[c.serum.key]
+            title_from[clade["from"]] = title_from.get(clade["from"], 0) + 1
             page = pages[f]
             lab = ctx.labs.get(str(page.chart.info.get("l", "")))
             if lab is None:
                 raise CoverageError(f"{f}: lab {page.chart.info.get('l')!r} not in the labs table")
             shown.append(Shown(int(block["addendum"]), label, c.reason, f, _chain(page), rec))
             figure_of[c.serum.key] = render_coverage(
-                page, rec, radius=RADIUS, clade_line=clade_line, created=ctx.created, lab=lab,
+                page, rec, radius=RADIUS, clade_line=clade["line"], created=ctx.created, lab=lab,
                 window=window,
                 out_pdf=out_dir / f / f"sr{rec.serum}" / "v1" / "figure.pdf",
                 addendum={"name": name, "kind": "coverage", "section": label,
                           "reason": c.reason, "rules": [rec.circle.rule, rec.coverage.rule],
-                          "radius": RADIUS, "record": rec.to_json()},
+                          "radius": RADIUS, "title_clade": clade, "record": rec.to_json()},
             )  # fmt: skip
 
     def cell(c: Any) -> str | None:
@@ -173,6 +180,7 @@ def run_coverage(block: Mapping[str, Any], pages: Mapping[str, Any], ctx: Any) -
         "declarations": [toml_path.name, md_path.name],
         "selection": selection.report(),
         "disagreements": counts,
+        "title_clade": title_from,
     }
     return AddendumResult(
         out_dir, manifest, tuple(figure_of.values()), selection.report(),
@@ -180,12 +188,31 @@ def run_coverage(block: Mapping[str, Any], pages: Mapping[str, Any], ctx: Any) -
     )  # fmt: skip
 
 
-def _clade_line(strain: Any) -> str:
-    """The figure's third title line: the serum's strain's clade (its lineage's last), or none
-    when no sequence of the strain is known."""
+def title_clade(page: Any, record: SerumCircle, strain: Any, store: bool) -> dict[str, str]:
+    """The figure's third title line (Sarah, Q255 b): the row of the map's own legend the
+    serum's strain paints with, so the title matches the legend on the page.
+
+    On a store-coloured map the strain's sequence record is styled through the store join, as a
+    vaccine's strain is (:meth:`af.map.colouring.StoreColours.for_sera` with the map's scheme).
+    A stand-in map has no join (its rows and labels are its chart's own, as for vaccines), so
+    the labels are those of the serum's best-match antigen on the map. When no legend row
+    paints the strain, the line is its clade, and ``from`` says so."""
+    if store:
+        labels, source = strain.labels, "legend row (store join)"
+    else:
+        labels, source = None, "legend row (best-match antigen, stand-in map)"
+        ag = record.coverage.antigen
+        if ag is not None:
+            point = next((p for p in page.points if p.id == f"ag{ag}"), None)
+            labels = point.labels if point is not None else None
+    row = page.scheme.paint(labels) if labels else None
+    if row is not None:
+        return {"line": row.legend, "from": source}
     if strain.clade:
-        return str(strain.clade)
-    return str(strain.lineage[-1]) if strain.lineage else ""
+        return {"line": str(strain.clade), "from": "clade (no legend row paints the strain)"}
+    if strain.lineage:
+        return {"line": str(strain.lineage[-1]), "from": "clade (no legend row paints the strain)"}
+    return {"line": "", "from": "none (no legend row, no sequence of the strain)"}
 
 
 def _chain(page: Any) -> Mapping[str, Any]:

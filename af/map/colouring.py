@@ -640,7 +640,12 @@ class StoreColours:
             )  # fmt: skip
         return out
 
-    def for_sera(self, chart: Chart, residues: Collection[int] = ()) -> list[SerumStrain]:
+    def for_sera(
+        self,
+        chart: Chart,
+        residues: Collection[int] = (),
+        scheme: str | CladeColourScheme | None = None,
+    ) -> list[SerumStrain]:
         """Each serum's strain as a sequence says it: the clade, its lineage and the amino acids
         at ``residues`` (mature HA numbering) of one sequence record of the serum's strain.
 
@@ -650,12 +655,25 @@ class StoreColours:
         serum's is taken (:func:`serum_record_rank`); among equals, one with an alignment, then
         the fewest unread amino acids (gaps, X: a partial sequence), then the lowest EPI_ISL. The
         serum-coverage addenda select their sections with these (af.chart.serum_selection).
+
+        With ``scheme`` (the map's, as :meth:`for_chart` takes it), each strain's record is also
+        styled as a preparation matched to it would be, exactly as :meth:`for_vaccines` styles a
+        strain's records, and ``labels`` are the legend labels it paints with: the row of the
+        map's legend the serum's strain belongs to (Sarah, Q255 b).
         """
         from af.clades.nomenclature import lineage
+        from af.geo.colours import dot_styles
 
         row = chart_subtype(chart).key
         strains = self._strain_index(row)
         clade_set, _ = self._clade_sets(row)
+        colouring = None
+        if scheme is not None:
+            colouring = (
+                self._colouring(row, scheme)
+                if isinstance(scheme, str)
+                else self._caller_colouring(row, scheme, None)
+            )
         out = []
         for sr, serum in enumerate(chart.sera):
             key = _strain_key(serum.name)
@@ -686,11 +704,28 @@ class StoreColours:
                     if 0 < pos <= len(seq.amino_acids):
                         aa[pos] = seq.amino_acids[pos - 1]
             rank = serum_record_rank(serum.passage, passage, self.rules.passages)
+            labels = None
+            if colouring is not None:
+                fake = {
+                    _record_key(0): PreparationSequence(
+                        epi_isl, accession, record.clade, "exact", False,
+                        clade_evidence=record.clade_evidence,
+                        supported_clade=record.supported_clade,
+                    )
+                }  # fmt: skip
+                style_of, _ = dot_styles(
+                    fake, aligned.get_pair, colouring.scheme, colouring.clade_set,
+                    colouring.group_set,
+                )  # fmt: skip
+                labels = labels_for(
+                    style_of(_record_key(0)).label, key_for_legend(colouring.scheme)
+                )
             out.append(
                 SerumStrain(
                     sr, epi_isl, accession, passage, record.clade,
                     lineage(clade_set, record.clade), aa,
                     f"record by name, passage rank {rank} of {len(found)} record(s)",
+                    labels,
                 )
             )  # fmt: skip
         return out
@@ -849,6 +884,9 @@ class SerumStrain:
     lineage: tuple[str, ...] | None
     aa: dict[int, str]
     why: str
+    # the legend labels its record paints with on a map of the scheme given (Q255 b); None
+    # when no scheme was given or the strain has no record
+    labels: frozenset[str] | None = None
 
 
 def serum_record_rank(serum_passage: str, record_passage: str, passages: PassageMatcher) -> int:
