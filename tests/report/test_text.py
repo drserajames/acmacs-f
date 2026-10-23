@@ -239,3 +239,69 @@ def test_not_recorded_never_reaches_the_page(tmp_path: Path) -> None:
     cfg_path.write_text(cfg_path.read_text().replace("\\n\\n{tree_method}", " NOT RECORDED"))
     with pytest.raises(build.BuildError, match="'NOT RECORDED' would be printed"):
         build.build(cfg_path, root, tmp_path / "out")
+
+
+ABOUT = '''
+[report.about]
+title = "About this report"
+text = """A monthly report for one centre.
+
+Its data end on {data_cutoff}; geographic data cover {period}."""
+'''
+
+
+def _with_about(about: str) -> str:
+    return CONFIG.replace("ALLOW", "true").replace("end_page = true\n", "end_page = true\n" + about)
+
+
+def test_the_about_page_fills_its_facts_from_the_config(tmp_path: Path) -> None:
+    """A monthly report says what it is on a page after the contents (11.166)."""
+    cfg_path, root, store = _setup(tmp_path, FULL, allow=True)
+    cfg_path.write_text(_with_about(ABOUT))
+    cfg = load(cfg_path)
+    assert build.about_text(cfg) == [
+        "A monthly report for one centre.",
+        "Its data end on 30 September 2026; geographic data cover April 2026 to September 2026.",
+    ]
+    out = tmp_path / "build"
+    out.mkdir()
+    figs = build.resolve_all(cfg, root)
+    tex = build.write_tex(cfg, figs, out, T0, 0, build.intro_texts(cfg, figs, store)).read_text()
+    assert r"\addcontentsline{toc}{section}{About this report}" in tex
+    assert tex.index(r"\tableofcontents") < tex.index("About this report") < tex.index("Geographic")
+
+
+def test_without_an_about_page_nothing_is_added(tmp_path: Path) -> None:
+    cfg_path, root, store = _setup(tmp_path, FULL, allow=True)
+    cfg = load(cfg_path)
+    assert build.about_text(cfg) == []
+    out = tmp_path / "build"
+    out.mkdir()
+    figs = build.resolve_all(cfg, root)
+    assert "addcontentsline{toc}{section}" not in build.write_tex(
+        cfg, figs, out, T0, 0, build.intro_texts(cfg, figs, store)).read_text()  # fmt: skip
+
+
+def test_the_about_page_is_checked(tmp_path: Path) -> None:
+    cfg = tmp_path / "r.toml"
+    cfg.write_text(_with_about(ABOUT.replace("{data_cutoff}", "{tree_method}")
+                               .replace('"About this report"', '" "')))  # fmt: skip
+    with pytest.raises(ConfigError) as err:
+        load(cfg)
+    assert "report.about.title: empty" in str(err.value)
+    assert ("{tree_method} is not a placeholder for an about page (known: ['data_cutoff', "
+            "'period'])") in str(err.value)  # fmt: skip
+    to_cutoff = 'intro = "Month by month to {data_cutoff}.'
+    cfg.write_text(_with_about(ABOUT).replace('intro = "Month by month from {period}.', to_cutoff))
+    with pytest.raises(ConfigError, match="data_cutoff.* is not a placeholder for a geo section"):
+        load(cfg)
+
+
+@build_needs_latex
+def test_a_report_with_an_about_page_builds(tmp_path: Path) -> None:
+    cfg_path, root, _ = _setup(tmp_path, FULL, allow=True)
+    cfg_path.write_text(_with_about(ABOUT).replace("\\n\\n{tree_method}", ""))
+    build.build(cfg_path, root, tmp_path / "out")
+    record = json.loads((tmp_path / "out" / "r.build.json").read_text())
+    assert record["about"][1].startswith("Its data end on 30 September 2026")
+    assert record["output"]["pages"] >= 5

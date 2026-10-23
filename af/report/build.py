@@ -392,6 +392,32 @@ def intro_texts(
     return out
 
 
+def about_text(cfg: ReportConfig) -> list[str]:
+    """The about page's paragraphs, its placeholders filled from the report config; none without
+    an about page."""
+    about = cfg.report.about
+    if about is None:
+        return []
+    values = {"period": text.period_text(cfg.months()),
+              "data_cutoff": text.date_text(cfg.report.data_cutoff)}  # fmt: skip
+    filled = text.fill(about.text, values)
+    return [p.strip() for p in filled.split("\n\n") if p.strip()]
+
+
+def _about_page(cfg: ReportConfig) -> list[str]:
+    """After the contents, spaced as an intro page and listed in the contents as a group is."""
+    if cfg.report.about is None:
+        return []
+    title = tex_escape(cfg.report.about.title)
+    return [
+        rf"\section*{{{title}}}",
+        rf"\addcontentsline{{toc}}{{section}}{{{title}}}",
+        r"\vspace*{3em}",
+        r"\par\vspace{1em}".join(tex_escape(p) for p in about_text(cfg)) + r"\par",
+        r"\newpage",
+    ]
+
+
 def _intro_page(section: Section, intro: Intro, key: Key | None = None, n: int = 0) -> list[str]:
     """The section heading and its paragraphs; then a new page. An unrecorded fact is refused.
 
@@ -554,6 +580,7 @@ def write_tex(
         # opening space, without which the cover sat 11.5pt high (review, 18 Oct 2026).
         GEOMETRY.replace("\\usepackage[", "\\newgeometry{").replace("]{geometry}", "}"),
         *_cover(cfg, sum(r.figure.placeholder for r in figs.values()), n_not_from_store, built_at),
+        *_about_page(cfg),
     ]
     group = None
     intros, keys = intros or {}, keys or {}
@@ -801,6 +828,7 @@ def build(
         dataset: dataclasses.asdict(method) for dataset, method in cfg.imported_tree_methods.items()
     }
     record["clade_key"] = key_record
+    record["about"] = about_text(cfg)  # the about page as printed, placeholders filled
     (out_dir / f"{cfg.report.id}.build.json").write_text(json.dumps(record, indent=1))
     return final
 
