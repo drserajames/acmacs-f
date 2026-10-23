@@ -39,6 +39,16 @@ class Meeting:
 
 
 @dataclass(frozen=True)
+class About:
+    """A text page after the contents saying what the report is: a monthly for one centre, say,
+    whose data end where, and what is new since the last meeting. The words are the report's;
+    its facts are placeholders filled from the report config (af.report.text), never typed in."""
+
+    title: str
+    text: str
+
+
+@dataclass(frozen=True)
 class Report:
     id: str
     kind: str
@@ -50,6 +60,7 @@ class Report:
     centre: str | list[str] = ""  # a list: one cover line each, as the delivered report has
     subtitle: str = ""  # e.g. "Southern Hemisphere 2027": config, not derived from dates
     meeting: Meeting | None = None
+    about: About | None = None
     end_page: bool = False  # a closing "Report generated <time>" page, as the delivered report has
     # IANA zone the closing page prints its time in (the delivered report: "Europe/London");
     # empty prints UTC. The build record keeps UTC either way.
@@ -207,19 +218,30 @@ def _placeholders(section: Section) -> list[str]:
 
 
 def _intro_problems(where: str, section: Section) -> list[str]:
-    from af.report.text import PLACEHOLDERS, placeholders
-
     if section.kind not in ("geo", "trees"):
         return [f"{where}.intro: only for geo and trees sections"]
+    return _placeholder_problems(f"{where}.intro", section.intro, section.kind, "section")
+
+
+def _about_problems(about: About) -> list[str]:
+    problems = [f"report.about.{key}: empty" for key in ("title", "text")
+                if not getattr(about, key).strip()]  # fmt: skip
+    return problems + _placeholder_problems("report.about.text", about.text, "about", "page")
+
+
+def _placeholder_problems(where: str, text: str, kind: str, noun: str) -> list[str]:
+    """Placeholders in ``text`` that are malformed or not filled for a ``kind`` page."""
+    from af.report.text import PLACEHOLDERS, placeholders
+
     try:
-        names = placeholders(section.intro)
+        names = placeholders(text)
     except ValueError as err:
-        return [f"{where}.intro: {err}"]
+        return [f"{where}: {err}"]
     return [
-        f"{where}.intro: {{{name}}} is not a placeholder for a {section.kind} section "
-        f"(known: {sorted(k for k, kinds in PLACEHOLDERS.items() if section.kind in kinds)})"
+        f"{where}: {{{name}}} is not a placeholder for a{'n' if kind[0] in 'aeiou' else ''} "
+        f"{kind} {noun} (known: {sorted(k for k, kinds in PLACEHOLDERS.items() if kind in kinds)})"
         for name in names
-        if section.kind not in PLACEHOLDERS.get(name, ())
+        if kind not in PLACEHOLDERS.get(name, ())
     ]
 
 
@@ -248,6 +270,8 @@ def load(path: Path) -> ReportConfig:
         problems.append("report.period: last is before first")
     if r.meeting is not None and r.meeting.end < r.meeting.start:
         problems.append("report.meeting: end is before start")
+    if r.about is not None:
+        problems += _about_problems(r.about)
     for key in ("title", "centre"):
         value = getattr(r, key)
         if isinstance(value, list) and not all(line.strip() for line in value):

@@ -15,6 +15,10 @@ change from round to round:
 - ``{clade_not_defined}`` (geo sections with a clade key only): how many viruses over the period
   are drawn as "clade not defined", with the noun ("1 virus", "2 viruses"), from the geo build's
   clade-key.json (Sarah, Q215). When there is none, the paragraph that says it is left out.
+- ``{data_cutoff}`` (the report's about page only): the report's data cut-off, "23 October 2026".
+
+The report's about page (``[report.about]``), which says what a report is, takes ``{period}`` and
+``{data_cutoff}``: both come from the report config, so it has no gaps.
 
 A fact no artefact records is a gap: named, and the build is refused, bring-up or final. Internal
 identifiers never reach the page in place of a sentence (00, 18 Oct 2026, after a review found
@@ -23,6 +27,7 @@ a NOT RECORDED line on two tree pages).
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import string
 from typing import Any
@@ -31,9 +36,10 @@ from af.report.config import TreeMethod
 from af.store import Store, StoreRef
 
 PLACEHOLDERS = {
-    "period": ("geo", "trees", "maps"),
+    "period": ("geo", "trees", "maps", "about"),
     "tree_method": ("trees",),
     "clade_not_defined": ("geo",),
+    "data_cutoff": ("about",),
 }
 
 
@@ -50,12 +56,15 @@ def without_paragraphs_using(text: str, name: str) -> str:
 
 def period_text(months: list[str]) -> str:
     """ "April 2026 to September 2026" for a period given as YYYY-MM months."""
-    import datetime as dt
-
     first, last = (dt.date(int(m[:4]), int(m[5:]), 1) for m in (months[0], months[-1]))
     if first == last:
         return first.strftime("%B %Y")
     return f"{first.strftime('%B %Y')} to {last.strftime('%B %Y')}"
+
+
+def date_text(date: dt.date) -> str:
+    """ "23 October 2026", as the cover prints a meeting day."""
+    return f"{date.day} {date.strftime('%B %Y')}"
 
 
 def tree_json(store: Store, figure: dict[str, Any]) -> tuple[StoreRef, dict[str, Any]]:
