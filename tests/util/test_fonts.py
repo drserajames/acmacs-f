@@ -102,3 +102,32 @@ def test_cff_outline_fonts_embed_as_type_3(tmp_path: Path) -> None:
     cff.write_bytes(b"OTTO rest of an invented font")
     assert pdf_fonttype((truetype, truetype)) == 42
     assert pdf_fonttype((truetype, cff)) == 3
+
+
+def test_a_mono_font_af_does_not_install_is_named_by_path_and_hash(tmp_path: Path) -> None:
+    import hashlib
+    import shutil
+
+    mono = tmp_path / "Mono.ttf"  # a file af does not install, as a system font would be
+    shutil.copyfile(TTF / "DejaVuSansMono.ttf", mono)
+    sha = hashlib.sha256(mono.read_bytes()).hexdigest()
+    head = (
+        '[fonts]\nsans = "STIXGeneral.ttf"\nsans_bold = "STIXGeneralBol.ttf"\nmono = "Mono.ttf"\n'
+    )
+    fonts = load_fonts(
+        write(tmp_path, head + f'mono_path = "{mono}"\nmono_sha256 = "{sha}"\n'), bundled
+    )
+    assert fonts.inputs()["font_mono"]["path"] == str(mono)
+    with pytest.raises(FontError, match="has sha256"):
+        load_fonts(
+            write(tmp_path, head + f'mono_path = "{mono}"\nmono_sha256 = "{"0" * 64}"\n'), bundled
+        )
+    with pytest.raises(FontError, match="both mono_path and mono_sha256"):
+        load_fonts(write(tmp_path, head + f'mono_path = "{mono}"\n'), bundled)
+    other = (
+        '[fonts]\nsans = "STIXGeneral.ttf"\nsans_bold = "STIXGeneralBol.ttf"\nmono = "Other.ttf"\n'
+    )
+    with pytest.raises(FontError, match="file name"):
+        load_fonts(
+            write(tmp_path, other + f'mono_path = "{mono}"\nmono_sha256 = "{sha}"\n'), bundled
+        )

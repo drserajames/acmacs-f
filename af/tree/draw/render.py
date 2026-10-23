@@ -133,6 +133,11 @@ class Geometry:
     # whose strain labels sit at fixed (shipped) offsets: placed last, an automatic aa label
     # takes their spot and pushes them off their rows (R7, B/Vic).
     strains_first: bool = False
+    # Pinned labels whose glyphs would print over another label or a strain label move the
+    # least distance up or down that leaves this much clear space (figure units); None: pins
+    # stay exactly where they are put. Each move is listed in the draw report (R7 review: two
+    # pins printed over each other where af's nodes sit closer than the shipped tree's).
+    pin_clearance: float | None = None
     # The continent inset's preferred corner (left x, bottom y): the clear spot nearest to it is
     # taken, never one over ink; None: the lowest, then leftmost clear spot. And its width.
     inset_left: float | None = None
@@ -150,6 +155,8 @@ class Geometry:
     label_ink_weight: float | None = None
     label_length_weight: float | None = None
     label_flat_weight: float | None = None
+    label_overlap_weight: float | None = None
+    label_crossing_weight: float | None = None
     # Clade bracket arrowheads, in points (FancyArrowPatch head length and half-width), and
     # the largest share of its bracket a head may take (None: no cap); past it the head
     # shrinks, so a short bracket's two heads never meet (R6 review: a bow-tie on J.1.1).
@@ -220,6 +227,10 @@ class Drawn:
     continents_not_in_legend: dict[str, int]  # value -> rows drawn grey for it
     leaf_names: int | None = None  # names written (None: layer off)
     inset: Box | None = None  # continent inset (x0, y0, x1, y1), figure units; None: clade key
+    # Geometry.pin_clearance only: pinned labels moved to clear ({text, dy}), and labels whose
+    # glyphs overlap another label's or a strain label's after placement
+    pin_moves: list[dict] | None = None
+    overprints: int | None = None
 
 
 class _Page:
@@ -646,9 +657,14 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
     )
     width, line_height = _text_width(font), g.label_font * 1.2
     fixed = {k: _pinned_box(spec, pg, k, width, line_height) for k in spec.label_pins}
+    moves = None
+    if g.pin_clearance is not None:
+        fixed, moves = _clear_pins(spec, fixed, obstacles, width, g)
     placed = place_labels(
         items, grid, width, line_height, search=search, weights=_weights(g), fixed=fixed or None
     )
+    if g.pin_clearance is not None and moves is not None:
+        placed = _clear_pins_after(placed, set(fixed.values()), obstacles, width, g, moves)
     for p in placed:
         x0, y0, x1, y1 = p.box
         ax.text(
@@ -663,7 +679,98 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
         )
         ex, ey = leader_end(p.box)
         ax.plot([ex, p.anchor[0]], [ey, p.anchor[1]], color="#4d4d4d", lw=0.35)
-    return placed, placement_metrics(placed, grid)
+    return placed, placement_metrics(placed, grid), moves
+
+
+def _glyph_box(box: Box, text: str, width: Callable[[str], float], g: Geometry) -> Box:
+    """Where a label's glyphs are inside its placer box: right-aligned one unit in, centred
+    vertically, capitals high (0.72 of the size) on the last line, 1.15 lines apart."""
+    lines = text.split("\n")
+    w = max(width(t) for t in lines)
+    h = g.label_font * (1.15 * (len(lines) - 1) + 0.72)
+    yc = (box[1] + box[3]) / 2
+    return (box[2] - 1 - w, yc - h / 2, box[2] - 1, yc + h / 2)
+
+
+def _hits(a: Box, b: Box, gap: float) -> bool:
+    return min(a[2], b[2]) + gap > max(a[0], b[0]) and min(a[3], b[3]) + gap > max(a[1], b[1])
+
+
+def _clear_pins(
+    spec: FigureSpec,
+    fixed: dict[int, Box],
+    obstacles: Sequence[Box],
+    width: Callable[[str], float],
+    g: Geometry,
+) -> tuple[dict[int, Box], list[dict]]:
+    """Pinned labels, top to bottom, each moved the least distance up or down (0.25-unit
+    steps, at most 40) that clears the glyphs of the pins already settled and of the strain
+    labels by ``pin_clearance``. A pin that no step clears stays, and is listed with dy None."""
+    gap = g.pin_clearance or 0.0
+    settled = list(obstacles)
+    out: dict[int, Box] = {}
+    moves: list[dict] = []
+    steps = sorted((d * 0.25 for d in range(-160, 161)), key=lambda d: (abs(d), d))
+    for k in sorted(fixed, key=lambda k: fixed[k][1]):
+        box, text = fixed[k], "\n".join(spec.labels[k].subs)
+        for dy in steps:
+            moved = (box[0], box[1] + dy, box[2], box[3] + dy)
+            if not any(_hits(_glyph_box(moved, text, width, g), o, gap) for o in settled):
+                break
+        else:
+            moved, dy = box, None
+        if dy:
+            moves.append({"text": " ".join(spec.labels[k].subs), "dy": round(dy, 2)})
+        elif dy is None:
+            moves.append({"text": " ".join(spec.labels[k].subs), "dy": None})
+        out[k] = moved
+        settled.append(_glyph_box(moved, text, width, g))
+    return out, moves
+
+
+def _clear_pins_after(
+    placed: list[Placed],
+    pinned_boxes: set[Box],
+    obstacles: Sequence[Box],
+    width: Callable[[str], float],
+    g: Geometry,
+    moves: list[dict],
+) -> list[Placed]:
+    """After placement: a pinned label an automatic label prints over (no clear spot was left
+    for the automatic one) moves the least distance up or down that clears every label and
+    strain label; the move is added to ``moves``."""
+    gap = g.pin_clearance or 0.0
+    out = list(placed)
+    steps = sorted((d * 0.25 for d in range(-160, 161)), key=lambda d: (abs(d), d))
+    for i, p in enumerate(out):
+        if p.box not in pinned_boxes:
+            continue
+        others = [_glyph_box(q.box, q.text, width, g) for j, q in enumerate(out) if j != i]
+        others += list(obstacles)
+        if not any(_hits(_glyph_box(p.box, p.text, width, g), o, 0.0) for o in others):
+            continue
+        for dy in steps:
+            box = (p.box[0], p.box[1] + dy, p.box[2], p.box[3] + dy)
+            if not any(_hits(_glyph_box(box, p.text, width, g), o, gap) for o in others):
+                out[i] = replace(p, box=box)
+                moves.append({"text": p.text.replace("\n", " "), "dy": round(dy, 2)})
+                break
+        else:
+            moves.append({"text": p.text.replace("\n", " "), "dy": None})
+    return out
+
+
+def glyph_overprints(
+    placed: Sequence[Placed], strains: Sequence[Box], width: Callable[[str], float], g: Geometry
+) -> int:
+    """Labels whose glyphs overlap another label's glyphs or a strain label: what a reader
+    sees printed over something (the placer's own boxes are padded)."""
+    boxes = [_glyph_box(p.box, p.text, width, g) for p in placed]
+    n = 0
+    for i, a in enumerate(boxes):
+        n += any(_hits(a, b, 0.0) for b in boxes[i + 1 :])
+        n += any(_hits(a, s, 0.0) for s in strains)
+    return n
 
 
 def _pinned_box(
@@ -687,6 +794,8 @@ def _weights(g: Geometry) -> Weights | None:
         "ink": g.label_ink_weight,
         "length": g.label_length_weight,
         "flat": g.label_flat_weight,
+        "overlap": g.label_overlap_weight,
+        "crossing": g.label_crossing_weight,
     }
     own: dict[str, float] = {k: v for k, v in given.items() if v is not None}
     return Weights(**own) if own else None
@@ -817,10 +926,14 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     inset = _draw_key(ax, spec, pg, grid)
     if g.strain_x is None or g.strains_first:  # strain labels first: the aa labels keep off them
         strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid)
-        placed, metrics = _draw_labels(ax, spec, pg, grid, strain_boxes)
+        placed, metrics, moves = _draw_labels(ax, spec, pg, grid, strain_boxes)
     else:  # margin strain labels go where the aa labels and their leaders leave room
-        placed, metrics = _draw_labels(ax, spec, pg, grid, [])
+        placed, metrics, moves = _draw_labels(ax, spec, pg, grid, [])
         strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid, placed)
+    overprints = None
+    if g.pin_clearance is not None:
+        label_font = FontProperties(family=_families(spec)[1], size=g.label_font)
+        overprints = glyph_overprints(placed, strain_boxes, _text_width(label_font), g)
     # The shipped pages start the title just left of the tree's root (H1 4, H3 4 units).
     title = spec.title if spec.drawn_title is None else spec.drawn_title
     if title:
@@ -835,7 +948,16 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     with plt.rc_context({"pdf.fonttype": 42} if searchable else {}):
         fig.savefig(pdf_path, metadata={"CreationDate": None, "Creator": "acmacs-f"})
     plt.close(fig)
-    return Drawn(placed, metrics, strain_report, continents_not_in_legend(spec), names, inset)
+    return Drawn(
+        placed,
+        metrics,
+        strain_report,
+        continents_not_in_legend(spec),
+        names,
+        inset,
+        moves,
+        overprints,
+    )
 
 
 def with_centre_column(g: Geometry, width: float = 14.0) -> Geometry:

@@ -40,25 +40,52 @@ class FontError(ValueError):
 
 @dataclass(frozen=True)
 class FontNames:
-    """The three installed font files a round names, by bare file name."""
+    """The three installed font files a round names, by bare file name.
+
+    The mono font may instead be a file af does not install, named by ``mono_path`` (and
+    ``mono`` its file name) and pinned by ``mono_sha256``: e.g. the Courier the shipped pages
+    embedded, from the machine that draws them (Q259 d). The hash is checked before use, so a
+    different file of that name is refused, and the figure records the file as an input."""
 
     sans: str
     sans_bold: str
     mono: str
+    mono_path: Path | None = None
+    mono_sha256: str | None = None
 
     def locate(self, path_of: Callable[[str], Path] | None = None) -> FontFiles:
         """The installed files. ``path_of`` maps a name to its file; by default the fonts the
         af build installed (:func:`af.fonts.path`, which raises listing what is installed)."""
-        for role, name in vars(self).items():
+        for role, name in (("sans", self.sans), ("sans_bold", self.sans_bold), ("mono", self.mono)):
             if Path(name).name != name:
                 raise FontError(f"figure font {role}: {name!r} is a path; name an installed file")
+        mono = self._mono_file()
         if path_of is None:
             try:
                 import af.fonts as fonts  # type: ignore[import-not-found,unused-ignore]
             except ImportError as exc:
                 raise FontError("af.fonts is missing: this af build installed no fonts") from exc
             path_of = fonts.path
-        return FontFiles(path_of(self.sans), path_of(self.sans_bold), path_of(self.mono))
+        return FontFiles(
+            path_of(self.sans), path_of(self.sans_bold), mono if mono else path_of(self.mono)
+        )
+
+    def _mono_file(self) -> Path | None:
+        """``mono_path``, checked against ``mono``'s name and ``mono_sha256``; None if unset."""
+        if self.mono_path is None and self.mono_sha256 is None:
+            return None
+        if self.mono_path is None or self.mono_sha256 is None:
+            raise FontError("figure font mono: give both mono_path and mono_sha256, or neither")
+        if self.mono_path.name != self.mono:
+            raise FontError(f"figure font mono: {self.mono!r} is not {self.mono_path}'s file name")
+        if not self.mono_path.is_file():
+            raise FontError(f"figure font mono: no file {self.mono_path}")
+        have = _sha256(self.mono_path)
+        if have != self.mono_sha256:
+            raise FontError(
+                f"figure font mono: {self.mono_path} has sha256 {have}, not {self.mono_sha256}"
+            )
+        return self.mono_path
 
 
 @dataclass(frozen=True)

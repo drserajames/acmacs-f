@@ -629,3 +629,55 @@ def test_tree_weights_heads_and_strain_offsets_come_from_the_round(tmp_path):
         {},
     )
     assert report["strains"][0]["drawn"]
+
+
+# R8 (23 Oct 2026): pinned labels clear other labels' glyphs; glyph overprints counted.
+def test_overlapping_pins_move_the_least_distance_that_clears():
+    from af.tree.draw.aa_labels import AALabel
+    from af.tree.draw.render import FigureSpec, Geometry, _clear_pins, _glyph_box, _hits
+
+    g = Geometry(label_font=10.0, pin_clearance=1.0)
+    labels = [AALabel(1, ["K2N"], "a", "b", 5), AALabel(2, ["A6S"], "c", "d", 5)]
+    spec = cast(FigureSpec, type("S", (), {"labels": labels})())
+    width = lambda t: 6.0 * len(t)  # noqa: E731
+    fixed = {0: (100.0, 100.0, 120.0, 113.0), 1: (100.0, 104.0, 120.0, 117.0)}
+    out, moves = _clear_pins(spec, fixed, [], width, g)
+    assert out[0] == fixed[0]  # the upper one, settled first, stays
+    a, b = (_glyph_box(out[k], labels[k].subs[0], width, g) for k in (0, 1))
+    assert not _hits(a, b, 1.0) and _hits(a, b, 1.5)  # cleared, by no more than needed
+    assert moves == [{"text": "A6S", "dy": out[1][1] - fixed[1][1]}] and moves[0]["dy"] > 0
+
+
+def test_an_automatic_label_printed_over_a_pin_moves_the_pin():
+    from af.tree.draw.place import Placed
+    from af.tree.draw.render import Geometry, _clear_pins_after, _glyph_box, _hits
+
+    g = Geometry(label_font=10.0, pin_clearance=1.0)
+    width = lambda t: 6.0 * len(t)  # noqa: E731
+    pin = Placed(1, "K2N", (150.0, 100.0), (100.0, 100.0, 120.0, 113.0), 0.0)
+    auto = Placed(2, "A6S", (150.0, 103.0), (102.0, 102.0, 122.0, 115.0), 0.0)
+    moves: list[dict] = []
+    out = _clear_pins_after([pin, auto], {pin.box}, [], width, g, moves)
+    assert out[1] == auto and out[0].box != pin.box
+    assert not _hits(
+        _glyph_box(out[0].box, "K2N", width, g), _glyph_box(auto.box, "A6S", width, g), 0.0
+    )
+    assert len(moves) == 1 and moves[0]["text"] == "K2N"
+
+
+def test_clearance_reports_moves_and_overprints(tmp_path):
+    from af.tree.draw.figure import LabelPin
+    from af.tree.draw.render import Geometry
+
+    pin = LabelPin("EPI_ISL_0000010", "EPI_ISL_0000019", "L7F", -0.05, 0.02, "invented")
+    plain = make_figure(standard_tree(), PARENTS, _pin_config([pin]), tmp_path / "a.pdf", {})
+    assert "moved to clear" not in plain["label_pins"]  # clearance off: as before
+    cleared = make_figure(
+        standard_tree(),
+        PARENTS,
+        _pin_config([pin], geometry=Geometry(pin_clearance=1.0)),
+        tmp_path / "b.pdf",
+        {},
+    )
+    assert cleared["label_pins"]["moved to clear"] == []
+    assert cleared["label_pins"]["glyph overprints"] == 0

@@ -236,6 +236,12 @@ def make_figure(
         "override_reasons": dict(config.overrides.reasons),
     }
     if config.label_pins:  # only when there are pins, so other figures keep their bytes
+        if drawn.pin_moves is not None:  # Geometry.pin_clearance set
+            pin_report = {
+                **pin_report,
+                "moved to clear": drawn.pin_moves,
+                "glyph overprints": drawn.overprints,
+            }
         report["label_pins"] = pin_report
     pdf.with_suffix(".draw.json").write_text(json.dumps(report, indent=1, default=str))
     return report
