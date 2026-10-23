@@ -168,6 +168,20 @@ class RotationConfig:
 
 
 @dataclass(frozen=True)
+class FrameShiftConfig:
+    """A one-off move of a map's frame after the frame search, by ``dx``, ``dy`` map units (y up):
+    hand curation where the search's best frame reads worse than it counts (named, with its
+    reason, recorded in every figure; design rule 9). The moved frame must still show every
+    recent antigen."""
+
+    name: str
+    reason: str
+    decided: dt.date
+    dx: float
+    dy: float
+
+
+@dataclass(frozen=True)
 class VaccineDisableConfig:
     name: str
     reason: str
@@ -220,6 +234,7 @@ class MapConfig:
     blocks: tuple[BlockOffsetConfig, ...] = ()
     hides: tuple[HideConfig, ...] = ()
     rotations: tuple[RotationConfig, ...] = ()
+    frame_shift: FrameShiftConfig | None = None
     vaccine_disable: tuple[VaccineDisableConfig, ...] = ()
     vaccine_choose: tuple[VaccineChooseConfig, ...] = ()
     # Where this map's colours come from, overriding the round's [colouring] source. Maps switch
