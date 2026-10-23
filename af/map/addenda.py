@@ -59,7 +59,9 @@ class AddendaError(ValueError):
 @dataclass(frozen=True)
 class MapPage:
     """What an addendum draws from one built map: everything af.map.build had when it finished
-    the map's pages, so an addendum figure is the map's own figure with more on it."""
+    the map's pages, so an addendum figure is the map's own figure with more on it.
+    ``clade_scheme`` and ``colour_source`` say how the map is coloured, so a serum's strain can
+    be styled with the map's own scheme (the coverage title's legend row, Q255 b)."""
 
     folder: str
     centre: str  # the collaborating centre: the chain dataset's first segment
@@ -74,6 +76,10 @@ class MapPage:
     must_show_since: dt.date
     provenance: dict[str, Any]
     vaccine_labels: dict[str, str] = field(default_factory=dict)  # point id -> the map's label
+    # how the map is coloured: the user's clade scheme it names, and "store" (the store join,
+    # as vaccines are coloured) or "stand-in" (the chart's own rows and labels); None: unknown
+    clade_scheme: str | None = None
+    colour_source: str | None = None
 
     def layout(self) -> np.ndarray:
         """The drawn layout in chart order (antigens then sera), NaN where the chart has no

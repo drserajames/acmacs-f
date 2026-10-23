@@ -830,6 +830,8 @@ def _map_page(
         must_show_since=config.defaults.must_show_since,
         provenance=provenance,
         vaccine_labels=dict(vaccine_labels),
+        clade_scheme=cfg.clade_scheme,
+        colour_source=config.colour_source(cfg),
     )
 
 
