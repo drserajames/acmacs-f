@@ -163,3 +163,16 @@ def test_the_one_writer_declares_circle_panels_by_their_theoretical_radius(tmp_p
     )
     assert "within" not in entry["text"]
     assert md.read_text().startswith("# Serum circle maps whose two homologous rules disagree")
+
+
+def test_a_hand_declaration_is_made_on_its_maps_chain_version() -> None:
+    from af.serology.coverage import hand_declaration
+
+    pages = {"lab-a-hi": page("lab-a-hi")}
+    entry = {"map": "lab-a-hi", "ruling": "Q74, Q123", "text": "ids print normalised"}
+    assert hand_declaration("addendum-5-h3", entry, pages, ["lab-a-hi"]) == {
+        "ruling": "Q74, Q123", "dataset": "laba/lab-a-hi/merged", "version": "0" * 16,
+        "text": "ids print normalised", "file": "declarations/addendum-5-h3-homologous-rules.md",
+    }  # fmt: skip
+    with pytest.raises(CoverageError, match="needs map, ruling and text"):
+        hand_declaration("addendum-5-h3", {"map": "lab-a-hi", "text": "t"}, pages, ["lab-a-hi"])
