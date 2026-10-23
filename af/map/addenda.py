@@ -59,7 +59,9 @@ class AddendaError(ValueError):
 @dataclass(frozen=True)
 class MapPage:
     """What an addendum draws from one built map: everything af.map.build had when it finished
-    the map's pages, so an addendum figure is the map's own figure with more on it."""
+    the map's pages, so an addendum figure is the map's own figure with more on it.
+    ``clade_scheme`` and ``colour_source`` say how the map is coloured, so a serum's strain can
+    be styled with the map's own scheme (the coverage title's legend row, Q255 b)."""
 
     folder: str
     centre: str  # the collaborating centre: the chain dataset's first segment
