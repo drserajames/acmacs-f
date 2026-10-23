@@ -92,6 +92,9 @@ def block(**kw: Any) -> dict[str, Any]:
         "passage_classes": ["cell"],
         "maps": [{"chart": "lab-a-hi"}, {"empty": True}, {"chart": "lab-a-neut"}],
         "sections": [{"label": "X", "clade": "X", "reason": "the example clade"}],
+        "declarations": [
+            {"map": "lab-a-neut", "ruling": "Q74, Q123", "text": "serum ids print normalised"}
+        ],
         **kw,
     }
 
@@ -128,6 +131,9 @@ def test_a_circle_block_draws_three_pages_per_map_and_writes_its_plan(tmp_path: 
     ]  # fmt: skip
     assert all((out / d).is_file() for d in manifest["declarations"])
     assert manifest["disagreements"]["shown"] == 2
+    assert manifest["disagreements"]["hand"] == 1
+    rows = (out / manifest["declarations"][0]).read_text()
+    assert 'ruling = "Q74, Q123"' in rows and 'dataset = "laba/lab-a-neut/merged"' in rows
     assert manifest["selection"]["excluded"] == {"passage class egg": 2}
     shown = json.loads((out / "shown.json").read_text())
     assert [(s["map"], s["section"]) for s in shown] == [("lab-a-hi", "X"), ("lab-a-neut", "X")]

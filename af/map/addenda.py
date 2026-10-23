@@ -330,7 +330,7 @@ def run_circles(
     from af.chart.serum_circles import serum_circles
     from af.chart.serum_selection import Section, candidates, select_sera
     from af.map.circles import CircleLook, names_lines, serum_circle_marks
-    from af.serology.coverage import Shown, write_fragment
+    from af.serology.coverage import Shown, hand_declaration, write_fragment
 
     name = directory_name(block)
     out_dir = ctx.out_root / "addenda" / name
@@ -401,12 +401,14 @@ def run_circles(
         ]
     # Sarah, Q228: draw the best match, declare the sera where ae's rule would draw another
     # circle; a circle panel draws only its radius, so the coverage sets do not count
+    # the block's own declarations about its maps (a look the rules make, cited): as coverage's
+    hand = [hand_declaration(name, d, pages, folders) for d in block.get("declarations", ())]
     out_dir.mkdir(parents=True, exist_ok=True)
     toml_path = out_dir / f"{name}-homologous-rules.toml"
     md_path = out_dir / f"{name}-homologous-rules.md"
     sources = {"addendum": name, "serology": str(getattr(ctx.colours, "serology", "?"))}
     disagreements = write_fragment(
-        declared, [], toml_path, md_path, f"declarations/{md_path.name}", sources,
+        declared, hand, toml_path, md_path, f"declarations/{md_path.name}", sources,
         radius=look.radius, kind="serum circle", coverage=False,
     )  # fmt: skip
     plan = []
