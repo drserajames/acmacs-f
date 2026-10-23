@@ -43,7 +43,7 @@ from af.chart.model import Chart
 from af.chart.sera import FERRET_ONLY, Marker, non_ferret, read_markers
 from af.geo.colours import DotStyle
 from af.map.colouring import MapColouringError, StoreColours
-from af.map.config import MapConfig, MapsConfig, TitlesConfig
+from af.map.config import FrameShiftConfig, MapConfig, MapsConfig, TitlesConfig
 from af.map.curate import (
     BlockOffset,
     CurationError,
@@ -64,7 +64,7 @@ from af.map.vaccines import (
     VaccineDisable,
     select_vaccines,
 )
-from af.map.viewport import from_y_down
+from af.map.viewport import Frame, from_y_down
 from af.store.busy import ReadGuard
 from af.store.ref import StoreError, StoreRef
 from af.store.store import Store
@@ -737,6 +737,10 @@ def build_map(
         vaccine_labels=vlabels,
         look=look,
     )
+    if cfg.frame_shift is not None:
+        # every page then checks the moved frame still shows the recent antigens
+        frame, record = shift_frame(frame, cfg.frame_shift)
+        provenance.setdefault("decisions", {})["frame_shift"] = record
     for window, title in windows:
         out = out_root / "map" / cfg.folder / window.name / "v1" / "figure.pdf"
         result = finish_map(
@@ -766,6 +770,21 @@ def build_map(
         non_ferret_count,
         (*(u["warning"] for u in [*unpainted, *placed]), *vaccine_flags),
     )
+
+
+def shift_frame(frame: Frame, shift: FrameShiftConfig) -> tuple[Frame, dict[str, Any]]:
+    """A named hand move of the searched frame (design rule 9), and the record every figure of
+    the map carries: the move, its reason, and the frame searched and drawn."""
+    moved = dataclasses.replace(frame, x=frame.x + shift.dx, y=frame.y + shift.dy)
+    return moved, {
+        "name": shift.name,
+        "reason": shift.reason,
+        "decided": shift.decided.isoformat(),
+        "dx": shift.dx,
+        "dy": shift.dy,
+        "searched": [frame.x, frame.y, frame.size],
+        "drawn": [moved.x, moved.y, moved.size],
+    }
 
 
 def unpainted_clades(

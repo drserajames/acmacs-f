@@ -23,6 +23,7 @@ from af.map.config import (
     ColumnBaseConfig,
     Defaults,
     FrameConfig,
+    FrameShiftConfig,
     HideConfig,
     LegendConfig,
     MapConfig,
@@ -227,6 +228,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
             "blocks",
             "hides",
             "rotations",
+            "frame_shift",
             "vaccine_disable",
             "vaccine_choose",
         },
@@ -355,6 +357,16 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
                 bool(r.get("reflect", False)),
             )
         )
+    shift = None
+    if (fs := m.get("frame_shift")) is not None:
+        _known(fs, {"name", "reason", "decided", "dx", "dy"}, f"{where} frame_shift")
+        shift = FrameShiftConfig(
+            fs["name"],
+            fs["reason"],
+            _date(fs["decided"], f"{where} frame_shift {fs['name']}"),
+            float(fs["dx"]),
+            float(fs["dy"]),
+        )
     disable = []
     for v in m.get("vaccine_disable", ()):
         _known(v, {"name", "reason", "passage", "optional", "decided"}, f"{where} vaccine_disable")
@@ -404,6 +416,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
         blocks=tuple(blocks),
         hides=tuple(hides),
         rotations=tuple(rotations),
+        frame_shift=shift,
         vaccine_disable=tuple(disable),
         vaccine_choose=tuple(choose),
         colouring=m.get("colouring"),

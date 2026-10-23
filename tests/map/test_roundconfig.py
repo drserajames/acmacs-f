@@ -303,3 +303,30 @@ def test_a_block_takes_a_fixed_shift_or_a_target(tmp_path: Path) -> None:
 def test_a_block_placement_is_checked_on_load(tmp_path: Path, extra: str, message: str) -> None:
     with pytest.raises(ConfigError, match=message):
         load_maps_config(write(tmp_path, GOOD + BLOCK + extra))
+
+
+FRAME_SHIFT = """
+  [maps.frame_shift]
+  name = "title crowding"
+  reason = "old antigens crowd under the title; the shipped page keeps them clear"
+  decided = 2026-10-23
+  dx = -0.7
+  dy = 2.1
+"""
+
+
+def test_a_map_may_shift_its_frame_by_hand_with_a_reason(tmp_path: Path) -> None:
+    from af.map.build import shift_frame
+    from af.map.viewport import Frame
+
+    config, _ = load_maps_config(write(tmp_path, GOOD + FRAME_SHIFT))
+    (m,) = config.maps
+    assert m.frame_shift is not None and (m.frame_shift.dx, m.frame_shift.dy) == (-0.7, 2.1)
+    moved, record = shift_frame(Frame(-7.2, 3.5, 15.0), m.frame_shift)
+    assert (moved.x, moved.y, moved.size) == pytest.approx((-7.9, 5.6, 15.0))
+    assert record["searched"] == [-7.2, 3.5, 15.0] and record["reason"].startswith("old antigens")
+    assert load_maps_config(write(tmp_path, GOOD))[0].maps[0].frame_shift is None
+    with pytest.raises(ConfigError, match="unknown key"):
+        load_maps_config(
+            write(tmp_path, GOOD + FRAME_SHIFT.replace("dy = 2.1", "dy = 2.1\nsize = 9"))
+        )
