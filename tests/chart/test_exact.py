@@ -10,9 +10,10 @@ from decimal import Decimal, localcontext
 
 import pytest
 
-from af.chart import exact
+from af.chart import control, exact
 from af.chart.model import minimum_column_basis_value
 from af.chart.titre import Titre
+from af.serology.titre import parse_reading
 
 # integers v for which one C library's log2(v/10) is the other neighbour of the true value (all
 # five below 100,000 on the machine that was measured), with the correctly rounded answer
@@ -44,6 +45,17 @@ def test_the_values_are_the_same_bits_everywhere():
     assert {v: exact.log2(v / 10.0).hex() for v in OTHER_NEIGHBOUR} == OTHER_NEIGHBOUR
     assert Titre.parse("57").logged().hex() == "0x1.4167333e661c4p+1"  # 40 and 80 merged
     assert Titre.parse("<113").logged().hex() == "0x1.bfc6af369e297p+1"  # the prefix is ignored
+
+
+def test_every_titre_log_is_the_defined_one():
+    # the serology store's readings and the HI-control port log as the optimiser's input does
+    for v, want in OTHER_NEIGHBOUR.items():
+        assert parse_reading(str(v)).log.hex() == want
+        assert parse_reading(f"<{v}").log.hex() == want  # the face value
+        assert control.log_num([str(v)])[0].hex() == want
+        assert control.log_num([f"<{2 * v}"])[0].hex() == want  # half the detection limit
+    assert control.log_num(["inf", "0"]) == [math.inf, -math.inf]
+    assert all(math.isnan(x) for x in control.log_num(["-40", "*", ">1280"]))
 
 
 def _nearest(x: float) -> float:
