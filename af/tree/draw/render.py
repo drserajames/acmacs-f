@@ -33,6 +33,7 @@ from .place import (  # noqa: E402
     Box,
     Grid,
     Placed,
+    Point,
     Search,
     Weights,
     leader_end,
@@ -147,6 +148,27 @@ class Geometry:
     # label_stroke's value when the round's mono fallback draws the labels instead of its
     # preferred font (af.util.fonts.FontNames.mono_fallback): the fallback is the lighter font.
     label_stroke_fallback: float = 0.0
+    # Pin clearing also moves a pin whose leader runs through another label's glyphs, or through
+    # whose glyphs another label's leader runs (R8 review: a moved pin's leader along a label).
+    pin_clear_leaders: bool = False
+    # How far pin clearing may also move a pin sideways (figure units); the least distance
+    # still wins. 0: up or down only (R9: af's node beside a pinned neighbour where the shipped
+    # tree's was 7 points away, so no vertical move short of a cascade separates them).
+    pin_clear_dx: float = 0.0
+    # Where a pin that must move goes, it keeps this many label sizes between its rows and
+    # another label's, if any move within reach does (else label_pitch): moved a stack's pitch
+    # below another label, two labels read as one stack (R9, B/Vic). None: label_pitch.
+    pin_clear_row_pitch: float | None = None
+    # Two labels less than this apart side by side (figure units) on rows closer than a stacked
+    # label's (label_pitch) read as one label line (R8 review): pin clearing moves a pin out of
+    # it (glyph to glyph), and the placer adds label_beside_weight for boxes on overlapping rows
+    # this close (None: the placer's own, 0). None: neither, and not counted.
+    label_beside_gap: float | None = None
+    label_beside_weight: float | None = None
+    # Baseline pitch inside a multi-line substitution label, in label sizes. None: matplotlib's
+    # linespacing 1.15, which for these fonts sets lines 0.93 sizes apart (R8 review: 21% tighter
+    # than the shipped pages' 1.18).
+    label_pitch: float | None = None
     # The continent inset's preferred corner (left x, bottom y): the clear spot nearest to it is
     # taken, never one over ink; None: the lowest, then leftmost clear spot. And its width.
     inset_left: float | None = None
@@ -668,7 +690,10 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
     fixed = {k: _pinned_box(spec, pg, k, width, line_height) for k in spec.label_pins}
     moves = None
     if g.pin_clearance is not None:
-        fixed, moves = _clear_pins(spec, fixed, obstacles, width, g)
+        anchors = {
+            k: (float(pg.nx[spec.labels[k].node]), float(pg.ny[spec.labels[k].node])) for k in fixed
+        }
+        fixed, moves = _clear_pins(spec, fixed, obstacles, width, g, anchors)
     placed = place_labels(
         items, grid, width, line_height, search=search, weights=_weights(g), fixed=fixed or None
     )
@@ -676,45 +701,178 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
         placed = _clear_pins_after(placed, set(fixed.values()), obstacles, width, g, moves)
     for p in placed:
         x0, y0, x1, y1 = p.box
-        shown = ax.text(
-            x1 - 1,
-            (y0 + y1) / 2,
-            p.text,
-            ha="right",
-            va="center",
-            fontproperties=font,
-            color="#4d4d4d",
-            linespacing=1.15,
-        )
-        if g.label_stroke:
-            shown.set_path_effects([withStroke(linewidth=g.label_stroke, foreground="#4d4d4d")])
-            ax.text(
+        for y, text in _label_lines(p.text, (y0 + y1) / 2, g):
+            shown = ax.text(
                 x1 - 1,
-                (y0 + y1) / 2,
-                p.text,
+                y,
+                text,
                 ha="right",
                 va="center",
                 fontproperties=font,
-                alpha=0.0,
+                color="#4d4d4d",
                 linespacing=1.15,
             )
+            if g.label_stroke:
+                shown.set_path_effects([withStroke(linewidth=g.label_stroke, foreground="#4d4d4d")])
+                ax.text(
+                    x1 - 1,
+                    y,
+                    text,
+                    ha="right",
+                    va="center",
+                    fontproperties=font,
+                    alpha=0.0,
+                    linespacing=1.15,
+                )
         ex, ey = leader_end(p.box)
         ax.plot([ex, p.anchor[0]], [ey, p.anchor[1]], color="#4d4d4d", lw=0.35)
-    return placed, placement_metrics(placed, grid), moves
+    metrics = placement_metrics(placed, grid)
+    if g.label_beside_gap is not None:
+        metrics |= glyph_metrics(placed, width, g)
+    return placed, metrics, moves
+
+
+def glyph_metrics(placed: Sequence[Placed], width: Callable[[str], float], g: Geometry) -> dict:
+    """What a reader sees, glyph to glyph (placement_metrics counts the placer's padded boxes):
+    pairs of labels side by side on rows closer than a stack's (``label_beside_gap``), and
+    leaders that run through another label's glyphs (R8 review: rowpairs, strike-throughs)."""
+    assert g.label_beside_gap is not None
+    glyphs = [_glyph_box(p.box, p.text, width, g) for p in placed]
+    leaders = [(leader_end(p.box), p.anchor) for p in placed]
+    n_beside = n_through = 0
+    for i, a in enumerate(glyphs):
+        for b in glyphs[i + 1 :]:
+            n_beside += _hits(a, b, g.label_beside_gap, _row_gap(g)) and not _hits(a, b, 0.0)
+        n_through += sum(
+            segment_hits_box(*leaders[i], b, 0.0) for j, b in enumerate(glyphs) if j != i
+        )
+    return {"labels_beside": int(n_beside), "leaders_through_glyphs": int(n_through)}
+
+
+def _label_lines(text: str, yc: float, g: Geometry) -> list[tuple[float, str]]:
+    """(y, text) to draw a label centred on ``yc``: the whole text at once (matplotlib's line
+    spacing), or with ``label_pitch`` each line on its own, that many label sizes apart."""
+    if g.label_pitch is None:
+        return [(yc, text)]
+    lines = text.split("\n")
+    step = g.label_pitch * g.label_font
+    return [(yc + (i - (len(lines) - 1) / 2) * step, t) for i, t in enumerate(lines)]
 
 
 def _glyph_box(box: Box, text: str, width: Callable[[str], float], g: Geometry) -> Box:
     """Where a label's glyphs are inside its placer box: right-aligned one unit in, centred
-    vertically, capitals high (0.72 of the size) on the last line, 1.15 lines apart."""
+    vertically, capitals high (0.72 of the size) on the last line, 1.15 lines apart (or
+    ``label_pitch``)."""
     lines = text.split("\n")
     w = max(width(t) for t in lines)
-    h = g.label_font * (1.15 * (len(lines) - 1) + 0.72)
+    pitch = 1.15 if g.label_pitch is None else g.label_pitch
+    h = g.label_font * (pitch * (len(lines) - 1) + 0.72)
     yc = (box[1] + box[3]) / 2
     return (box[2] - 1 - w, yc - h / 2, box[2] - 1, yc + h / 2)
 
 
-def _hits(a: Box, b: Box, gap: float) -> bool:
-    return min(a[2], b[2]) + gap > max(a[0], b[0]) and min(a[3], b[3]) + gap > max(a[1], b[1])
+def _hits(a: Box, b: Box, gap: float, gap_y: float | None = None) -> bool:
+    gy = gap if gap_y is None else gap_y
+    return min(a[2], b[2]) + gap > max(a[0], b[0]) and min(a[3], b[3]) + gy > max(a[1], b[1])
+
+
+def _row_gap(g: Geometry, pitch: float | None = None) -> float:
+    """The clear space between the capitals of two lines a stacked label's pitch (or
+    ``pitch``) apart."""
+    if pitch is None:
+        pitch = 1.15 if g.label_pitch is None else g.label_pitch
+    return g.label_font * (pitch - 0.72)
+
+
+@dataclass(frozen=True)
+class _Settled:
+    """A label pin clearing keeps clear of: its glyphs, and for a substitution label its
+    placer box and leader (a strain label has neither)."""
+
+    glyph: Box
+    box: Box | None = None
+    leader: tuple[Point, Point] | None = None
+
+
+def _settled(
+    box: Box, text: str, anchor: Point | None, width: Callable[[str], float], g: Geometry
+) -> _Settled:
+    leader = (leader_end(box), anchor) if anchor is not None else None
+    return _Settled(_glyph_box(box, text, width, g), box, leader)
+
+
+def _clashes(
+    me: _Settled, others: Iterable[_Settled], gap: float, g: Geometry, moving: bool = False
+) -> bool:
+    """Does a label print over a settled one (glyphs closer than ``gap``), sit beside it
+    (``label_beside_gap``), or, ``moving``, run a leader through its glyphs or take one through
+    its own (``pin_clear_leaders``) or keep less than ``pin_clear_row_pitch`` from its rows?
+    Those only rule out where a pin that must move goes: a pin is not moved off its place for
+    them alone (R9: that moved most of a tree's pins away from the shipped positions)."""
+    rows = _row_gap(g, g.pin_clear_row_pitch if moving else None)
+    for o in others:
+        if _hits(me.glyph, o.glyph, gap):
+            return True
+        apart = g.label_beside_gap
+        if apart is not None and o.box and _hits(me.glyph, o.glyph, apart, rows):
+            return True
+        if moving and g.pin_clear_leaders:  # clear by the same space as glyphs
+            if me.leader is not None and segment_hits_box(*me.leader, o.glyph, gap):
+                return True
+            if o.leader is not None and segment_hits_box(*o.leader, me.glyph, gap):
+                return True
+    return False
+
+
+# Pin clearing's moves, least first: 0.25-unit steps, at most 40 up or down.
+_STEPS = sorted((d * 0.25 for d in range(-160, 161)), key=lambda d: (abs(d), d))
+
+
+def _moves(g: Geometry) -> list[tuple[float, float]]:
+    """(dx, dy) pin clearing tries, least first: up or down only, or with ``pin_clear_dx``
+    also sideways in 0.5-unit steps, a sideways unit counting half: a label moved along its row
+    keeps its place in a column of labels, where moving down pushes into the next one (R9)."""
+    if not g.pin_clear_dx:
+        return [(0.0, dy) for dy in _STEPS]
+    n = int(g.pin_clear_dx / 0.5)
+    both = [(dx * 0.5, dy) for dx in range(-n, n + 1) for dy in _STEPS]
+    return sorted(both, key=lambda m: ((m[0] / 2) ** 2 + m[1] ** 2, abs(m[1]), m[1], m[0]))
+
+
+def _least_move(
+    box: Box,
+    text: str,
+    anchor: Point | None,
+    others: Sequence[_Settled],
+    width: Callable[[str], float],
+    g: Geometry,
+    gap: float,
+) -> tuple[float, float] | None:
+    """The least move (dx, dy) that clears ``others`` (:func:`_clashes`); None if none does.
+    A move that also meets ``pin_clear_leaders`` and ``pin_clear_row_pitch`` comes first, and
+    failing one the least that clears the rest (R9: a node whose only leader runs through a
+    label)."""
+    preferred = g.pin_clear_leaders or g.pin_clear_row_pitch is not None
+    for moving in (True, False) if preferred else (False,):
+        for dx, dy in _moves(g):
+            moved = (box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy)
+            here = _settled(moved, text, anchor, width, g)
+            if not _clashes(here, others, gap, g, moving and (dx, dy) != (0.0, 0.0)):
+                return dx, dy
+    return None
+
+
+def _shifted(box: Box, move: tuple[float, float] | None) -> Box:
+    dx, dy = move or (0.0, 0.0)
+    return (box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy)
+
+
+def _move_row(text: str, move: tuple[float, float] | None) -> dict:
+    """A move as the draw report lists it: dy (None: no move cleared), and dx when not 0."""
+    row: dict = {"text": text, "dy": None if move is None else round(move[1], 2)}
+    if move is not None and move[0]:
+        row["dx"] = round(move[0], 2)
+    return row
 
 
 def _clear_pins(
@@ -723,29 +881,26 @@ def _clear_pins(
     obstacles: Sequence[Box],
     width: Callable[[str], float],
     g: Geometry,
+    anchors: Mapping[int, Point] | None = None,
 ) -> tuple[dict[int, Box], list[dict]]:
     """Pinned labels, top to bottom, each moved the least distance up or down (0.25-unit
     steps, at most 40) that clears the glyphs of the pins already settled and of the strain
-    labels by ``pin_clearance``. A pin that no step clears stays, and is listed with dy None."""
+    labels by ``pin_clearance`` (and, as set, keeps off their rows and leaders: see
+    :func:`_clashes`; ``anchors``, label index -> node point, place the leaders). A pin that
+    no step clears stays, and is listed with dy None."""
     gap = g.pin_clearance or 0.0
-    settled = list(obstacles)
+    settled = [_Settled(o) for o in obstacles]
     out: dict[int, Box] = {}
     moves: list[dict] = []
-    steps = sorted((d * 0.25 for d in range(-160, 161)), key=lambda d: (abs(d), d))
     for k in sorted(fixed, key=lambda k: fixed[k][1]):
         box, text = fixed[k], "\n".join(spec.labels[k].subs)
-        for dy in steps:
-            moved = (box[0], box[1] + dy, box[2], box[3] + dy)
-            if not any(_hits(_glyph_box(moved, text, width, g), o, gap) for o in settled):
-                break
-        else:
-            moved, dy = box, None
-        if dy:
-            moves.append({"text": " ".join(spec.labels[k].subs), "dy": round(dy, 2)})
-        elif dy is None:
-            moves.append({"text": " ".join(spec.labels[k].subs), "dy": None})
+        anchor = anchors.get(k) if anchors is not None else None
+        move = _least_move(box, text, anchor, settled, width, g, gap)
+        moved = _shifted(box, move)
+        if move != (0.0, 0.0):
+            moves.append(_move_row(" ".join(spec.labels[k].subs), move))
         out[k] = moved
-        settled.append(_glyph_box(moved, text, width, g))
+        settled.append(_settled(moved, text, anchor, width, g))
     return out, moves
 
 
@@ -758,26 +913,21 @@ def _clear_pins_after(
     moves: list[dict],
 ) -> list[Placed]:
     """After placement: a pinned label an automatic label prints over (no clear spot was left
-    for the automatic one) moves the least distance up or down that clears every label and
+    for the automatic one; or that sits beside it or crosses its leader, as
+    :func:`_clashes` is set) moves the least distance up or down that clears every label and
     strain label; the move is added to ``moves``."""
     gap = g.pin_clearance or 0.0
     out = list(placed)
-    steps = sorted((d * 0.25 for d in range(-160, 161)), key=lambda d: (abs(d), d))
     for i, p in enumerate(out):
         if p.box not in pinned_boxes:
             continue
-        others = [_glyph_box(q.box, q.text, width, g) for j, q in enumerate(out) if j != i]
-        others += list(obstacles)
-        if not any(_hits(_glyph_box(p.box, p.text, width, g), o, 0.0) for o in others):
+        others = [_settled(q.box, q.text, q.anchor, width, g) for j, q in enumerate(out) if j != i]
+        others += [_Settled(o) for o in obstacles]
+        if not _clashes(_settled(p.box, p.text, p.anchor, width, g), others, 0.0, g):
             continue
-        for dy in steps:
-            box = (p.box[0], p.box[1] + dy, p.box[2], p.box[3] + dy)
-            if not any(_hits(_glyph_box(box, p.text, width, g), o, gap) for o in others):
-                out[i] = replace(p, box=box)
-                moves.append({"text": p.text.replace("\n", " "), "dy": round(dy, 2)})
-                break
-        else:
-            moves.append({"text": p.text.replace("\n", " "), "dy": None})
+        move = _least_move(p.box, p.text, p.anchor, others, width, g, gap)
+        out[i] = replace(p, box=_shifted(p.box, move))
+        moves.append(_move_row(p.text.replace("\n", " "), move))
     return out
 
 
@@ -817,6 +967,8 @@ def _weights(g: Geometry) -> Weights | None:
         "flat": g.label_flat_weight,
         "overlap": g.label_overlap_weight,
         "crossing": g.label_crossing_weight,
+        "beside": g.label_beside_weight,
+        "beside_gap": g.label_beside_gap,
     }
     own: dict[str, float] = {k: v for k, v in given.items() if v is not None}
     return Weights(**own) if own else None

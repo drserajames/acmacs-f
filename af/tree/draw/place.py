@@ -126,6 +126,15 @@ def near(a: Box, b: Box, margin: float = 1.0) -> bool:
     )
 
 
+def beside(a: Box, b: Box, gap: float) -> bool:
+    """Do two labels' texts sit side by side, less than ``gap`` apart, with lines closer than a
+    line height? They then read as one label line (R8 review: two stacks 2.2 pt apart read as
+    one block). A box is its text plus a point left and right and half a point above and below
+    (place_labels), so two boxes whose lines are a line apart overlap by that point."""
+    rows = min(a[3], b[3]) - max(a[1], b[1]) > 1.0
+    return rows and max(a[0], b[0]) - min(a[2], b[2]) + 2.0 < gap
+
+
 def leader_end(box: Box) -> Point:
     """The leader leaves the box at the middle of its right edge (labels sit left of the node)."""
     return (box[2], (box[1] + box[3]) / 2)
@@ -139,6 +148,8 @@ class Weights:
     crossing: float = 3000.0  # leader crossing a leader, or passing through a label: hard
     length: float = 0.6  # per point of leader length
     flat: float = 3000.0  # leader within 8 degrees of horizontal reads as a branch: hard
+    beside: float = 0.0  # label beside another, closer than beside_gap (0: not costed)
+    beside_gap: float = 0.0
 
 
 @dataclass
@@ -207,6 +218,10 @@ def place_labels(
             raise ValueError(f"label {text!r} has no candidate position inside the page limits")
         return out
 
+    # Pairs further apart than a point are skipped (above); labels beside each other are costed
+    # up to beside_gap apart, so with that cost on, pairs within it are not.
+    margin = max(1.0, w.beside_gap) if w.beside else 1.0
+
     def cost_of(k: int, box: Box) -> float:
         anchor = items[k][2]
         end = leader_end(box)
@@ -228,9 +243,11 @@ def place_labels(
             if j == k:
                 continue
             other_anchor = items[j][2]
-            if not near(here, reach(b, other_anchor)):
+            if not near(here, reach(b, other_anchor), margin):
                 continue
             c += w.overlap * box_overlap(box, b)
+            if w.beside:
+                c += w.beside * beside(box, b, w.beside_gap)
             c += w.crossing * segments_cross(end, anchor, leader_end(b), other_anchor)
             through = segment_hits_box(end, anchor, b) or segment_hits_box(
                 leader_end(b), other_anchor, box
