@@ -665,6 +665,91 @@ def test_an_automatic_label_printed_over_a_pin_moves_the_pin():
     assert len(moves) == 1 and moves[0]["text"] == "K2N"
 
 
+def test_a_cleared_pin_keeps_off_a_row_beside_it_and_off_leaders():
+    from af.tree.draw.aa_labels import AALabel
+    from af.tree.draw.place import leader_end, segment_hits_box
+    from af.tree.draw.render import FigureSpec, Geometry, _clear_pins, _glyph_box, _hits, _row_gap
+
+    labels = [AALabel(1, ["K2N"], "a", "b", 5), AALabel(2, ["A6S"], "c", "d", 5)]
+    spec = cast(FigureSpec, type("S", (), {"labels": labels})())
+    width = lambda t: 6.0 * len(t)  # noqa: E731
+    # side by side, glyphs 3 apart: clear, but the two read as one line
+    fixed = {0: (100.0, 100.0, 120.0, 113.0), 1: (121.0, 104.0, 141.0, 117.0)}
+    plain = Geometry(label_font=10.0, pin_clearance=1.0)
+    assert _clear_pins(spec, fixed, [], width, plain)[0] == fixed
+    rows = Geometry(label_font=10.0, pin_clearance=1.0, label_beside_gap=5.0, label_pitch=1.18)
+    out, moves = _clear_pins(spec, fixed, [], width, rows)
+    a, b = (_glyph_box(out[k], labels[k].subs[0], width, rows) for k in (0, 1))
+    assert out[0] == fixed[0] and not _hits(a, b, 5.0, _row_gap(rows))
+    assert _hits(a, (b[0], b[1] - 0.25, b[2], b[3] - 0.25), 5.0, _row_gap(rows))  # the least
+    assert moves == [{"text": "A6S", "dy": out[1][1] - fixed[1][1]}] and moves[0]["dy"] > 0
+    # the lower pin must move off the upper one, and its least move takes its leader through
+    # a strain label; keeping off leaders, it takes the least move that does not
+    fixed = {0: (100.0, 100.0, 120.0, 113.0), 1: (100.0, 104.0, 120.0, 117.0)}
+    strain = (150.0, 118.0, 170.0, 126.0)
+    anchors = {0: (200.0, 106.0), 1: (200.0, 130.0)}
+
+    def through(g: Geometry) -> tuple[bool, float]:
+        box = _clear_pins(spec, fixed, [strain], width, g, anchors)[0][1]
+        return segment_hits_box(leader_end(box), anchors[1], strain, 0.0), box[1] - fixed[1][1]
+
+    leaders = Geometry(label_font=10.0, pin_clearance=1.0, pin_clear_leaders=True)
+    (hit, dy), (hit_kept, dy_kept) = through(plain), through(leaders)
+    assert hit and not hit_kept and abs(dy_kept) > abs(dy)
+    # a pin that need not move is not moved for a leader alone
+    alone = {0: (100.0, 100.0, 120.0, 113.0), 1: (100.0, 130.0, 120.0, 143.0)}
+    lead = {0: (200.0, 106.0), 1: (200.0, 100.0)}  # through label 0's glyphs
+    assert _clear_pins(spec, alone, [], width, leaders, lead)[0] == alone
+
+
+def test_a_pin_may_move_sideways_and_keeps_wider_rows_where_it_can():
+    from dataclasses import replace
+
+    from af.tree.draw.aa_labels import AALabel
+    from af.tree.draw.render import FigureSpec, Geometry, _clear_pins, _moves
+
+    assert _moves(Geometry())[:3] == [(0.0, 0.0), (0.0, -0.25), (0.0, 0.25)]  # as before
+    assert _moves(Geometry(pin_clear_dx=1.0))[:3] == [(0.0, 0.0), (-0.5, 0.0), (0.5, 0.0)]
+    labels = [AALabel(1, ["K2N"], "a", "b", 5), AALabel(2, ["A6S"], "c", "d", 5)]
+    spec = cast(FigureSpec, type("S", (), {"labels": labels})())
+    width = lambda t: 6.0 * len(t)  # noqa: E731
+    # the lower label's glyphs end a unit under the upper one's left edge: 2 sideways (half
+    # weight) beats 4.25 down
+    fixed = {0: (100.0, 100.0, 120.0, 113.0), 1: (83.0, 104.0, 103.0, 117.0)}
+    g = Geometry(label_font=10.0, pin_clearance=1.0)
+    assert _clear_pins(spec, fixed, [], width, g)[1] == [{"text": "A6S", "dy": 4.25}]
+    sideways = Geometry(label_font=10.0, pin_clearance=1.0, pin_clear_dx=4.0)
+    assert _clear_pins(spec, fixed, [], width, sideways)[1] == [
+        {"text": "A6S", "dy": 0.0, "dx": -2.0}
+    ]
+    # moved down off the upper one, it keeps 1.4 sizes between rows rather than 1.18
+    fixed = {0: (100.0, 100.0, 120.0, 113.0), 1: (100.0, 104.0, 120.0, 117.0)}
+    base = Geometry(label_font=10.0, pin_clearance=1.0, label_pitch=1.18, label_beside_gap=5.0)
+    near = _clear_pins(spec, fixed, [], width, base)[1][0]["dy"]
+    wide = _clear_pins(spec, fixed, [], width, replace(base, pin_clear_row_pitch=1.4))
+    assert wide[1][0]["dy"] == pytest.approx(near + 2.2, abs=0.25)  # 0.22 sizes further
+
+
+def test_glyph_metrics_count_labels_beside_and_leaders_through_glyphs():
+    from af.tree.draw.place import Placed
+    from af.tree.draw.render import Geometry, glyph_metrics
+
+    width = lambda t: 6.0 * len(t)  # noqa: E731
+    g = Geometry(label_font=10.0, label_pitch=1.18, label_beside_gap=5.0)
+    a = Placed(1, "K2N", (121.0, 106.5), (100.0, 100.0, 120.0, 113.0), 0.0)
+    b = Placed(2, "A6S", (200.0, 104.0), (121.0, 102.0, 141.0, 115.0), 0.0)  # 3 right of a
+    c = Placed(3, "L7F", (200.0, 103.0), (40.0, 100.0, 60.0, 113.0), 0.0)  # leader through a, b
+    assert glyph_metrics([a, b, c], width, g) == {"labels_beside": 1, "leaders_through_glyphs": 2}
+
+
+def test_label_pitch_sets_the_lines_of_a_stacked_label_apart():
+    from af.tree.draw.render import Geometry, _label_lines
+
+    assert _label_lines("K2N\nA6S", 50.0, Geometry()) == [(50.0, "K2N\nA6S")]  # as before
+    lines = _label_lines("K2N\nA6S\nL7F", 50.0, Geometry(label_font=10.0, label_pitch=1.18))
+    assert lines == [(pytest.approx(38.2), "K2N"), (50.0, "A6S"), (pytest.approx(61.8), "L7F")]
+
+
 def test_clearance_reports_moves_and_overprints(tmp_path):
     from af.tree.draw.figure import LabelPin
     from af.tree.draw.render import Geometry

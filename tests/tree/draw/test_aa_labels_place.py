@@ -231,3 +231,23 @@ def test_pair_repair_untangles_what_single_moves_leave(seed):
     single = place_labels(items, grid, width, 10.0, search=Search(pair_candidates=0))
     paired = place_labels(items, grid, width, 10.0, search=Search(pair_candidates=40))
     assert clashes(paired) < clashes(single)  # when written: 7 -> 2, 6 -> 0, 13 -> 4
+
+
+# R9 (R8 review): labels side by side on one row read as one label line.
+def test_labels_beside_each_other_are_counted_and_costed():
+    from af.tree.draw.place import Weights, beside
+
+    assert beside((0, 0, 10, 10), (11, 4, 20, 14), 4.0)  # texts 3 apart on overlapping rows
+    assert not beside((0, 0, 10, 10), (11, 9, 20, 19), 4.0)  # lines a line apart: a stack
+    assert not beside((0, 0, 10, 10), (13, 4, 20, 14), 4.0)  # further apart than the gap
+
+    def width(s: str) -> float:
+        return 6.0 * len(s)
+
+    def pairs(placed) -> int:
+        return sum(beside(a.box, b.box, 5.0) for i, a in enumerate(placed) for b in placed[i + 1 :])
+
+    grid, items = _crowded(3)
+    assert pairs(place_labels(items, grid, width, 10.0)) > 0
+    costed = place_labels(items, grid, width, 10.0, weights=Weights(beside=3000.0, beside_gap=5.0))
+    assert pairs(costed) == 0
