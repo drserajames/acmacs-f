@@ -131,3 +131,55 @@ def test_a_mono_font_af_does_not_install_is_named_by_path_and_hash(tmp_path: Pat
         load_fonts(
             write(tmp_path, other + f'mono_path = "{mono}"\nmono_sha256 = "{sha}"\n'), bundled
         )
+
+
+def test_a_mono_fallback_draws_only_when_the_preferred_file_is_absent(tmp_path: Path) -> None:
+    import hashlib
+    import shutil
+
+    mono = tmp_path / "Mono.ttf"
+    shutil.copyfile(TTF / "DejaVuSansMono.ttf", mono)
+    sha = hashlib.sha256(mono.read_bytes()).hexdigest()
+    head = (
+        '[fonts]\nsans = "STIXGeneral.ttf"\nsans_bold = "STIXGeneralBol.ttf"\nmono = "Mono.ttf"\n'
+        'mono_fallback = "cmtt10.ttf"\n'
+    )
+    present = load_fonts(
+        write(tmp_path, head + f'mono_path = "{mono}"\nmono_sha256 = "{sha}"\n'), bundled
+    )
+    assert present.files.mono == mono
+    assert present.inputs()["font_mono"]["chosen"] == "preferred"
+
+    absent = load_fonts(
+        write(
+            tmp_path,
+            head + f'mono_path = "{tmp_path / "no" / "Mono.ttf"}"\nmono_sha256 = "{sha}"\n',
+        ),
+        bundled,
+    )
+    assert absent.files.mono == TTF / "cmtt10.ttf"
+    row = absent.inputs()["font_mono"]
+    assert row["chosen"] == "fallback" and "not on this machine" in row["reason"]
+    assert row["path"] == str(TTF / "cmtt10.ttf")
+
+    with pytest.raises(FontError, match="has sha256"):  # a different file is never a fallback
+        load_fonts(
+            write(tmp_path, head + f'mono_path = "{mono}"\nmono_sha256 = "{"0" * 64}"\n'), bundled
+        )
+    with pytest.raises(FontError, match="falls back from nothing"):
+        load_fonts(write(tmp_path, head), bundled)
+    with pytest.raises(FontError, match="not installed"):  # the fallback must itself be there
+        load_fonts(
+            write(
+                tmp_path,
+                head.replace("cmtt10.ttf", "Nothing.ttf")
+                + f'mono_path = "{tmp_path / "no" / "Mono.ttf"}"\nmono_sha256 = "{sha}"\n',
+            ),
+            bundled,
+        )
+
+
+def test_without_a_fallback_the_mono_row_is_unchanged(tmp_path: Path) -> None:
+    fonts = load_fonts(write(tmp_path, fonts_toml()), bundled)
+    assert fonts.files.mono_choice is None
+    assert set(fonts.inputs()["font_mono"]) == {"path", "family", "sha256"}

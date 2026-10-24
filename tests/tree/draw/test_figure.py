@@ -706,3 +706,45 @@ def test_a_label_stroke_thickens_labels_and_keeps_them_searchable(tmp_path):
     except FileNotFoundError:
         pytest.skip("pdftotext not installed")
     assert {"K2N", "A6S", "L7F"} <= set(text.split())  # the invisible copy is text
+
+
+def test_a_mono_fallback_draws_with_its_own_stroke_and_says_so(tmp_path):
+    import hashlib
+    import shutil
+    from pathlib import Path
+
+    import matplotlib
+
+    from af.tree.draw.render import Geometry
+    from af.util.fonts import FontNames
+
+    ttf = Path(matplotlib.get_data_path()) / "fonts" / "ttf"  # stand-ins every env has
+    mono = tmp_path / "Mono.ttf"
+    shutil.copyfile(ttf / "DejaVuSansMono.ttf", mono)
+    sha = hashlib.sha256(mono.read_bytes()).hexdigest()
+    labels = replace(load_defaults().labels, target_labels=0, min_share=0.05)
+    geometry = Geometry(label_stroke_fallback=0.25)
+    reports = {}
+    for name, path in (("preferred", mono), ("fallback", tmp_path / "no" / "Mono.ttf")):
+        names = FontNames(
+            "STIXGeneral.ttf",
+            "STIXGeneralBol.ttf",
+            "Mono.ttf",
+            path,
+            sha,
+            "cmtt10.ttf",
+        )
+        fonts = names.locate(lambda n: ttf / n).resolve()
+        reports[name] = make_figure(
+            standard_tree(),
+            PARENTS,
+            config(labels=labels, geometry=geometry, fonts=fonts),
+            tmp_path / f"{name}.pdf",
+            {},
+        )["font_mono"]
+    assert reports["preferred"]["chosen"] == "preferred"
+    assert reports["preferred"]["label_stroke"] == 0.0
+    assert reports["fallback"]["chosen"] == "fallback"
+    assert reports["fallback"]["font"] == "cmtt10.ttf"
+    assert reports["fallback"]["label_stroke"] == 0.25
+    assert "not on this machine" in reports["fallback"]["reason"]
