@@ -262,17 +262,15 @@ def _json(path: Path) -> object:
 def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
     """One pipeline step per chain step, each depending on the previous step's chosen map."""
     first_source = cfg.first_map if cfg.first_map else cfg.tables[0].path
-    split = seed_split(cfg) if cfg.bridged else None
+    split = seed_split(cfg) if cfg.seeded else None
+    # only a bridged seed converts its identities at step 0; the split decides the tables either way
+    bridge_split = split if cfg.bridged else None
     af_only: set[str] = set()
+    merged_tables = stepped_tables(cfg, split)
     if split is not None:
-        # the tables the seed holds are its bridge, never merged again; after it, the later ones
-        merged_tables = list(split.post_seed)
         assert cfg.seed_chart is not None
         if cfg.seed_chart.af_only_tables == "append":
-            merged_tables += split.af_only
             af_only = {t.table_id for t in split.af_only}
-    else:
-        merged_tables = cfg.tables if cfg.first_map else cfg.tables[1:]
     common = {
         "chain": cfg.name,
         "options": option_parameters(cfg.options),
@@ -308,13 +306,15 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
         [] if cfg.first_map else [d0 / "scratch.ace"]
     )
     first_inputs = {"source": Path(first_source)}
-    if split is not None:  # the converted seed follows the shared tables' content too
+    if bridge_split is not None:  # the converted seed follows the shared tables' content too
         first_outputs.append(d0 / BRIDGE_RECORD)
-        first_inputs |= {f"bridge {t.table_id}": t.path for t, _ in split.in_seed}
+        first_inputs |= {f"bridge {t.table_id}": t.path for t, _ in bridge_split.in_seed}
     steps.append(
         Step(
             name="step-0000",
-            action=_action(functools.partial(_first_step, cfg, mapper=mapper, split=split), d0),
+            action=_action(
+                functools.partial(_first_step, cfg, mapper=mapper, split=bridge_split), d0
+            ),
             inputs=first_inputs,
             outputs=[
                 Artefact(p, parse=_ace if p.suffix == ".ace" else _json) for p in first_outputs
@@ -421,8 +421,16 @@ def run_chain(
     `runner` runs the start chunks when `split` is given (af.run LocalRunner or SlurmRunner).
     """
     optimiser = optimiser or default_optimiser()
-    select.check_rules_match(cfg.remove, [t.path for t in cfg.tables])
-    select.check_cells_match(cfg.drop_cells, {t.table_id: t.path for t in cfg.tables})
+    # The rules act on every table whose titres reach the map. Without a seed that is all of
+    # them (the first table is step 0's own map); with one it is the tables after the seed, whose
+    # points the chain merges, and never the seed's own tables, already in the shipped map.
+    merged = stepped_tables(cfg) if cfg.seeded else list(cfg.tables)
+    select.check_rules_match(
+        cfg.remove,
+        [t.path for t in merged],
+        seed_tables=[t.path for t in cfg.tables if t not in merged] if cfg.seeded else None,
+    )
+    select.check_cells_match(cfg.drop_cells, {t.table_id: t.path for t in merged})
     # `root` is the chain's own directory (af.store.Work: <work>/chains/<dataset>); without
     # it, <store_root>/<name>. Pipeline state goes in <root>/state (DatasetWork.state).
     root = Path(root) if root is not None else Path(store_root) / cfg.name
@@ -431,9 +439,13 @@ def run_chain(
         from af.chain.append import check_settings
         from af.pipeline.record import canonical
 
+        # A seeded chain's step 0 is the seed and holds no table, so its tables are the stepped
+        # ones and they start at step 1. Without a seed, step 0's map IS the first table's.
+        first_step = 1 if cfg.seeded else 0
+        ids = [t.table_id for t in (merged if cfg.seeded else cfg.tables)]
         check_settings(
-            cfg.name, cfg.append_published, [t.table_id for t in cfg.tables],
-            [canonical(s.parameters) for s in steps], cfg.rerun_settings,
+            cfg.name, cfg.append_published, ids,
+            [canonical(s.parameters) for s in steps[first_step:]], cfg.rerun_settings, first_step,
         )  # fmt: skip
     # Inputs are named and outputs recorded relative to the chain root, so a store or a tables
     # checkout moved to another root (a sync to o or the HPC) re-runs nothing.
@@ -611,10 +623,38 @@ def _json_default(o: object) -> object:
 
 
 def seed_split(cfg: ChainConfig) -> bridge.SeedSplit:
-    """A bridged seed's tables: which it holds, which the store adds within it, which follow."""
+    """A seed's tables: which it holds, which the store adds within it, which follow."""
     assert cfg.first_map is not None
     seed = read_chart(cfg.first_map)
     return bridge.seed_split(bridge.seed_source_dates(seed), cfg.tables)
+
+
+def stepped_tables(cfg: ChainConfig, split: bridge.SeedSplit | None = None) -> list[TableRef]:
+    """The tables that become steps 1..n, in step order.
+
+    With a seed, the tables the seed already holds are its bridge and are never merged again, so
+    the steps are the tables dated after the seed's last source, plus — only if `[seed_chart]`
+    af_only_tables = "append" — those the store has within the seed's dates that the seed lacks
+    (Q268: "leave-out" by Sarah's ruling, so they stay out of the chain and are declared).
+    Without a seed the chain's own first table is step 0's map and the rest are steps.
+
+    `cfg.stepped` overrides the order when the loader has decided it: an append-to-published
+    chain steps in the published chain's order, which the dates do not give.
+    """
+    if cfg.stepped is not None:
+        by_id = {t.table_id: t for t in cfg.tables}
+        return [by_id[tid] for tid in cfg.stepped]
+    if split is None:
+        split = seed_split(cfg) if cfg.seeded else None
+    if split is None:
+        return list(cfg.tables) if cfg.first_map else list(cfg.tables[1:])
+    assert cfg.seed_chart is not None
+    tables = list(split.post_seed)
+    if cfg.seed_chart.af_only_tables == "append":
+        # at the END, after the tables that follow the seed, not in date order among them: they
+        # are back-dated arrivals, and Q164 ("cut-off only") puts an arrival at the chain's end
+        tables += split.af_only
+    return tables
 
 
 def _first_step(
@@ -640,6 +680,9 @@ def _first_step(
             "index": 0,
             "table_id": Path(cfg.first_map).name,
             "source": str(cfg.first_map),
+            # the seed by content, not by path: a later month checks that it is appending to a
+            # chain built on this same map, wherever the file now sits (af.chain.append)
+            "source_sha256": sha256_path(Path(cfg.first_map)),
             "chosen": "seed",
             **seed_record,
         }

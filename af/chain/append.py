@@ -96,11 +96,17 @@ class SettingsRerun:
 
 @dataclass(frozen=True)
 class Published:
-    """The chain's published CURRENT version as the order needs it."""
+    """The chain's published CURRENT version as the order needs it.
+
+    `tables` are the STEPPED tables only: a chain seeded from a map made elsewhere has a step 0
+    that is the seed, not a table, so it keys the chain without taking part in the order, and
+    its chart's hash is `seed_sha256` instead (the seed must be the same one next month).
+    """
 
     version: str
     tables: Sequence[tuple[str, str]]  # (table id, table_sha256 its step recorded), in order
     directory: Path | None = None  # the version's directory, for its step parameters
+    seed_sha256: str | None = None  # the seed chart step 0 was built from, if the chain has one
 
 
 @dataclass(frozen=True)
@@ -273,10 +279,16 @@ def check_settings(
     table_ids: Sequence[str],
     parameters: Sequence[Mapping[str, Any]],
     accepted: Sequence[SettingsRerun],
+    first_step: int = 0,
 ) -> None:
     """Every prefix step's parameters (canonical, as its build recorded them) must be today's,
     unless the keys that changed are accepted (`[[tables.rerun_settings]]`). Compared while the
-    tables stand where they stood: after a dropped table the steps re-run by decision anyway."""
+    tables stand where they stood: after a dropped table the steps re-run by decision anyway.
+
+    `table_ids` and `parameters` are the stepped tables', in step order, and `first_step` is the
+    step the first of them is: 1 for a chain seeded from a map made elsewhere, whose step 0 is
+    the seed and holds no table.
+    """
     import json
 
     assert published.directory is not None
@@ -285,8 +297,9 @@ def check_settings(
     for k, (tid, _) in enumerate(published.tables):
         if k >= len(table_ids) or table_ids[k] != tid:
             break
+        step = k + first_step
         built = json.loads(
-            (published.directory / f"steps/{k:04d}/chosen.ace.provenance.json").read_text()
+            (published.directory / f"steps/{step:04d}/chosen.ace.provenance.json").read_text()
         )["parameters"]
         now = parameters[k]
         for key in sorted(set(built) | set(now)):
