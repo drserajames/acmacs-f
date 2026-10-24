@@ -62,6 +62,28 @@ def figure_refs(r: Resolved) -> list[StoreRef]:
         raise ProvenanceError(f"slot {r.slot}: bad store ref: {err}") from err
 
 
+# A figure input that is only compared with, not drawn: af.map.build records each new-antigen
+# outline tier's previous map as "previous_map <dataset>@<version>" (Q264 b). The figure's colours
+# and points come from its own chain; the previous map only decides which antigens are new. So
+# it is not an input the report rests on: it is recorded as a comparison, with the slots that
+# cite it, and what it was built from (older tables, as the previous report's maps were) is not
+# held to the report's one version of each dataset.
+COMPARISON_INPUT = "previous_map "
+
+
+def comparison_refs(r: Resolved) -> list[StoreRef]:
+    """The store refs a figure's I7 names only as comparisons (:data:`COMPARISON_INPUT`)."""
+    inputs = r.figure.doc["provenance"].get("inputs") or {}
+    try:
+        return [
+            StoreRef.from_json({k: v for k, v in item.items() if k != "sha256"})
+            for name, item in inputs.items()
+            if name.startswith(COMPARISON_INPUT)
+        ]
+    except (StoreError, AttributeError, TypeError) as err:
+        raise ProvenanceError(f"slot {r.slot}: bad comparison input: {err}") from err
+
+
 @dataclass
 class StoreUse:
     """The refs a report uses, and which slots were not drawn from the store."""
@@ -81,6 +103,9 @@ class StoreUse:
     # tree dataset -> (sequences version it was exported from, sequences version the figures
     # read, the export record that shows both exports identical, how that record was written)
     trees_same_content: dict[str, tuple[str, str, str, str]] = field(default_factory=dict)
+    # Versions a figure only compares with (:func:`comparison_refs`) -> the slots citing them:
+    # not inputs, so neither in refs nor followed upstream, and need not be CURRENT.
+    comparison_refs: dict[StoreRef, list[str]] = field(default_factory=dict)
 
     def all_refs(self) -> list[StoreRef]:
         """Every version the report rests on: its own, then the pinned-only older ones."""
@@ -102,6 +127,10 @@ class StoreUse:
             "trees_same_content": {
                 d: list(triple) for d, triple in sorted(self.trees_same_content.items())
             },
+            "comparison_refs": {
+                str(ref): slots
+                for ref, slots in sorted(self.comparison_refs.items(), key=lambda kv: str(kv[0]))
+            },
         }
 
 
@@ -111,17 +140,24 @@ Chosen = dict[tuple[str, str], tuple[StoreRef, set[str]]]
 
 def write_report_manifest(path: Path, use: StoreUse, description: str) -> Path:
     """The report manifest: the store's snapshot document of the report's own versions, plus
-    ``pinned``: each older version reached only through pinned slots, with those slots.
+    ``pinned``: each older version reached only through pinned slots, with those slots, and
+    ``compared``: each version a figure only compares with, with the slots that cite it.
 
     A snapshot names one version per dataset (af.store refuses repeats), so the pinned older
     versions sit beside ``refs``, not in it; together they are every version the report rests
-    on. With no pins the document is exactly the snapshot format.
+    on. The compared versions are not inputs, so they are listed apart, where nobody takes them
+    for one. With no pins and no comparisons the document is exactly the snapshot format.
     """
     document = refs_document(use.refs, description)
     if use.pinned_versions:
         document["pinned"] = [
             {"store": ref.to_json(), "slots": slots}
             for ref, slots in sorted(use.pinned_versions.items(), key=lambda kv: str(kv[0]))
+        ]
+    if use.comparison_refs:
+        document["compared"] = [
+            {"store": ref.to_json(), "slots": slots}
+            for ref, slots in sorted(use.comparison_refs.items(), key=lambda kv: str(kv[0]))
         ]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
@@ -201,7 +237,10 @@ def collect(figs: dict[str, Resolved]) -> StoreUse:
     for slot, r in figs.items():
         if r.figure.placeholder:
             continue
-        refs = figure_refs(r)
+        compared = comparison_refs(r)
+        for ref in compared:
+            use.comparison_refs.setdefault(ref, []).append(slot)
+        refs = [ref for ref in figure_refs(r) if ref not in compared]
         if not refs:
             use.not_from_store.append(slot)
         for ref in refs:
@@ -404,7 +443,7 @@ def check_against_store(
     A ref used only by pinned slots may be old: pinning is how a report keeps an older figure
     on purpose.
     """
-    problems = check_refs(store, use.all_refs(), deep=deep)
+    problems = check_refs(store, [*use.all_refs(), *use.comparison_refs], deep=deep)
     if problems:
         raise ProvenanceError(f"{len(problems)} store problem(s):\n  " + "\n  ".join(problems))
     pinned = {slot for slot, r in figs.items() if r.pinned}
