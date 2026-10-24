@@ -37,6 +37,7 @@ from typing import Any
 from af.chain.adjust import ColumnBasisAdjustment
 from af.chain.append import ORDERS, Order, Rerun, SettingsRerun
 from af.chain.backend import DEFAULT_MOVE_LOWER_RULE, MOVE_LOWER_RULES
+from af.chain.seed import STRESS_TOLERANCE
 from af.chain.select import DropCell, RemoveRule, Selection, SeraPolicy
 from af.chain.sequence_select import SequenceRemovals
 from af.chart.merge import ColumnBasisConvention
@@ -216,13 +217,32 @@ class SeedChart:
     pairing). `af_only_tables`: tables the store has that the seed lacks although dated within
     it, "leave-out" (not in the chain: a data correction, for later) or "append" (stepped after
     the post-seed tables, in date order). Q268: Sarah's choice; "leave-out" until she rules.
+
+    The rest decide how the seed's own layout becomes step 0 (af.chain.seed), and apply whether
+    or not the seed is bridged. `projection`: which of the seed's projections the chain
+    continues, P[0] by default, named rather than deduced from the stresses -- in the Sep 2026
+    round's maps as drawn, the lowest-stress projection is a different map in 6 of the 18.
+    `bake_transformation`: apply
+    that projection's transformation to its coordinates at step 0, so every later step is in the
+    frame the seed was drawn in; the matrix is recorded in the step. `stress_tolerance`: how far
+    the stress recomputed at step 0 may differ, relatively, from the stress the seed stores,
+    before the chain refuses to start.
     """
 
     bridge: bool
     drop_serum_id_prefix: str | None = None
     af_only_tables: str = "leave-out"
+    projection: int = 0
+    bake_transformation: bool = True
+    stress_tolerance: float = STRESS_TOLERANCE
 
     def __post_init__(self) -> None:
+        if self.projection < 0:
+            raise ChainConfigError(f"[seed_chart] projection must be 0 or more: {self.projection}")
+        if not self.stress_tolerance > 0:
+            raise ChainConfigError(
+                f"[seed_chart] stress_tolerance must be above 0: {self.stress_tolerance}"
+            )
         if self.af_only_tables not in AF_ONLY_TABLES:
             raise ChainConfigError(
                 f"[seed_chart] af_only_tables must be one of {AF_ONLY_TABLES}:"

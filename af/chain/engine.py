@@ -39,6 +39,14 @@ from af.chain import adjust, bridge, select, sequence_select
 from af.chain.backend import DEFAULT_MOVE_LOWER_RULE, Optimiser, default_optimiser, map_order
 from af.chain.config import ChainConfig, TableRef, config_to_json, option_parameters
 from af.chain.diagnostics import group_moves, run_threads, step_diagnostics, two_position_points
+from af.chain.seed import (
+    bake_transformation,
+    check_layers,
+    lowest_stress_index,
+    projection_stresses,
+    seed_projection,
+    seed_stress_check,
+)
 from af.chain.starts import (
     finished,
     problem_digest,
@@ -457,13 +465,21 @@ def _step_seed(cfg: ChainConfig, index: int, inputs: list[Path]) -> int:
 # steps
 
 
-def _merge_options(cfg: ChainConfig) -> MergeOptions:
+def _merge_options(cfg: ChainConfig, index: int | None = None) -> MergeOptions:
     o = cfg.options
+    # Step 1 starts from the seed's own layout, so it names the seed's projection: a seed made
+    # elsewhere keeps the alternatives it was offered and the drawn one is not always the lowest
+    # stress (af.chain.seed). Every later step's previous chart is the chain's own, whose best is
+    # the map it chose, so they take the default.
+    seed_projection = (
+        cfg.seed_chart.projection if index == 1 and cfg.seed_chart is not None else None
+    )
     return MergeOptions(
         merge_type=MergeType.INCREMENTAL,
         combine_copied_references=o.combine_copied_references,
         titres=MergeSettings(sd_limit=o.sd_limit),
         column_bases=ColumnBasisConvention(o.column_bases),
+        chart1_projection=seed_projection,
     )
 
 
@@ -618,13 +634,14 @@ def _first_step(
         chart = read_chart(cfg.first_map)
         if not chart.projections:
             raise ChainError(f"{cfg.first_map}: seed chart has no projections")
+        chart, seed_record = _seed_layout(cfg, chart, len(bridge.seed_source_dates(chart)))
         write_chart(chart, directory / CHOSEN)
         record = {
             "index": 0,
             "table_id": Path(cfg.first_map).name,
             "source": str(cfg.first_map),
             "chosen": "seed",
-            "stress": {"seed": chart.best().stress_value},
+            **seed_record,
         }
         record["diagnostics"] = step_diagnostics(chart, None, None, None, None, None, cfg)
         _write_step_record(directory, record, mapper)
@@ -823,22 +840,60 @@ def _bridged_first_step(
     if not seed.projections:
         raise ChainError(f"{cfg.first_map}: seed chart has no projections")
     b = bridge.bridge_seed(seed, split, cfg.seed_chart.drop_serum_id_prefix)
-    write_chart(b.chart, directory / CHOSEN)
+    chart, seed_record = _seed_layout(cfg, b.chart, len(split.in_seed) + len(split.af_only))
+    write_chart(chart, directory / CHOSEN)
     doc = b.to_json()
     (directory / BRIDGE_RECORD).write_text(json.dumps(doc, indent=1, default=_json_default))
-    best = seed.best_projection()
     record = {
         "index": 0,
         "table_id": Path(cfg.first_map).name,
         "source": str(cfg.first_map),
         "source_sha256": sha256_path(Path(cfg.first_map)),
         "chosen": "seed",
-        # the seed's own stored stress; a seed may have none (then null)
-        "stress": {"seed": None if best is None else best.stress},
         "bridge": {"record": BRIDGE_RECORD, **doc["counts"]},
+        **seed_record,
     }
-    record["diagnostics"] = step_diagnostics(b.chart, None, None, None, None, None, cfg)
+    record["diagnostics"] = step_diagnostics(chart, None, None, None, None, None, cfg)
     _write_step_record(directory, record, mapper)
+
+
+def _seed_layout(cfg: ChainConfig, chart: Chart, source_tables: int) -> tuple[Chart, dict]:
+    """The seed's layout as step 0: the named projection, its orientation baked in, checked.
+
+    Returns the chart to write and what the step records about it: which projection the chain
+    continues and every projection's stored stress, the transformations baked (so the conversion
+    is declared and invertible), the stored stress beside the stress recomputed here, and the
+    layer count. `[seed_chart]` decides all of it; a `first_map` chain without that table keeps
+    the behaviour it had before (the seed copied as it stands, with its stored stress).
+    """
+    sc = cfg.seed_chart
+    if sc is None:
+        return chart, {"stress": {"seed": chart.best().stress_value}}
+    chosen = seed_projection(chart, sc.projection)
+    checked = seed_stress_check(chart, chosen, sc.stress_tolerance)
+    lowest = lowest_stress_index(chart)
+    record: dict[str, Any] = {
+        "stress": checked.to_json(),
+        "seed_projection": {
+            "index": sc.projection,
+            "of": len(chart.projections),
+            "stresses": projection_stresses(chart),
+            "lowest_stress_index": lowest,
+            # worth seeing: the map that was drawn is not always the lowest-stress one
+            "is_lowest_stress": None if lowest is None else lowest == sc.projection,
+        },
+        "layers": check_layers(chart, source_tables),
+    }
+    if sc.bake_transformation:
+        baked = bake_transformation(chart)
+        chart = baked.chart
+        record["transformation"] = {"baked": True, "projections": baked.transformations}
+    else:
+        had = [i for i, p in enumerate(chart.projections) if p.transformation is not None]
+        # not baked: the layout stays the seed's raw one and `t` travels no further than step 0,
+        # so every later step sits in a frame the published map was not drawn in
+        record["transformation"] = {"baked": False, "projections_with_one": had}
+    return chart, record
 
 
 def _merge_step(
@@ -859,7 +914,7 @@ def _merge_step(
     table, removed = select.apply(cfg.remove, table)
     table, by_sequence = sequence_select.apply(cfg.sequence_removals, table)
     table, dropped = select.drop_cells(cfg.drop_cells, table_ref.table_id, table)
-    merged, report = merge(previous, table, _merge_options(cfg))
+    merged, report = merge(previous, table, _merge_options(cfg, index=index))
     write_chart(merged, directory / "merge.ace")
     arrays = merged.optimiser_arrays(
         o.minimum_column_basis, disconnect_threshold=o.disconnect_threshold
