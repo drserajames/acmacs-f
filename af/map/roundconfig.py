@@ -35,6 +35,7 @@ from af.map.config import (
     VaccineDisableConfig,
     WindowConfig,
 )
+from af.map.new_antigens import NewAntigenTier
 
 
 class ConfigError(ValueError):
@@ -70,6 +71,22 @@ def _path(value: str, base: Path) -> Path:
     return p if p.is_absolute() else (base / p).resolve()
 
 
+def _new_antigen_tier(t: Any, base: Path, where: str) -> NewAntigenTier:
+    _known(
+        t,
+        {"name", "since", "outline_width", "reason", "colour", "compare_round"},
+        where,
+    )
+    return NewAntigenTier(
+        name=str(t["name"]),
+        since=_date(t["since"], where),
+        outline_width=float(t["outline_width"]),
+        reason=str(t["reason"]),
+        colour=str(t.get("colour", "black")),
+        compare_round=_path(t["compare_round"], base) if "compare_round" in t else None,
+    )
+
+
 def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
     """Read ``maps.toml``; return the config and the path of the curated vaccine list."""
     path = Path(path)
@@ -90,6 +107,7 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
             "titles",
             "legends",
             "label_abbreviations",
+            "new_antigen_outlines",
         },
         str(path),
     )
@@ -182,6 +200,10 @@ def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:
             label_abbreviations=_path(data["label_abbreviations"], base)
             if "label_abbreviations" in data
             else None,
+            new_antigen_outlines=tuple(
+                _new_antigen_tier(t, base, f"{path} new_antigen_outlines[{k}]")
+                for k, t in enumerate(data.get("new_antigen_outlines", ()))
+            ),
         )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc

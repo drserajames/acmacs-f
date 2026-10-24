@@ -94,6 +94,7 @@ AF_SIDE = {
     "af/map/vaccines.py",
     "af/map/circles.py",  # draws af.chart.serum_circles records: the addenda's serum circles
     "af/map/addenda.py",  # the addenda pass: serum selection and circles over a round's maps
+    "af/map/new_antigens.py",  # the interim reports' new-antigen outlines: table dates, rounds
 }  # fmt: skip
 
 

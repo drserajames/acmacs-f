@@ -330,3 +330,32 @@ def test_a_map_may_shift_its_frame_by_hand_with_a_reason(tmp_path: Path) -> None
         load_maps_config(
             write(tmp_path, GOOD + FRAME_SHIFT.replace("dy = 2.1", "dy = 2.1\nsize = 9"))
         )
+
+
+NEW_ANTIGENS = """
+[[new_antigen_outlines]]
+name = "since the VCM"
+since = 2026-09-21
+outline_width = 3.0
+reason = "thin, as ae's interim reports"
+compare_round = "../previous"
+
+[[new_antigen_outlines]]
+name = "since the last interim"
+since = 2026-09-21
+outline_width = 6.0
+reason = "thick: the first interim's cut-off is the VCM's"
+"""
+
+
+def test_new_antigen_outlines_are_read_in_order_and_off_by_default(tmp_path: Path) -> None:
+    config, _ = load_maps_config(write(tmp_path, GOOD + NEW_ANTIGENS))
+    vcm, interim = config.new_antigen_outlines
+    assert (vcm.since, vcm.outline_width, vcm.colour) == (dt.date(2026, 9, 21), 3.0, "black")
+    assert vcm.compare_round == (tmp_path / "../previous").resolve()
+    assert interim.outline_width == 6.0 and interim.compare_round is None
+    assert load_maps_config(write(tmp_path, GOOD))[0].new_antigen_outlines == ()
+    with pytest.raises(ConfigError, match="unknown key"):
+        load_maps_config(
+            write(tmp_path, GOOD + NEW_ANTIGENS.replace("outline_width = 3.0", "width = 3.0"))
+        )
