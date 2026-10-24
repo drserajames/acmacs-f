@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from af.report import build, placeholder
+from af.report import build, placeholder, provenance
 from af.report.config import load
 from af.report.provenance import ProvenanceError
 from af.store import Provenance, Store, StoreError, StoreRef, check_refs, read_manifest
@@ -588,6 +588,50 @@ def test_a_pinned_slot_may_rest_on_an_older_version_and_it_is_recorded(tmp_path:
 def test_two_versions_under_unpinned_slots_are_still_refused(tmp_path: Path) -> None:
     cfg, root, store, _, _ = _two_chains_on_two_tables(tmp_path, pin_m2=False)
     with pytest.raises(ProvenanceError, match="rest on different versions of the same dataset"):
+        build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                               tmp_path / "m.json", deep=False)  # fmt: skip
+
+
+def _compare_m2_with(root: Path, compared: StoreRef, refs: list[StoreRef]) -> None:
+    """map/m2 names ``refs`` as inputs and ``compared`` as its new-antigen outlines' previous
+    map, as af.map.build records it (Q264 b)."""
+    i7 = root / "map/m2/all/v1/figure.i7.json"
+    doc = json.loads(i7.read_text())
+    doc["provenance"]["store_refs"] = [ref.to_json() for ref in [*refs, compared]]
+    doc["provenance"]["inputs"] = {
+        f"previous_map {compared.dataset}@{compared.version}": {
+            **compared.to_json(), "sha256": "0" * 64,
+        }
+    }  # fmt: skip
+    i7.write_text(json.dumps(doc))
+
+
+def test_a_previous_map_is_recorded_as_a_comparison_not_an_input(tmp_path: Path) -> None:
+    """The previous report's map, a chain on older tables, decides which antigens are new: it
+    is listed apart (use and manifest), and its older tables are not the report's (no pin)."""
+    cfg, root, store, old, new = _two_chains_on_two_tables(tmp_path, pin_m2=False)
+    redrawn, kept = store.current("chains", "labx/m/main"), store.current("chains", "labx/m/kept")
+    _compare_m2_with(root, kept, [redrawn])
+    use = build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                                 tmp_path / "m.json", deep=False)  # fmt: skip
+    assert use.comparison_refs == {kept: ["map/m2/all"]}
+    assert kept not in use.all_refs() and old not in use.all_refs() and new in use.refs
+    assert use.pinned_versions == {}
+    assert use.to_json()["comparison_refs"] == {str(kept): ["map/m2/all"]}
+    manifest = provenance.write_report_manifest(tmp_path / "m.json", use, "test")
+    document = json.loads(manifest.read_text())
+    assert document["compared"] == [{"store": kept.to_json(), "slots": ["map/m2/all"]}]
+    assert kept.to_json() not in document["refs"]
+
+
+def test_a_genuine_input_clash_is_still_refused_beside_a_comparison(tmp_path: Path) -> None:
+    """m2 rests on the chain over the old tables as an INPUT: refused as before, comparison or
+    not."""
+    cfg, root, store, _, _ = _two_chains_on_two_tables(tmp_path, pin_m2=False)
+    kept = store.current("chains", "labx/m/kept")
+    previous = _publish(store, "chains", "labx/m/previous", "previous report's map")
+    _compare_m2_with(root, previous, [kept])
+    with pytest.raises(ProvenanceError, match=r"rest on different versions(.|\n)*tables/labx/m"):
         build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
                                tmp_path / "m.json", deep=False)  # fmt: skip
 
