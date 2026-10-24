@@ -144,6 +144,9 @@ class Geometry:
     # 0.60 at 0.25; Q259) and keeps the font's metrics, so placement is unchanged. Stroked
     # text is drawn as outlines, so an invisible copy keeps each label searchable.
     label_stroke: float = 0.0
+    # label_stroke's value when the round's mono fallback draws the labels instead of its
+    # preferred font (af.util.fonts.FontNames.mono_fallback): the fallback is the lighter font.
+    label_stroke_fallback: float = 0.0
     # The continent inset's preferred corner (left x, bottom y): the clear spot nearest to it is
     # taken, never one over ink; None: the lowest, then leftmost clear spot. And its width.
     inset_left: float | None = None

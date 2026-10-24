@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -147,6 +147,9 @@ def make_figure(
 
     marked = None
     geometry = config.geometry
+    choice = config.fonts.files.mono_choice if config.fonts is not None else None
+    if choice is not None and choice.chosen == "fallback":
+        geometry = replace(geometry, label_stroke=geometry.label_stroke_fallback)
     if config.marked_ids:
         marked = rows_matching(tree, layout, config.marked_ids)
         geometry = with_centre_column(geometry)
@@ -235,6 +238,8 @@ def make_figure(
         "overrides": {k: len(v) for k, v in asdict(config.overrides).items() if k != "reasons"},
         "override_reasons": dict(config.overrides.reasons),
     }
+    if choice is not None:  # which mono font drew the labels, and why (rule 4: never silent)
+        report["font_mono"] = {**asdict(choice), "label_stroke": geometry.label_stroke}
     if config.label_pins:  # only when there are pins, so other figures keep their bytes
         if drawn.pin_moves is not None:  # Geometry.pin_clearance set
             pin_report = {
