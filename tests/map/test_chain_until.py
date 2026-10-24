@@ -1,13 +1,15 @@
 """A map drawn from a chain as it stood after a named table (reproducing a past round)."""
 
+import datetime as dt
 import json
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from af.map.build import BuildError, chain_chart
+from af.map.build import BuildError, chain_chart, chain_version_chart
 from af.map.roundconfig import ConfigError, load_maps_config
+from af.store import Provenance
 from af.store.store import Store
 
 from .test_roundconfig import GOOD, write
@@ -83,3 +85,29 @@ def test_chain_until_needs_a_chain(tmp_path: Path) -> None:
     )
     with pytest.raises((ConfigError, ValueError), match="chain_until needs a chain"):
         load_maps_config(write(tmp_path, text))
+
+
+def test_a_pinned_version_is_read_after_current_moves_on(tmp_path: Path) -> None:
+    """The previous report's map (af.map.new_antigens) is the version that report drew, not the
+    chain's CURRENT: a later table must not change what counted as already shown."""
+    store = Store.create(tmp_path / "store")
+    t0 = dt.datetime(2026, 10, 2, tzinfo=dt.UTC)
+    refs = []
+    for i in range(2):
+        name = "/".join(("B", "OLDTOWN", str(i + 1), "2020"))
+        chart = {"c": {"i": {"V": "B"}, "a": [{"N": name}], "s": [{"N": name}],
+                       "t": {"l": [["40"]]}}}  # fmt: skip
+        with store.build("chains", "lab/a/main") as build:
+            (build.path / "steps/0000").mkdir(parents=True)
+            (build.path / "steps/0000/chosen.ace").write_text(json.dumps(chart))
+            steps = [
+                {"table_id": f"lab-a-{i}", "directory": "steps/0000", "chosen_file": "chosen.ace"}
+            ]
+            (build.path / "chain.json").write_text(json.dumps({"steps": steps}))
+            refs.append(build.publish(Provenance("af.chain", (), {"i": i}, t0, t0)))
+    old, ref, _ = chain_version_chart(store, "lab/a/main", refs[0].version)
+    current, _, _ = chain_chart(store, "lab/a/main")
+    assert ref == refs[0] and old.antigens[0].name.endswith("/1/2020")
+    assert current.antigens[0].name.endswith("/2/2020")
+    with pytest.raises(BuildError, match="no chain version chains/lab/a/main@0123456789abcdef"):
+        chain_version_chart(store, "lab/a/main", "0123456789abcdef")

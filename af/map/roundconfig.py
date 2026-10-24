@@ -72,19 +72,21 @@ def _path(value: str, base: Path) -> Path:
 
 
 def _new_antigen_tier(t: Any, base: Path, where: str) -> NewAntigenTier:
-    _known(
-        t,
-        {"name", "since", "outline_width", "reason", "colour", "compare_round"},
-        where,
-    )
-    return NewAntigenTier(
-        name=str(t["name"]),
-        since=_date(t["since"], where),
-        outline_width=float(t["outline_width"]),
-        reason=str(t["reason"]),
-        colour=str(t.get("colour", "black")),
-        compare_round=_path(t["compare_round"], base) if "compare_round" in t else None,
-    )
+    _known(t, {"name", "since", "outline_width", "reason", "colour", "previous_maps"}, where)
+    previous = t.get("previous_maps", {})
+    if not isinstance(previous, Mapping):
+        raise ConfigError(f"{where}: previous_maps must be a table of map folder = dataset@version")
+    try:
+        return NewAntigenTier(
+            name=str(t["name"]),
+            since=_date(t["since"], where),
+            outline_width=float(t["outline_width"]),
+            reason=str(t["reason"]),
+            previous_maps={str(k): str(v) for k, v in previous.items()},
+            colour=str(t.get("colour", "black")),
+        )
+    except ValueError as exc:
+        raise ConfigError(f"{where}: {exc}") from exc
 
 
 def load_maps_config(path: Path) -> tuple[MapsConfig, Path]:

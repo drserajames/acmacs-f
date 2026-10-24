@@ -338,7 +338,7 @@ name = "since the VCM"
 since = 2026-09-21
 outline_width = 3.0
 reason = "thin, as ae's interim reports"
-compare_round = "../previous"
+previous_maps = { "example-lab" = "lab/example/merged-strict@0123456789abcdef" }
 
 [[new_antigen_outlines]]
 name = "since the last interim"
@@ -352,8 +352,8 @@ def test_new_antigen_outlines_are_read_in_order_and_off_by_default(tmp_path: Pat
     config, _ = load_maps_config(write(tmp_path, GOOD + NEW_ANTIGENS))
     vcm, interim = config.new_antigen_outlines
     assert (vcm.since, vcm.outline_width, vcm.colour) == (dt.date(2026, 9, 21), 3.0, "black")
-    assert vcm.compare_round == (tmp_path / "../previous").resolve()
-    assert interim.outline_width == 6.0 and interim.compare_round is None
+    assert vcm.previous_map("example-lab") == ("lab/example/merged-strict", "0123456789abcdef")
+    assert interim.outline_width == 6.0 and interim.previous_maps == {}
     assert load_maps_config(write(tmp_path, GOOD))[0].new_antigen_outlines == ()
     with pytest.raises(ConfigError, match="unknown key"):
         load_maps_config(

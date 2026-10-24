@@ -1,4 +1,4 @@
-"""Outlines that mark the antigens newly titrated since a report's cut-offs (the interim reports).
+"""Outlines that mark the antigens new since the previous reports (the interim reports).
 
 Sarah, for M2 (23 Oct 2026): antigens newly titrated since the previous VCM have a thin black
 outline, thicker than the default; those titrated since the previous interim report (or the VCM,
@@ -6,20 +6,20 @@ for the first interim) a thick bold one, as ae's interim (TC) reports drew them.
 1, 3 and 6 points on the 800-point page (ae.report.chart_modifier.style_new_compared_to), black,
 the new antigens raised over the others.
 
-A round configures the tiers (``[[new_antigen_outlines]]``): each a cut-off date and a width. An
-antigen is new for a tier when the first table it was titrated in is dated after the tier's
-cut-off; one new for several tiers takes the latest cut-off's (the thick one). ae marked an
-antigen new when the previous round's chart lacked it; that count is recorded beside, for a
-tier that names the round to compare with. A tier that matches nothing is reported, not an
-error: a quiet month is possible. Vaccine marks keep their own outline, as in ae.
+A round configures the tiers (``[[new_antigen_outlines]]``): each a cut-off, a width, and per
+map the previous report's map as af drew it (a store chain version, ``dataset@version``). An
+antigen is new for a tier when that map lacks it (Sarah, Q264 b, 24 Oct 2026: what is new to the
+reader, as ae's rule, against af's own chain version); one new for several tiers takes the latest
+cut-off's (the thick one). How many were first titrated after the cut-off is recorded beside: a
+table dated before the cut-off can arrive after it. A tier that matches nothing is reported, not
+an error: a quiet month is possible. Vaccine marks keep their own outline, as in ae.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Sequence
-from dataclasses import dataclass
-from pathlib import Path
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from af.chart.model import Chart
@@ -29,20 +29,36 @@ from af.map.style import PointIn
 
 @dataclass(frozen=True)
 class NewAntigenTier:
-    """Antigens first titrated after ``since`` get an outline ``outline_width`` points wide."""
+    """Antigens the previous report's map lacks get an outline ``outline_width`` points wide;
+    ``since`` is that report's cut-off, which orders the tiers and counts first titrations."""
 
     name: str
     since: dt.date
     outline_width: float
     reason: str
+    # per map folder: the previous report's map, the store chain version it was drawn from
+    previous_maps: Mapping[str, str] = field(default_factory=dict)
     colour: str = "black"
-    # an ae round folder whose <map>/styled.ace is the previous report's chart, for counting ae's
-    # rule (antigens that chart lacks) beside this one; None: not counted
-    compare_round: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.outline_width > 0:
             raise ValueError(f"new antigen outline {self.name!r}: width must be positive")
+        for folder, ref in self.previous_maps.items():
+            dataset, sep, version = ref.partition("@")
+            if not sep or not dataset or not version:
+                raise ValueError(
+                    f"new antigen outline {self.name!r}: {folder} = {ref!r} is not dataset@version"
+                )
+
+    def previous_map(self, folder: str) -> tuple[str, str]:
+        """The previous report's chain dataset and version for ``folder``; a map the tier does
+        not name is an error (design rule 4: no silent default)."""
+        if folder not in self.previous_maps:
+            raise ValueError(
+                f"new antigen outline {self.name!r} names no previous map for {folder}"
+            )
+        dataset, _, version = self.previous_maps[folder].partition("@")
+        return dataset, version
 
 
 def first_titrated(chart: Chart) -> list[dt.date | None]:
@@ -67,36 +83,31 @@ def first_titrated(chart: Chart) -> list[dt.date | None]:
     return first
 
 
-def _not_in_previous(chart: Chart, folder: str, round_dir: Path) -> set[int] | None:
-    """Antigens the previous round's chart lacks (ae's rule), or None when it has no chart."""
-    from af.chart.ace import read_chart
-
-    path = round_dir / folder / "styled.ace"
-    if not path.is_file():
-        return None
-
-    def key(a: Any) -> tuple:
-        return (a.name, a.reassortant, a.annotations, a.passage)
-
-    theirs = {key(a) for a in read_chart(path).antigens}
-    return {i for i, a in enumerate(chart.antigens) if key(a) not in theirs}
+def _key(a: Any) -> tuple:
+    return (a.name, a.reassortant, a.annotations, a.passage)
 
 
 def new_antigen_styles(
     chart: Chart,
     points: Sequence[PointIn],
     tiers: Sequence[NewAntigenTier],
-    folder: str,
+    previous: Sequence[Chart],
     marks: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, PointStyle], list[dict[str, Any]]]:
     """The outline of each new antigen point (by id), and per tier what it matched, for the
-    figure's record. ``marks``: point ids drawn as vaccine marks, which keep their outline."""
-    first = first_titrated(chart)
+    figure's record. ``previous[k]`` is tier k's previous report map (its chart). ``marks``:
+    point ids drawn as vaccine marks, which keep their outline."""
+    if len(previous) != len(tiers):
+        raise ValueError(f"{len(previous)} previous maps for {len(tiers)} tiers")
+    new_for = []
+    for prev in previous:
+        theirs = {_key(a) for a in prev.antigens}
+        new_for.append({i for i, a in enumerate(chart.antigens) if _key(a) not in theirs})
     order = sorted(range(len(tiers)), key=lambda k: (tiers[k].since, k))  # the latest wins
     tier_of: dict[int, int] = {}
-    for i, when in enumerate(first):
+    for i in range(chart.n_antigens):
         for k in order:
-            if when is not None and when > tiers[k].since:
+            if i in new_for[k]:
                 tier_of[i] = k
     styles: dict[str, PointStyle] = {}
     drawn = [0] * len(tiers)
@@ -110,20 +121,18 @@ def new_antigen_styles(
             outline=tiers[tier].colour, outline_width=tiers[tier].outline_width, raise_rank=tier
         )
         drawn[tier] += 1
+    first = first_titrated(chart)
     record = []
     for k, t in enumerate(tiers):
-        new = [i for i, when in enumerate(first) if when is not None and when > t.since]
-        ae_rule = _not_in_previous(chart, folder, t.compare_round) if t.compare_round else None
         record.append(
             {
                 "name": t.name,
                 "since": t.since.isoformat(),
                 "outline_width": t.outline_width,
                 "reason": t.reason,
-                "first_titrated_after": len(new),
+                "new_since_previous_map": len(new_for[k]),
                 "outlined": drawn[k],
-                "ae_rule_not_in_previous_chart": None if ae_rule is None else len(ae_rule),
-                "compare_round": str(t.compare_round) if t.compare_round else None,
+                "first_titrated_after": sum(1 for w in first if w is not None and w > t.since),
             }
         )
     return styles, record

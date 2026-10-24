@@ -1,7 +1,6 @@
-"""af.map.new_antigens: the interim reports' outlines for antigens newly titrated since cut-offs."""
+"""af.map.new_antigens: interim reports' outlines for antigens new since the previous reports."""
 
 import datetime as dt
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -52,27 +51,48 @@ def test_first_titrated_is_the_earliest_table_with_a_titre() -> None:
     assert first_titrated(single) == [D(2024, 3, 1)] * 4
 
 
-def test_each_new_antigen_takes_the_latest_cut_off_it_passes(tmp_path: Path) -> None:
+def previous(c: Chart, n: int) -> Chart:
+    """The previous report's map: the first n antigens of ``c``."""
+    return Chart(c.info, c.antigens[:n], c.sera, Titres(c.titres.table[:n]))
+
+
+def test_an_antigen_is_new_when_the_previous_reports_map_lacks_it() -> None:
+    """Q264 b: new to the reader, against the previous reports' maps; the first-table date is
+    recorded beside (ag1's table is dated before the VCM cut-off but the VCM map lacks it)."""
     c = chart()
-    styles, record = new_antigen_styles(c, points(c), (VCM, INTERIM), "lab-a-hi")
-    assert set(styles) == {"ag2", "ag3"}  # ag0 old, ag1 before the VCM cut-off
-    assert styles["ag2"].outline_width == 3.0 and styles["ag3"].outline_width == 6.0
+    vcm_map, interim_map = previous(c, 1), previous(c, 3)  # the interim map has ag0..ag2
+    styles, record = new_antigen_styles(c, points(c), (VCM, INTERIM), (vcm_map, interim_map))
+    assert set(styles) == {"ag1", "ag2", "ag3"}
+    assert {k: s.outline_width for k, s in styles.items()} == {"ag1": 3.0, "ag2": 3.0, "ag3": 6.0}
     assert styles["ag3"].outline == "black" and styles["ag3"].raise_rank == 1
-    assert [(r["first_titrated_after"], r["outlined"]) for r in record] == [(2, 1), (1, 1)]
-    assert record[0]["ae_rule_not_in_previous_chart"] is None  # no round to compare with
-    # the first interim: both cut-offs are the VCM's, and the thick tier (configured last) wins
+    assert [
+        (r["new_since_previous_map"], r["outlined"], r["first_titrated_after"]) for r in record
+    ] == [
+        (3, 2, 2),  # ag1 is new to the reader though titrated before the cut-off
+        (1, 1, 1),
+    ]
+    # the first interim: both tiers compare with the VCM's map; the thick one (listed last) wins
     same = NewAntigenTier("since the last interim", VCM.since, 6.0, "first interim")
-    styles, _ = new_antigen_styles(c, points(c), (VCM, same), "lab-a-hi")
-    assert {k: s.outline_width for k, s in styles.items()} == {"ag2": 6.0, "ag3": 6.0}
+    styles, _ = new_antigen_styles(c, points(c), (VCM, same), (vcm_map, vcm_map))
+    assert {k: s.outline_width for k, s in styles.items()} == {"ag1": 6.0, "ag2": 6.0, "ag3": 6.0}
     # a vaccine mark keeps its own outline; a quiet month is counted, not refused
-    styles, _ = new_antigen_styles(c, points(c), (VCM,), "lab-a-hi", frozenset({"ag3"}))
-    assert set(styles) == {"ag2"}
-    quiet = NewAntigenTier("since later", D(2026, 12, 1), 6.0, "nothing yet")
-    styles, record = new_antigen_styles(c, points(c), (quiet,), "lab-a-hi")
-    assert styles == {} and record[0]["first_titrated_after"] == 0
-    missing = NewAntigenTier("compared", VCM.since, 3.0, "r", compare_round=tmp_path)
-    _, record = new_antigen_styles(c, points(c), (missing,), "lab-a-hi")
-    assert record[0]["ae_rule_not_in_previous_chart"] is None  # that round has no such chart
+    styles, _ = new_antigen_styles(c, points(c), (VCM,), (vcm_map,), frozenset({"ag3"}))
+    assert set(styles) == {"ag1", "ag2"}
+    styles, record = new_antigen_styles(c, points(c), (VCM,), (c,))
+    assert styles == {} and record[0]["new_since_previous_map"] == 0
+    with pytest.raises(ValueError, match="previous maps for"):
+        new_antigen_styles(c, points(c), (VCM, INTERIM), (vcm_map,))
+
+
+def test_a_tier_names_each_maps_previous_report_by_chain_version() -> None:
+    t = NewAntigenTier(
+        "since the VCM", VCM.since, 3.0, "r", {"lab-a-hi": "lab/a-hi/merged@0123456789abcdef"}
+    )
+    assert t.previous_map("lab-a-hi") == ("lab/a-hi/merged", "0123456789abcdef")
+    with pytest.raises(ValueError, match="names no previous map for lab-b-hi"):
+        t.previous_map("lab-b-hi")
+    with pytest.raises(ValueError, match="not dataset@version"):
+        NewAntigenTier("x", VCM.since, 3.0, "r", {"lab-a-hi": "lab/a-hi/merged"})
 
 
 def test_a_raised_new_antigen_is_drawn_over_antigens_and_under_the_marks() -> None:

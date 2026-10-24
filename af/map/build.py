@@ -218,7 +218,25 @@ def chain_chart(
     report builder refuses a stale figure. ``until_table`` names a table id; it must match
     exactly one step (design rule 1), and a step index is never accepted (rule 2).
     """
-    ref = store.current("chains", dataset)
+    return _chain_step_chart(store, dataset, store.current("chains", dataset), until_table)
+
+
+def chain_version_chart(store: Store, dataset: str, version: str) -> tuple[Chart, StoreRef, Path]:
+    """The chart of one named chain version (its last step): a report's map as it was drawn,
+    which a later report compares with (af.map.new_antigens). The version is pinned, not CURRENT."""
+    from af.store.manifest import MANIFEST, Manifest
+    from af.store.store import VERSIONS
+
+    manifest = store.dataset_dir("chains", dataset) / VERSIONS / version / MANIFEST
+    if not manifest.is_file():
+        raise BuildError(f"no chain version chains/{dataset}@{version} in the store")
+    ref = StoreRef("chains", dataset, version, Manifest.from_bytes(manifest.read_bytes()).sha256())
+    return _chain_step_chart(store, dataset, ref, None)
+
+
+def _chain_step_chart(
+    store: Store, dataset: str, ref: StoreRef, until_table: str | None
+) -> tuple[Chart, StoreRef, Path]:
     root = store.resolve(ref)
     steps = json.loads((root / "chain.json").read_text())["steps"]
     if not steps:
@@ -731,9 +749,9 @@ def build_map(
         inputs.update(fonts.inputs())
     outlines: dict[str, PointStyle] | None = None
     if config.new_antigen_outlines:
-        # the interim reports' outlines for antigens newly titrated since the cut-offs
-        outlines, decisions["new_antigen_outlines"] = new_antigen_styles(
-            chart, points, config.new_antigen_outlines, cfg.folder, frozenset(vlabels)
+        # the interim reports' outlines for antigens new since the previous reports (Q264 b)
+        outlines, decisions["new_antigen_outlines"] = new_antigen_outlines(
+            chart, points, cfg, config, store, frozenset(vlabels), inputs, store_refs
         )
     provenance: dict[str, Any] = {"inputs": inputs}
     if decisions:
@@ -826,6 +844,39 @@ def shift_frame(frame: Frame, shift: FrameShiftConfig) -> tuple[Frame, dict[str,
         "searched": [frame.x, frame.y, frame.size],
         "drawn": [moved.x, moved.y, moved.size],
     }
+
+
+def new_antigen_outlines(
+    chart: Chart,
+    points: Sequence[PointIn],
+    cfg: MapConfig,
+    config: MapsConfig,
+    store: Store | None,
+    marks: frozenset[str],
+    inputs: dict[str, Any],
+    store_refs: list[dict[str, str]],
+) -> tuple[dict[str, PointStyle], list[dict[str, Any]]]:
+    """Each tier's previous report map, read from its pinned chain version and recorded as an
+    input of the figure (design rule 5), then the outlines (af.map.new_antigens)."""
+    if store is None:
+        raise BuildError(f"{cfg.folder}: new-antigen outlines need --store (the previous maps)")
+    loaded: dict[tuple[str, str], Chart] = {}
+    previous = []
+    for tier in config.new_antigen_outlines:
+        try:
+            dataset, version = tier.previous_map(cfg.folder)
+        except ValueError as exc:
+            raise BuildError(f"{cfg.folder}: {exc}") from exc
+        if (dataset, version) not in loaded:
+            prev, ref, ace = chain_version_chart(store, dataset, version)
+            loaded[dataset, version] = prev
+            store_refs.append(ref.to_json())
+            inputs[f"previous_map {dataset}@{version}"] = {
+                **ref.to_json(),
+                "sha256": content_hash(ace),
+            }
+        previous.append(loaded[dataset, version])
+    return new_antigen_styles(chart, points, config.new_antigen_outlines, previous, marks)
 
 
 def _map_page(
