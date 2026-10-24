@@ -71,17 +71,33 @@ def figure_refs(r: Resolved) -> list[StoreRef]:
 COMPARISON_INPUT = "previous_map "
 
 
+REF_KEYS = {"kind", "dataset", "version", "manifest_sha256"}
+
+
 def comparison_refs(r: Resolved) -> list[StoreRef]:
-    """The store refs a figure's I7 names only as comparisons (:data:`COMPARISON_INPUT`)."""
+    """The store refs a figure's I7 names only as comparisons (:data:`COMPARISON_INPUT`).
+
+    A ref another input also names is an input, not only a comparison, and is left out: an
+    outline tier's previous map may be the very chain the figure draws (a quiet month, the
+    previous interim's version still CURRENT; 08, 24 Oct 2026).
+    """
     inputs = r.figure.doc["provenance"].get("inputs") or {}
     try:
-        return [
+        compared = [
             StoreRef.from_json({k: v for k, v in item.items() if k != "sha256"})
             for name, item in inputs.items()
             if name.startswith(COMPARISON_INPUT)
         ]
     except (StoreError, AttributeError, TypeError) as err:
         raise ProvenanceError(f"slot {r.slot}: bad comparison input: {err}") from err
+    drawn = {
+        StoreRef.from_json({k: item[k] for k in REF_KEYS})
+        for name, item in inputs.items()
+        if not name.startswith(COMPARISON_INPUT)
+        and isinstance(item, dict)
+        and set(item) >= REF_KEYS
+    }
+    return [ref for ref in compared if ref not in drawn]
 
 
 @dataclass
