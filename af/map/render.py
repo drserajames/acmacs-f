@@ -106,6 +106,8 @@ class PointStyle:
     removed points larger. ``on_top`` draws the point over every other point (ae's raise: the
     circled sera of the circle addenda); among raised points a higher ``raise_rank`` is drawn
     later (the coverage maps raise the within antigens, then the outside ones, then the serum).
+    A ``raise_rank`` without ``on_top`` raises an antigen over the other antigens but under the
+    vaccine marks (the new antigens of an interim report, as ae raised them).
     """
 
     fill: str | None = None
@@ -311,12 +313,15 @@ def draw_scene(
     styles = styles or {}
 
     def order(p: ScenePoint) -> float:
-        if p.id in styles and styles[p.id].on_top:
-            return 5 + 0.1 * min(styles[p.id].raise_rank or 0, 9)  # still under circles (7)
+        own = styles.get(p.id)
+        if own is not None and own.on_top:
+            return 5 + 0.1 * min(own.raise_rank or 0, 9)  # still under circles (7)
         if p.kind == "serum":
             return 0
         if p.mark:
             return 4
+        if own is not None and own.raise_rank is not None:
+            return 3 + 0.1 * (1 + min(own.raise_rank, 8))  # raised, still under the marks (4)
         return 1 if (p.greyed or p.colour is None) else (2 if p.reference else 3)
 
     for i in sorted(range(len(scene.points)), key=lambda i: order(scene.points[i])):

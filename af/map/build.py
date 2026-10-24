@@ -62,8 +62,9 @@ from af.map.curate import (
 from af.map.figure import chart_points
 from af.map.finish import finish_map, shared_frame
 from af.map.labels import LabelAbbreviations, label_text
+from af.map.new_antigens import new_antigen_styles
 from af.map.orient import Orientation, RotationOverride, drawn_pairs, orient
-from af.map.render import DEFAULT_LOOK
+from af.map.render import DEFAULT_LOOK, PointStyle
 from af.map.style import ColourRow, ColourScheme, PointIn, SequenceLink, Window
 from af.map.vaccines import (
     MapAntigen,
@@ -728,6 +729,12 @@ def build_map(
     title_base = map_title(chart, cfg.title, config.titles)
     if fonts is not None:  # the font files the figure is drawn in (rule 5)
         inputs.update(fonts.inputs())
+    outlines: dict[str, PointStyle] | None = None
+    if config.new_antigen_outlines:
+        # the interim reports' outlines for antigens newly titrated since the cut-offs
+        outlines, decisions["new_antigen_outlines"] = new_antigen_styles(
+            chart, points, config.new_antigen_outlines, cfg.folder, frozenset(vlabels)
+        )
     provenance: dict[str, Any] = {"inputs": inputs}
     if decisions:
         provenance["decisions"] = decisions
@@ -777,6 +784,7 @@ def build_map(
             orientation=ori.report() if ori else None,
             flags=flags,
             look=look,
+            styles=outlines,
         )
         figures.append(result.i7)
     return MapResult(

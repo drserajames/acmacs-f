@@ -16,6 +16,8 @@ import datetime as dt
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from af.map.new_antigens import NewAntigenTier
+
 
 def _movers(name: str, inline: tuple[str, ...], path: Path | None) -> tuple[str, ...]:
     """Designations given inline or in a file beside the config; exactly one of the two."""
@@ -337,6 +339,9 @@ class MapsConfig:
     # The place abbreviations vaccine labels use (af.map.labels.LabelAbbreviations); None: no
     # table, every place is abbreviated by the fallback rule.
     label_abbreviations: Path | None = None
+    # The interim reports' outlines for antigens newly titrated since cut-offs
+    # (af.map.new_antigens); none: no map marks new antigens.
+    new_antigen_outlines: tuple[NewAntigenTier, ...] = ()
 
     def __post_init__(self) -> None:
         store = [m for m in self.maps if self.colour_source(m) == "store"]
