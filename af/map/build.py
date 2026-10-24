@@ -341,16 +341,36 @@ def hidden_by_rules(chart: Chart, cfg: MapConfig) -> dict[int, str]:
 def orientation_for(
     chart: Chart, layout: np.ndarray, cfg: MapConfig, config: MapsConfig, scheme_name: str
 ) -> Orientation | None:
-    """Fit to the previous round's map, over the points that map actually DREW."""
-    if config.defaults.previous_round is None:
+    """Fit to the previous round's map, over the points that map actually DREW.
+
+    A hand rotation turns the map from where the fit to ITS reference leaves it, so it is refused
+    against any other reference, which may already carry the turn (M2's B/Vic map drew turned
+    132° when one was carried to a round oriented on the map that held it), and refused when
+    there is no reference at all, where it would silently not be applied."""
+    previous = (
+        None
+        if config.defaults.previous_round is None
+        else config.defaults.previous_round / cfg.folder / "styled.ace"
+    )
+    if previous is None or not previous.is_file():
+        if cfg.rotations:
+            raise BuildError(
+                f"{cfg.folder}: rotation {cfg.rotations[0].name!r} needs the previous round it was "
+                f"decided against ({cfg.rotations[0].reference}), but this build orients to none"
+            )
         return None
-    previous = config.defaults.previous_round / cfg.folder / "styled.ace"
-    if not previous.is_file():
-        return None
+    round_name = previous.parent.parent.name
+    for r in cfg.rotations:
+        if r.reference != round_name:
+            raise BuildError(
+                f"{cfg.folder}: rotation {r.name!r} was decided against {r.reference}, but this "
+                f"build orients to {round_name}, which may already carry it: re-decide it against "
+                f"{round_name} or drop it"
+            )
     prev = read_chart(previous)
     pairs, prev_drawn = common_points(chart, prev, scheme_name)
     overrides = tuple(
-        RotationOverride(r.name, r.degrees, r.reason, r.decided.isoformat(), r.reflect)
+        RotationOverride(r.name, r.degrees, r.reason, r.decided.isoformat(), r.reflect, r.reference)
         for r in cfg.rotations
     )
     # The previous round's map is an ae round's styled.ace, which kateri drew with y DOWN. Fit to

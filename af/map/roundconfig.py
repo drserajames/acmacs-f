@@ -371,13 +371,21 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
         )
     rotations = []
     for r in m.get("rotations", ()):
-        _known(r, {"name", "reason", "decided", "degrees", "reflect"}, f"{where} rotation")
+        _known(
+            r, {"name", "reason", "decided", "degrees", "reference", "reflect"}, f"{where} rotation"
+        )
+        if "reference" not in r:
+            raise ConfigError(
+                f"{where} rotation {r.get('name')!r}: needs reference, the previous round it was "
+                "decided against (it turns the map from that round's orientation)"
+            )
         rotations.append(
             RotationConfig(
                 r["name"],
                 r["reason"],
                 _date(r["decided"], f"{where} rotation {r['name']}"),
                 float(r["degrees"]),
+                str(r["reference"]),
                 bool(r.get("reflect", False)),
             )
         )

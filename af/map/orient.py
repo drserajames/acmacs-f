@@ -71,6 +71,7 @@ class RotationOverride:
     reason: str
     decided: str
     reflect: bool = False
+    reference: str = ""  # the previous round it was decided against (see af.map.build)
 
 
 def rotation(degrees: float, reflect: bool = False) -> Array:
@@ -137,6 +138,7 @@ class Orientation:
                     "reflect": o.reflect,
                     "reason": o.reason,
                     "decided": o.decided,
+                    "reference": o.reference,
                 }
                 for o in self.overrides
             ],

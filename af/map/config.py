@@ -160,12 +160,15 @@ class ColumnBaseConfig:
 
 @dataclass(frozen=True)
 class RotationConfig:
-    """A one-off turn applied after the automatic orientation."""
+    """A one-off turn applied after the automatic orientation. It turns the map from where the
+    fit to ``reference`` (the previous round it was decided against) leaves it, so it is only
+    right for that reference: against another, which may already carry the turn, it is refused."""
 
     name: str
     reason: str
     decided: dt.date
     degrees: float
+    reference: str
     reflect: bool = False
 
 
