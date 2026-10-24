@@ -35,7 +35,7 @@ from typing import Any
 
 import numpy as np
 
-from af.chain import adjust, select, sequence_select
+from af.chain import adjust, bridge, select, sequence_select
 from af.chain.backend import DEFAULT_MOVE_LOWER_RULE, Optimiser, default_optimiser, map_order
 from af.chain.config import ChainConfig, TableRef, config_to_json, option_parameters
 from af.chain.diagnostics import group_moves, run_threads, step_diagnostics, two_position_points
@@ -70,6 +70,7 @@ log = logging.getLogger(__name__)
 STEP_RECORD = "step.json"
 CHOSEN = "chosen.ace"
 CHAIN_RECORD = "chain.json"
+BRIDGE_RECORD = "bridge.json"  # step 0 of a bridged seed: every pairing decision (af.chain.bridge)
 
 
 class ChainError(RuntimeError):
@@ -253,7 +254,17 @@ def _json(path: Path) -> object:
 def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
     """One pipeline step per chain step, each depending on the previous step's chosen map."""
     first_source = cfg.first_map if cfg.first_map else cfg.tables[0].path
-    merged_tables = cfg.tables if cfg.first_map else cfg.tables[1:]
+    split = seed_split(cfg) if cfg.bridged else None
+    af_only: set[str] = set()
+    if split is not None:
+        # the tables the seed holds are its bridge, never merged again; after it, the later ones
+        merged_tables = list(split.post_seed)
+        assert cfg.seed_chart is not None
+        if cfg.seed_chart.af_only_tables == "append":
+            merged_tables += split.af_only
+            af_only = {t.table_id for t in split.af_only}
+    else:
+        merged_tables = cfg.tables if cfg.first_map else cfg.tables[1:]
     common = {
         "chain": cfg.name,
         "options": option_parameters(cfg.options),
@@ -279,6 +290,8 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
         common["non_ferret_sera"] = cfg.sera_policy.to_json()
     if cfg.column_basis_adjustments:  # they change the map; a map without them keeps its steps
         common["column_basis_adjustments"] = [a.to_json() for a in cfg.column_basis_adjustments]
+    if cfg.seed_chart is not None:  # likewise: how the seed is converted and what follows it
+        common["seed_chart"] = cfg.seed_chart.to_json()
     if cfg.options.merge_all:
         return [_merge_all_step_def(cfg, root, mapper, common)]
     steps = []
@@ -286,11 +299,15 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
     first_outputs = [d0 / CHOSEN, d0 / STEP_RECORD] + (
         [] if cfg.first_map else [d0 / "scratch.ace"]
     )
+    first_inputs = {"source": Path(first_source)}
+    if split is not None:  # the converted seed follows the shared tables' content too
+        first_outputs.append(d0 / BRIDGE_RECORD)
+        first_inputs |= {f"bridge {t.table_id}": t.path for t, _ in split.in_seed}
     steps.append(
         Step(
             name="step-0000",
-            action=_action(functools.partial(_first_step, cfg, mapper=mapper), d0),
-            inputs={"source": Path(first_source)},
+            action=_action(functools.partial(_first_step, cfg, mapper=mapper, split=split), d0),
+            inputs=first_inputs,
             outputs=[
                 Artefact(p, parse=_ace if p.suffix == ".ace" else _json) for p in first_outputs
             ],
@@ -312,6 +329,7 @@ def chain_steps(cfg: ChainConfig, root: Path, mapper: Mapper) -> list[Step]:
                         previous_path=previous,
                         table_ref=table,
                         mapper=mapper,
+                        af_only=table.table_id in af_only,
                     ),
                     d,
                 ),
@@ -576,9 +594,26 @@ def _json_default(o: object) -> object:
     raise TypeError(type(o))
 
 
-def _first_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper: Mapper) -> None:
+def seed_split(cfg: ChainConfig) -> bridge.SeedSplit:
+    """A bridged seed's tables: which it holds, which the store adds within it, which follow."""
+    assert cfg.first_map is not None
+    seed = read_chart(cfg.first_map)
+    return bridge.seed_split(bridge.seed_source_dates(seed), cfg.tables)
+
+
+def _first_step(
+    cfg: ChainConfig,
+    directory: Path,
+    runner: Runner,
+    *,
+    mapper: Mapper,
+    split: bridge.SeedSplit | None = None,
+) -> None:
     optimiser = mapper.optimiser
     o = cfg.options
+    if cfg.first_map and split is not None:
+        _bridged_first_step(cfg, directory, split, mapper)
+        return
     if cfg.first_map:
         chart = read_chart(cfg.first_map)
         if not chart.projections:
@@ -778,6 +813,34 @@ def _merge_all_step(cfg: ChainConfig, directory: Path, runner: Runner, *, mapper
     _write_step_record(directory, record, mapper)
 
 
+def _bridged_first_step(
+    cfg: ChainConfig, directory: Path, split: bridge.SeedSplit, mapper: Mapper
+) -> None:
+    """Step 0 of a seed made elsewhere: the seed as it is, its point identities converted to the
+    store's (af.chain.bridge). The layout, projections and titres are the seed's own."""
+    assert cfg.first_map is not None and cfg.seed_chart is not None
+    seed = read_chart(cfg.first_map)
+    if not seed.projections:
+        raise ChainError(f"{cfg.first_map}: seed chart has no projections")
+    b = bridge.bridge_seed(seed, split, cfg.seed_chart.drop_serum_id_prefix)
+    write_chart(b.chart, directory / CHOSEN)
+    doc = b.to_json()
+    (directory / BRIDGE_RECORD).write_text(json.dumps(doc, indent=1, default=_json_default))
+    best = seed.best_projection()
+    record = {
+        "index": 0,
+        "table_id": Path(cfg.first_map).name,
+        "source": str(cfg.first_map),
+        "source_sha256": sha256_path(Path(cfg.first_map)),
+        "chosen": "seed",
+        # the seed's own stored stress; a seed may have none (then null)
+        "stress": {"seed": None if best is None else best.stress},
+        "bridge": {"record": BRIDGE_RECORD, **doc["counts"]},
+    }
+    record["diagnostics"] = step_diagnostics(b.chart, None, None, None, None, None, cfg)
+    _write_step_record(directory, record, mapper)
+
+
 def _merge_step(
     cfg: ChainConfig,
     directory: Path,
@@ -787,6 +850,7 @@ def _merge_step(
     previous_path: Path,
     table_ref: TableRef,
     mapper: Mapper,
+    af_only: bool = False,
 ) -> None:
     o = cfg.options
     optimiser = mapper.optimiser
@@ -846,7 +910,9 @@ def _merge_step(
     write_chart(inc_chart, directory / "incremental.ace")
     write_chart(scr_chart, directory / "scratch.ace")
     s_inc, s_scr = all_incremental[0]["stress"], all_scratch[0]["stress"]
-    chosen_name = "incremental" if s_inc <= s_scr else "scratch"  # ties go to incremental, as today
+    # ties go to incremental, as today; "incremental" keeps it whatever the stresses (step_choice)
+    keep_incremental = o.step_choice == "incremental" or s_inc <= s_scr
+    chosen_name = "incremental" if keep_incremental else "scratch"
     chosen = inc_chart if chosen_name == "incremental" else scr_chart
     shutil.copyfile(directory / f"{chosen_name}.ace", directory / CHOSEN)
     record = {
@@ -865,6 +931,9 @@ def _merge_step(
         "trapped_loop": {"incremental": _loop(all_incremental), "scratch": _loop(all_scratch)},
         # appended after a published chain although dated before its latest table (Q164)
         **({"late": late} if (late := cfg.late(table_ref.table_id)) else {}),
+        # a table the store has and a bridged seed lacks, dated within it, appended (Q268)
+        **({"seed_af_only": True} if af_only else {}),
+        **({"step_choice": o.step_choice} if o.step_choice != "lower-stress" else {}),
         **({"removed": removed} if cfg.remove else {}),
         **({"removed_by_sequence": by_sequence} if cfg.sequence_removals is not None else {}),
         **({"dropped_cells_by_rule": dropped} if dropped else {}),
