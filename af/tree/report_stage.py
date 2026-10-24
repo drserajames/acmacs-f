@@ -3,7 +3,7 @@
     python -m af.tree.report_stage <store> <source dataset@version> <export dir> <purpose>
         --cutoff 2021-01-01 --tables-through 2026-09-21 --table-subtype "A(H1N1)"
         --locations <acmacs-f-data>/rules/locations --placement-limits <.../trees/placement.tsv>
-        [--table-lineage VICTORIA]
+        [--table-lineage VICTORIA] [--trim <acmacs-f-data>/trees/trim.tsv]
 
 Today's pipeline makes the report tree from the weekly tree in its W8 ``pdf`` step: leaves
 collected before 2021 are dropped unless a WHO CC table holds them (af.tree.report_filter, task
@@ -24,6 +24,14 @@ round's report tree says exactly which weekly tree it came from, and publishes t
   their net change, so the numbers are measured again rather than inherited. The thresholds the
   flags use are the ones the SOURCE version recorded for its populate step, read back from its
   provenance, so a report tree flags on its source's rule and never on one typed in here.
+- ``--trim`` applies the shipped 223V / 127T cut (af.tree.trim), found on the source tree. The
+  trimmed tree has no outgroup, and placement is measured on the path to the outgroup, so it is
+  measured on the *untrimmed* report tree and recorded as such. So are the clock's leaf flags,
+  carried onto the leaves the trim keeps: one fit, one meaning of off-clock (00, 24 Oct). Refitted
+  on the cut branch alone, the clock flagged 1,004 B/Vic leaves instead of 286, nearly all of them
+  the current fast-moving clade, an artefact of the cut. The clock direction is checked on the
+  trimmed tree. A trim file with no row for the subtype is an error. Without ``--trim`` nothing
+  changes.
 - The source version is an input in PROVENANCE.json and in HISTORY.jsonl's publish event; the
   store's ``parent`` field is the previous version of this same dataset.
 """
@@ -61,6 +69,7 @@ from af.tree.placement import PlacementError, check_placement, limit_for, load_p
 from af.tree.populate import CONTINENTS, LeafRecord, PopulatedTree
 from af.tree.report_filter import TitratedIndex, report_tree
 from af.tree.stages import build_record
+from af.tree.trim import TrimError, TrimMatch, find_trim_node, load_trim_rules, rule_for
 
 KIND = "trees"
 STEP = "trees.report"
@@ -210,12 +219,24 @@ def derive(
     missing: Counter[str],
     placement_limits: Path,
     clock: ClockSettings,
+    trim: TrimMatch | None = None,
 ) -> PopulatedTree:
     """The report tree, re-checked. Refuses as the build would."""
     outgroup = populated.counts.get("outgroup")
     if not outgroup:
         raise ReportStageError("the source tree records no outgroup")
-    result = report_tree(populated, cutoff, titrated, continent_of=continent_of)
+    # Placement needs the outgroup, so with a trim it is measured on the untrimmed report tree.
+    # Continents are not looked up there: the lookup counts its misses, and this tree is not kept.
+    untrimmed = (
+        report_tree(populated, cutoff, titrated)
+        if trim is not None
+        else report_tree(populated, cutoff, titrated, continent_of=continent_of)
+    )
+    result = (
+        untrimmed
+        if trim is None
+        else report_tree(populated, cutoff, titrated, continent_of=continent_of, trim=trim)
+    )
     for reason, count in sorted(missing.items()):
         result.counts[f"continent_unassigned_{reason}"] = count
     result.counts.pop("continent_not_assigned", None)
@@ -225,11 +246,29 @@ def derive(
         raise ReportStageError(str(error)) from error
     limit = limit_for(load_placement_limits(placement_limits), result.subtype)
     try:
-        measured = check_placement(result, outgroup, limit)
+        measured = check_placement(untrimmed, outgroup, limit)
     except PlacementError as error:
         raise ReportStageError(str(error)) from error
     result.counts["placement"] = {**measured.to_json(), "limit": limit.to_json()}
-    apply_flags(result, find_outliers(result, clock))
+    if trim is not None:
+        result.counts["placement"]["measured_on"] = "the untrimmed report tree (no outgroup after)"
+    # With a trim, the flags come from the untrimmed tree's fit (module docstring); apply_flags
+    # matches by leaf key, so the flags of leaves outside the cut are dropped.
+    outliers = find_outliers(untrimmed, clock)
+    apply_flags(result, outliers)
+    if trim is not None:
+        kept = {leaf.name for leaf in result.tree.leaves()}
+        result.counts["clock_flags_measured_on"] = "the untrimmed report tree"
+        result.counts["clock_flags_on_kept_leaves"] = dict(
+            sorted(
+                Counter(
+                    reason
+                    for key, reasons in outliers.flags.items()
+                    if key in kept
+                    for reason in reasons
+                ).items()
+            )
+        )
     return result
 
 
@@ -289,6 +328,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="the source's build.json, for a source published before tree.json recorded its build;"
         " fills tree.json 'build' and is recorded as a hashed input",
     )
+    parser.add_argument(
+        "--trim",
+        type=Path,
+        help="acmacs-f-data trees/trim.tsv: cut to the subtype's one 223V / 127T branch "
+        "(af.tree.trim); a file with no row for the subtype is an error",
+    )
     parser.add_argument("--dry-run", action="store_true", help="derive and check; do not publish")
     args = parser.parse_args(argv)
 
@@ -310,6 +355,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     table_refs = sorted({ref for ref, _ in held.values()}, key=lambda r: r.dataset)
     titrated = TitratedIndex.from_tables(tables, report_name_key)
     continent_of, missing = continent_lookup(LocationTables.read(args.locations))
+    trim: TrimMatch | None = None
+    if args.trim is not None:
+        try:
+            trim = find_trim_node(
+                populated, rule_for(load_trim_rules(args.trim), populated.subtype)
+            )
+        except TrimError as error:
+            raise ReportStageError(str(error)) from error
     result = derive(
         populated,
         args.cutoff,
@@ -318,6 +371,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         missing,
         args.placement_limits,
         source_clock_settings(version),
+        trim,
     )
     result.counts.update({f"report_{k}": v for k, v in table_counts.items()})
     extra_inputs: list[StoreRef | ExternalInput] = []
@@ -339,6 +393,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "name_key": "af.seq.matching location/isolate/year, location forms",
         "continent": f"{args.locations} scheme {CONTINENT_SCHEME}, country source {COUNTRY_SOURCE}",
     }
+    if trim is not None:
+        parameters["trim"] = {"file": str(args.trim), **trim.to_json()}
+        extra_inputs.append(ExternalInput.of(args.trim))
     leaves, internal = result.tree.count()
     report = {
         k: result.counts.get(k)
@@ -363,6 +420,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         "clock_impossible_date",
         "clock_branch_threshold",
         "clock_z_threshold",
+        *(
+            ()
+            if trim is None
+            else (
+                "trim",
+                "removed_by_trim",
+                "removed_by_trim_titrated",
+                "removed_by_trim_otherwise_kept",
+                "removed_by_trim_by_year",
+            )
+        ),
     ):
         print(f"  {key:<28} {report.get(key)}")
     print(f"  continents                   {result.counts.get('continents')}")
