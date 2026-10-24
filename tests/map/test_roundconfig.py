@@ -359,3 +359,42 @@ def test_new_antigen_outlines_are_read_in_order_and_off_by_default(tmp_path: Pat
         load_maps_config(
             write(tmp_path, GOOD + NEW_ANTIGENS.replace("outline_width = 3.0", "width = 3.0"))
         )
+
+
+ROTATION = """
+  [[maps.rotations]]
+  name = "quarter turn"
+  reason = "matches the reviewer's picture"
+  decided = 2026-09-23
+  degrees = 90.0
+"""
+
+
+def test_a_rotation_names_the_round_it_was_decided_against(tmp_path: Path) -> None:
+    text = GOOD + ROTATION + '  reference = "previous"\n'
+    config, _ = load_maps_config(write(tmp_path, text))
+    (r,) = config.maps[0].rotations
+    assert (r.name, r.degrees, r.reference, r.reflect) == ("quarter turn", 90.0, "previous", False)
+    with pytest.raises(ConfigError, match="needs reference, the previous round"):
+        load_maps_config(write(tmp_path, GOOD + ROTATION))
+
+
+def test_a_rotation_is_refused_against_another_reference_or_none(tmp_path: Path) -> None:
+    """A hand rotation turns the map from where the fit to its own reference leaves it: carried to
+    a build oriented on a map that already holds the turn, it would turn the map twice."""
+    from typing import Any, cast
+
+    from af.map.build import BuildError, orientation_for
+
+    (tmp_path / "cfg").mkdir()
+    (tmp_path / "previous/example-lab").mkdir(parents=True)
+    (tmp_path / "previous/example-lab/styled.ace").write_text("{}")
+    text = GOOD + ROTATION + '  reference = "older-round"\n'
+    config, _ = load_maps_config(write(tmp_path / "cfg", text))
+    chart = cast(Any, None)
+    with pytest.raises(BuildError, match="decided against older-round, but this build orients to"):
+        orientation_for(chart, cast(Any, None), config.maps[0], config, "clades-v2")
+    text = text.replace('previous_round = "../previous"\n', "")
+    config, _ = load_maps_config(write(tmp_path / "cfg", text))
+    with pytest.raises(BuildError, match="but this build orients to none"):
+        orientation_for(chart, cast(Any, None), config.maps[0], config, "clades-v2")
