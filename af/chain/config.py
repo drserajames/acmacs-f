@@ -51,6 +51,10 @@ class ChainConfigError(ValueError):
     pass
 
 
+STEP_CHOICES = ("lower-stress", "incremental")
+AF_ONLY_TABLES = ("leave-out", "append")
+
+
 @dataclass(frozen=True)
 class MapOptions:
     """How every step's maps are made. A pipeline parameter: changing it remaps every step."""
@@ -99,9 +103,18 @@ class MapOptions:
     # resolve_best > 1 it runs on each of the best maps and the lowest is kept; AD ran it on
     # projection 0 only, which is resolve_best = 1, the default.
     move_lower_rule: str = DEFAULT_MOVE_LOWER_RULE
+    # Which of a step's two maps is carried forward: "lower-stress", the lower of incremental and
+    # scratch with ties to incremental (ae's rule, chains.py:choose_between_incremental_scratch),
+    # or "incremental", always the map from the previous layout (continuity by rule). Q269, for a
+    # chain seeded from a shipped map: Sarah's choice; "lower-stress" until she rules.
+    step_choice: str = "lower-stress"
 
     def __post_init__(self) -> None:
         ColumnBasisConvention(self.column_bases)  # raises on an unknown convention
+        if self.step_choice not in STEP_CHOICES:
+            raise ChainConfigError(
+                f"step_choice must be one of {STEP_CHOICES}: {self.step_choice!r}"
+            )
         if self.scratch_precision not in ("rough", "fine"):
             raise ChainConfigError(
                 f"scratch_precision must be rough or fine: {self.scratch_precision!r}"
@@ -130,6 +143,7 @@ LATER_OPTIONS = {
     "resolve_best": 1,
     "move_lower": False,
     "move_lower_rule": DEFAULT_MOVE_LOWER_RULE,
+    "step_choice": "lower-stress",
 }
 
 
@@ -192,6 +206,40 @@ class Reference:
 
 
 @dataclass(frozen=True)
+class SeedChart:
+    """How a chain uses its seed chart (`first_map`) when the seed was made elsewhere, e.g. the
+    map as shipped for a report (`[seed_chart]` in the chain file; af.chain.bridge).
+
+    `bridge`: convert the seed's point identities to the tables store's through the tables both
+    hold, and step only through the tables after the seed. `drop_serum_id_prefix`: a lab code
+    the store writes in front of serum ids and the seed may not (dropped on both sides when
+    pairing). `af_only_tables`: tables the store has that the seed lacks although dated within
+    it, "leave-out" (not in the chain: a data correction, for later) or "append" (stepped after
+    the post-seed tables, in date order). Q268: Sarah's choice; "leave-out" until she rules.
+    """
+
+    bridge: bool
+    drop_serum_id_prefix: str | None = None
+    af_only_tables: str = "leave-out"
+
+    def __post_init__(self) -> None:
+        if self.af_only_tables not in AF_ONLY_TABLES:
+            raise ChainConfigError(
+                f"[seed_chart] af_only_tables must be one of {AF_ONLY_TABLES}:"
+                f" {self.af_only_tables!r}"
+            )
+        if not self.bridge and (
+            self.drop_serum_id_prefix is not None or self.af_only_tables != "leave-out"
+        ):
+            raise ChainConfigError(
+                "[seed_chart] drop_serum_id_prefix and af_only_tables apply only with bridge = true"
+            )
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ChainSettings:
     """The TOML schema."""
 
@@ -204,6 +252,8 @@ class ChainSettings:
     reference: list[Reference] = field(default_factory=list)
     # named changes to the merged chart's column bases before optimising (af.chain.adjust)
     adjust_column_bases: list[ColumnBasisAdjustment] = field(default_factory=list)
+    # ("seed" is the random seed, so the seed chart's settings have their own table)
+    seed_chart: SeedChart | None = None
 
 
 @dataclass(frozen=True)
@@ -249,8 +299,16 @@ class ChainConfig:
     # the steps' parameters when they are built (af.chain.append.check_settings); not a record
     append_published: Any = None
     rerun_settings: list[SettingsRerun] = field(default_factory=list)
+    # how the seed chart is used (af.chain.bridge); only with first_map
+    seed_chart: SeedChart | None = None
+
+    @property
+    def bridged(self) -> bool:
+        return self.first_map is not None and self.seed_chart is not None and self.seed_chart.bridge
 
     def __post_init__(self) -> None:
+        if self.seed_chart is not None and self.first_map is None:
+            raise ChainConfigError(f"{self.name}: [seed_chart] needs first_map, the seed chart")
         if self.column_basis_adjustments and not self.options.merge_all:
             raise ChainConfigError(
                 f"{self.name}: column-basis adjustments apply to a merge_all map only (in a chain"
@@ -359,6 +417,7 @@ def load_chain_config(
             append,
             published,
             list(t.rerun_settings),
+            s.seed_chart,
         )
     if s.select.remove_by_sequence:
         raise ChainConfigError(
@@ -382,6 +441,7 @@ def load_chain_config(
             s.reference,
             s.adjust_column_bases,
             s.select.drop_cell,
+            seed_chart=s.seed_chart,
         )
     raise ChainConfigError(f"{path}: [tables] needs either dataset or directory + group")
 
@@ -617,6 +677,7 @@ def config_to_json(cfg: ChainConfig) -> dict[str, Any]:
         "name": cfg.name,
         "seed": cfg.seed,
         "first_map": None if cfg.first_map is None else str(cfg.first_map),
+        **({"seed_chart": cfg.seed_chart.to_json()} if cfg.seed_chart is not None else {}),
         "tables_source": cfg.tables_source,
         "options": option_parameters(cfg.options),
         **({"select_remove": [r.to_json() for r in cfg.remove]} if cfg.remove else {}),
