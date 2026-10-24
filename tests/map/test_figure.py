@@ -459,3 +459,21 @@ def test_i7_points_say_which_sequence_they_are(tmp_path: Any) -> None:
     unjoined = points(COLOURS)  # no sequences: nothing was looked up
     assert {p["sequence_why"] for k, p in unjoined.items() if k.startswith("ag")} == {NOT_JOINED}
     assert unjoined["sr0"]["sequence_why"] == SERUM_NOT_RESOLVED
+
+
+def test_points_are_drawn_without_per_patch_limit_updates(monkeypatch: Any) -> None:
+    # The page's limits are set once; matplotlib's per-patch data-limit update (bezier extrema of
+    # every marker) was half of a map figure's time and is never read (OWED 50).
+    import matplotlib.pyplot as plt
+    from matplotlib.axes import Axes
+
+    def refuse(self: Any, patch: Any) -> None:
+        raise AssertionError("a map patch went through the per-patch limit update")
+
+    monkeypatch.setattr(Axes, "_update_patch_limits", refuse)
+    fig = plt.figure(figsize=(4, 4), dpi=72)
+    ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+    scene = chart_scene(chart(), XY, COLOURS, title="T")
+    draw_axes(ax, scene, frame_around(scene))
+    assert len(ax.patches) >= 4 and ax.get_xlim() == (0.0, 1.0) and ax.get_ylim() == (1.0, 0.0)
+    plt.close(fig)

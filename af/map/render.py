@@ -350,7 +350,7 @@ def draw_scene(
         alpha = own.alpha if own.alpha is not None else look.alpha
         if alpha is not None:
             style["alpha"] = alpha
-        ax.add_patch(_marker_patch(own.marker or p.marker, x, y, s, style))
+        _add_patch(ax, _marker_patch(own.marker or p.marker, x, y, s, style))
     _draw_circles(ax, scene, drawn, frame, circles, scale)
     from matplotlib import patheffects
 
@@ -434,6 +434,14 @@ def marker_extent(p: ScenePoint, look: Look, own: PointStyle | None = None) -> f
     return s * (own.scale if own.scale is not None else 1.0)
 
 
+def _add_patch(ax: Any, patch: Any) -> Any:
+    """``ax.add_patch`` without its data-limit update. draw_scene sets the Axes' limits to the
+    page itself, so the limits each patch would extend are never read, and computing them (the
+    bezier extrema of every marker's path) was half the time of a map figure (OWED 50, 24 Oct
+    2026). The patch is drawn exactly as add_patch draws it: same transform, clip and order."""
+    return ax.add_artist(patch)
+
+
 def _marker_patch(marker: str, x: float, y: float, size: float, style: dict[str, Any]) -> Any:
     """One marker. ``size`` is the radius ("circle", "egg") or half-side ("box", "uglyegg")."""
     from matplotlib.patches import Circle, PathPatch, Rectangle
@@ -466,12 +474,13 @@ def _draw_circles(
         if i is None or not scene.points[i].shown or not np.isfinite(drawn[i]).all():
             raise ValueError(f"circle round {c.point}: no drawn point to centre it on")
         centre, r = (float(drawn[i][0]), float(drawn[i][1])), c.radius / frame.size
-        ax.add_patch(Circle(centre, r, fc=c.fill, ec="none", alpha=c.fill_alpha, zorder=7))
-        ax.add_patch(
+        _add_patch(ax, Circle(centre, r, fc=c.fill, ec="none", alpha=c.fill_alpha, zorder=7))
+        _add_patch(
+            ax,
             Circle(
                 centre, r, fc="none", ec=c.outline, lw=c.outline_width * scale, zorder=7,
                 linestyle=(0, (3.0, 3.0)) if c.dashed else "solid",
-            )
+            ),
         )  # fmt: skip
 
 
@@ -483,7 +492,8 @@ def _draw_legend(
 
     box = legend_box(scene, look)
     box = Box(box.name, box.left, box.top + drop, box.right, box.bottom + drop)
-    ax.add_patch(
+    _add_patch(
+        ax,
         Rectangle(
             (box.left, box.top),
             box.right - box.left,
@@ -492,14 +502,15 @@ def _draw_legend(
             ec="black",
             lw=1 * scale,
             zorder=10,
-        )
+        ),
     )
     pts = look.page_points
     font = look.legend_text_size * scale
     first = box.top + (look.legend_padding / 2 + look.legend_row_pitch / 2) / pts
     for k, (text, colour, count) in enumerate(scene.legend):
         y = first + k * look.legend_row_pitch / pts
-        ax.add_patch(
+        _add_patch(
+            ax,
             Circle(
                 (box.left + look.legend_marker_left / pts, y),
                 look.legend_marker_size / 2 / pts,
@@ -507,7 +518,7 @@ def _draw_legend(
                 ec="black",
                 lw=look.legend_marker_outline * scale,
                 zorder=11,
-            )
+            ),
         )
         ax.text(
             box.left + look.legend_text_left / pts, y, text, fontsize=font, va="center", zorder=11
