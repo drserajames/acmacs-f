@@ -15,11 +15,18 @@ Titrated means matched to an antigen in the tables store: by EPI_ISL where the l
 (field names come from config, since only some labs have them), else by normalised strain name.
 The name normaliser is passed in, one editable copy (design rule 6), never a local re-spelling.
 Until workstream 10's serology store exists this reads the tables store (prompt 05, task 5).
+
+With a trim (af.tree.trim, found on the source tree as tree_trim.R found it), every leaf outside
+the cut goes first, the outgroup with them, and the date rule then runs inside the cut. The tree is
+rooted at the cut node. What the trim removed is counted apart from what the date rule removed, and
+``removed_by_trim_otherwise_kept`` is what the trim alone cost: the leaves the date rule would
+have kept.
 """
 
 from __future__ import annotations
 
 import datetime
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -33,6 +40,7 @@ from af.tree.populate import (
     PopulatedTree,
     populate,
 )
+from af.tree.trim import TrimMatch
 
 
 @dataclass(frozen=True)
@@ -115,11 +123,13 @@ def report_tree(
     backend: Backend | None = None,
     assign_clades: CladeAssigner | None = None,
     continent_of: Callable[[LeafRecord], str | None] | None = None,
+    trim: TrimMatch | None = None,
 ) -> PopulatedTree:
     """A new populated tree without the untitrated leaves collected wholly before ``cutoff``.
 
     The input is not modified. Undated leaves are kept and counted: dropping them would be a
-    silent rule. ``titrated`` is recorded on every leaf of the result.
+    silent rule. ``titrated`` is recorded on every leaf of the result. With ``trim``, only the
+    leaves under the cut are considered, and the result has no outgroup.
     """
     if populated.states is None:
         raise ValueError("the report tree is derived from a tree with ancestral states")
@@ -142,9 +152,21 @@ def report_tree(
     outgroup = populated.counts.get("outgroup")
     if outgroup is None:
         raise ValueError("the populated tree records no outgroup; pass outgroup= to populate()")
+    trimmed = dict.fromkeys(
+        ("removed_by_trim", "removed_by_trim_titrated", "removed_by_trim_otherwise_kept"), 0
+    )
+    trimmed_by_year = Counter[str]()
     for key, record in populated.leaves.items():
         how[key] = titrated.match(record)
         before = collected_before(record, cutoff)
+        if trim is not None and key not in trim.keys:
+            if key != outgroup:  # the outgroup goes with any trim; it is recorded, not counted
+                trimmed["removed_by_trim"] += 1
+                trimmed["removed_by_trim_titrated"] += how[key] is not None
+                trimmed["removed_by_trim_otherwise_kept"] += not before or how[key] is not None
+                date = record.collection_date
+                trimmed_by_year["undated" if date is None else str(date.year)] += 1
+            continue
         if key == outgroup:  # the root is defined by it; old and untitrated is expected
             pass
         elif before is None:
@@ -155,6 +177,10 @@ def report_tree(
         elif before:
             counts["kept_titrated_before_cutoff"] += 1
         keep.append(key)
+    if trim is not None and len(keep) < 2:
+        raise ValueError(
+            f"the trim at {trim.node_id} and the date rule leave {len(keep)} leaf left; not a tree"
+        )
     tree.prune(keep)
     tree.assign_ids()
 
@@ -182,7 +208,7 @@ def report_tree(
         backend=backend,
         assign_clades=engine,
         continent_of=continent_of,
-        outgroup=outgroup,
+        outgroup=None if trim is not None else outgroup,
     )
     result.build = populated.build  # pruning does not change how the topology was built
     if continent_of is None:
@@ -198,6 +224,10 @@ def report_tree(
     result.counts["titrated_by_name"] = sum(how[key] == "name" for key in keep)
     result.counts["titre_index_tables"] = titrated.tables
     result.counts["titre_index_antigens"] = titrated.antigens
+    if trim is not None:
+        result.counts.update(trimmed)
+        result.counts["removed_by_trim_by_year"] = dict(sorted(trimmed_by_year.items()))
+        result.counts["trim"] = {**trim.to_json(), "outgroup_removed": outgroup}
     return result
 
 

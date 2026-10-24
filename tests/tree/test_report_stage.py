@@ -144,3 +144,32 @@ def test_clock_settings_that_cannot_be_read_are_refused_rather_than_defaulted(
     write_step_record(tmp_path, "h1.populate", {"z_threshold": "four"})
     with pytest.raises(R.ReportStageError, match="cannot read"):
         R.source_clock_settings(tmp_path)
+
+
+def test_with_a_trim_placement_is_measured_before_it_and_the_clock_after(tmp_path: Path) -> None:
+    from af.tree.clock import ClockSettings
+    from af.tree.trim import TrimRule, find_trim_node
+
+    from .test_report_filter import CUTOFF, full, index
+
+    populated, ids = full()
+    populated.aa_subs[ids["x"]] = ["P3S"]
+    trim = find_trim_node(populated, TrimRule("h3", 3, "S", 4, "invented"))
+    limits = tmp_path / "placement.tsv"
+    limits.write_text("subtype\tmin_correlation\treason\ttrees\nh3\t0.5\tinvented\t1\n")
+    clock = ClockSettings(
+        z_threshold=4.0, branch_threshold=None, earliest=datetime.date(1977, 1, 1), min_leaves=20
+    )
+    args = (populated, CUTOFF, index(), lambda record: None, Counter[str](), limits, clock)
+    plain = R.derive(*args)
+    trimmed = R.derive(*args, trim)
+    assert trimmed.counts["placement"]["measured_on"].startswith("the untrimmed report tree")
+    assert {k: v for k, v in trimmed.counts["placement"].items() if k != "measured_on"} == (
+        plain.counts["placement"]
+    )
+    assert "measured_on" not in plain.counts["placement"]
+    assert (
+        "outgroup" not in trimmed.counts
+        and plain.counts["outgroup"] == trimmed.counts["trim"]["outgroup_removed"]
+    )
+    assert "clock_direction" in trimmed.counts
