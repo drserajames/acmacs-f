@@ -83,6 +83,11 @@ class MergeOptions:
     combine_copied_references: bool = False
     titres: MergeSettings = MergeSettings()
     column_bases: ColumnBasisConvention = ColumnBasisConvention.ADJUST_TO_NEXT
+    # Which of chart1's projections the incremental start copies. None means its best (lowest
+    # stress), which is what a chain's own steps want: each keeps only the maps it chose. A seed
+    # made elsewhere keeps the alternatives it was offered, and the one that was drawn is not
+    # always the lowest, so a chain seeded from such a map names it (af.chain.seed).
+    chart1_projection: int | None = None
 
 
 @dataclass
@@ -352,7 +357,7 @@ def merge(
     if dups := find_duplicates(merged, dup_rule):
         raise MergeError(f"merge has duplicates: {dups[:5]}")
     if options.merge_type == MergeType.INCREMENTAL and chart1.projections:
-        merged.projections = [_incremental_projection(chart1, merged)]
+        merged.projections = [_incremental_projection(chart1, merged, options.chart1_projection)]
     return merged, report
 
 
@@ -608,13 +613,24 @@ def _merge_info(chart1: Chart, chart2: Chart) -> dict:
     return info
 
 
-def _incremental_projection(chart1: Chart, merged: Chart) -> Projection:
-    """Copy chart1's best layout into the merge; points new to the merge are NaN.
+def _incremental_projection(
+    chart1: Chart, merged: Chart, projection: int | None = None
+) -> Projection:
+    """Copy chart1's layout into the merge; points new to the merge are NaN.
 
     chart1's antigens and sera keep their indexes in the merge, so the copy is two slices
-    (ae `merge.cc:310-328`).
+    (ae `merge.cc:310-328`). `projection` names which of chart1's projections to copy; by
+    default its best, the lowest stress.
     """
-    best = chart1.best_projection()
+    if projection is None:
+        best = chart1.best_projection()
+    else:
+        if not 0 <= projection < len(chart1.projections):
+            raise MergeError(
+                f"chart1_projection {projection} but the chart has {len(chart1.projections)}"
+                " projection(s)"
+            )
+        best = chart1.projections[projection]
     assert best is not None
     dim = best.dimensions
     layout = np.full((merged.n_points, dim), np.nan)
