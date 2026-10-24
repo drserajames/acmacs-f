@@ -26,9 +26,12 @@ round's report tree says exactly which weekly tree it came from, and publishes t
   provenance, so a report tree flags on its source's rule and never on one typed in here.
 - ``--trim`` applies the shipped 223V / 127T cut (af.tree.trim), found on the source tree. The
   trimmed tree has no outgroup, and placement is measured on the path to the outgroup, so it is
-  measured on the *untrimmed* report tree and recorded as such; the clock and its flags are
-  measured on the trimmed tree, whose root-to-tip distances are what the figure draws. A trim file
-  with no row for the subtype is an error. Without ``--trim`` nothing changes.
+  measured on the *untrimmed* report tree and recorded as such. So are the clock's leaf flags,
+  carried onto the leaves the trim keeps: one fit, one meaning of off-clock (00, 24 Oct). Refitted
+  on the cut branch alone, the clock flagged 1,004 B/Vic leaves instead of 286, nearly all of them
+  the current fast-moving clade, an artefact of the cut. The clock direction is checked on the
+  trimmed tree. A trim file with no row for the subtype is an error. Without ``--trim`` nothing
+  changes.
 - The source version is an input in PROVENANCE.json and in HISTORY.jsonl's publish event; the
   store's ``parent`` field is the previous version of this same dataset.
 """
@@ -249,7 +252,23 @@ def derive(
     result.counts["placement"] = {**measured.to_json(), "limit": limit.to_json()}
     if trim is not None:
         result.counts["placement"]["measured_on"] = "the untrimmed report tree (no outgroup after)"
-    apply_flags(result, find_outliers(result, clock))
+    # With a trim, the flags come from the untrimmed tree's fit (module docstring); apply_flags
+    # matches by leaf key, so the flags of leaves outside the cut are dropped.
+    outliers = find_outliers(untrimmed, clock)
+    apply_flags(result, outliers)
+    if trim is not None:
+        kept = {leaf.name for leaf in result.tree.leaves()}
+        result.counts["clock_flags_measured_on"] = "the untrimmed report tree"
+        result.counts["clock_flags_on_kept_leaves"] = dict(
+            sorted(
+                Counter(
+                    reason
+                    for key, reasons in outliers.flags.items()
+                    if key in kept
+                    for reason in reasons
+                ).items()
+            )
+        )
     return result
 
 

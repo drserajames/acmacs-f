@@ -173,3 +173,44 @@ def test_with_a_trim_placement_is_measured_before_it_and_the_clock_after(tmp_pat
         and plain.counts["outgroup"] == trimmed.counts["trim"]["outgroup_removed"]
     )
     assert "clock_direction" in trimmed.counts
+
+
+def test_with_a_trim_the_clock_flags_come_from_the_untrimmed_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One fit, one meaning of off-clock: the outliers are scored on the tree with the outgroup."""
+    from af.tree import clock as C
+    from af.tree.trim import TrimRule, find_trim_node
+
+    from .test_report_filter import CUTOFF, full, index
+
+    populated, ids = full()
+    populated.aa_subs[ids["x"]] = ["P3S"]
+    trim = find_trim_node(populated, TrimRule("h3", 3, "S", 4, "invented"))
+    outgroup = populated.counts["outgroup"]
+    scored: list[set[str | None]] = []
+
+    def fake(tree, settings):  # every leaf of the scored tree flagged, so carrying is visible
+        scored.append({leaf.name for leaf in tree.tree.leaves()})
+        result = C.ClockResult(slope=None, intercept=None, residual_scale=None)
+        for key in tree.leaves:
+            result.flags[key] = [C.CLOCK_OUTLIER]
+        return result
+
+    monkeypatch.setattr(R, "find_outliers", fake)
+    limits = tmp_path / "placement.tsv"
+    limits.write_text("subtype\tmin_correlation\treason\ttrees\nh3\t0.5\tinvented\t1\n")
+    settings = C.ClockSettings(
+        z_threshold=4.0, branch_threshold=None, earliest=datetime.date(1977, 1, 1), min_leaves=20
+    )
+    args = (populated, CUTOFF, index(), lambda record: None, Counter[str](), limits, settings)
+    trimmed = R.derive(*args, trim)
+    assert len(scored) == 1 and outgroup in scored[0]  # scored once, on the untrimmed tree
+    kept = {leaf.name for leaf in trimmed.tree.leaves()}
+    assert outgroup not in kept
+    flagged = {leaf.name for leaf in trimmed.tree.leaves() if trimmed.flags.get(leaf.node_id)}
+    assert flagged == kept
+    assert trimmed.counts["clock_flags_measured_on"] == "the untrimmed report tree"
+    assert trimmed.counts["clock_flags_on_kept_leaves"] == {C.CLOCK_OUTLIER: len(kept)}
+    plain = R.derive(*args)
+    assert "clock_flags_measured_on" not in plain.counts
