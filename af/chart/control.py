@@ -32,6 +32,8 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from af.chart import exact
+
 HICONTROL_COMMIT = "aca6dd822e920f333f9c320685fb8f89c29b8fc2"
 
 Series = Sequence[float]  # NaN = missing (R NA)
@@ -56,7 +58,10 @@ def _log2_or_nan(text: str, divisor: float) -> float:
         return math.nan
     if value == 0:
         return -math.inf  # R: log(0) is -Inf
-    return math.log2(value / divisor) if value > 0 else math.nan
+    if not value > 0:
+        return math.nan
+    # the same bits on every machine (af.chart.exact); exact.log2 refuses inf, math.log2 gave inf
+    return exact.log2(value / divisor) if math.isfinite(value) else math.inf
 
 
 # ----------------------------------------------------------------------

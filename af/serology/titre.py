@@ -5,7 +5,8 @@ Readings arrive from the tables store already normalised (``"40"``, ``"<10"``, `
 "missing" kind here. Anything else is an error rather than a guess (design rule 4).
 
 ``log`` is log2(value / 10), the acmacs convention, for every kind. It is the face value:
-``<10`` logs to 0, not -1. Consumers that average titres decide how to treat censored
+``<10`` logs to 0, not -1. The log is :func:`af.chart.exact.log2`, the same bits on every
+machine, as the optimiser's input is. Consumers that average titres decide how to treat censored
 readings; the store records what the lab reported.
 """
 
@@ -13,6 +14,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+
+from af.chart import exact
 
 KINDS = {"<": "lt", ">": "gt", "~": "dodgy"}
 
@@ -39,4 +42,4 @@ def parse_reading(raw: str) -> Reading:
         raise TitreError(f"not a titre reading: {raw!r}") from None
     if not math.isfinite(value) or value <= 0:
         raise TitreError(f"not a titre reading: {raw!r}")
-    return Reading(raw=raw, kind=kind, value=value, log=math.log2(value / 10.0))
+    return Reading(raw=raw, kind=kind, value=value, log=exact.log2(value / 10.0))
