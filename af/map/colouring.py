@@ -127,6 +127,73 @@ TIE = "tie"
 CONFLICT = "conflict"
 
 
+#: A further :class:`PointSequence` reason: the chosen record is in the join, but the sequence
+#: version it came from holds no aligned protein for it (``aa_aligned`` null: an unaligned or
+#: untranslated deposit). The point has a record and still no amino acids.
+NO_AMINO_ACIDS = "no amino acids"
+
+#: A serum whose strain no record in the sequence version is named after (:meth:`for_sera`).
+NO_RECORD = "no sequence record"
+
+#: How :class:`ChartSequences` numbers a sequence: af aligns every protein to mature HA and
+#: counts its positions from 1, so position ``p`` is ``amino_acids[p - 1]`` (0-based ``p - 1``).
+AA_NUMBERING = "aligned mature HA, positions from 1"
+
+
+@dataclass(frozen=True)
+class PointSequence:
+    """One chart point's aligned amino acids, or why it has none.
+
+    ``amino_acids`` is the whole aligned protein (:data:`AA_NUMBERING`) or ``None``; exactly one
+    of it and ``reason`` is set, so a caller cannot read an absent sequence as an empty one.
+    ``how`` says how the record was reached, for a point that has one.
+    """
+
+    epi_isl: str | None
+    accession: str | None
+    amino_acids: str | None
+    reason: str  # "" when amino_acids is set
+    how: str = ""
+
+    def __post_init__(self) -> None:
+        if (self.amino_acids is None) == (not self.reason):
+            raise MapColouringError(
+                f"point sequence: amino_acids {self.amino_acids!r} and reason {self.reason!r}: "
+                "exactly one of a sequence and a reason"
+            )
+
+
+@dataclass(frozen=True)
+class ChartSequences:
+    """One chart's aligned amino acids, antigens and sera, with what they were read from.
+
+    ``numbering`` is :data:`AA_NUMBERING` for every sequence here. ``provenance`` carries the
+    store versions read (``store_refs``, as a figure cites them) and the counted reasons
+    (design rule 1): a caller can say how many points it tested and why the rest were skipped.
+    """
+
+    numbering: str
+    antigens: tuple[PointSequence, ...]
+    sera: tuple[PointSequence, ...]
+    provenance: dict[str, Any]
+
+    def counts(self) -> dict[str, dict[str, int]]:
+        """``{"antigens": {reason or "sequence": n}, "sera": ...}``, as the provenance records."""
+        return {k: dict(self.provenance[k]) for k in ("antigens", "sera")}
+
+
+@dataclass(frozen=True)
+class _SerumRecord:
+    """The record :meth:`StoreColours._serum_record` chose for one serum, with its alignment."""
+
+    record: StrainRecord
+    passage: str
+    aligned: AlignedSequences
+    sequence: AlignedSequence | None
+    rank: int
+    of: int
+
+
 def sequence_link(found: PreparationSequence | None) -> SequenceLink:
     """The one sequence a preparation is, as the colouring join found it, or why none.
 
@@ -681,29 +748,16 @@ class StoreColours:
             if not found:
                 out.append(SerumStrain(sr, None, None, None, None, None, {}, "no sequence record"))
                 continue
-            records = self._strain_records([(e, a, "") for e, a, _ in found])
-            aligned = self._strain_aligned(row, records)
-            passage_of = {(e, a): p for e, a, p in found}
-
-            record = min(
-                records,
-                key=lambda r: _serum_record_order(
-                    serum.passage,  # noqa: B023 (used at once, inside this iteration)
-                    passage_of[(r.epi_isl, r.accession)],  # noqa: B023
-                    aligned.get_pair(r.epi_isl, r.accession),  # noqa: B023
-                    r.epi_isl,
-                    self.rules.passages,
-                ),
-            )
+            chosen = self._serum_record(row, serum.passage, found)
+            record, aligned = chosen.record, chosen.aligned
             epi_isl, accession = record.epi_isl, record.accession
-            passage = passage_of[(epi_isl, accession)]
-            seq = aligned.get_pair(epi_isl, accession)
+            passage, seq = chosen.passage, chosen.sequence
             aa = {}
             if seq is not None:
                 for pos in residues:
                     if 0 < pos <= len(seq.amino_acids):
                         aa[pos] = seq.amino_acids[pos - 1]
-            rank = serum_record_rank(serum.passage, passage, self.rules.passages)
+            rank = chosen.rank
             labels = None
             if colouring is not None:
                 fake = {
@@ -729,6 +783,118 @@ class StoreColours:
                 )
             )  # fmt: skip
         return out
+
+    def for_sequences(self, chart: Chart) -> ChartSequences:
+        """Each antigen's and each serum strain's aligned amino acids, or why it has none.
+
+        The public accessor for a caller that tests a chart's viruses at named positions (a
+        glycosylation site, say) rather than colouring them: it reads the same join every map
+        and geo figure is coloured through (Sarah, Q46), so a virus tested here is the virus
+        the map painted, and no caller needs the sequence store's files.
+
+        Antigens are the chart's preparations, matched as :meth:`for_chart` matches them; a
+        serum is not a preparation the tables pair with a sequence, so its strain's record is
+        found by name exactly as :meth:`for_sera` finds it. Every sequence is numbered
+        :data:`AA_NUMBERING`.
+
+        A point with no sequence carries a reason instead, and the reasons are counted in the
+        provenance (design rule 1): :data:`NO_SEQUENCE` (no row matched), :data:`TIE` (the rows
+        refused a name tie), :data:`CONFLICT` (rows naming records passage could not choose
+        between), :data:`NO_RECORD` (a serum strain no record is named after) and
+        :data:`NO_AMINO_ACIDS` (a record whose version holds no aligned protein for it).
+        """
+        row = chart_subtype(chart).key
+        antigens = tuple(
+            self._point_sequence(sequence_link(self._sequences.get(key)))
+            for key in (preparation_key(chart, "antigen", i) for i in range(chart.n_antigens))
+        )
+        strains = self._strain_index(row) if chart.sera else {}
+        sera = []
+        for serum in chart.sera:
+            key = _strain_key(serum.name)
+            found = strains.get(key, []) if key is not None else []
+            if not found:
+                sera.append(PointSequence(None, None, None, NO_RECORD))
+                continue
+            chosen = self._serum_record(row, serum.passage, found)
+            record = chosen.record
+            how = f"record by name, passage rank {chosen.rank} of {chosen.of} record(s)"
+            sera.append(
+                self._point_sequence(
+                    SequenceLink(record.epi_isl, record.accession, "", ""),
+                    chosen.sequence,
+                    how,
+                )
+            )
+        datasets = self.chart_datasets(chart, row)
+        provenance: dict[str, Any] = {
+            "source": "store",
+            "numbering": AA_NUMBERING,
+            "store_refs": self.store_refs(datasets),
+            "store_read": self.store_read,
+            "matching_rules": self.rules.provenance(),
+            "datasets": sorted(datasets),
+            "antigens": dict(_reason_counts(antigens)),
+            "sera": dict(_reason_counts(sera)),
+            "pins": self.pins.to_json(),
+        }
+        return ChartSequences(AA_NUMBERING, antigens, tuple(sera), provenance)
+
+    def _point_sequence(
+        self,
+        link: SequenceLink,
+        sequence: AlignedSequence | None = None,
+        how: str = "",
+    ) -> PointSequence:
+        """One point's aligned amino acids from the record its join chose, or the reason.
+
+        ``sequence`` is the serum side's already-read alignment; an antigen's comes from the
+        run's one read of the alignments (:func:`af.serology.outputs.aligned_sequences`).
+        """
+        if link.epi_isl is None:
+            return PointSequence(None, None, None, link.why)
+        if sequence is None:
+            sequence = self._aligned.get_pair(link.epi_isl, link.accession or "")
+        if sequence is None or not sequence.amino_acids:
+            return PointSequence(link.epi_isl, link.accession, None, NO_AMINO_ACIDS)
+        return PointSequence(
+            link.epi_isl, link.accession, sequence.amino_acids, "", how or link.pairing or "matched"
+        )
+
+    def _serum_record(
+        self, row: str, serum_passage: str, found: Sequence[tuple[str, str, str]]
+    ) -> _SerumRecord:
+        """The one record of a serum's strain this run takes, with its aligned sequence.
+
+        The one copy of the rule :meth:`for_sera` documents: of the strain's records in the
+        sequence version the join read, the one whose passage is closest to the serum's
+        (:func:`serum_record_rank`), then aligned-first, fewest unread, lowest EPI_ISL.
+        ``found`` must not be empty: a strain with no record has no record to choose.
+        """
+        if not found:
+            raise MapColouringError("no sequence record to choose between")
+        records = self._strain_records([(e, a, "") for e, a, _ in found])
+        aligned = self._strain_aligned(row, records)
+        passage_of = {(e, a): p for e, a, p in found}
+        record = min(
+            records,
+            key=lambda r: _serum_record_order(
+                serum_passage,
+                passage_of[(r.epi_isl, r.accession)],
+                aligned.get_pair(r.epi_isl, r.accession),
+                r.epi_isl,
+                self.rules.passages,
+            ),
+        )
+        passage = passage_of[(record.epi_isl, record.accession)]
+        return _SerumRecord(
+            record,
+            passage,
+            aligned,
+            aligned.get_pair(record.epi_isl, record.accession),
+            serum_record_rank(serum_passage, passage, self.rules.passages),
+            len(found),
+        )
 
     def _strain_index(self, row: str) -> dict[tuple[str, str, str], list[tuple[str, str, str]]]:
         """Every record of the row's sequence version the join read, by strain name key."""
@@ -920,6 +1086,12 @@ def _canonical_passage(text: str, passages: PassageMatcher) -> str | None:
 
 
 _STEPS = re.compile(r"([A-Z]+)(\d+|\?)?")
+
+
+def _reason_counts(points: Sequence[PointSequence]) -> Counter[str]:
+    """Each reason once, with ``"sequence"`` for the points that have one (design rule 1): a
+    caller reports how many it could test and why the rest it could not."""
+    return Counter(p.reason or "sequence" for p in points)
 
 
 def _serum_record_order(
