@@ -232,17 +232,41 @@ def _removed(rules: list[RemoveRule], what: str, point: Antigen | Serum) -> bool
     return any(r.what == what and r.matches(point) for r in rules)
 
 
-def check_rules_match(rules: list[RemoveRule], tables: list[Path]) -> None:
-    """Every rule must remove something from at least one of the chain's tables (design rule 1).
-    Checked before any step runs, so a typo fails in seconds, not after hours of maps."""
-    unmatched = list(rules)
-    for path in tables:
-        if not unmatched:
-            return
-        chart = read_chart(path)
-        unmatched = [rule for rule in unmatched if not removed_by([rule], chart)[0]["points"]]
-    if unmatched:
+def check_rules_match(
+    rules: list[RemoveRule], tables: list[Path], seed_tables: list[Path] | None = None
+) -> None:
+    """Every rule must remove something from at least one of the tables a step merges (design
+    rule 1). Checked before any step runs, so a typo fails in seconds, not after hours of maps.
+
+    `seed_tables` are the tables a seed already holds, which no step merges: a rule matching only
+    those can never fire, and the refusal says so rather than leaving it to look like a typo.
+    The seed's own points are what was shipped and no rule removes them.
+    """
+    unmatched = _unmatched(rules, tables)
+    if not unmatched:
+        return
+    in_seed = [r for r in _matched(unmatched, seed_tables or [])]
+    detail = "; ".join(str(r.to_json()) for r in unmatched)
+    if in_seed:
         raise SelectError(
-            "select.remove rules match nothing in the chain's tables: "
-            + "; ".join(str(r.to_json()) for r in unmatched)
+            f"{len(in_seed)} select.remove rule(s) match only tables the seed already holds, so"
+            " they can never remove anything: the chain steps the tables after the seed, and the"
+            " seed's own points are the shipped map's. Remove the rule, or state it for the"
+            f" tables that follow: {'; '.join(str(r.to_json()) for r in in_seed)}"
         )
+    raise SelectError(f"select.remove rules match nothing in the chain's tables: {detail}")
+
+
+def _unmatched(rules: list[RemoveRule], tables: list[Path]) -> list[RemoveRule]:
+    left = list(rules)
+    for path in tables:
+        if not left:
+            return []
+        chart = read_chart(path)
+        left = [rule for rule in left if not removed_by([rule], chart)[0]["points"]]
+    return left
+
+
+def _matched(rules: list[RemoveRule], tables: list[Path]) -> list[RemoveRule]:
+    unmatched = _unmatched(rules, tables)
+    return [r for r in rules if r not in unmatched]

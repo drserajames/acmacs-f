@@ -323,10 +323,21 @@ class ChainConfig:
     rerun_settings: list[SettingsRerun] = field(default_factory=list)
     # how the seed chart is used (af.chain.bridge); only with first_map
     seed_chart: SeedChart | None = None
+    # the table ids that become steps 1..n, in step order, when the loader has decided it (an
+    # append-to-published chain, whose order is the published one's and not the dates'). None
+    # leaves the order to the engine: a seed's post-seed tables, or the tables themselves.
+    stepped: tuple[str, ...] | None = None
 
     @property
     def bridged(self) -> bool:
         return self.first_map is not None and self.seed_chart is not None and self.seed_chart.bridge
+
+    @property
+    def seeded(self) -> bool:
+        """The seed is a map made elsewhere whose own tables the chain must not merge again:
+        `first_map` with `[seed_chart]`. Without that table a `first_map` chain keeps its older
+        meaning, every selected table merged onto the seed."""
+        return self.first_map is not None and self.seed_chart is not None
 
     def __post_init__(self) -> None:
         if self.seed_chart is not None and self.first_map is None:
@@ -340,14 +351,21 @@ class ChainConfig:
             raise ChainConfigError(
                 f"{self.name}: merge_all maps the tables from scratch; no first_map"
             )
-        if self.sequence_removals is not None and self.first_map is not None:
+        # Rules apply to each table as it enters a merge, never to the seed, whose points are
+        # what was shipped (a rule on the seed would also unset its stress, which step 0 checks).
+        # With [seed_chart] the chain steps only the tables after the seed, so a rule there has
+        # tables of its own to act on; without it every selected table merges onto the seed and
+        # a rule could not tell the seed's own tables from later ones.
+        if self.sequence_removals is not None and self.first_map is not None and not self.seeded:
             raise ChainConfigError(
-                f"{self.name}: select.remove_by_sequence cannot be used with first_map"
+                f"{self.name}: select.remove_by_sequence needs [seed_chart] to be used with"
+                " first_map (the rules apply to the tables after the seed, not to the seed)"
             )
-        if self.remove and self.first_map is not None:
-            # the seed map would lose its stress (Chart.select unsets it: stale), which step 0
-            # records; the round's selections apply to tables, so rules go with tables only
-            raise ChainConfigError(f"{self.name}: select.remove cannot be used with first_map")
+        if self.remove and self.first_map is not None and not self.seeded:
+            raise ChainConfigError(
+                f"{self.name}: select.remove needs [seed_chart] to be used with first_map (the"
+                " rules apply to the tables after the seed, not to the seed)"
+            )
         labels = [r.label for r in self.references]
         if len(set(labels)) != len(labels):
             raise ChainConfigError(f"{self.name}: two [[reference]] entries share a label")
@@ -359,11 +377,23 @@ class ChainConfig:
         order = [(t.date, t.suffix) for t in self.tables]
         if self.append is None and order != sorted(order):
             raise ChainConfigError(f"{self.name}: tables are not in (date, suffix) order")
-        if self.append is not None and (self.options.merge_all or self.first_map is not None):
+        if self.append is not None and self.options.merge_all:
             raise ChainConfigError(
-                f"{self.name}: append-to-published is for a chain of steps, not merge_all or"
-                " first_map"
+                f"{self.name}: append-to-published is for a chain of steps, not a merge_all map"
             )
+        if self.append is not None and self.first_map is not None and not self.seeded:
+            raise ChainConfigError(
+                f"{self.name}: append-to-published needs [seed_chart] to be used with first_map"
+                " (the published order is the order of the steps after the seed)"
+            )
+        if self.stepped is not None:
+            selected = {t.table_id for t in self.tables}
+            unknown = [tid for tid in self.stepped if tid not in selected]
+            if unknown:
+                raise ChainConfigError(
+                    f"{self.name}: the step order names tables that are not selected:"
+                    f" {', '.join(unknown)}"
+                )
 
     def late(self, table_id: str) -> dict[str, Any] | None:
         """A late table's record (af.chain.append), or None."""
@@ -413,9 +443,11 @@ def load_chain_config(
             for x in tables
             if (start is None or x.date >= start) and (end is None or x.date <= end)
         ]
-        append, published = None, None
+        append, published, stepped = None, None, None
         if t.order == "append-to-published":
-            tables, append, published = _append_order(path, t, tables, ref, tables_store)
+            tables, append, published, stepped = _append_order(
+                path, t, tables, ref, tables_store, s.first_map, s.seed_chart
+            )
         policy = _sera_policy(path, s.select)
         removals = (
             _sequence_removals(path, s.select, tables, ref, tables_store, policy)
@@ -440,6 +472,7 @@ def load_chain_config(
             published,
             list(t.rerun_settings),
             s.seed_chart,
+            stepped,
         )
     if s.select.remove_by_sequence:
         raise ChainConfigError(
@@ -539,11 +572,23 @@ def _sequence_removals(
 
 
 def _append_order(
-    chain_path: Path, t: TableSelection, tables: list[TableRef], ref: Any, store_root: Path
-) -> tuple[list[TableRef], dict[str, Any], Any]:
+    chain_path: Path,
+    t: TableSelection,
+    tables: list[TableRef],
+    ref: Any,
+    store_root: Path,
+    first_map: Path | None = None,
+    seed_chart: SeedChart | None = None,
+) -> tuple[list[TableRef], dict[str, Any], Any, tuple[str, ...] | None]:
     """`[tables] order = "append-to-published"` (af.chain.append): this chain dataset's published
     CURRENT version's order kept, today's new tables after it. Returns the tables, the record,
-    and the published version (for `check_settings` once the steps exist)."""
+    the published version (for `check_settings` once the steps exist) and the step order.
+
+    With a seed (`first_map` and `[seed_chart]`) only the tables after the seed are steps, so
+    only those take part in the order: the seed's own tables are its bridge and are never
+    stepped, this month or any month. The step order is returned separately because it is the
+    published order, which the dates alone do not give.
+    """
     import json
 
     from af.chain.__main__ import dataset_from_path
@@ -561,16 +606,27 @@ def _append_order(
     today_dir = store.resolve(ref)
     today_doc = json.loads((today_dir / "index.json").read_text())
     today_sha = {x.table_id: sha256_path(x.path) for x in tables}  # what keys each step
+    held_by_seed: list[TableRef] = []
+    if first_map is not None and seed_chart is not None:
+        held_by_seed, tables = _seed_tables(first_map, tables, seed_chart)
     published, old_dir = None, None
     if current is not None:
         vdir = store.resolve(current)
         doc = json.loads((vdir / "chain.json").read_text())
         old_dir = store.resolve(StoreRef.from_json(doc["config"]["tables_source"]))
+        steps = doc["steps"]
+        seed_sha = None
+        if doc["config"].get("first_map") is not None:
+            # step 0 is the seed, not a table: it keys the chain but is not part of the order
+            seed_sha = _step_seed_sha(vdir / steps[0]["directory"])
+            steps = steps[1:]
         published = Published(
             current.version,
-            [(s["table_id"], _step_table_sha(vdir / s["directory"])) for s in doc["steps"]],
+            [(s["table_id"], _step_table_sha(vdir / s["directory"])) for s in steps],
             vdir,
+            seed_sha,
         )
+        _check_seed_unchanged(dataset, published, first_map)
 
     def read(directory: Path, table_id: str) -> Table:
         text = (directory / "tables" / f"{table_id}.json").read_text(encoding="utf-8")
@@ -608,7 +664,65 @@ def _append_order(
         record["rerun_settings"] = [
             {"keys": r.keys, "decided": r.decided} for r in t.rerun_settings
         ]
-    return order.tables, record, published
+    if held_by_seed:
+        record["seed_tables"] = len(held_by_seed)
+        # the tables selected today are the seed's and the stepped ones together; the step order
+        # is the stepped ones' alone, so it is recorded (and returned) in its own right
+        return (
+            [*held_by_seed, *order.tables],
+            record,
+            published,
+            tuple(x.table_id for x in order.tables),
+        )
+    return order.tables, record, published, None
+
+
+def _seed_tables(
+    first_map: Path, tables: list[TableRef], seed_chart: SeedChart
+) -> tuple[list[TableRef], list[TableRef]]:
+    """Split today's tables into the ones the seed holds and the ones a step would merge, by the
+    seed chart's own source list (so the split cannot drift from the file it describes)."""
+    from af.chain.bridge import BridgeError, seed_source_dates, seed_split
+    from af.chart.ace import read_chart
+
+    try:
+        dates = seed_source_dates(read_chart(first_map))
+    except (BridgeError, OSError, ValueError) as e:
+        raise ChainConfigError(f"{first_map}: cannot read the seed's tables: {e}") from None
+    split = seed_split(dates, tables)
+    stepped = list(split.post_seed)
+    if seed_chart.af_only_tables == "append":
+        stepped += split.af_only  # at the end: back-dated arrivals (Q164 "cut-off only")
+    held = [x for x, _ in split.in_seed]
+    if seed_chart.af_only_tables == "leave-out":
+        # Q268 a: a table the store has and the seed lacks, dated within it, stays out of the
+        # chain as a data correction for later. Out of the steps, but counted for the declaration.
+        held += split.af_only
+        held.sort(key=lambda x: (x.date, x.suffix))
+    return held, stepped
+
+
+def _step_seed_sha(step: Path) -> str:
+    """The seed chart a published step 0 was built from, as its record names it."""
+    import json
+
+    record = json.loads((step / "step.json").read_text())
+    return str(record.get("source_sha256") or "")
+
+
+def _check_seed_unchanged(dataset: str, published: Any, first_map: Path | None) -> None:
+    """A month's run must continue the published chain, so its seed must be the published seed.
+    A different seed would rebase every step on another map while reusing the published steps."""
+    if first_map is None or not published.seed_sha256:
+        return
+    today = sha256_path(Path(first_map))
+    if today != published.seed_sha256:
+        raise ChainConfigError(
+            f"{dataset}: the seed chart is not the one the published chain {published.version} was"
+            f" built from ({first_map}: {today[:12]}, published {published.seed_sha256[:12]});"
+            " nothing was run. Every step stands on that seed, so a new seed is a new chain:"
+            " publish it as its own first version rather than appending to this one"
+        )
 
 
 def _step_table_sha(step: Path) -> str:
