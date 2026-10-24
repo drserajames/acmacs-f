@@ -22,6 +22,9 @@ from af.util.config import ConfigError, load_config
 REPORT_KINDS = ("monthly", "vcm")
 SECTION_KINDS = ("trees", "maps", "geo")
 BLANK = "-"  # a grid cell left empty on purpose (e.g. a lab with no map of this assay)
+# A grid cell taken by the figure above it: that figure spans both rows, and its column widens to
+# keep it square (Sarah, 24 Oct 2026: H1 | H3 in two rows | B/Vic on one landscape page).
+SPAN = "^"
 
 
 @dataclass(frozen=True)
@@ -106,7 +109,8 @@ class Section:
     def pages(self, months: list[str]) -> list[tuple[str, list[str | None]]]:
         """(heading, cells) per page for a grid section; a blank cell is None.
 
-        maps: one run of pages per window, cells = slots in order (``"-"`` = blank);
+        maps: one run of pages per window, cells = slots in order (``"-"`` = blank, ``"^"`` =
+        :data:`SPAN`, kept as is);
         geo: one slot per month of the report period, ``<slot>/<YYYY-MM>``.
         """
         return [(heading, cells) for heading, cells, _ in self._pages(months)]
@@ -122,7 +126,7 @@ class Section:
         runs: list[tuple[str, list[str | None]]] = []
         if self.kind == "maps":
             for w in self.windows:
-                cells = [None if s == BLANK else f"{s}/{w.name}" for s in self.slots]
+                cells = [_cell(s, w.name) for s in self.slots]
                 runs.append((w.title, cells))
         elif self.kind == "geo":
             for slot in self.slots:
@@ -180,8 +184,30 @@ class ReportConfig:
                 out += section.slots
             else:
                 for _, cells in section.pages(self.months()):
-                    out += [c for c in cells if c is not None]
+                    out += [c for c in cells if c is not None and c != SPAN]
         return out
+
+
+def _cell(slot: str, window: str) -> str | None:
+    """A map grid cell for one window: blank, span, or the slot's figure in that window."""
+    return None if slot == BLANK else slot if slot == SPAN else f"{slot}/{window}"
+
+
+def _span_problems(where: str, section: Section) -> list[str]:
+    """A span cell needs a figure (or another span) above it on the same page, in a landscape
+    map grid: the only layout that draws spans (af.report.build)."""
+    if section.kind != "maps" or not section.landscape:
+        return [f"{where}.slots: span cells ('{SPAN}') only in landscape map grids"]
+    cols, rows = section.grid
+    problems = []
+    for i, slot in enumerate(section.slots):
+        if slot != SPAN:
+            continue
+        if (i % (cols * rows)) // cols == 0:
+            problems.append(f"{where}.slots[{i}]: a span cell in a page's top row")
+        elif section.slots[i - cols] == BLANK:
+            problems.append(f"{where}.slots[{i}]: a span cell under a blank cell")
+    return problems
 
 
 def _key_class_problems(where: str, section: Section) -> list[str]:
@@ -299,6 +325,8 @@ def load(path: Path) -> ReportConfig:
             problems.append(f"{where}.slots: blank cells ('{BLANK}') only in map grids")
         if len(section.grid) != 2 or min(section.grid) < 1:
             problems.append(f"{where}.grid: expected [columns, rows], both >= 1")
+        elif SPAN in section.slots:
+            problems += _span_problems(where, section)
         if section.intro:
             problems += _intro_problems(where, section)
         if section.clade_key and (section.kind != "geo" or not section.intro):

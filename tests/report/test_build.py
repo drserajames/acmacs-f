@@ -384,6 +384,59 @@ def test_blank_cells_only_in_map_grids(tmp_path: Path) -> None:
         load(cfg)
 
 
+SPANS = VCM.replace(
+    'slots = ["map/a", "map/b", "-", "map/c", "-", "-"]',
+    'slots = ["map/a", "map/b", "map/c", "^", "map/d", "^"]',
+)
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (('slots = ["geo/x"]', 'slots = ["geo/x", "^"]'), "only in landscape map grids"),
+        (("landscape = true\n", ""), "only in landscape map grids"),
+        (('"map/a", "map/b", "map/c", "^"', '"^", "map/b", "map/c", "map/a"'), "top row"),
+        (('"map/a", "map/b", "map/c", "^"', '"-", "map/b", "map/c", "^"'), "under a blank cell"),
+    ],
+)
+def test_a_span_cell_needs_a_figure_above_it_in_a_landscape_map_grid(
+    tmp_path: Path, change: tuple[str, str], problem: str
+) -> None:
+    cfg = tmp_path / "v.toml"
+    cfg.write_text(SPANS.replace(*change))
+    with pytest.raises(ConfigError, match=problem):
+        load(cfg)
+
+
+def test_span_cells_are_not_slots(tmp_path: Path) -> None:
+    cfg = tmp_path / "v.toml"
+    cfg.write_text(SPANS)
+    slots = [s for s in load(cfg).all_slots() if s.startswith("map/")]
+    assert slots == ["map/a/all", "map/b/all", "map/c/all", "map/d/all"]
+
+
+@needs_latex
+def test_a_span_page_sets_columns_with_the_spanning_panels_square(tmp_path: Path) -> None:
+    """a | b over d | c (Sarah, 24 Oct 2026): a and c span both rows and stay square, so their
+    columns are twice as wide; one cell size fits the line (5 cells + 4pt + 2 x 6pt + 3 frames)."""
+    cfg = tmp_path / "v.toml"
+    cfg.write_text(SPANS)
+    root = tmp_path / "figs"
+    for slot in load(cfg).all_slots():
+        placeholder.make(root, slot, slot, T0)
+    pdf = build.build(cfg, root, tmp_path / "out")
+    tex = (tmp_path / "out" / "build" / "report.tex").read_text()
+    maps = tex[tex.index(r"\begin{landscape}") : tex.index(r"\end{landscape}")]
+    assert r"\begin{tabular}" not in maps and maps.count(r"\begin{minipage}[b]") == 3
+    assert r"\ifdim\dimexpr(\linewidth-22.4pt)/5\relax<\afspancell" in maps
+    spanning = r"\includegraphics[width=\dimexpr2\afspancell+4pt\relax,frame]"
+    single = r"\includegraphics[width=\dimexpr1\afspancell+0pt\relax,frame]"
+    assert maps.count(spanning) == 2 and maps.count(single) == 2
+    record = json.loads((tmp_path / "out" / "vcm-test.build.json").read_text())
+    # cover, contents, 2 geo pages, the one map page: every panel typeset (check_output)
+    assert record["output"]["pages"] == 5 and pdf.is_file()
+
+
 def test_meeting_dates_on_the_cover() -> None:
     from af.report.config import Meeting
 
