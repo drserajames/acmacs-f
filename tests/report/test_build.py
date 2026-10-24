@@ -624,6 +624,23 @@ def test_a_previous_map_is_recorded_as_a_comparison_not_an_input(tmp_path: Path)
     assert kept.to_json() not in document["refs"]
 
 
+def test_a_previous_map_that_is_also_the_drawn_chain_stays_an_input(tmp_path: Path) -> None:
+    """A quiet month: the outline tier's previous map is the very chain the figure draws (08,
+    24 Oct 2026). It is the slot's input, so it stays in refs and is not listed as compared."""
+    cfg, root, store, _, new = _two_chains_on_two_tables(tmp_path, pin_m2=False)
+    redrawn = store.current("chains", "labx/m/main")
+    _compare_m2_with(root, redrawn, [])
+    i7 = root / "map/m2/all/v1/figure.i7.json"
+    doc = json.loads(i7.read_text())
+    doc["provenance"]["inputs"]["chain"] = {**redrawn.to_json(), "sha256": "0" * 64}
+    i7.write_text(json.dumps(doc))
+    use = build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                                 tmp_path / "m.json", deep=False)  # fmt: skip
+    assert redrawn in use.refs and new in use.refs
+    assert "map/m2/all" in use.used_by[("chains", "labx/m/main")]
+    assert use.comparison_refs == {} and "map/m2/all" not in use.not_from_store
+
+
 def test_a_genuine_input_clash_is_still_refused_beside_a_comparison(tmp_path: Path) -> None:
     """m2 rests on the chain over the old tables as an INPUT: refused as before, comparison or
     not."""
