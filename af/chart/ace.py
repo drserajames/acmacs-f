@@ -13,6 +13,8 @@ import hashlib
 import json
 import lzma
 import math
+import os
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -304,13 +306,33 @@ def chart_to_json(chart: Chart, created: str = "acmacs-f") -> dict[str, Any]:
     return {"  version": "acmacs-ace-v1", "?created": created, "c": c}
 
 
-def write_chart(chart: Chart, path: Path | str, created: str = "acmacs-f") -> Path:
-    """Write xz-compressed JSON, via a temporary file so a crash never leaves half a chart."""
-    path = Path(path)
-    data = json.dumps(
+def chart_json_bytes(chart: Chart, created: str = "acmacs-f") -> bytes:
+    """The exact bytes `write_chart` compresses, which is what `content_hash` hashes.
+
+    Separate from the write so a caller can ask whether a file already holds this chart
+    without writing it.
+    """
+    return json.dumps(
         chart_to_json(chart, created), separators=(",", ":"), ensure_ascii=False
     ).encode()
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(lzma.compress(data, preset=6))
-    tmp.replace(path)
+
+
+def write_chart(chart: Chart, path: Path | str, created: str = "acmacs-f") -> Path:
+    """Write xz-compressed JSON, via a temporary file so a crash never leaves half a chart.
+
+    The temporary name carries the process id and a random token because several processes do
+    write one path: array tasks loading the same dataset into a shared inputs directory. With a
+    name derived from the target alone they deleted each other's temporary, and every task but
+    the first died renaming a file that was no longer there. The pid is not enough on its own —
+    tasks on different nodes share pids — and the token comes from `secrets`, not `random`,
+    which a seeded run would make identical in every task.
+    """
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        tmp.write_bytes(lzma.compress(chart_json_bytes(chart, created), preset=6))
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # a unique name is never reused, so clean it up here
+        raise
     return path

@@ -18,11 +18,14 @@ identity works as in today's chains:
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
+import lzma
+from collections.abc import Sequence
 from pathlib import Path
 
 from af.chain.config import ChainConfigError, TableRef
-from af.chart.ace import write_chart
+from af.chart.ace import chart_json_bytes, content_hash, write_chart
 from af.chart.merge import DROPPING, antigen_key, serum_key
 from af.chart.model import Antigen, Chart, Serum, Titres, empty_table
 from af.chart.titre import Titre, merge_titres
@@ -134,6 +137,28 @@ def _table_chart(table: Table) -> Chart:
     return Chart(info=info, antigens=antigens, sera=sera, titres=Titres(cells))
 
 
+def _needs_write(path: Path, chart: Chart, marked: Sequence[str]) -> bool:
+    """Whether this table's chart file has to be written.
+
+    Absent: always. Present and the table marks no repeat: never — the name carries the map
+    hash, so the content is settled. Present and repeats ARE marked: only if the bytes differ,
+    because the name cannot say whether the file was cached before marking (a chart cached
+    before it could never merge). Rewriting every marked table on every load made concurrent
+    loaders of one shared inputs directory race over the file.
+
+    An unreadable file is replaced rather than fatal: it is a cache, rebuilt here exactly from
+    the store, which has already verified the table's content hash.
+    """
+    if not path.exists():
+        return True
+    if not marked:
+        return False
+    try:
+        return content_hash(path) != hashlib.sha256(chart_json_bytes(chart)).hexdigest()
+    except (ValueError, OSError, EOFError, lzma.LZMAError):  # damaged beyond reading
+        return True
+
+
 def tables_from_store(
     store_root: Path,
     dataset: str,
@@ -142,7 +167,8 @@ def tables_from_store(
 ) -> tuple[StoreRef, list[TableRef]]:
     """The dataset's CURRENT tables as chain inputs, in (date, suffix) order.
 
-    Each table becomes `<inputs_dir>/<table_id>.<map_hash[:16]>.ace`, written only if absent.
+    Each table becomes `<inputs_dir>/<table_id>.<map_hash[:16]>.ace`, written only if absent or
+    (see `_needs_write`) different, so repeated loads of one `inputs_dir` leave the files alone.
     The stored table is checked against its content hash (on read) and its map hash (here).
     Every id in `exclude` must name a table of the dataset (design rule 1).
     """
@@ -164,10 +190,7 @@ def tables_from_store(
         if table.map_hash() != entry["map_hash"]:
             raise ChainConfigError(f"{table_id}: map hash differs from the store's index")
         chart, marked = table_chart_and_repeats(table)
-        # Written once per map hash. A table with repeats is rewritten: a chart cached before
-        # repeats were marked could never merge, so no reused step depends on it, and an
-        # unchanged file keeps its hash.
-        if marked or not path.exists():
+        if _needs_write(path, chart, marked):
             write_chart(chart, path)
         date = datetime.date.fromisoformat(entry["date"])
         suffix = int(entry["date_suffix"])

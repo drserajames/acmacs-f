@@ -15,6 +15,8 @@ laptop (af.run LocalRunner) and as a SLURM array (af.run SlurmRunner) unchanged.
 from __future__ import annotations
 
 import hashlib
+import os
+import secrets
 import sys
 from pathlib import Path
 from typing import Any
@@ -48,10 +50,22 @@ def write_problem(
         numerics=numerics,
         start_layout=start_layout,
     )
-    tmp = path.with_name(path.name + ".tmp.npz")
-    np.savez(tmp, **data)
-    tmp.replace(path)
+    _savez_atomically(path, data)
     return path
+
+
+def _savez_atomically(path: Path, data: dict[str, Any]) -> None:
+    """Write an `.npz` through a temporary, named so that two writers of one path cannot
+    collide: a requeued array task can overlap the instance it replaces, and a shared temporary
+    name made each delete the other's (af.chart.ace.write_chart, same reason). The suffix stays
+    `.npz` because `np.savez` appends it otherwise."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp.npz")
+    try:
+        np.savez(tmp, **data)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # a unique name is never reused, so clean it up here
+        raise
 
 
 def problem_digest(
@@ -142,9 +156,7 @@ def write_result(path: Path, maps: list[MapResult], numerics: str | None = None)
         data["cpus"] = np.array([m["cpus"] for m in maps])
     if numerics is not None:
         data["numerics"] = np.str_(numerics)
-    tmp = path.with_name(path.name + ".tmp.npz")
-    np.savez(tmp, **data)
-    tmp.replace(path)
+    _savez_atomically(path, data)
     return path
 
 
