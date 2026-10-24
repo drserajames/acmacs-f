@@ -220,8 +220,9 @@ class SeedChart:
 
     The rest decide how the seed's own layout becomes step 0 (af.chain.seed), and apply whether
     or not the seed is bridged. `projection`: which of the seed's projections the chain
-    continues, P[0] by default, the one a report's map was drawn from -- not the lowest-stress
-    one, which is a different map in 6 of the Sep 2026 round's 18. `bake_transformation`: apply
+    continues, P[0] by default, named rather than deduced from the stresses -- in the Sep 2026
+    round's maps as drawn, the lowest-stress projection is a different map in 6 of the 18.
+    `bake_transformation`: apply
     that projection's transformation to its coordinates at step 0, so every later step is in the
     frame the seed was drawn in; the matrix is recorded in the step. `stress_tolerance`: how far
     the stress recomputed at step 0 may differ, relatively, from the stress the seed stores,

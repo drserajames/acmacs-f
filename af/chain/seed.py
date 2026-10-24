@@ -20,11 +20,13 @@ stress. `bake_transformation` refuses a transformation that is not orthogonal ra
 quietly changing the map (all 18 maps of the Sep 2026 round are orthogonal to 1.4e-15).
 
 **Which projection.** `Chart.best_projection` means "the lowest stress", which is what the rest
-of the code wants. A shipped chart keeps 1-17 projections and the one that was drawn is P[0],
-which is not always the lowest: in the Sep 2026 round it is not in 6 of the 18 maps, by as much
-as 200 stress units. Taking the lowest would silently chain from a map nobody has seen, so the
-seed's projection is named in the config (`[seed_chart] projection`, default 0) and passed
-explicitly where the step-0 layout is taken.
+of the code wants. A chart made elsewhere keeps 1-17 projections, and the one a chain continues
+is P[0], which is not always the lowest. Measured on the Sep 2026 round's 18 maps: in the file
+the chains seed from (the chain output, before any hand moves) P[0] is the lowest in all 18, but
+in the same maps as drawn it is not in 6 of them, by as much as 200 stress units. So the seed's
+projection is named in the config (`[seed_chart] projection`, default 0) and passed explicitly
+where the step-0 layout is taken, rather than deduced: which file seeds a chain is a ruling that
+can change, and taking the lowest would silently chain from a map nobody has seen.
 
 **The check.** Step 0 records the seed's own stored stress, which comes from the program that
 made the seed. `seed_stress_check` recomputes it here, from the seed's titres under its own
