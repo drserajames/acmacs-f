@@ -681,3 +681,28 @@ def test_clearance_reports_moves_and_overprints(tmp_path):
     )
     assert cleared["label_pins"]["moved to clear"] == []
     assert cleared["label_pins"]["glyph overprints"] == 0
+
+
+def test_a_label_stroke_thickens_labels_and_keeps_them_searchable(tmp_path):
+    import subprocess
+
+    from af.tree.draw.render import Geometry
+
+    labels = replace(load_defaults().labels, target_labels=0, min_share=0.05)
+    plain = make_figure(standard_tree(), PARENTS, config(labels=labels), tmp_path / "a.pdf", {})
+    stroked = make_figure(
+        standard_tree(),
+        PARENTS,
+        config(labels=labels, geometry=Geometry(label_stroke=0.25)),
+        tmp_path / "b.pdf",
+        {},
+    )
+    assert stroked["aa_label_placement"] == plain["aa_label_placement"]  # the metrics are kept
+    assert (tmp_path / "a.pdf").read_bytes() != (tmp_path / "b.pdf").read_bytes()
+    try:
+        text = subprocess.run(
+            ["pdftotext", str(tmp_path / "b.pdf"), "-"], capture_output=True, text=True, check=True
+        ).stdout
+    except FileNotFoundError:
+        pytest.skip("pdftotext not installed")
+    assert {"K2N", "A6S", "L7F"} <= set(text.split())  # the invisible copy is text

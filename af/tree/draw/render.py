@@ -23,6 +23,7 @@ from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.collections import LineCollection, PolyCollection  # noqa: E402
 from matplotlib.font_manager import FontProperties  # noqa: E402
 from matplotlib.patches import ArrowStyle, FancyArrowPatch  # noqa: E402
+from matplotlib.patheffects import withStroke  # noqa: E402
 from matplotlib.textpath import TextPath  # noqa: E402
 
 from .aa_labels import AALabel  # noqa: E402
@@ -138,6 +139,11 @@ class Geometry:
     # stay exactly where they are put. Each move is listed in the draw report (R7 review: two
     # pins printed over each other where af's nodes sit closer than the shipped tree's).
     pin_clearance: float | None = None
+    # A stroke of the label's own colour round each aa label's glyphs, in points (0: none):
+    # it thickens a light mono font's stems (TeX Gyre Cursor's 0.36 pt to the shipped Courier's
+    # 0.60 at 0.25; Q259) and keeps the font's metrics, so placement is unchanged. Stroked
+    # text is drawn as outlines, so an invisible copy keeps each label searchable.
+    label_stroke: float = 0.0
     # The continent inset's preferred corner (left x, bottom y): the clear spot nearest to it is
     # taken, never one over ink; None: the lowest, then leftmost clear spot. And its width.
     inset_left: float | None = None
@@ -667,7 +673,7 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
         placed = _clear_pins_after(placed, set(fixed.values()), obstacles, width, g, moves)
     for p in placed:
         x0, y0, x1, y1 = p.box
-        ax.text(
+        shown = ax.text(
             x1 - 1,
             (y0 + y1) / 2,
             p.text,
@@ -677,6 +683,18 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
             color="#4d4d4d",
             linespacing=1.15,
         )
+        if g.label_stroke:
+            shown.set_path_effects([withStroke(linewidth=g.label_stroke, foreground="#4d4d4d")])
+            ax.text(
+                x1 - 1,
+                (y0 + y1) / 2,
+                p.text,
+                ha="right",
+                va="center",
+                fontproperties=font,
+                alpha=0.0,
+                linespacing=1.15,
+            )
         ex, ey = leader_end(p.box)
         ax.plot([ex, p.anchor[0]], [ey, p.anchor[1]], color="#4d4d4d", lw=0.35)
     return placed, placement_metrics(placed, grid), moves
