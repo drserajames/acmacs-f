@@ -3,11 +3,21 @@
 import gzip
 import json
 import lzma
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-from af.chart.ace import AceError, chart_to_json, content_hash, read_chart, write_chart
+from af.chart.ace import (
+    AceError,
+    chart_json_bytes,
+    chart_to_json,
+    content_hash,
+    read_chart,
+    write_chart,
+)
 from af.chart.model import Antigen, Chart, Projection, Serum, Titres, empty_table
 from af.chart.titre import Titre
 
@@ -76,3 +86,48 @@ def test_optimiser_arrays_i1():
     assert np.isnan(a["titre_value"][1, 1])
     assert a["column_bases"].tolist() == pytest.approx([4.0, 8.0])  # >1280 counts one dilution up
     assert a["disconnected"].all()  # every point has fewer than 3 regular titres
+
+
+def test_concurrent_writers_of_one_path_all_succeed(tmp_path, monkeypatch):
+    """Several processes do write one chart path: array tasks loading one dataset into a shared
+    inputs directory. Renames are held here until every writer has its temporary on disk, the
+    interleaving a temporary named after the target alone could not survive."""
+    path = tmp_path / "c.ace"
+    writers = 6
+    at_rename = threading.Barrier(writers, timeout=60)
+    real_replace = Path.replace
+
+    def replace(self, target):
+        if Path(target) == path:
+            at_rename.wait()
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    with ThreadPoolExecutor(max_workers=writers) as pool:
+        futures = [pool.submit(write_chart, small_chart(), path) for _ in range(writers)]
+        assert [f.result() for f in futures] == [path] * writers
+    assert read_chart(path).n_antigens == 3
+    assert [p.name for p in tmp_path.iterdir()] == ["c.ace"]  # no temporary left behind
+
+
+def test_a_failed_rename_leaves_no_temporary(tmp_path, monkeypatch):
+    """A unique temporary name is never reused, so the write has to clean up after itself."""
+    path = tmp_path / "c.ace"
+    real_replace = Path.replace
+
+    def replace(self, target):
+        if Path(target) == path:
+            raise OSError("no space left on device")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    with pytest.raises(OSError, match="no space left"):
+        write_chart(small_chart(), path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_chart_json_bytes_are_what_is_written(tmp_path):
+    chart = small_chart()
+    assert lzma.decompress(write_chart(chart, tmp_path / "c.ace").read_bytes()) == chart_json_bytes(
+        chart
+    )

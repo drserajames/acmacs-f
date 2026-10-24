@@ -9,7 +9,8 @@ import pytest
 from af.chain.backend import StubOptimiser
 from af.chain.config import ChainConfig, ChainConfigError, MapOptions, load_chain_config
 from af.chain.engine import run_chain
-from af.chain.tables import cell_titre, table_chart, tables_from_store
+from af.chain.tables import _table_chart, cell_titre, table_chart, tables_from_store
+from af.chart.ace import write_chart
 from af.store.store import Provenance, Store
 from af.tables.model import Antigen, Serum, Table, canonical_json
 
@@ -251,3 +252,58 @@ def test_distinct_marks_reach_the_chain_record(tmp_path):
     publish(tmp_path / "store", [make_table(0), _with_repeats(1)])
     ref, tables = tables_from_store(tmp_path / "store", DATASET, tmp_path / "inputs")
     assert [len(t.distinct_marked) for t in tables] == [0, 3]
+
+
+def make_repeat_table(k: int) -> Table:
+    """Two antigens with one identity key, so the chart marks the later one DISTINCT."""
+    table = make_table(k)
+    first = table.antigens[0]
+    table.antigens.append(
+        Antigen(
+            first.name,
+            first.raw_name,
+            passage=first.passage,
+            passage_date=first.passage_date,
+            lab_ids=["TESTLAB#2"],
+        )
+    )
+    table.titres.append([["80"] for _ in range(4)])
+    return table
+
+
+def test_a_marked_table_is_written_once(tmp_path):
+    """A second load must leave the input files alone. Array tasks loading one dataset into a
+    shared inputs_dir rewrote every marked table on every load and raced over it: one renamed
+    its temporary, the rest failed on a file that was gone."""
+    publish(tmp_path / "store", [make_repeat_table(0)])
+    inputs = tmp_path / "inputs"
+    _, first = tables_from_store(tmp_path / "store", DATASET, inputs)
+    assert first[0].distinct_marked  # the mark is what used to force the rewrite
+    path = first[0].path
+    before = (path.stat().st_mtime_ns, path.read_bytes())
+    _, again = tables_from_store(tmp_path / "store", DATASET, inputs)
+    assert again[0].path == path
+    assert (path.stat().st_mtime_ns, path.read_bytes()) == before
+
+
+def test_a_chart_cached_before_marking_is_replaced(tmp_path):
+    """The file name carries the map hash, which cannot say whether repeats were marked, so a
+    chart cached by an older af (unmarked, and unable to merge) has to be rewritten."""
+    publish(tmp_path / "store", [make_repeat_table(0)])
+    inputs = tmp_path / "inputs"
+    _, first = tables_from_store(tmp_path / "store", DATASET, inputs)
+    marked_bytes = first[0].path.read_bytes()
+    write_chart(_table_chart(make_repeat_table(0)), first[0].path)  # as cached before marking
+    assert first[0].path.read_bytes() != marked_bytes
+    _, again = tables_from_store(tmp_path / "store", DATASET, inputs)
+    assert again[0].path.read_bytes() == marked_bytes
+
+
+def test_an_unreadable_cached_chart_is_replaced(tmp_path):
+    publish(tmp_path / "store", [make_repeat_table(0)])
+    inputs = tmp_path / "inputs"
+    _, first = tables_from_store(tmp_path / "store", DATASET, inputs)
+    good = first[0].path.read_bytes()
+    first[0].path.write_bytes(good[: len(good) // 2])  # truncated, as a killed writer once left
+    _, again = tables_from_store(tmp_path / "store", DATASET, inputs)
+    assert again[0].path.read_bytes() == good
