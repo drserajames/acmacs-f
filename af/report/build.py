@@ -35,6 +35,7 @@ from typing import Any, NamedTuple
 from af.geo.records import CLADE_NOT_DEFINED, CLADE_NOT_IN_SCHEME
 from af.report import text
 from af.report.config import (
+    SPAN,
     Meeting,
     ReportConfig,
     Section,
@@ -485,6 +486,7 @@ def _grid_pages(
     - portrait geo columns: panels \\textheight x 18/30 wide for 3 rows (scaled for others),
       centred, rows 2.5 x stretched.
     A blank cell keeps its width. A placeholder figure keeps a red PLACEHOLDER line under it.
+    A page with a span cell is laid out by :func:`_span_page` instead.
     """
     cols, rows = section.grid
     if section.landscape:
@@ -507,28 +509,99 @@ def _grid_pages(
             lines.append(
                 rf"\{_level(section)}{{{tex_escape(f'{section.title} {heading}'.strip())}}}"
             )
-        lines += [r"\begin{center}", *table, r"\begin{tabular}{" + " ".join("c" * cols) + "}"]
-        for start in range(0, len(cells), cols):
-            row = []
-            for slot in cells[start : start + cols]:
-                if slot is None:
-                    row.append(rf"\hspace*{{{width}}}")  # a blank cell keeps its width
-                    continue
-                image = rf"\includegraphics[width={width},frame]{{{rel[slot]}}}"
-                if figs[slot].figure.placeholder:
-                    image = (rf"\parbox[t]{{{width}}}{{\centering{image}"
-                             + _figure_mark(figs[slot], slot, r"\scriptsize") + "}")  # fmt: skip
-                else:
-                    image += _figure_mark(figs[slot], slot, r"\scriptsize")
-                row.append(image)
-            lines.append(" & ".join(row) + row_end)
-        lines += [r"\end{tabular}", r"\end{center}"]
+        if SPAN in cells:
+            lines += _span_page(cells, cols, rows, figs, rel)
+        else:
+            lines += _grid_table(cells, cols, width, table, row_end, figs, rel)
         if section.landscape:
             if n + 1 == len(pages) or starts[n + 1]:  # the window's last page
                 lines.append(r"\end{landscape}")
         else:
             lines.append(r"\newpage")
     return lines
+
+
+def _cell_image(slot: str, width: str, figs: dict[str, Resolved], rel: dict[str, str]) -> str:
+    """One framed panel and its mark; a placeholder's red line is kept under it in a parbox."""
+    image = rf"\includegraphics[width={width},frame]{{{rel[slot]}}}"
+    if figs[slot].figure.placeholder:
+        return (rf"\parbox[t]{{{width}}}{{\centering{image}"
+                + _figure_mark(figs[slot], slot, r"\scriptsize") + "}")  # fmt: skip
+    return image + _figure_mark(figs[slot], slot, r"\scriptsize")
+
+
+def _grid_table(
+    cells: list[str | None], cols: int, width: str, table: list[str], row_end: str,
+    figs: dict[str, Resolved], rel: dict[str, str],
+) -> list[str]:  # fmt: skip
+    """A page of equal cells as one tabular, as the delivered report.tex sets its map pages."""
+    lines = [r"\begin{center}", *table, r"\begin{tabular}{" + " ".join("c" * cols) + "}"]
+    for start in range(0, len(cells), cols):
+        row = []
+        for slot in cells[start : start + cols]:
+            if slot is None:
+                row.append(rf"\hspace*{{{width}}}")  # a blank cell keeps its width
+                continue
+            row.append(_cell_image(slot, width, figs, rel))
+        lines.append(" & ".join(row) + row_end)
+    return [*lines, r"\end{tabular}", r"\end{center}"]
+
+
+SPAN_GAP = 4  # pt between stacked panels, as the tabular's \\[4pt]
+SPAN_COLUMN_GAP = 6  # pt between columns, as the tabular's two 3pt \tabcolsep
+FRAME = 0.8  # pt a framed panel adds to its width (0.4pt rule each side)
+
+
+def _span_page(
+    cells: list[str | None], cols: int, rows: int, figs: dict[str, Resolved],
+    rel: dict[str, str],
+) -> list[str]:  # fmt: skip
+    """A landscape map page whose grid has span cells, set as columns of stacked panels.
+
+    A figure with span cells under it covers those rows and stays square, so its column is as
+    wide as it is tall. One cell size fits the page both ways: the tabular's height,
+    (\\textheight - 70pt) / rows, unless the widened columns would then run past \\linewidth,
+    in which case the size that fills the line (less each column's frame). Columns are
+    bottom-aligned minipages in one box, so they cannot wrap, and panels of one row line up when
+    their columns are equally tall.
+    """
+    n_rows = -(-len(cells) // cols)
+    columns: list[list[tuple[str | None, int]]] = []  # per column: (slot or blank, rows covered)
+    for j in range(cols):
+        column: list[tuple[str | None, int]] = []
+        for i in range(n_rows):
+            k = i * cols + j
+            cell = cells[k] if k < len(cells) else None
+            if cell == SPAN:
+                slot, covered = column[-1]
+                column[-1] = (slot, covered + 1)
+            else:
+                column.append((cell, 1))
+        columns.append(column)
+    widest = [max(covered for _, covered in column) for column in columns]
+    units, gaps = sum(widest), sum(w - 1 for w in widest) * SPAN_GAP
+    fixed = (cols - 1) * SPAN_COLUMN_GAP + gaps + cols * FRAME
+    fit = rf"\dimexpr(\linewidth-{fixed:g}pt)/{units}\relax"
+    lines = [
+        r"\ifdefined\afspancell\else\newlength{\afspancell}\fi",
+        rf"\setlength{{\afspancell}}{{\dimexpr(\textheight-70pt)/{rows}\relax}}",
+        rf"\ifdim{fit}<\afspancell\setlength{{\afspancell}}{{{fit}}}\fi",
+        r"\begin{center}",
+        r"\mbox{%",
+    ]
+    for j, column in enumerate(columns):
+        span = rf"\dimexpr{widest[j]}\afspancell+{(widest[j] - 1) * SPAN_GAP}pt\relax"
+        lines.append(rf"\begin{{minipage}}[b]{{{span}}}\centering\offinterlineskip")
+        stacked = []
+        for slot, covered in column:
+            size = rf"\dimexpr{covered}\afspancell+{(covered - 1) * SPAN_GAP}pt\relax"
+            stacked.append(rf"\rule{{0pt}}{{{size}}}" if slot is None
+                           else _cell_image(slot, size, figs, rel))  # fmt: skip
+        lines.append((rf"\\[{SPAN_GAP}pt]" + "\n").join(stacked))
+        lines.append(r"\end{minipage}%")
+        if j + 1 < cols:
+            lines.append(rf"\hspace{{{SPAN_COLUMN_GAP}pt}}%")
+    return [*lines, r"}", r"\end{center}"]
 
 
 def write_tex(
