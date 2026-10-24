@@ -106,8 +106,9 @@ class MapOptions:
     move_lower_rule: str = DEFAULT_MOVE_LOWER_RULE
     # Which of a step's two maps is carried forward: "lower-stress", the lower of incremental and
     # scratch with ties to incremental (ae's rule, chains.py:choose_between_incremental_scratch),
-    # or "incremental", always the map from the previous layout (continuity by rule). Q269, for a
-    # chain seeded from a shipped map: Sarah's choice; "lower-stress" until she rules.
+    # or "incremental", always the map from the previous layout (continuity by rule). Q269 a
+    # (Sarah, 24 Oct 2026) keeps ae's rule, so "lower-stress" stands and each step records which
+    # of the two won.
     step_choice: str = "lower-stress"
 
     def __post_init__(self) -> None:
@@ -216,7 +217,8 @@ class SeedChart:
     the store writes in front of serum ids and the seed may not (dropped on both sides when
     pairing). `af_only_tables`: tables the store has that the seed lacks although dated within
     it, "leave-out" (not in the chain: a data correction, for later) or "append" (stepped after
-    the post-seed tables, in date order). Q268: Sarah's choice; "leave-out" until she rules.
+    the post-seed tables, in date order). Q268 a (Sarah, 24 Oct 2026) keeps them out of the
+    chains for now and declares them per map, so "leave-out" stands.
 
     The rest decide how the seed's own layout becomes step 0 (af.chain.seed), and apply whether
     or not the seed is bridged. `projection`: which of the seed's projections the chain
