@@ -62,7 +62,7 @@ from af.map.curate import (
 from af.map.figure import chart_points
 from af.map.finish import finish_map, shared_frame
 from af.map.labels import LabelAbbreviations, label_text
-from af.map.new_antigens import new_antigen_styles
+from af.map.new_antigens import new_antigen_styles, outlines_on_page
 from af.map.orient import Orientation, RotationOverride, drawn_pairs, orient
 from af.map.render import DEFAULT_LOOK, PointStyle
 from af.map.style import ColourRow, ColourScheme, PointIn, SequenceLink, Window
@@ -768,9 +768,11 @@ def build_map(
     if fonts is not None:  # the font files the figure is drawn in (rule 5)
         inputs.update(fonts.inputs())
     outlines: dict[str, PointStyle] | None = None
+    outline_record: list[dict[str, Any]] = []
     if config.new_antigen_outlines:
-        # the interim reports' outlines for antigens new since the previous reports (Q264 b)
-        outlines, decisions["new_antigen_outlines"] = new_antigen_outlines(
+        # the interim reports' outlines for antigens new since the previous reports (Q264 b);
+        # each page keeps those it draws in colour, and records its own counts
+        outlines, outline_record = new_antigen_outlines(
             chart, points, cfg, config, store, frozenset(vlabels), inputs, store_refs
         )
     provenance: dict[str, Any] = {"inputs": inputs}
@@ -806,6 +808,16 @@ def build_map(
         provenance.setdefault("decisions", {})["frame_shift"] = record
     for window, title in windows:
         out = out_root / "map" / cfg.folder / window.name / "v1" / "figure.pdf"
+        page_styles, page_provenance = outlines, provenance
+        if outlines is not None:
+            page_styles, page_record = outlines_on_page(
+                points, scheme, window, vlabels, outlines, outline_record
+            )
+            page_decisions = {
+                **provenance.get("decisions", {}),
+                "new_antigen_outlines": page_record,
+            }
+            page_provenance = {**provenance, "decisions": page_decisions}
         result = finish_map(
             points,
             chart=cfg.folder,
@@ -818,11 +830,11 @@ def build_map(
             vaccine_labels=vlabels,
             out_pdf=out,
             created=created,
-            provenance=provenance,
+            provenance=page_provenance,
             orientation=ori.report() if ori else None,
             flags=flags,
             look=look,
-            styles=outlines,
+            styles=page_styles,
         )
         figures.append(result.i7)
     return MapResult(
