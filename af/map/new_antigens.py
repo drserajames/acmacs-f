@@ -13,6 +13,12 @@ reader, as ae's rule, against af's own chain version); one new for several tiers
 cut-off's (the thick one). How many were first titrated after the cut-off is recorded beside: a
 table dated before the cut-off can arrive after it. A tier that matches nothing is reported, not
 an error: a quiet month is possible. Vaccine marks keep their own outline, as in ae.
+
+Each page then outlines only the new antigens it draws in a clade colour (Sarah, 26 Oct 2026:
+"Only show the bold outline if the antigen would be colored."): a black ring round a grey dot
+reads as a marked point and says nothing. A point is drawn grey for two reasons, kept apart
+(:data:`SUPPRESS_WINDOW_GREY`, :data:`SUPPRESS_UNPAINTED`) so either can be dropped alone, and each
+page's record counts what each suppressed.
 """
 
 from __future__ import annotations
@@ -24,7 +30,12 @@ from typing import Any
 
 from af.chart.model import Chart
 from af.map.render import PointStyle
-from af.map.style import PointIn
+from af.map.style import ColourScheme, PointIn, Scene, Window, style_points
+
+#: No outline where the page's window greys the antigen: dated before the window, or undated.
+SUPPRESS_WINDOW_GREY = True
+#: No outline where the antigen has no clade colour at all (the scheme paints no row for it).
+SUPPRESS_UNPAINTED = True
 
 
 @dataclass(frozen=True)
@@ -96,7 +107,9 @@ def new_antigen_styles(
 ) -> tuple[dict[str, PointStyle], list[dict[str, Any]]]:
     """The outline of each new antigen point (by id), and per tier what it matched, for the
     figure's record. ``previous[k]`` is tier k's previous report map (its chart). ``marks``:
-    point ids drawn as vaccine marks, which keep their outline."""
+    point ids drawn as vaccine marks, which keep their outline. A style's ``raise_rank`` is its
+    tier's index. These are the map's candidates: :func:`outlines_on_page` keeps, per page,
+    those the page draws in colour."""
     if len(previous) != len(tiers):
         raise ValueError(f"{len(previous)} previous maps for {len(tiers)} tiers")
     new_for = []
@@ -131,8 +144,38 @@ def new_antigen_styles(
                 "outline_width": t.outline_width,
                 "reason": t.reason,
                 "new_since_previous_map": len(new_for[k]),
-                "outlined": drawn[k],
+                "drawn_new": drawn[k],
                 "first_titrated_after": sum(1 for w in first if w is not None and w > t.since),
             }
         )
     return styles, record
+
+
+def outlines_on_page(
+    points: Sequence[PointIn],
+    scheme: ColourScheme,
+    window: Window,
+    vaccines: Mapping[str, str],
+    styles: Mapping[str, PointStyle],
+    record: Sequence[dict[str, Any]],
+) -> tuple[dict[str, PointStyle], list[dict[str, Any]]]:
+    """The outlines one page draws, and its record: per tier, the map's record plus how many
+    new antigens the page outlines and how many each grey suppressed. The page's points are
+    styled as finish_map styles them (:func:`af.map.style.style_points`), so the outline follows
+    what is drawn. A point both window-grey and unpainted is counted under the window."""
+    scene: Scene = style_points(points, scheme, window, title="", vaccines=dict(vaccines))
+    page = [dict(r, outlined=0, suppressed_window_grey=0, suppressed_unpainted=0) for r in record]
+    kept: dict[str, PointStyle] = {}
+    for p in scene.points:
+        style = styles.get(p.id)
+        if style is None or style.raise_rank is None or not p.shown:
+            continue
+        tier = page[style.raise_rank]
+        if SUPPRESS_WINDOW_GREY and p.greyed:
+            tier["suppressed_window_grey"] += 1
+        elif SUPPRESS_UNPAINTED and p.colour is None:
+            tier["suppressed_unpainted"] += 1
+        else:
+            kept[p.id] = style
+            tier["outlined"] += 1
+    return kept, page
