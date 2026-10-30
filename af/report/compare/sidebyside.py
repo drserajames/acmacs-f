@@ -177,56 +177,64 @@ def write_procrustes(
     pairs: list[arrows.MapPair], sides: tuple[str, str], one_sided: list[str], out_pdf: Path,
     how: str = "identity", banner: str = "",
 ) -> list[dict[str, Any]]:  # fmt: skip
-    """Per map slot: the two figures, the new one with arrows, and the numbers."""
+    """Per map: the two figures of each window, then the new map with arrows, and the numbers.
+
+    A map's windows share one layout, so their fits are usually the same. When every window's
+    arrows have identical inputs (every matched point's two positions and distance, and the
+    viewport), the map gets one arrows page and one numbers page, naming the windows they stand
+    for (00 and 11, 30 Oct 2026); a map whose windows differ in any of these keeps one per window.
+    """
     import tempfile
 
     doc = Document(banner=banner)
     rows: list[dict[str, Any]] = []
+    groups: dict[str, list[tuple[arrows.MapPair, arrows.Arrows, dict[str, Any]]]] = {}
+    for pair in pairs:
+        new = json.loads(pair.new_i7.read_text())
+        groups.setdefault(pair.slot.rsplit("/", 1)[0], []).append(
+            (pair, arrows.read_pair(pair, how), new)
+        )
     with tempfile.TemporaryDirectory() as tmp:
-        for pair in pairs:
-            a = arrows.read_pair(pair, how)
-            new = json.loads(pair.new_i7.read_text())
-            size = page_sizes(pair.new_pdf)[0]
-            layer = Path(tmp) / f"overlay-{len(rows)}.pdf"
-            drawn = arrows.overlay(a, new["map"]["viewport"], size, layer)
-            row = arrows.summary(a) | {"arrows_drawn": drawn}
-            if pair.ref_pdf is not None:
-                diff = pixels.pixel_diff(pair.new_pdf, 1, pair.ref_pdf, 1)
-                row["pixels"] = {"differing": diff.differing, "share": diff.share,
-                                 "mean_abs": diff.mean_abs}  # fmt: skip
-                doc.add(
-                    rf"\hbox{{\large\bfseries {tex_escape(pair.slot)}}}"
-                    rf"\hbox{{\footnotesize {tex_escape(diff.text())}. {PIXELS_ARE_NOT_POSITIONS}}}"
-                    r"\kern4pt"
-                    + side_by_side(
-                        doc.picture(pair.new_pdf),
-                        doc.picture(pair.ref_pdf),
-                        (f"new: {sides[0]}", f"reference: {sides[1]}"),
-                    )  # fmt: skip
-                )
-            words = [
-                rf"{{\large\bfseries {tex_escape(pair.slot)}: Procrustes arrows}}",
-                rf"The map is {tex_escape(sides[0])}, as the report draws it. Each arrow runs "
-                rf"from where {tex_escape(sides[1])} puts a point, after it is fitted onto this "
-                r"map, to where this map draws it.",
-                "The reference is fitted onto this map by rotation, reflection and "
-                "translation, without scaling, over every point drawn in both, matched as the "
-                "report comparison matches them.",
-                rf"Orientation, as COMPARISON reports it: {tex_escape(arrows.orientation(a))}.",
-                rf"\textbf{{{tex_escape(arrows.headline(a))}}}.",
-                rf"Arrows are drawn for moves over {arrows.THRESHOLD:g} units ({drawn:,}); "
-                rf"{{\color[HTML]{{d62728}}red}} over {arrows.FAR:g} unit. Shorter moves draw no "
-                "arrow, as in ae and AD.",
-                rf"Drawn in one map only: {a.only_new:,} in this map, {a.only_ref:,} in the "
-                "reference.",
-            ]
-            doc.add(
-                # \vtop{\kern0pt...} hangs the map from the top, level with the text's first line
-                rf"\hbox{{\vtop{{\kern0pt\hbox{{{doc.picture(pair.new_pdf, overlay=layer)}}}}}"
-                rf"\kern{GAP}pt" + text_block(340.0, words, r"\large") + "}"
+        for map_slot, members in groups.items():
+            page_rows = []
+            for pair, a, _ in members:
+                row = arrows.summary(a)
+                if pair.ref_pdf is not None:
+                    diff = pixels.pixel_diff(pair.new_pdf, 1, pair.ref_pdf, 1)
+                    row["pixels"] = {"differing": diff.differing, "share": diff.share,
+                                     "mean_abs": diff.mean_abs}  # fmt: skip
+                    doc.add(
+                        rf"\hbox{{\large\bfseries {tex_escape(pair.slot)}}}"
+                        rf"\hbox{{\footnotesize {tex_escape(diff.text())}. "
+                        rf"{PIXELS_ARE_NOT_POSITIONS}}}\kern4pt"
+                        + side_by_side(
+                            doc.picture(pair.new_pdf),
+                            doc.picture(pair.ref_pdf),
+                            (f"new: {sides[0]}", f"reference: {sides[1]}"),
+                        )  # fmt: skip
+                    )
+                page_rows.append(row)
+            first, a0, new0 = members[0]
+            same = all(
+                a.moves == a0.moves and n["map"]["viewport"] == new0["map"]["viewport"]
+                for _, a, n in members[1:]
             )
-            doc.add(numbers_page(pair.slot, row, sides))
-            rows.append(row)
+            drawn_for = [(members[0], page_rows)] if same else [
+                (m, [r]) for m, r in zip(members, page_rows, strict=True)]  # fmt: skip
+            for (pair, a, new), these in drawn_for:
+                windows = [m[0].slot.rsplit("/", 1)[1] for m in members] if same else []
+                label = (
+                    f"{map_slot} ({', '.join(windows)})" if same and len(members) > 1 else pair.slot
+                )
+                layer = Path(tmp) / f"overlay-{len(rows)}.pdf"
+                drawn = arrows.overlay(
+                    a, new["map"]["viewport"], page_sizes(pair.new_pdf)[0], layer
+                )
+                doc.add(arrows_page(label, pair, a, drawn, layer, sides, doc, windows))
+                doc.add(numbers_page(label, these, sides))
+                for r in these:
+                    r["arrows_drawn"] = drawn
+            rows += page_rows
         heads = [
             rf"\textbf{{{tex_escape(r['slot'])}}}: RMSD {r['rmsd']:.3f} over {r['matched']:,} "
             rf"points; {sum(r[FAR_KEY].values()):,} moved over {arrows.FAR:g} unit"
@@ -240,7 +248,8 @@ def write_procrustes(
         lines = [
             r"\medskip Points are matched by identity (isolate, year, passage class, date; sera by "
             r"serum id) and the reference is fitted onto the new map by rotation, reflection and "
-            r"translation, without scaling: the comparison behind COMPARISON.json.",
+            r"translation, without scaling: the comparison behind COMPARISON.json. A map whose "
+            r"windows give the same arrows has one arrows page, naming its windows.",
             *extra, r"\medskip", *heads,
         ]  # fmt: skip
         title = "Maps of two reports: Procrustes arrows"
@@ -249,7 +258,42 @@ def write_procrustes(
     return rows
 
 
-def numbers_page(slot: str, row: dict[str, Any], sides: tuple[str, str]) -> str:
+def arrows_page(
+    label: str, pair: arrows.MapPair, a: arrows.Arrows, drawn: int, layer: Path,
+    sides: tuple[str, str], doc: Document, windows: list[str],
+) -> str:  # fmt: skip
+    """The new map as the report draws it, with the arrows laid over it, and the words."""
+    words = [
+        rf"{{\large\bfseries {tex_escape(label)}: Procrustes arrows}}",
+        rf"The map is {tex_escape(sides[0])}, as the report draws it. Each arrow runs "
+        rf"from where {tex_escape(sides[1])} puts a point, after it is fitted onto this "
+        r"map, to where this map draws it.",
+        "The reference is fitted onto this map by rotation, reflection and "
+        "translation, without scaling, over every point drawn in both, matched as the "
+        "report comparison matches them.",
+        rf"Orientation, as COMPARISON reports it: {tex_escape(arrows.orientation(a))}.",
+        rf"\textbf{{{tex_escape(arrows.headline(a))}}}.",
+        rf"Arrows are drawn for moves over {arrows.THRESHOLD:g} units ({drawn:,}); "
+        rf"{{\color[HTML]{{d62728}}red}} over {arrows.FAR:g} unit. Shorter moves draw no "
+        "arrow, as in ae and AD.",
+        rf"Drawn in one map only: {a.only_new:,} in this map, {a.only_ref:,} in the reference.",
+    ]
+    if len(windows) > 1:
+        words.append(
+            rf"One page for the windows {tex_escape(', '.join(windows))}: their arrows are "
+            "identical (every matched point's positions and distance, and the frame). The map "
+            rf"drawn is the {tex_escape(windows[0])} page."
+        )
+    # \vtop{\kern0pt...} hangs the map from the top, level with the text's first line
+    return (
+        rf"\hbox{{\vtop{{\kern0pt\hbox{{{doc.picture(pair.new_pdf, overlay=layer)}}}}}"
+        rf"\kern{GAP}bp" + text_block(340.0, words, r"\large") + "}"
+    )
+
+
+def numbers_page(slot: str, rows: list[dict[str, Any]], sides: tuple[str, str]) -> str:
+    """The numbers of a map (one row, or the identical windows' rows, whose pixels differ)."""
+    row = rows[0]
     gt = row[FAR_KEY]
     lines = [
         rf"{{\large\bfseries {tex_escape(slot)}: numbers}}",
@@ -262,12 +306,15 @@ def numbers_page(slot: str, row: dict[str, Any], sides: tuple[str, str]) -> str:
         rf"{arrows.FAR:g}: {gt['antigens']:,} antigens, {gt['sera']:,} sera",
         rf"orientation, as COMPARISON reports it: {tex_escape(row['orientation'])}",
     ]
-    if "pixels" in row:
-        px = row["pixels"]
-        lines.append(
-            rf"pixels: {px['differing']:,} differ ({100 * px['share']:.2f}\%), "
-            rf"mean |diff| {px['mean_abs']:.2f} of 255. {PIXELS_ARE_NOT_POSITIONS}"
-        )
+    for r in rows:
+        if "pixels" in r:
+            px = r["pixels"]
+            lines.append(
+                rf"pixels, {tex_escape(r['slot'])}: {px['differing']:,} differ "
+                rf"({100 * px['share']:.2f}\%), mean |diff| {px['mean_abs']:.2f} of 255"
+            )
+    if any("pixels" in r for r in rows):
+        lines.append(rf"{PIXELS_ARE_NOT_POSITIONS}.")
     vaccines = row["vaccines"]
     lines.append(r"\medskip\textbf{Vaccines} (units moved): " + (
         "; ".join(rf"{tex_escape(v['label'])} {v['distance']:.2f}" for v in vaccines)

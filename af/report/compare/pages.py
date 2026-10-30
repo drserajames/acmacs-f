@@ -17,8 +17,9 @@ from pathlib import Path
 
 from af.report.build import LATEX, pdf_pages, tex_escape
 
-MARGIN = 18.0  # pt round every page
-GAP = 14.0  # pt between the pictures of a page
+# In PDF points (TeX's bp), the unit page sizes are given in: TeX's pt is 1/72.27 inch.
+MARGIN = 18.0  # round every page
+GAP = 14.0  # between the pictures of a page
 
 
 class PagesError(RuntimeError):
@@ -75,7 +76,7 @@ class Document:
         if self.banner:
             body = rf"\hbox{{\color{{red}}\small {tex_escape(self.banner)}}}\kern4pt" + body
         return (
-            rf"\setbox0=\vbox{{\kern{m}pt\hbox{{\kern{m}pt\vtop{{{body}}}\kern{m}pt}}\kern{m}pt}}"
+            rf"\setbox0=\vbox{{\kern{m}bp\hbox{{\kern{m}bp\vtop{{{body}}}\kern{m}bp}}\kern{m}bp}}"
             r"\pdfpagewidth=\wd0 \pdfpageheight=\ht0 \advance\pdfpageheight by \dp0 "
             r"\shipout\box0"
         )
@@ -121,7 +122,7 @@ class Document:
 def text_block(width: float, lines: list[str], size: str = r"\small") -> str:
     """A ragged-right block ``width`` pt wide; ``lines`` are TeX (escape plain text first)."""
     body = r"\par ".join(lines)
-    return rf"\vtop{{\hsize={width:.1f}pt\raggedright{size} {body}\par}}"
+    return rf"\vtop{{\hsize={width:.1f}bp\raggedright{size} {body}\par}}"
 
 
 def side_by_side(left: str, right: str, labels: tuple[str, str], stacked: bool = False) -> str:
@@ -129,5 +130,5 @@ def side_by_side(left: str, right: str, labels: tuple[str, str], stacked: bool =
     a = rf"\vtop{{\hbox{{\strut\footnotesize {tex_escape(labels[0])}}}\hbox{{{left}}}}}"
     b = rf"\vtop{{\hbox{{\strut\footnotesize {tex_escape(labels[1])}}}\hbox{{{right}}}}}"
     if stacked:
-        return rf"\vtop{{\hbox{{{a}}}\kern{GAP}pt\hbox{{{b}}}}}"
-    return rf"\hbox{{{a}\kern{GAP}pt{b}}}"
+        return rf"\vtop{{\hbox{{{a}}}\kern{GAP}bp\hbox{{{b}}}}}"
+    return rf"\hbox{{{a}\kern{GAP}bp{b}}}"

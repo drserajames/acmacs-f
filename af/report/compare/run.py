@@ -810,7 +810,8 @@ def main(argv: list[str] | None = None) -> int:
     pairs = sidebyside.reference_pairs(manifest, args.reference)
     if pairs:
         name = f"{manifest.get('report')}-{sidebyside.PROCRUSTES}-vs-reference.pdf"
-        sidebyside.write_procrustes(pairs, (sides.new, sides.ref), [], args.out / name)
+        sides_text = (sides.new, sides.ref)
+        sidebyside.write_procrustes(pairs, sides_text, [], args.out / name, how=args.match)
     missing = sum(r["status"] == "no reference" for r in rows)
     print(
         f"{len(rows)} figures, {failed} failing, {missing} without reference "

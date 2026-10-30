@@ -188,3 +188,62 @@ def test_one_command_writes_both_documents_beside_the_report(tmp_path: Path) -> 
     data = json.loads((report / "r-procrustes-vs-older.json").read_text())
     assert data["maps"][0]["moved_gt_1"] == {"antigens": 1, "sera": 0}
     assert data["pages"][0]["differing"] > 0  # the two report pages print different names
+
+
+@pytest.mark.tool(build.LATEX)
+@pytest.mark.tool(pixels.PDFTOPPM)
+def test_side_by_side_pages_keep_their_own_size(tmp_path: Path) -> None:
+    """Sarah, 30 Oct 2026: "Keep the original page sizes in side by side": a page pair is never
+    scaled to fit, so its sheet is at least the two pages side by side (or stacked) plus margins."""
+    import matplotlib
+
+    matplotlib.use("pdf")
+    import matplotlib.pyplot as plt
+
+    from af.report.compare.pages import GAP, MARGIN
+
+    def pdf(name: str, w: float, h: float) -> Path:
+        fig = plt.figure(figsize=(w / 72, h / 72), dpi=72)
+        fig.text(0.1, 0.5, name)
+        fig.savefig(tmp_path / f"{name}.pdf")
+        plt.close(fig)
+        return tmp_path / f"{name}.pdf"
+
+    for (aw, ah), (bw, bh), stacked in (((300, 400), (600, 800), False),
+                                        ((400, 300), (800, 600), True)):  # fmt: skip
+        new, ref = pdf("new", aw, ah), pdf("ref", bw, bh)
+        out = tmp_path / "sbs.pdf"
+        rows = sidebyside.write_sbs(new, ref, ("new", "ref"), out)
+        w, h = sidebyside.page_sizes(out)[1]  # page 1 is the cover
+        slack = 0.05  # TeX rounds dimensions to its scaled points
+        if stacked:
+            assert w + slack >= max(aw, bw) + 2 * MARGIN
+            assert h + slack >= ah + bh + GAP + 2 * MARGIN
+        else:
+            assert w + slack >= aw + bw + GAP + 2 * MARGIN
+            assert h + slack >= max(ah, bh) + 2 * MARGIN
+        assert rows[0]["sizes"][0] != rows[0]["sizes"][1]
+        d = pixels.compare_arrays(pixels.rasterise(new, 1), pixels.rasterise(ref, 1))
+        for size in (d.size_a, d.size_b):  # the page's pixel line names both sizes
+            assert f"{size[0]} x {size[1]} px" in d.text().replace(" and ", " px and ")
+        assert "padded white" in d.text()
+
+
+@pytest.mark.tool(build.LATEX)
+@pytest.mark.tool(pixels.PDFTOPPM)
+def test_windows_with_identical_arrows_share_one_arrows_page(tmp_path: Path) -> None:
+    """A map's windows share one layout: identical arrows get one arrows page and one numbers
+    page, naming the windows; a map whose windows differ at all keeps a page per window."""
+    ref, new = _pair()
+    a = _record(tmp_path, "r", {"map/x/all": new, "map/x/recent": new}, "c0")
+    b = _record(tmp_path, "r-older", {"map/x/all": ref, "map/x/recent": ref}, "c0")
+    out = tmp_path / "out"
+    assert sidebyside.main([str(a), str(b), "--out", str(out)]) == 0
+    # a cover, the two windows' figures, then one arrows page and one numbers page
+    assert len(sidebyside.page_sizes(out / "r-procrustes-vs-older.pdf")) == 5
+    moved = json.loads(json.dumps(new))
+    moved["map"]["antigens"][5]["xy"][0] += 0.5  # the recent window's layout differs
+    c = _record(tmp_path / "c", "r", {"map/x/all": new, "map/x/recent": moved}, "c0")
+    d = _record(tmp_path / "c", "r-older", {"map/x/all": ref, "map/x/recent": ref}, "c0")
+    assert sidebyside.main([str(c), str(d), "--out", str(out)]) == 0
+    assert len(sidebyside.page_sizes(out / "r-procrustes-vs-older.pdf")) == 7
