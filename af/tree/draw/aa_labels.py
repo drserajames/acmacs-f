@@ -95,6 +95,9 @@ class LabelHide:
     last: str
     text: str
     reason: str
+    # Hidden in the label editor (af.tree.draw.hand): a pin on the same label from the round's
+    # config is then superseded, not an error.
+    hand: bool = False
 
 
 def leaf_consensus(seqs: Sequence[str | None], pos1: int) -> tuple[str, float]:

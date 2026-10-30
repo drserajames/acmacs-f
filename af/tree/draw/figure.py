@@ -19,6 +19,7 @@ from af.util.fonts import FigureFonts
 
 from .aa_labels import AALabel, LabelHide, LabelParams, hide_labels, select_labels
 from .defaults import load_defaults
+from .editor import EditorRequest
 from .i7 import tree_block, write_i7
 from .layout import HideRules, Layout, compute_layout, rows_matching
 from .model import DrawTree
@@ -66,11 +67,15 @@ class LabelPin:
     reason: str
     x_by: str = "height"
     optional: bool = False
+    # Placed in the label editor (af.tree.draw.hand): never moved by pin clearing, a clash it
+    # would have been moved for is an error (render.HandLabelClash), and it supersedes a pin
+    # from the round's config on the same label.
+    hand: bool = False
 
 
 class LabelPinError(ValueError):
     """A label pin that cannot apply: a leaf the tree does not have, a pin matching no label
-    and not optional, or two pins on one label."""
+    and not optional, two pins on one label, or a hand pin on a label hidden by hand."""
 
 
 @dataclass
@@ -112,6 +117,10 @@ class FigureConfig:
     # The round's figure fonts (af.util.fonts, figures.toml): the whole figure, label placement
     # included, is drawn in them and their files are recorded in the I7. None: DejaVu, as before.
     fonts: FigureFonts | None = None
+    # The hand labels file (af.tree.draw.hand) a label editor saves as: given, also write
+    # <stem>.labels.html, the editor (af.tree.draw.editor), from this drawing, and each label's
+    # node and box in the draw report (aa_label_layout). "": no editor.
+    label_editor: str = ""
 
 
 def make_figure(
@@ -136,14 +145,18 @@ def make_figure(
         raise SectionOverrideError(f"clade label size(s) for clade(s) not shown: {unknown}")
     bands = [(b.first, b.last) for cs in selection.shown for b in cs.bands]
     labels, label_counts = select_labels(tree, layout, bands, config.labels)
+    hand_hidden: list[tuple[AALabel, LabelHide]] = []
     if config.hide_labels:
+        hand_hidden = _hidden_by_hand(tree, layout, labels, config.hide_labels)
         labels, label_counts["hidden by name"] = hide_labels(
             tree, layout, labels, config.hide_labels
         )
         label_counts["labels"] = len(labels)
 
     dash_bars = dash_bar_counts(tree, layout.leaf_nodes, config.dash_bars)
-    pins, pin_report = resolve_pins(tree, labels, config.label_pins)
+    pins, pin_report, hand = resolve_pins(
+        tree, labels, config.label_pins, [lab for lab, _ in hand_hidden]
+    )
 
     marked = None
     geometry = config.geometry
@@ -175,13 +188,23 @@ def make_figure(
         figure_fonts=config.fonts is not None,
         strain_dy=_strain_dy(config),
         label_pins=pins,
+        label_hand=frozenset(hand),
     )
+    editor = None
+    if config.label_editor:
+        editor = EditorRequest(
+            pdf.with_suffix(".labels.html"),
+            save_as=config.label_editor,
+            tree=", ".join(f"{r.dataset}@{r.version}" for r in store_refs),
+            pins=_pin_rows(tree, labels, config.label_pins),
+            hidden=hand_hidden,
+        )
     # Every text, label placement included, is measured and drawn in the figure fonts. They are
     # registered here, in the process that draws: a spawned worker (af.tree.draw.stage) starts
     # with matplotlib's own fonts only, and would draw in its fallback with just a warning.
     fonts = config.fonts.files.resolve() if config.fonts is not None else None
     with fonts.context() if fonts is not None else contextlib.nullcontext():
-        drawn = render(spec, pdf)
+        drawn = render(spec, pdf) if editor is None else render(spec, pdf, editor)
     if config.fonts is not None:  # the font files are inputs (rule 5)
         inputs = {**inputs, **{k: v["sha256"] for k, v in config.fonts.inputs().items()}}
     write_i7(
@@ -222,7 +245,10 @@ def make_figure(
             for lab in labels
         ],
         "aa_label_filter": label_counts,
-        "aa_label_hides": [asdict(h) for h in config.hide_labels],
+        # a hide's hand flag only where set, so other figures keep their bytes
+        "aa_label_hides": [
+            {k: v for k, v in asdict(h).items() if k != "hand" or v} for h in config.hide_labels
+        ],
         "aa_label_placement": drawn.label_metrics,
         "dash_bars": dash_bars,
         "strains": drawn.strains,
@@ -247,18 +273,61 @@ def make_figure(
                 "moved to clear": drawn.pin_moves,
                 "glyph overprints": drawn.overprints,
             }
+        if hand:
+            pin_report["hand leaders through labels"] = drawn.hand_leaders
         report["label_pins"] = pin_report
+    if drawn.layout is not None:
+        report["aa_label_layout"] = drawn.layout
     pdf.with_suffix(".draw.json").write_text(json.dumps(report, indent=1, default=str))
     return report
 
 
-def resolve_pins(
+def _hidden_by_hand(
+    tree: DrawTree, layout: Layout, labels: list[AALabel], hides: Sequence[LabelHide]
+) -> list[tuple[AALabel, LabelHide]]:
+    """The labels hidden in the label editor, each with its hide: the editor lists them so a
+    hide can be undone, and a config pin on one of them is superseded, not an error."""
+    found = []
+    for h in hides:
+        if h.hand:
+            kept, _ = hide_labels(tree, layout, labels, [h])
+            nodes = {lab.node for lab in kept}
+            found += [(lab, h) for lab in labels if lab.node not in nodes]
+    return found
+
+
+def _pin_rows(
     tree: DrawTree, labels: Sequence[AALabel], pins: Sequence[LabelPin]
-) -> tuple[dict[int, tuple[float, float, str]], dict[str, Any]]:
-    """Label index -> (dx, dy, x_by) for each pinned label, and what the pins did.
+) -> dict[int, LabelPin]:
+    """Label index -> the pin that holds it (a hand pin over a config one): the editor keeps a
+    pin's own leaf ids and reason when it writes the label back."""
+    node_of = {str(tree.leaf_id[i]): i for i in tree.leaves()}
+    index = {(lab.node, tuple(sorted(lab.subs))): k for k, lab in enumerate(labels)}
+    rows: dict[int, LabelPin] = {}
+    for p in pins:
+        if p.first not in node_of or p.last not in node_of:
+            continue
+        node = _mrca(tree, node_of[p.first], node_of[p.last])
+        k = index.get((node, tuple(sorted(p.text.split()))))
+        if k is not None and (k not in rows or p.hand):
+            rows[k] = p
+    return rows
+
+
+def resolve_pins(
+    tree: DrawTree,
+    labels: Sequence[AALabel],
+    pins: Sequence[LabelPin],
+    hidden_by_hand: Sequence[AALabel] = (),
+) -> tuple[dict[int, tuple[float, float, str]], dict[str, Any], set[int]]:
+    """Label index -> (dx, dy, x_by) for each pinned label, what the pins did, and the labels
+    pinned by hand.
 
     A pin applies to the label on the MRCA of its two leaves whose substitutions are the
-    pin's (in any order). It is never moved to another node to fit (00, 21 Oct 2026)."""
+    pin's (in any order). It is never moved to another node to fit (00, 21 Oct 2026). What
+    was done by hand in the label editor wins over the round's config: a config pin on a label
+    also pinned by hand, or on a label hidden by hand (``hidden_by_hand``), is superseded and
+    listed, not an error."""
     node_of = {str(tree.leaf_id[i]): i for i in tree.leaves()}
     missing = sorted({x for p in pins for x in (p.first, p.last) if x not in node_of})
     if missing:  # design rule 1
@@ -266,27 +335,40 @@ def resolve_pins(
     by_key: dict[tuple[int, tuple[str, ...]], int] = {}
     for k, lab in enumerate(labels):
         by_key.setdefault((lab.node, tuple(sorted(lab.subs))), k)
+    hidden = {(lab.node, tuple(sorted(lab.subs))) for lab in hidden_by_hand}
     out: dict[int, tuple[float, float, str]] = {}
+    hand: set[int] = set()
+    superseded: list[str] = []
     unused: list[dict[str, str]] = []
     errors: list[str] = []
-    for p in pins:
+    # hand pins first, so a config pin on the same label is the one superseded
+    for p in sorted(pins, key=lambda p: not p.hand):
         if p.x_by not in ("height", "width"):
             errors.append(f"{p.text}: x_by {p.x_by!r} is neither 'height' nor 'width'")
             continue
-        node = _mrca(tree, node_of[p.first], node_of[p.last])
-        found = by_key.get((node, tuple(sorted(p.text.split()))))
-        if found is None:
+        key = (_mrca(tree, node_of[p.first], node_of[p.last]), tuple(sorted(p.text.split())))
+        found = by_key.get(key)
+        if found is None and key in hidden:
+            if p.hand:
+                errors.append(f"{p.text}: pinned and hidden, both by hand")
+            else:
+                superseded.append(f"{p.text}: hidden by hand")
+        elif found is None:
             if p.optional:
                 unused.append({"text": p.text, "reason": p.reason})
             else:
                 errors.append(f"{p.text}: no label of that text on the MRCA of {p.first}, {p.last}")
+        elif found in out and found in hand and not p.hand:
+            superseded.append(f"{p.text}: pinned by hand")
         elif found in out:
             errors.append(f"{p.text}: a second pin on the same label")
         else:
             out[found] = (p.dx, p.dy, p.x_by)
+            if p.hand:
+                hand.add(found)
     if errors:
         raise LabelPinError(f"{len(errors)} label pin(s) refused:\n  " + "\n  ".join(errors))
-    report = {
+    report: dict[str, Any] = {
         "pins": len(pins),
         "pinned": len(out),
         "optional pins unused": unused,
@@ -294,7 +376,11 @@ def resolve_pins(
             " ".join(lab.subs) for k, lab in enumerate(labels) if k not in out
         ],
     }
-    return out, report
+    if hand:  # only with hand pins, so other figures keep their bytes
+        report["pinned by hand"] = len(hand)
+    if superseded:
+        report["config pins superseded"] = superseded
+    return out, report, hand
 
 
 def _mrca(tree: DrawTree, a: int, b: int) -> int:
