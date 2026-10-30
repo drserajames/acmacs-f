@@ -55,6 +55,28 @@ def test_every_month_is_its_own_report_figure(tmp_path: Path) -> None:
         assert (folder / "figure.pdf").stat().st_size > 0
 
 
+def test_each_figure_says_how_much_of_it_neighbours_cover(tmp_path: Path) -> None:
+    """Q280: the dots a neighbouring location's dots are drawn over are in the figure's own
+    provenance, as the unplaceable and edge-moved ones are, and at 0 as well as above it."""
+    doc = _doc()
+    doc["periods"][0]["locations"].append(
+        {"name": "BETA", "points": [{"color": "#00aa00", "count": 1, "clade": "Clade S"}]}
+    )
+    places = {"ALPHA": (10.0, 20.0), "BETA": (10.1, 20.0)}  # a quarter of a dot apart
+    written = write_geo_figures(
+        doc, "h3", places.get, coastline_file(tmp_path), tmp_path / "figures",
+        {"serology": "v-test"},
+    )  # fmt: skip
+    hidden = written.hiding["2021-01"]
+    assert (hidden.dots, hidden.mostly_covered, hidden.invisible_locations) == (4, 1, 0)
+    folder = tmp_path / "figures" / "geo" / "h3" / "2021-01" / "af"
+    i7 = json.loads((folder / "figure.i7.json").read_text())
+    validate(i7)
+    assert i7["provenance"]["hidden_by_neighbours"] == hidden.to_json()
+    empty = tmp_path / "figures" / "geo" / "h3" / "2021-02" / "af" / "figure.i7.json"
+    assert json.loads(empty.read_text())["provenance"]["hidden_by_neighbours"]["dots"] == 0
+
+
 def test_the_clade_key_lists_every_scheme_entry_with_its_dots() -> None:
     scheme = ColourScheme(
         "h3 test",
