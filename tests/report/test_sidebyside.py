@@ -247,3 +247,19 @@ def test_windows_with_identical_arrows_share_one_arrows_page(tmp_path: Path) -> 
     d = _record(tmp_path / "c", "r-older", {"map/x/all": ref, "map/x/recent": ref}, "c0")
     assert sidebyside.main([str(c), str(d), "--out", str(out)]) == 0
     assert len(sidebyside.page_sizes(out / "r-procrustes-vs-older.pdf")) == 7
+
+
+@pytest.mark.tool(build.LATEX)
+@pytest.mark.tool(pixels.PDFTOPPM)
+def test_windows_whose_orientation_text_differs_keep_their_pages(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Any difference in what the shared page would print keeps a page per window: here only the
+    orientation text (which reads the window's own antigens) differs."""
+    ref, new = _pair()
+    a = _record(tmp_path, "r", {"map/x/all": new, "map/x/recent": new}, "c0")
+    b = _record(tmp_path, "r-older", {"map/x/all": ref, "map/x/recent": ref}, "c0")
+    monkeypatch.setattr(arrows, "orientation", lambda arr: f"orientation of {arr.slot}")
+    out = tmp_path / "out"
+    assert sidebyside.main([str(a), str(b), "--out", str(out)]) == 0
+    assert len(sidebyside.page_sizes(out / "r-procrustes-vs-older.pdf")) == 7

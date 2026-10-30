@@ -215,10 +215,7 @@ def write_procrustes(
                     )
                 page_rows.append(row)
             first, a0, new0 = members[0]
-            same = all(
-                a.moves == a0.moves and n["map"]["viewport"] == new0["map"]["viewport"]
-                for _, a, n in members[1:]
-            )
+            same = all(_same_page(a, n, a0, new0) for _, a, n in members[1:])
             drawn_for = [(members[0], page_rows)] if same else [
                 (m, [r]) for m, r in zip(members, page_rows, strict=True)]  # fmt: skip
             for (pair, a, new), these in drawn_for:
@@ -256,6 +253,20 @@ def write_procrustes(
         doc.pages.insert(0, doc.page(cover(title, sides, floor(pairs[0].new_pdf), lines)))
         doc.write(out_pdf)
     return rows
+
+
+def _same_page(
+    a: arrows.Arrows, new: dict[str, Any], a0: arrows.Arrows, new0: dict[str, Any]
+) -> bool:
+    """Whether a window's arrows and numbers page would print exactly what the first window's
+    does: the moves and frame, and every text taken from the first window alone."""
+    return (
+        a.moves == a0.moves
+        and new["map"]["viewport"] == new0["map"]["viewport"]
+        and (a.only_new, a.only_ref) == (a0.only_new, a0.only_ref)
+        and arrows.orientation(a) == arrows.orientation(a0)
+        and arrows.headline(a) == arrows.headline(a0)
+    )
 
 
 def arrows_page(
