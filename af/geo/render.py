@@ -17,7 +17,10 @@ Two inputs are explicit rather than fetched or guessed:
   never dropped silently.
 
 The returned :class:`RenderReport` says how many dots each month drew and which
-locations had no coordinates, so a thin map says why.
+locations had no coordinates, so a thin map says why. It also says how many of those dots
+neighbouring locations are drawn over (:class:`Hiding`): at this scale a dot is 3.6 degrees
+wide, so places closer than that overlap whatever is done, and a page that loses dots behind
+their neighbours says so rather than looking complete (Q280).
 
 A cluster that would cross the map's edge (a place near the seam at 168.24 W, such as the
 central Pacific) is moved inward just far enough that every dot is drawn whole, and counted
@@ -75,9 +78,53 @@ class Look:
     title_inset: float = 10.0  # ae: width x 0.0125, to the top-left of the title's ink
 
 
+@dataclass(frozen=True)
+class PlacedDot:
+    """One dot as drawn, in figure points, with the location and draw order it belongs to."""
+
+    location: str
+    order: int  # the location's place in the period, which is the order the renderer draws in
+    x: float
+    y: float
+    filled: bool  # a ring-only dot paints no disc, so it hides nothing
+
+
+@dataclass(frozen=True)
+class Hiding:
+    """How much of a page's dots other locations' dots are drawn over.
+
+    Dots of one location overlap by design (the ring step is smaller than the dot), so only
+    other locations count here. ``worst`` is the most of any one dot that is covered, 0 to 1.
+    """
+
+    dots: int = 0
+    half_covered: int = 0  # at least half the dot painted over
+    mostly_covered: int = 0  # at least nine tenths: the dot cannot be read
+    invisible_locations: int = 0  # every dot of the location mostly covered
+    worst: float = 0.0
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "dots": self.dots,
+            "half_covered": self.half_covered,
+            "mostly_covered": self.mostly_covered,
+            "invisible_locations": self.invisible_locations,
+            "worst": round(self.worst, 3),
+        }
+
+
+@dataclass(frozen=True)
+class PeriodDrawn:
+    """What one month's map drew: its dots, and how much of them is hidden."""
+
+    dots: int = 0
+    hiding: Hiding = field(default_factory=Hiding)
+
+
 @dataclass
 class RenderReport:
     drawn: dict[str, int] = field(default_factory=dict)  # period -> dots drawn
+    hiding: dict[str, Hiding] = field(default_factory=dict)  # period -> dots hidden by neighbours
     no_coordinates: Counter[str] = field(default_factory=Counter)  # location -> dots
     # location -> dots in clusters moved inward so the map's edge cuts none of them
     moved_inside: Counter[str] = field(default_factory=Counter)
@@ -99,9 +146,11 @@ def render_geo(
     report = RenderReport()
     for period in doc["periods"]:
         path = out_dir / f"{prefix}-{period['period']}.pdf"
-        report.drawn[period["period"]] = _render_period(
+        got = _render_period(
             period, coordinates, shapes, path, look, report.no_coordinates, report.moved_inside
         )
+        report.drawn[period["period"]] = got.dots
+        report.hiding[period["period"]] = got.hiding
         report.files.append(path)
     return report
 
@@ -114,8 +163,9 @@ def render_period(
     look: Look | None = None,
     no_coordinates: Counter[str] | None = None,
     moved_inside: Counter[str] | None = None,
-) -> int:
-    """Draw one period of an I7 ``geo`` document to ``path``; the number of dots drawn.
+) -> PeriodDrawn:
+    """Draw one period of an I7 ``geo`` document to ``path``: the dots drawn, and how much of
+    them neighbouring locations cover (:class:`Hiding`).
 
     For a caller that files each month separately (the report's one figure per folder).
     Locations it cannot place are added to ``no_coordinates``; the dots of a cluster moved in
@@ -125,6 +175,60 @@ def render_period(
     moved = moved_inside if moved_inside is not None else Counter()
     look = look if look is not None else Look()
     return _render_period(period, coordinates, _coastline(coastline), path, look, unplaced, moved)
+
+
+#: Samples across a dot when measuring how much of it several neighbours together cover. A
+#: sunflower lattice, so the answer is the same every time (design rule 8) and good to ~2 %.
+COVER_SAMPLES = 512
+#: A dot at least this covered is counted as half covered, and as mostly covered (unreadable).
+HALF_COVERED = 0.5
+MOSTLY_COVERED = 0.9
+
+
+def _covered(dot: PlacedDot, over: list[PlacedDot], radius: float) -> float:
+    """What fraction of ``dot`` the dots in ``over`` together paint, by sampling its disc."""
+    golden = math.pi * (3.0 - math.sqrt(5.0))
+    hidden = 0
+    for i in range(COVER_SAMPLES):
+        r = radius * math.sqrt((i + 0.5) / COVER_SAMPLES)
+        angle = i * golden
+        px, py = dot.x + r * math.cos(angle), dot.y + r * math.sin(angle)
+        if any(math.hypot(px - o.x, py - o.y) <= radius for o in over):
+            hidden += 1
+    return hidden / COVER_SAMPLES
+
+
+def hiding(dots: list[PlacedDot], radius: float) -> Hiding:
+    """How much of each dot the dots of other locations, drawn after it, paint over.
+
+    The renderer draws one location at a time at one zorder, so every dot of a location drawn
+    later is over every dot of one drawn earlier; a dot with no fill paints nothing. Within a
+    location the dots overlap by design and are not counted. Reported because a map that drops
+    a tenth of its locations behind their neighbours should say so rather than look complete
+    (Q280; design rules 1 and 9).
+    """
+    filled = [d for d in dots if d.filled]
+    covered: dict[str, list[bool]] = {}
+    half = mostly = 0
+    worst = 0.0
+    for dot in dots:
+        over = [
+            d
+            for d in filled
+            if d.order > dot.order and math.hypot(d.x - dot.x, d.y - dot.y) < 2 * radius
+        ]
+        share = _covered(dot, over, radius) if over else 0.0
+        worst = max(worst, share)
+        half += share >= HALF_COVERED
+        mostly += share >= MOSTLY_COVERED
+        covered.setdefault(dot.location, []).append(share >= MOSTLY_COVERED)
+    return Hiding(
+        dots=len(dots),
+        half_covered=half,
+        mostly_covered=mostly,
+        invisible_locations=sum(1 for flags in covered.values() if all(flags)),
+        worst=worst,
+    )
 
 
 def ring_capacity(ring: int) -> int:
@@ -221,7 +325,7 @@ def _render_period(
     look: Look,
     no_coordinates: Counter[str],
     moved_inside: Counter[str],
-) -> int:
+) -> PeriodDrawn:
     import cartopy.crs as ccrs
     import matplotlib
 
@@ -250,7 +354,8 @@ def _render_period(
             linewidth=look.outline_width,
         )  # fmt: skip
         drawn = 0
-        for location in period["locations"]:
+        placed: list[PlacedDot] = []
+        for order, location in enumerate(period["locations"]):
             dots = [p for p in location["points"] for _ in range(int(p["count"]))]
             where = coordinates(location["name"])
             if where is None:
@@ -282,6 +387,12 @@ def _render_period(
                 xs, ys, s=look.dot_diameter**2, c=fills, edgecolors=edges, linewidths=widths,
                 transform=centred, zorder=3,
             )  # fmt: skip
+            # the same dots in figure points, where a dot is a circle, for what hides what
+            placed += [
+                PlacedDot(location["name"], order, x / lon_per_point, y / lat_per_point,
+                          fill != "none")
+                for x, y, fill in zip(xs, ys, fills, strict=True)
+            ]  # fmt: skip
             drawn += len(dots)
         _title(fig, ax, period.get("title", period["period"]), look)
         fig.savefig(path)
@@ -289,7 +400,7 @@ def _render_period(
         plt.close(fig)
     if not path.is_file() or path.stat().st_size == 0:
         raise GeoRenderError(f"no map written: {path}")
-    return drawn
+    return PeriodDrawn(drawn, hiding(placed, look.dot_diameter / 2.0))
 
 
 def _title(fig: Any, ax: Any, title: str, look: Look) -> None:

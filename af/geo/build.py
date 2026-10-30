@@ -171,6 +171,8 @@ def build_geo(
             "subtype": subtype,
             "store_refs": slot_provenance["store_refs"],
             "drawn": written.drawn,
+            # per month, the dots neighbouring locations cover (af.geo.render.Hiding, Q280)
+            "hidden_by_neighbours": {m: h.to_json() for m, h in sorted(written.hiding.items())},
             "no_coordinates": dict(sorted(written.no_coordinates.items())),
             "moved_inside_edge": dict(sorted(written.moved_inside.items())),
             "undated": doc["undated"],
@@ -245,6 +247,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )  # fmt: skip
     for slot, info in record["slots"].items():
         print(f"{slot:6s} {sum(info['drawn'].values()):6d} dots  {info['drawn']}")
+        hidden = info["hidden_by_neighbours"].values()
+        unreadable = sum(h["mostly_covered"] for h in hidden)
+        if unreadable:  # said out loud, as the unpainted clades are: never a silent count
+            places = sum(h["invisible_locations"] for h in hidden)
+            print(
+                f"{'':6s} {unreadable:6d} of those dots are covered by a neighbouring "
+                f"location's, {places} location(s) entirely"
+            )
     return 0
 
 

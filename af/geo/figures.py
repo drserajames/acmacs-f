@@ -23,7 +23,7 @@ from typing import Any
 
 from af.geo.colours import placement_warning, unpainted_warning
 from af.geo.records import CLADE_NOT_DEFINED, CLADE_NOT_IN_SCHEME, NOT_SEQUENCED
-from af.geo.render import Coordinates, Look, render_period, uncoloured_style
+from af.geo.render import Coordinates, Hiding, Look, render_period, uncoloured_style
 from af.geo.style import look_record
 from af.map.style import ColourScheme as MapColourScheme
 from af.report.i7 import I7_NAME, I7_VERSION, validate
@@ -83,6 +83,8 @@ def placement_records(placed: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
 class FiguresReport:
     files: list[Path] = field(default_factory=list)
     drawn: dict[str, int] = field(default_factory=dict)  # month -> dots drawn
+    # month -> how many of those dots neighbouring locations cover (af.geo.render.Hiding)
+    hiding: dict[str, Hiding] = field(default_factory=dict)
     no_coordinates: Counter[str] = field(default_factory=Counter)  # location -> dots
     # location -> dots in clusters moved inward so the map's edge cuts none (af.geo.render)
     moved_inside: Counter[str] = field(default_factory=Counter)
@@ -103,8 +105,10 @@ def write_geo_figures(
     """Write every period of one subtype's I7 ``geo`` document as a report figure.
 
     ``provenance`` goes into each I7 as given (the store versions and tables the dots and
-    colours came from); the month's dot count and any locations it could not place are added,
-    so a thin map says why on its own page. A month with dots left unpainted by clade evidence
+    colours came from); the month's dot count, any locations it could not place, and how many
+    of its dots neighbouring locations are drawn over are added, so a thin map says why on its
+    own page and a crowded one does not look complete (``hidden_by_neighbours``, Q280).
+    A month with dots left unpainted by clade evidence
     gets ``provenance.decisions.unpainted_clades`` with the warning, and the warning is printed
     (Sarah, 8 Oct 2026: a warning, never a silent count); ``scheme`` names the colour scheme.
     """
@@ -116,9 +120,9 @@ def write_geo_figures(
         pdf = folder / "figure.pdf"
         unplaced: Counter[str] = Counter()
         moved: Counter[str] = Counter()
-        report.drawn[month] = render_period(
-            period, coordinates, coastline, pdf, look, unplaced, moved
-        )
+        got = render_period(period, coordinates, coastline, pdf, look, unplaced, moved)
+        report.drawn[month] = got.dots
+        report.hiding[month] = got.hiding
         report.no_coordinates.update(unplaced)
         report.moved_inside.update(moved)
         decisions: dict[str, Any] = {}
@@ -143,6 +147,8 @@ def write_geo_figures(
                 "producer": "af.geo.figures",
                 "look": look_record(look if look is not None else Look()),
                 "drawn": report.drawn[month],
+                # dots a neighbouring location's dots are drawn over, counted not silent (Q280)
+                "hidden_by_neighbours": got.hiding.to_json(),
                 "no_coordinates": dict(sorted(unplaced.items())),
                 # a cluster at the seam (168.24 W) moved inward until no dot is cut: its dots
                 "moved_inside_edge": dict(sorted(moved.items())),
