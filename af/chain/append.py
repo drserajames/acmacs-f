@@ -1,11 +1,16 @@
 """A monthly chain that keeps its published order: `[tables] order = "append-to-published"`.
 
-Sarah, Q164 (13 Oct 2026), "cut-off only": a table that arrives after a month's cut-off joins the
+Sarah, Q164 (13 Oct 2026), "cut-off only", restated as Q285 (31 Oct: "add the tables in order of
+arrival not date for late tables"): a table that arrives after a month's cut-off joins the
 chain at its END, whatever its test date, and is recorded as late; earlier months' maps never
 change. So the chain's published CURRENT version fixes the order of every table it holds (the
 prefix), and the tables selected today that it does not hold follow, in date order, as this
 month's arrivals. One that is dated before the prefix's latest table is LATE. "Arrival order" is
-thereby the run a table first appeared in; no arrival time is needed. Every prefix step is reused
+thereby the run a table first appeared in; no arrival time is needed. Tables that first appear in
+the same run (two late tables in one update, or a late one beside an on-time one) follow in
+(date, suffix) order, the order a dataset's tables always have, so the tie-break is deterministic
+and needs no clock either; a table arriving in a later run follows them whatever its date. Every
+prefix step is reused
 untouched (a step is keyed by the one before it), so a month costs one step per new table.
 
 "Earlier months' maps never change" is checked exactly, on what keys a step (03, 18 Oct 2026):

@@ -59,6 +59,33 @@ def test_new_tables_follow_the_published_order_and_late_ones_are_recorded():
                                  "published_version": "v1"}  # fmt: skip
 
 
+def test_tables_first_seen_in_one_run_follow_in_date_and_suffix_order():
+    """Q285: two late tables in one update, one of them a second table on its date, beside an
+    on-time one. Today's selection comes in (date, suffix) order and the tail keeps it."""
+    feb20b = _t("t-feb20.2", 2, 20, suffix=2)
+    jan20 = _t("t-jan20", 1, 20)
+    shas = {**SHAS, "t-feb20.2": "s6", "t-jan20": "s7"}
+    o = _order([JAN, jan20, FEB, FEB20, feb20b, MAR, APR], shas=shas)
+    assert [t.table_id for t in o.tables] == [
+        "t-jan",
+        "t-feb",
+        "t-mar",
+        "t-jan20",
+        "t-feb20",
+        "t-feb20.2",
+        "t-apr",
+    ]
+    assert set(o.late) == {"t-jan20", "t-feb20", "t-feb20.2"} and o.prefix == 3
+
+
+def test_a_late_table_follows_every_table_that_arrived_before_it():
+    """Arrival beats date across runs: t-apr arrived in v2, t-feb20 (dated earlier) in v3."""
+    v2 = Published("v2", [*PUBLISHED.tables, ("t-apr", "s5")])
+    o = _order([JAN, FEB, FEB20, MAR, APR], published=v2)
+    assert [t.table_id for t in o.tables] == ["t-jan", "t-feb", "t-mar", "t-apr", "t-feb20"]
+    assert o.late["t-feb20"]["published_until"] == "2021-04-15"
+
+
 def test_a_revised_table_stops_the_run_and_says_what_a_rerun_costs():
     with pytest.raises(RevisedTablesError) as e:
         _order([JAN, FEB, MAR, APR], shas={**SHAS, "t-feb": "s2-new"})
