@@ -131,7 +131,9 @@ jobs:
       # man pages, and re-indexing them is slow on some runners); whether that shortens
       # the tail is unmeasured. apt retries downloads and waits a bounded time for the
       # dpkg lock. texlive-fonts-recommended: the report sets Times (psnfss times, ptmr8t), as the
-      # delivered report does; latex-extra alone has no Times metrics.
+      # delivered report does; latex-extra alone has no Times metrics. poppler-utils: pdftoppm
+      # and pdfinfo for the side-by-side documents' pixel measure (af.report.compare.pixels);
+      # skipped on macOS with pdflatex, which those documents also need.
       - name: LaTeX (Linux)
         if: runner.os == 'Linux'
         timeout-minutes: 25
@@ -141,7 +143,7 @@ jobs:
           apt="-o Acquire::Retries=3 -o DPkg::Lock::Timeout=120"
           sudo apt-get $apt update
           sudo apt-get $apt install -y --no-install-recommends texlive-latex-extra \
-            texlive-fonts-recommended
+            texlive-fonts-recommended poppler-utils
       # Apple clang on macOS: conda-forge's clang cannot link with recent Xcode linkers
       # (`-lto_library` rejected); Apple clang gives bit-identical optimiser results.
       - name: Install af into the environment
@@ -152,5 +154,5 @@ jobs:
         run: |
           set -o pipefail
           skip=""
-          if [ "$RUNNER_OS" = macOS ]; then skip="--skip-tool pdflatex"; fi
+          if [ "$RUNNER_OS" = macOS ]; then skip="--skip-tool pdflatex --skip-tool pdftoppm"; fi
           python -m pytest -m tool --require-tools $skip -rs | tee tools.log

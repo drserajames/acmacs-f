@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from af.report.compare import ae_hash, geo, maps, trees
+from af.report.compare import ae_hash, geo, maps, sidebyside, trees
 from af.report.howmade import figure_warnings
 from af.store import Store
 from af.store.work import PathsConfig
@@ -805,6 +805,13 @@ def main(argv: list[str] | None = None) -> int:
     labs = {lab.code: lab for lab in read_labs(args.labs)}
     report_md = markdown(manifest, rows, args.limits.name, args.match, limits.adoption, sides, labs)
     (args.out / "COMPARISON.md").write_text(report_md)
+    # The same comparison drawn: every map with a reference, with its Procrustes arrows (Sarah,
+    # 30 Oct 2026), beside COMPARISON.md.
+    pairs = sidebyside.reference_pairs(manifest, args.reference)
+    if pairs:
+        name = f"{manifest.get('report')}-{sidebyside.PROCRUSTES}-vs-reference.pdf"
+        sides_text = (sides.new, sides.ref)
+        sidebyside.write_procrustes(pairs, sides_text, [], args.out / name, how=args.match)
     missing = sum(r["status"] == "no reference" for r in rows)
     print(
         f"{len(rows)} figures, {failed} failing, {missing} without reference "

@@ -279,6 +279,9 @@ class Fit:
     rmsd: float
     rotation_deg: float
     reflected: bool
+    # ``b`` after the fit, in ``a``'s coordinates: what the distances were measured between, so a
+    # drawing of the fit (af.report.compare.arrows) shows exactly what the numbers report.
+    fitted: tuple[XY, ...] = ()
 
 
 def _centre(points: Sequence[XY]) -> tuple[list[XY], XY]:
@@ -304,15 +307,18 @@ def procrustes(a: Sequence[XY], b: Sequence[XY]) -> Fit:
     """Fit ``b`` onto ``a`` by rotation, optional reflection (y -> -y) and translation."""
     if len(a) != len(b) or len(a) < 3:
         raise ValueError("procrustes needs two equal lists of at least 3 points")
-    a0, _ = _centre(a)
+    a0, (ax, ay) = _centre(a)
     b0, _ = _centre(b)
     theta, dist = _rotation_fit(a0, b0)
     theta_r, dist_r = _rotation_fit(a0, [(x, -y) for x, y in b0])
     reflected = sum(d * d for d in dist_r) < sum(d * d for d in dist) - 1e-12
     if reflected:
         theta, dist = theta_r, dist_r
+        b0 = [(x, -y) for x, y in b0]
+    c, s = math.cos(theta), math.sin(theta)
+    fitted = tuple((x * c - y * s + ax, x * s + y * c + ay) for x, y in b0)
     rmsd = math.sqrt(sum(d * d for d in dist) / len(dist))
-    return Fit(dist, rmsd, math.degrees(theta), reflected)
+    return Fit(dist, rmsd, math.degrees(theta), reflected, fitted)
 
 
 # Largest single displacement (units) below which two layouts count as the same up to rotation and
@@ -498,8 +504,12 @@ def clade_centroids(pairs: list[tuple[str, Point, Point]], min_points: int = 10)
     return result
 
 
-def compare(ref: dict[str, Any], new: dict[str, Any], how: str = "name") -> dict[str, Any]:
-    """Compare two map I7 documents; see the module docstring for what each number means."""
+def matched(
+    ref: dict[str, Any], new: dict[str, Any], how: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The antigen and serum matching of two map I7 documents, as :func:`compare` reads them
+    (sera with the map's lab token dropped and Sarah's serum-id rules applied), each with its
+    ``_pairs``: (key, reference point, new point) for every point drawn on both sides."""
     rm, nm = ref["map"], new["map"]
     if rm.get("y_axis") != nm.get("y_axis"):
         # A y-down map against a y-up one would fit through the mirror and report every map as
@@ -519,6 +529,12 @@ def compare(ref: dict[str, Any], new: dict[str, Any], how: str = "name") -> dict
     if lab:
         sera["serum_id_lab_dropped"] = {"lab": lab, "ref": ref_dropped, "new": new_dropped}
     sera["serum_id_normalised"] = {"ref": ref_rules, "new": new_rules}
+    return antigens, sera
+
+
+def compare(ref: dict[str, Any], new: dict[str, Any], how: str = "name") -> dict[str, Any]:
+    """Compare two map I7 documents; see the module docstring for what each number means."""
+    antigens, sera = matched(ref, new, how)
     ag_pairs, sr_pairs = antigens.pop("_pairs"), sera.pop("_pairs")
     out: dict[str, Any] = {
         "ref": ref["title"], "new": new["title"], "match": how,
