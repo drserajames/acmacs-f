@@ -10,7 +10,10 @@ here, not in config, so no config can change what beats what:
    GISAID host is wrong (EPI_ISL, accession, reason); they pass it and are counted as added;
 2. ``include_list`` (R7) adds listed records back that a filter removed;
 3. ``qc`` (R3) applies to everything, included records too;
-4. ``exclude_list`` (R6) removes listed records; exclude beats include;
+4. ``exclude_list`` (R6) removes listed records; exclude beats include.
+   A list names isolates: a row matches **every** stored accession of its EPI_ISL, whatever
+   accession it gives (Q281 a). GISAID gives one isolate an accession per linked submission and
+   can re-issue one, so a list keyed by the pair stopped matching without a word;
 5. ``low_divergence`` removes records far too close to the outgroup for their collection year
    (:func:`_low_divergence`). It runs last because "expected for the year" is measured on
    what the other rules left;
@@ -332,16 +335,20 @@ def _keys(store: Store, ref: StoreRef) -> frozenset[Key]:
 
 
 def _listed(rule: Rule, records: dict[Key, _Record]) -> set[Key]:
-    """Keys of the list file that are in this store version; the rest match nothing yet."""
+    """Every stored record of an EPI_ISL the list names, under any accession (Q281 a).
+
+    The row's accession says which submission the list was written against; it does not limit
+    the match. EPI_ISLs not in this store version match nothing yet.
+    """
     assert rule.file is not None
     want = rule.kind.removesuffix("_list")
     lines = [line for line in rule.file.read_text().splitlines() if not line.startswith("#")]
-    keys = {
-        (row["epi_isl"], row["accession"])
+    epi_isls = {
+        row["epi_isl"]
         for row in csv.DictReader(lines, delimiter="\t")
         if row.get("list", want) == want and row["epi_isl"]
     }
-    return keys & records.keys()
+    return {key for key in records if key[0] in epi_isls}
 
 
 def _host_overrides(rule: Rule, records: dict[Key, _Record]) -> set[Key]:
