@@ -101,6 +101,22 @@ def designation(a: Any) -> str:
     )
 
 
+def mover_designations(chart: Chart) -> list[str]:
+    """How a move or block names its movers: each antigen's designation, date stripped, except
+    where several preparations share it, which are told apart by their passage date as the chart
+    writes it ("<name> MDCK2 (2020-01-12)"). A shared name could only ever match several
+    antigens, which a mover refuses (design rule 1), so a group with twin preparations could not
+    all be moved (Sarah, Q284 b, 31 Oct 2026: move all 48). Hides keep the dateless form: a hide
+    by name means every preparation of it."""
+    plain = [designation(a) for a in chart.antigens]
+    shared = {d for d, n in Counter(plain).items() if n > 1}
+    return [
+        " ".join(p for p in (a.name, a.reassortant, *a.annotations, a.passage) if p)
+        if d in shared else d
+        for a, d in zip(chart.antigens, plain, strict=True)
+    ]  # fmt: skip
+
+
 def clade_labels(a: Any) -> frozenset[str]:
     """Clade and aa labels the chart carries for this antigen (semantic attribute "C")."""
     return frozenset((a.extra.get("T") or {}).get("C") or ())
@@ -266,7 +282,7 @@ def apply_moves(
 ) -> tuple[np.ndarray, list[str], list[dict[str, Any]]]:
     """Run the map's kept moves in order. A refused move leaves the layout alone and is flagged
     on the figure rather than stopping the build: the reader should see that it was refused."""
-    designations = [designation(a) for a in chart.antigens]
+    designations = mover_designations(chart)
     flags: list[str] = []
     reports: list[dict[str, Any]] = []
     current = stress(layout)
@@ -633,7 +649,7 @@ def build_map(
             result_b = apply_block_offset(
                 rule_b,
                 layout,
-                [designation(a) for a in chart.antigens],
+                mover_designations(chart),
                 painted,
                 stress_before=stress(layout),
                 relax=relax,
