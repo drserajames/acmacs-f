@@ -142,6 +142,9 @@ class BlockOffsetConfig:
     max_other_move: float
     movers_file: Path | None = None
     to: str | None = None
+    # "start" (a fixed shift only): settled = the movers still within settled_within of where the
+    # shift put them after the relax, for a block aimed at a place rather than at a legend row.
+    settled_against: str = "target"
 
     def load_movers(self) -> tuple[str, ...]:
         return _movers(self.name, self.movers, self.movers_file)

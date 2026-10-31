@@ -321,3 +321,26 @@ def test_a_block_records_every_guard_and_flags_one_near_its_cap() -> None:
     # both movers settled, against a minimum of 2: on the cap, so flagged; the others are far
     flags = near_cap_flags("block", "b", True, result.checks)
     assert flags == ["block 'b' applied within 5% of its settled cap: 2.0000 against 2"]
+
+
+def test_a_block_aimed_at_a_place_counts_movers_that_stayed_where_they_were_put() -> None:
+    """settled_against = "start" (Sarah, Q284 b): a group moved whole has no other points of its
+    colour to aim at; settled counts the movers still where the shift put them after the relax,
+    and a relax that pulls them back is refused."""
+    whole = block_rule(target_colour="", settled_against="start", shift=(-4.0, 3.0))
+    painted = [BLUE, BLUE, BLUE, RED, RED, BLUE, BLUE]  # no other point has the movers' colour
+    with pytest.raises(CurationError, match="no points painted"):  # the legend guard, as before
+        apply_block_offset(block_rule(target_colour=RED), LAYOUT, NAMES, painted,
+                           stress_before=0.0, relax=no_relax)  # fmt: skip
+    kept = apply_block_offset(whole, LAYOUT, NAMES, painted, stress_before=0.0, relax=no_relax)
+    assert kept.settled == 2 and kept.report(whole)["settled_against"] == "start"
+
+    def drift_back(start: np.ndarray, movable: np.ndarray) -> tuple[np.ndarray, float]:
+        out = start.copy()
+        out[[3, 4]] = LAYOUT[[3, 4]]  # the relax returns the movers to where they were
+        return out, 0.0
+
+    with pytest.raises(CurationError, match="0 of 2 movers settled"):
+        apply_block_offset(whole, LAYOUT, NAMES, painted, stress_before=0.0, relax=drift_back)
+    with pytest.raises(ValueError, match="needs a fixed shift"):
+        block_rule(settled_against="start", shift=None, derived_from=None, to="target-median")

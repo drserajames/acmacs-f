@@ -354,6 +354,11 @@ class BlockOffset:
     ``max_stress_rise``; at least ``min_settled`` of the movers must end within ``settled_within``
     of the median of the points painted ``target_colour``; and no other point may move more than
     ``max_other_move`` once the map is rigidly fitted back onto its old self.
+
+    ``settled_against = "start"`` (a fixed shift only; Sarah, Q284 b, 31 Oct 2026): a block aimed
+    at a place, not at a legend row, counts as settled the movers still within ``settled_within``
+    of where the shift put them once the relax is done and fitted back; no target row is needed.
+    Without it, a group moved whole has no other points of its colour left to aim at.
     """
 
     name: str
@@ -369,8 +374,18 @@ class BlockOffset:
     min_settled: int
     max_other_move: float
     to: str | None = None  # "target-median": shift computed from the layout, not given
+    settled_against: str = "target"  # or "start": where the shift put the movers
 
     def __post_init__(self) -> None:
+        if self.settled_against not in (SETTLED_AT_TARGET, SETTLED_AT_START):
+            raise ValueError(
+                f"block {self.name!r}: settled_against must be {SETTLED_AT_TARGET!r} or "
+                f"{SETTLED_AT_START!r}, not {self.settled_against!r}"
+            )
+        if self.settled_against == SETTLED_AT_START and self.to is not None:
+            raise ValueError(
+                f"block {self.name!r}: settled_against = {SETTLED_AT_START!r} needs a fixed shift"
+            )
         if self.to is None:
             if self.shift is None or not self.derived_from:
                 raise ValueError(f"block {self.name!r}: a fixed shift needs shift and derived_from")
@@ -386,6 +401,8 @@ class BlockOffset:
 
 
 TO_TARGET_MEDIAN = "target-median"
+SETTLED_AT_TARGET = "target"
+SETTLED_AT_START = "start"
 
 
 @dataclass(frozen=True)
@@ -402,6 +419,8 @@ class BlockResult:
 
     def report(self, rule: BlockOffset) -> dict[str, object]:
         placed = {"to": rule.to} if rule.to else {"derived_from": rule.derived_from}
+        if rule.settled_against != SETTLED_AT_TARGET:
+            placed["settled_against"] = rule.settled_against
         return {
             "override": rule.name,
             "reason": rule.reason,
@@ -454,7 +473,7 @@ def apply_block_offset(
         and i not in movers
         and has_xy[i]
     ]
-    if not group:
+    if not group and rule.settled_against == SETTLED_AT_TARGET:
         raise CurationError(
             f"block {rule.name!r}: no points painted {rule.target_colour} by {rule.colour_scheme}",
             guard="target_points",
@@ -487,8 +506,12 @@ def apply_block_offset(
     fit = procrustes(out[others], layout[others], reflection=False)
     fitted = out @ fit.matrix + fit.translation
     largest_other = float(np.linalg.norm(fitted[others] - layout[others], axis=1).max())
-    centre = np.median(fitted[group], axis=0)
-    settled = int((np.linalg.norm(fitted[rows] - centre, axis=1) <= rule.settled_within).sum())
+    if rule.settled_against == SETTLED_AT_START:
+        put = np.linalg.norm(fitted[rows] - start[rows], axis=1)
+        settled = int((put <= rule.settled_within).sum())
+    else:
+        centre = np.median(fitted[group], axis=0)
+        settled = int((np.linalg.norm(fitted[rows] - centre, axis=1) <= rule.settled_within).sum())
     degrees = decompose(fit.matrix)[0]
     checks = (
         GuardCheck("stress_rise", stress_after - stress_before, rule.max_stress_rise, "max"),

@@ -52,6 +52,7 @@ from af.map.addenda import (
 from af.map.colouring import MapColouringError, StoreColours
 from af.map.config import FrameShiftConfig, MapConfig, MapsConfig, TitlesConfig
 from af.map.curate import (
+    SETTLED_AT_START,
     BlockOffset,
     CurationError,
     MoveOverride,
@@ -626,7 +627,7 @@ def build_map(
         decisions["moves"] = move_reports
     for b in cfg.blocks:
         row_b = next((r for r in scheme.rows if r.legend == b.target_legend), None)
-        if row_b is None:
+        if row_b is None and not (b.settled_against == SETTLED_AT_START and not b.target_legend):
             raise BuildError(
                 f"{cfg.folder}: block {b.name!r} targets unknown legend row {b.target_legend!r}"
             )
@@ -638,12 +639,13 @@ def build_map(
             b.shift,
             b.derived_from,
             scheme.name,
-            row_b.colour,
+            row_b.colour if row_b is not None else "",
             b.max_stress_rise,
             b.settled_within,
             b.min_settled,
             b.max_other_move,
             to=b.to,
+            settled_against=b.settled_against,
         )
         try:
             result_b = apply_block_offset(
