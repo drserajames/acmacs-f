@@ -249,6 +249,9 @@ class MapConfig:
     # one at a time, each once its loss against the round's colours is within the agreed limit
     # (Sarah, 29 Sep: "map by map now").
     colouring: str | None = None
+    # The map's labels placed by hand (af.map.hand): one file per map, beside the config. Named
+    # means it must exist; a file of comments only has no rows.
+    hand_labels: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.chain and not self.layout_stand_in:

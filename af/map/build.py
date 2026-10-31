@@ -62,6 +62,7 @@ from af.map.curate import (
 )
 from af.map.figure import chart_points
 from af.map.finish import finish_map, shared_frame
+from af.map.hand import load_hand_labels
 from af.map.labels import LabelAbbreviations, label_text
 from af.map.new_antigens import new_antigen_styles, outlines_on_page
 from af.map.orient import Orientation, RotationOverride, drawn_pairs, orient
@@ -785,6 +786,15 @@ def build_map(
     title_base = map_title(chart, cfg.title, config.titles)
     if fonts is not None:  # the font files the figure is drawn in (rule 5)
         inputs.update(fonts.inputs())
+    hand = None
+    if cfg.hand_labels is not None:
+        # the map's labels placed by hand (af.map.hand): an input, and its rows recorded (rule 9)
+        hand = load_hand_labels(cfg.hand_labels)
+        inputs["hand_labels"] = {
+            "path": str(cfg.hand_labels),
+            "sha256": hashlib.sha256(cfg.hand_labels.read_bytes()).hexdigest(),
+        }
+        decisions["hand_labels"] = hand.record(cfg.hand_labels)
     outlines: dict[str, PointStyle] | None = None
     outline_record: list[dict[str, Any]] = []
     if config.new_antigen_outlines:
@@ -853,6 +863,7 @@ def build_map(
             flags=flags,
             look=look,
             styles=page_styles,
+            hand=hand,
         )
         figures.append(result.i7)
     return MapResult(
