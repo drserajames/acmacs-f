@@ -42,7 +42,7 @@ FORBIDDEN_PACKAGES = (
 #: af.map modules on the af side of the line (flu, round configuration, af's figure format).
 FORBIDDEN_MAP_MODULES = (
     "af.map.vaccines", "af.map.colouring", "af.map.matching", "af.map.build", "af.map.config",
-    "af.map.roundconfig", "af.map.i7",
+    "af.map.roundconfig", "af.map.i7", "af.map.hand",
 )  # fmt: skip
 #: Influenza words that mean the code is interpreting viruses. ("reassortant" is not here: it is
 #: a field of the acmacs chart format, read and written by af.chart as data.)
@@ -70,8 +70,9 @@ MIXED: dict[str, tuple[set[str], set[str], str]] = {
         "'egg'/'uglyegg' are marker SHAPE names, not passages (fine)",
     ),
     "af/map/finish.py": (
-        {"af.map.i7"}, {"vaccine"},
-        "frame/labels/PDF assembly is core; writing af's I7 description is af-side",
+        {"af.map.i7", "af.map.hand"}, {"vaccine"},
+        "frame/labels/PDF assembly is core; writing af's I7 description and reading a round's "
+        "hand labels file are af-side",
     ),
     "af/map/style.py": (
         {"af.map.vaccines"}, {"egg", "passage_class", "strain", "vaccine"},
@@ -95,6 +96,7 @@ AF_SIDE = {
     "af/map/circles.py",  # draws af.chart.serum_circles records: the addenda's serum circles
     "af/map/addenda.py",  # the addenda pass: serum selection and circles over a round's maps
     "af/map/new_antigens.py",  # the interim reports' new-antigen outlines: table dates, rounds
+    "af/map/hand.py",  # a round's labels placed by hand: points by name + passage, who and when
 }  # fmt: skip
 
 
