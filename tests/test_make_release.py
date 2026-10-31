@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -753,3 +754,14 @@ def test_the_fonts_probe_reads_this_environments_af(mr: ModuleType) -> None:
     mono = af.fonts.source()["courier_prime"]
     assert found["courier_prime"] == {k: mono[k] for k in ("url", "sha256", "version")}
     assert (Path(found["directory"]) / af.fonts.SOURCE_FILE).is_file()
+
+
+def test_release_skips_the_tools_ci_skips_on_macos(mr: ModuleType) -> None:
+    """A release env, like CI's macOS job, has no system TeX or poppler. If the lists drift, a
+    release either fails on a tool it never had (2b2f439, pdftoppm) or skips one it could test."""
+    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    lines = [line for line in ci.splitlines() if "RUNNER_OS" in line and "--skip-tool" in line]
+    assert len(lines) == 1, lines
+    assert sorted(re.findall(r"--skip-tool (\S+?)\"?(?=\s|;|$)", lines[0])) == sorted(
+        mr.UNPROVIDED_TOOLS
+    )

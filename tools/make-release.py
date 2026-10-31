@@ -27,7 +27,7 @@ It makes ``<releases>/<sha12>/`` containing:
   (LDFLAGS, CPPFLAGS, …) are not inherited;
 - checks: af and its compiled optimisers import from inside the release; ``af.run.smoke
   --local`` passes; the optimisers built here keep their arithmetic (below); every tool test
-  passes with ``--require-tools`` (pdflatex excepted);
+  passes with ``--require-tools`` (``UNPROVIDED_TOOLS`` excepted);
 - ``RELEASE.toml`` (commit, compiler, arithmetic, figure fonts, versions, host, time),
   ``conda-explicit.txt`` and ``pip-freeze.txt``, written last. The whole tree is then made
   read-only;
@@ -267,7 +267,8 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
         )
         step("tool tests", "tool_tests")
         tool_tests = [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-m", "tool"]
-        run([*tool_tests, "--require-tools", "--skip-tool", "pdflatex"], build_env, cwd=scratch)
+        skips = [arg for name in UNPROVIDED_TOOLS for arg in ("--skip-tool", name)]
+        run([*tool_tests, "--require-tools", *skips], build_env, cwd=scratch)
 
     step("recording", "record")
     lock = capture(
@@ -693,6 +694,10 @@ def verify_one_openmp(python: str, env: dict[str, str]) -> None:
             f"two OpenMP runtimes? {result.stderr.strip()[-400:]}"
         )
 
+
+# System tools environment.yml does not provide, so a release cannot run their tool tests. CI's
+# macOS job skips the same list; tests/test_make_release.py holds the two together.
+UNPROVIDED_TOOLS = ("pdflatex", "pdftoppm")
 
 NUMERICS_TESTS = "tests/map/test_numerics.py"
 NUMERICS_PROBE = (
