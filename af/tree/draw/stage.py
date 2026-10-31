@@ -84,14 +84,18 @@ class TreeResult:
     cache: dict[str, CacheResult] = field(default_factory=dict)  # per part
 
 
-def outputs(part: str, pdf: Path) -> dict[str, Path]:
-    """Entry file name -> where it is written, for one part."""
+def outputs(part: str, pdf: Path, editor: bool = False) -> dict[str, Path]:
+    """Entry file name -> where it is written, for one part (``editor``: the figure's label
+    editor too, FigureConfig.label_editor)."""
     if part == "figure":
-        return {
+        out = {
             "figure.pdf": pdf,
             "figure.i7.json": pdf.with_suffix(".i7.json"),
             "figure.draw.json": pdf.with_suffix(".draw.json"),
         }
+        if editor:
+            out["figure.labels.html"] = pdf.with_suffix(".labels.html")
+        return out
     return {"book.pdf": pdf, "book.book.json": pdf.with_suffix(".book.json")}
 
 
@@ -116,7 +120,8 @@ def draw_trees(
     results = {job.name: TreeResult({}) for job in jobs}
     for job in jobs:
         for part, pdf in _parts(job):
-            hit = reuse(cache, _key(job, part), code, outputs(part, pdf), _step(job, part))
+            files = outputs(part, pdf, bool(job.config.label_editor))
+            hit = reuse(cache, _key(job, part), code, files, _step(job, part))
             results[job.name].cache[part] = hit
             if not hit.hit:
                 todo.append((job, part, pdf))
@@ -126,7 +131,8 @@ def draw_trees(
         lines = "\n".join(f"  - {name}: {error}" for name, error in failures)
         raise TreeStageError(f"{len(failures)} tree part(s) failed:\n{lines}")
     for job, part, pdf in todo:
-        keep(cache, _key(job, part), code, outputs(part, pdf), _step(job, part))
+        files = outputs(part, pdf, bool(job.config.label_editor))
+        keep(cache, _key(job, part), code, files, _step(job, part))
     for job in jobs:
         results[job.name].report = _report(job)
     return results

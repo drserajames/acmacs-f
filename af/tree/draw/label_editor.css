@@ -1,0 +1,55 @@
+/* The tree label editor (af.tree.draw.editor): the figure on the left, the panel on the right. */
+:root {
+  --ink: #1f2328;
+  --muted: #59636e;
+  --line: #d1d9e0;
+  --panel: #f6f8fa;
+  --accent: #0969da;
+  --refused: #cf222e;
+  --warned: #bf8700;
+  --moved: #8250df;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  color: var(--ink);
+  background: #fff;
+}
+#stage { overflow: auto; background: #e8ebef; }
+#stage svg { display: block; margin: 16px auto; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .2); }
+#panel { overflow: auto; border-left: 1px solid var(--line); background: var(--panel); padding: 12px 14px 40px; }
+#panel h1 { font-size: 15px; margin: 0 0 2px; }
+#panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 0 6px; }
+#panel .sub { color: var(--muted); font-size: 12px; word-break: break-all; }
+#panel label { display: block; margin: 6px 0 2px; font-weight: 600; }
+#panel input[type=text], #panel textarea { width: 100%; font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+#panel textarea { min-height: 44px; resize: vertical; }
+#panel .need { border-color: var(--refused); }
+#panel button { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; background: #fff; cursor: pointer; }
+#panel button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+#panel .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+#panel .counts span { margin-right: 10px; }
+#panel ul { list-style: none; padding: 0; margin: 0; }
+#panel li { padding: 3px 4px; border-radius: 3px; cursor: pointer; }
+#panel li:hover { background: #eaeef2; }
+#panel .refused { color: var(--refused); }
+#panel .warned { color: var(--warned); }
+#panel .moved { color: var(--moved); }
+#panel .help { color: var(--muted); font-size: 12px; }
+#message { white-space: pre-wrap; font-size: 12px; margin-top: 6px; }
+.lab { cursor: grab; }
+.lab.drag { cursor: grabbing; }
+.lab text { fill: #4d4d4d; stroke: #4d4d4d; paint-order: stroke; }
+.lab .hit { fill: transparent; }
+.lab .box { fill: none; stroke: none; stroke-width: .4; }
+.boxes .lab .box { stroke: #9aa4ae; }
+.lab.moved .box { stroke: var(--moved); }
+.lab.warned .box { stroke: var(--warned); stroke-width: .8; }
+.lab.refused .box { stroke: var(--refused); stroke-width: 1; }
+.lab.selected .box { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 2 1; }
+.leader { stroke: #4d4d4d; stroke-width: .35; }
+.node { fill: var(--accent); display: none; }
+.lab.selected + .node, .node.on { display: inline; }

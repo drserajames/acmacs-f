@@ -19,6 +19,7 @@ import matplotlib
 matplotlib.use("pdf")
 import matplotlib.pyplot as plt  # noqa: E402  (after the backend is chosen)
 import numpy as np  # noqa: E402
+from matplotlib import font_manager  # noqa: E402
 from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.collections import LineCollection, PolyCollection  # noqa: E402
 from matplotlib.font_manager import FontProperties  # noqa: E402
@@ -27,6 +28,7 @@ from matplotlib.patheffects import withStroke  # noqa: E402
 from matplotlib.textpath import TextPath  # noqa: E402
 
 from .aa_labels import AALabel  # noqa: E402
+from .editor import EditorRequest, write_editor  # noqa: E402
 from .layout import Layout  # noqa: E402
 from .model import DrawTree  # noqa: E402
 from .place import (  # noqa: E402
@@ -246,6 +248,9 @@ class FigureSpec:
     # Label index (into ``labels``) -> (dx, dy, x_by): labels pinned by hand
     # (figure.LabelPin); the placer keeps them where they are and places the rest around them.
     label_pins: dict[int, tuple[float, float, str]] = field(default_factory=dict)
+    # Pins placed in the label editor (LabelPin.hand): never moved by pin clearing; a clash it
+    # would have moved them for raises HandLabelClash.
+    label_hand: frozenset[int] = frozenset()
 
 
 @dataclass
@@ -262,6 +267,16 @@ class Drawn:
     # glyphs overlap another label's or a strain label's after placement
     pin_moves: list[dict] | None = None
     overprints: int | None = None
+    # With hand pins: leaders that run through a label's glyphs where either is a hand label
+    hand_leaders: list[str] | None = None
+    # With the label editor: each label's node and box (figure units), as the editor reads them
+    layout: list[dict] | None = None
+
+
+class HandLabelClash(ValueError):
+    """A label placed in the editor that pin clearing would have moved: its glyphs print over,
+    or sit beside, another label or a strain label. A hand label is never moved, so the build
+    stops and names it rather than draw the clash."""
 
 
 class _Page:
@@ -688,17 +703,26 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
     )
     width, line_height = _text_width(font), g.label_font * 1.2
     fixed = {k: _pinned_box(spec, pg, k, width, line_height) for k in spec.label_pins}
+    hand = {k for k in fixed if k in spec.label_hand}
     moves = None
     if g.pin_clearance is not None:
         anchors = {
             k: (float(pg.nx[spec.labels[k].node]), float(pg.ny[spec.labels[k].node])) for k in fixed
         }
-        fixed, moves = _clear_pins(spec, fixed, obstacles, width, g, anchors)
+        fixed, moves = _clear_pins(spec, fixed, obstacles, width, g, anchors, hand)
     placed = place_labels(
         items, grid, width, line_height, search=search, weights=_weights(g), fixed=fixed or None
     )
     if g.pin_clearance is not None and moves is not None:
-        placed = _clear_pins_after(placed, set(fixed.values()), obstacles, width, g, moves)
+        movable = {fixed[k] for k in fixed if k not in hand}
+        placed = _clear_pins_after(placed, movable, obstacles, width, g, moves)
+    if hand:
+        clashes = hand_clashes(placed, {fixed[k] for k in hand}, obstacles, width, g)
+        if clashes:
+            raise HandLabelClash(
+                f"{len(clashes)} label(s) placed by hand clash, and are not moved:\n  "
+                + "\n  ".join(clashes)
+            )
     for p in placed:
         x0, y0, x1, y1 = p.box
         for y, text in _label_lines(p.text, (y0 + y1) / 2, g):
@@ -882,19 +906,26 @@ def _clear_pins(
     width: Callable[[str], float],
     g: Geometry,
     anchors: Mapping[int, Point] | None = None,
+    hand: Iterable[int] = (),
 ) -> tuple[dict[int, Box], list[dict]]:
     """Pinned labels, top to bottom, each moved the least distance up or down (0.25-unit
     steps, at most 40) that clears the glyphs of the pins already settled and of the strain
     labels by ``pin_clearance`` (and, as set, keeps off their rows and leaders: see
     :func:`_clashes`; ``anchors``, label index -> node point, place the leaders). A pin that
-    no step clears stays, and is listed with dy None."""
+    no step clears stays, and is listed with dy None. Pins placed by hand (``hand``) settle
+    first and are never moved: :func:`hand_clashes` refuses what they hit."""
     gap = g.pin_clearance or 0.0
+    by_hand = set(hand)
     settled = [_Settled(o) for o in obstacles]
     out: dict[int, Box] = {}
     moves: list[dict] = []
-    for k in sorted(fixed, key=lambda k: fixed[k][1]):
+    for k in sorted(fixed, key=lambda k: (k not in by_hand, fixed[k][1])):
         box, text = fixed[k], "\n".join(spec.labels[k].subs)
         anchor = anchors.get(k) if anchors is not None else None
+        if k in by_hand:
+            out[k] = box
+            settled.append(_settled(box, text, anchor, width, g))
+            continue
         move = _least_move(box, text, anchor, settled, width, g, gap)
         moved = _shifted(box, move)
         if move != (0.0, 0.0):
@@ -928,6 +959,49 @@ def _clear_pins_after(
         move = _least_move(p.box, p.text, p.anchor, others, width, g, gap)
         out[i] = replace(p, box=_shifted(p.box, move))
         moves.append(_move_row(p.text.replace("\n", " "), move))
+    return out
+
+
+def hand_clashes(
+    placed: Sequence[Placed],
+    hand_boxes: set[Box],
+    obstacles: Sequence[Box],
+    width: Callable[[str], float],
+    g: Geometry,
+) -> list[str]:
+    """Each clash pin clearing would have moved a hand label for (:func:`_clashes`: glyphs
+    closer than ``pin_clearance``, or side by side as ``label_beside_gap`` sets): with another
+    label, or with a strain label. Checked whether or not clearing is on."""
+    gap = g.pin_clearance or 0.0
+    settled = [_settled(p.box, p.text, p.anchor, width, g) for p in placed]
+    out = []
+    for i, p in enumerate(placed):
+        if p.box not in hand_boxes:
+            continue
+        name = p.text.replace("\n", " ")
+        for j, q in enumerate(placed):
+            once = not (q.box in hand_boxes and j < i)  # a pair of hand labels is named once
+            if j != i and once and _clashes(settled[i], [settled[j]], gap, g):
+                out.append(f"{name}: against {q.text.replace(chr(10), ' ')}")
+        if any(_clashes(settled[i], [_Settled(o)], gap, g) for o in obstacles):
+            out.append(f"{name}: against a strain label")
+    return out
+
+
+def hand_leaders(
+    placed: Sequence[Placed], hand_boxes: set[Box], width: Callable[[str], float], g: Geometry
+) -> list[str]:
+    """Leaders through a label's glyphs where the leader's label or the label is a hand label:
+    listed, not refused (the automatic placer leaves some too; the editor shows them)."""
+    glyphs = [_glyph_box(p.box, p.text, width, g) for p in placed]
+    out = []
+    for i, p in enumerate(placed):
+        leader = (leader_end(p.box), p.anchor)
+        for j, q in enumerate(placed):
+            mine = p.box in hand_boxes or q.box in hand_boxes
+            if j != i and mine and segment_hits_box(*leader, glyphs[j], 0.0):
+                a, b = p.text.replace("\n", " "), q.text.replace("\n", " ")
+                out.append(f"{a}'s leader through {b}")
     return out
 
 
@@ -1076,8 +1150,9 @@ def _draw_key(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid) -> Box | None:
     return box
 
 
-def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
-    """Write the PDF and return what was drawn."""
+def render(spec: FigureSpec, pdf_path: Path, editor: EditorRequest | None = None) -> Drawn:
+    """Write the PDF and return what was drawn; with ``editor``, also the label editor, from
+    this same drawing (its background is the figure with the substitution labels taken out)."""
     g = spec.geometry
     pg = _Page(spec)
     fig = plt.figure(figsize=(g.width / 72, g.height / 72))
@@ -1097,20 +1172,33 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     last_column = bracket_left + max(spec.selection.slots.values(), default=0) * g.clade_slot + 2
     _draw_dash_bars(ax, spec, pg, last_column + g.bars_gap)
     inset = _draw_key(ax, spec, pg, grid)
+    first = len(ax.texts), len(ax.lines)  # the labels' artists follow: the editor hides them
     if g.strain_x is None or g.strains_first:  # strain labels first: the aa labels keep off them
         strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid)
+        first = len(ax.texts), len(ax.lines)
         placed, metrics, moves = _draw_labels(ax, spec, pg, grid, strain_boxes)
+        labels_drawn = ax.texts[first[0] :] + ax.lines[first[1] :]
+        obstacles = strain_boxes
     else:  # margin strain labels go where the aa labels and their leaders leave room
         placed, metrics, moves = _draw_labels(ax, spec, pg, grid, [])
+        labels_drawn = ax.texts[first[0] :] + ax.lines[first[1] :]
+        obstacles = []
         strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid, placed)
+    ink = grid.ink > 0  # what placement kept labels off: tree, key and the strain labels
+    label_font = FontProperties(family=_families(spec)[1], size=g.label_font)
     overprints = None
     if g.pin_clearance is not None:
-        label_font = FontProperties(family=_families(spec)[1], size=g.label_font)
         overprints = glyph_overprints(placed, strain_boxes, _text_width(label_font), g)
+    leaders = None
+    if spec.label_hand:
+        index = {lab.node: k for k, lab in enumerate(spec.labels)}  # a Placed's key is its node
+        hand = {p.box for p in placed if index[p.key] in spec.label_hand}
+        leaders = hand_leaders(placed, hand, _text_width(label_font), g)
     # The shipped pages start the title just left of the tree's root (H1 4, H3 4 units).
     title = spec.title if spec.drawn_title is None else spec.drawn_title
     if title:
         ax.text(g.tree_left - 4, 16, title, fontsize=g.title_font, ha="left", va="center")
+    before_names = len(ax.texts)
     names = _draw_leaf_names(ax, spec, pg) if spec.leaf_names else None
 
     # Without figure fonts the name layer is written Type 42 (a Unicode map, so viewers can search
@@ -1120,6 +1208,18 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
     searchable = spec.leaf_names and not spec.figure_fonts
     with plt.rc_context({"pdf.fonttype": 42} if searchable else {}):
         fig.savefig(pdf_path, metadata={"CreationDate": None, "Creator": "acmacs-f"})
+    layout = None
+    if editor is not None:
+        for artist in labels_drawn + ax.texts[before_names:]:  # names: invisible, slow in a PNG
+            artist.set_visible(False)
+        layout = _editor_layout(spec, placed, editor, _text_width(label_font))
+        write_editor(
+            editor,
+            fig,
+            layout,
+            _editor_page(spec, pg, ink, obstacles, inset, label_font),
+            _editor_hidden(spec, pg, editor, _text_width(label_font)),
+        )
     plt.close(fig)
     return Drawn(
         placed,
@@ -1130,7 +1230,108 @@ def render(spec: FigureSpec, pdf_path: Path) -> Drawn:
         inset,
         moves,
         overprints,
+        leaders,
+        layout,
     )
+
+
+def _editor_layout(
+    spec: FigureSpec,
+    placed: Sequence[Placed],
+    editor: EditorRequest,
+    width: Callable[[str], float],
+) -> list[dict]:
+    """Each drawn label as the editor and the draw report read it: its text, the leaves that
+    name its node, the node point and box (figure units), its glyphs' width (as
+    :func:`_glyph_box` measures it), and the pin holding it, if any."""
+    index = {lab.node: k for k, lab in enumerate(spec.labels)}  # a Placed's key is its node
+    out = []
+    for p in placed:
+        lab = spec.labels[index[p.key]]
+        pin = editor.pins.get(index[p.key])
+        out.append(
+            {
+                "text": " ".join(lab.subs),
+                "first": lab.first,
+                "last": lab.last,
+                "node": [round(float(v), 3) for v in p.anchor],
+                "box": [round(float(v), 3) for v in p.box],
+                "glyph_w": round(float(max(width(t) for t in lab.subs)), 3),
+                "pin": None
+                if pin is None
+                else {"first": pin.first, "last": pin.last, "reason": pin.reason, "hand": pin.hand},
+            }
+        )
+    return out
+
+
+def _editor_page(
+    spec: FigureSpec,
+    pg: _Page,
+    ink: np.ndarray,
+    obstacles: Sequence[Box],
+    inset: Box | None,
+    font: FontProperties,
+) -> dict:
+    """What the editor needs to draw and check labels as the renderer does: the page, the label
+    style, the occupancy placement used, and the settings of :func:`_clashes`."""
+    g = spec.geometry
+    return {
+        "figure": spec.title,
+        "width": g.width,
+        "height": g.height,
+        "top": g.top - 4,
+        "bottom": pg.bottom + 2,
+        "left": g.label_left,
+        "font_size": g.label_font,
+        "baseline": _baseline(font),
+        "line_height": g.label_font * 1.2,
+        "pitch": g.label_pitch if g.label_pitch is not None else 1.15,
+        "stroke": g.label_stroke,
+        "clearance": g.pin_clearance or 0.0,
+        "beside_gap": g.label_beside_gap,
+        "row_gap": _row_gap(g),
+        "ink": ink,
+        "obstacles": [list(o) for o in obstacles],
+        "inset": list(inset) if inset else None,
+        "font_file": font_manager.findfont(font),
+    }
+
+
+def _baseline(font: FontProperties) -> float:
+    """How far below the y it is centred on a label line's baseline sits: matplotlib centres a
+    line (va "center") on its box, as high as "lp" and as deep as its descent, where a browser
+    centres on the font's em box (render._label_lines; the editor draws on the baseline)."""
+    from matplotlib.backends.backend_agg import RendererAgg
+
+    _, height, descent = RendererAgg(1, 1, 72).get_text_width_height_descent("lp", font, False)
+    return float(height / 2 - descent)
+
+
+def _editor_hidden(
+    spec: FigureSpec, pg: _Page, editor: EditorRequest, width: Callable[[str], float]
+) -> list[dict]:
+    """The labels hidden by hand, with their node points, so the editor can bring one back."""
+    out = []
+    for lab, hide in editor.hidden:
+        node = (float(pg.nx[lab.node]), float(pg.ny[lab.node]))
+        bw = max(width(t) for t in lab.subs) + 2
+        bh = spec.geometry.label_font * 1.2 * len(lab.subs) + 1
+        out.append(
+            {
+                "text": " ".join(lab.subs),
+                "first": hide.first,
+                "last": hide.last,
+                "reason": hide.reason,
+                "node": [round(v, 3) for v in node],
+                "box": [
+                    round(v, 3)
+                    for v in (node[0] - 10 - bw, node[1] - bh / 2, node[0] - 10, node[1] + bh / 2)
+                ],
+                "glyph_w": round(float(bw) - 2, 3),
+            }
+        )
+    return out
 
 
 def with_centre_column(g: Geometry, width: float = 14.0) -> Geometry:
