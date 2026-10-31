@@ -19,6 +19,9 @@ from .synthetic import PARENTS, standard_tree  # noqa: E402
 from .test_figure import _pin_config  # noqa: E402
 
 K2N = ("EPI_ISL_0000000", "EPI_ISL_0000019")  # the invented tree's three labels' leaves
+# aa_label_layout rounds node points and boxes to 3 decimals: a box drawn from a pin computed
+# from those rows can differ by two roundings (and a float hair), never more
+ROUNDED = 2e-3
 L7F = ("EPI_ISL_0000010", "EPI_ISL_0000019")
 
 
@@ -76,7 +79,7 @@ def test_a_saved_file_draws_each_label_exactly_where_it_was_left(tmp_path):
     assert pins[0].reason == "invented: clear of the strain (AB, 2026-10-30)"
     report, after = _layout(tmp_path, pins, hides)
     assert after["K2N"]["box"] == pytest.approx(
-        [k2n["box"][0] - 10, k2n["box"][1] + 5, k2n["box"][2] - 10, k2n["box"][3] + 5], abs=1e-3
+        [k2n["box"][0] - 10, k2n["box"][1] + 5, k2n["box"][2] - 10, k2n["box"][3] + 5], abs=ROUNDED
     )
     assert "L7F" not in after
     assert report["label_pins"]["pinned by hand"] == 1
@@ -108,7 +111,7 @@ def test_hand_rows_supersede_config_rows_on_the_same_label(tmp_path):
     config_pin = LabelPin(*K2N, "K2N", -0.05, 0.0, "invented: from the round's config")
     hand_pin = _pin_at(rows["K2N"], 20.0, 150.0, height)
     report, after = _layout(tmp_path, [config_pin, hand_pin])
-    assert after["K2N"]["box"][:2] == pytest.approx([20.0, 150.0], abs=1e-3)
+    assert after["K2N"]["box"][:2] == pytest.approx([20.0, 150.0], abs=ROUNDED)
     assert report["label_pins"]["config pins superseded"] == ["K2N: pinned by hand"]
     hide = LabelHide(*K2N, "K2N", "invented (AB, 2026-10-30)", hand=True)
     report, after = _layout(tmp_path, [config_pin], [hide])
@@ -132,7 +135,7 @@ def test_a_hand_label_is_never_moved_a_clash_stops_the_build(tmp_path):
     hand = _pin_at(rows["K2N"], 20.0, 150.0, height)
     config_pin = replace(_pin_at(rows["L7F"], 20.0, 150.0, height), hand=False, reason="invented")
     report, after = _layout(tmp_path, [hand, config_pin], geometry=geometry)
-    assert after["K2N"]["box"][:2] == pytest.approx([20.0, 150.0], abs=1e-3)
+    assert after["K2N"]["box"][:2] == pytest.approx([20.0, 150.0], abs=ROUNDED)
     assert [m["text"] for m in report["label_pins"]["moved to clear"]] == ["L7F"]
     # two hand pins on one spot: refused, with or without clearing, and named
     both = [hand, replace(config_pin, hand=True)]
