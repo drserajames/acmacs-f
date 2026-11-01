@@ -55,9 +55,10 @@ def test_the_editor_is_written_from_the_same_drawing_and_the_pdf_keeps_its_bytes
     data = _editor_data((tmp_path / "f.labels.html").read_text())
     assert data["save_as"] == "labels-t.toml"
     assert [lab["box"] for lab in data["labels"]] == [r["box"] for r in report["aa_label_layout"]]
-    ink = data["ink"]
+    ink = data["adapter"]["ink"]
     assert len(__import__("base64").b64decode(ink["bits"])) == (ink["rows"] * ink["cols"] + 7) // 8
-    assert data["page"]["font_size"] == Geometry().label_font
+    assert data["adapter"]["font_size"] == Geometry().label_font
+    assert data["page"] == {"width": Geometry().width, "height": Geometry().height}
 
 
 def test_a_saved_file_draws_each_label_exactly_where_it_was_left(tmp_path):
@@ -85,7 +86,17 @@ def test_a_saved_file_draws_each_label_exactly_where_it_was_left(tmp_path):
     assert report["label_pins"]["pinned by hand"] == 1
     assert report["aa_label_hides"][0]["hand"] is True
     data = _editor_data((tmp_path / "f.labels.html").read_text())
-    assert [h["text"] for h in data["hidden"]] == ["L7F"]  # the editor can bring it back
+    hidden = [lab for lab in data["labels"] if lab["hidden"]]
+    assert [lab["text"] for lab in hidden] == ["L7F"]  # the editor can bring it back
+    assert hidden[0]["hide"] == {"reason": "invented: not wanted", "by": "AB", "date": "2026-10-30"}
+    pin = next(lab["pin"] for lab in data["labels"] if lab["text"] == "K2N")
+    assert pin == {
+        "hand": True,
+        "reason": "invented: clear of the strain",
+        "by": "AB",
+        "date": "2026-10-30",
+        "keys": {"first": K2N[0], "last": K2N[1]},
+    }
 
 
 @pytest.mark.parametrize(
