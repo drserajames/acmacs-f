@@ -1,4 +1,4 @@
-/* The tree label editor (af.tree.draw.editor): the figure on the left, the panel on the right. */
+/* A label editor (af.util.label_editor): the figure on the left, the panel on the right. */
 :root {
   --ink: #1f2328;
   --muted: #59636e;
@@ -42,7 +42,7 @@ body {
 #message { white-space: pre-wrap; font-size: 12px; margin-top: 6px; }
 .lab { cursor: grab; }
 .lab.drag { cursor: grabbing; }
-.lab text { fill: #4d4d4d; stroke: #4d4d4d; paint-order: stroke; }
+.lab text { paint-order: stroke; } /* fill and stroke: the adapter's textStyle */
 .lab .hit { fill: transparent; }
 .lab .box { fill: none; stroke: none; stroke-width: .4; }
 .boxes .lab .box { stroke: #9aa4ae; }
