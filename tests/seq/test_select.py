@@ -156,6 +156,33 @@ def test_an_include_row_brings_back_every_accession_of_its_isolate(
     assert {("EPI_ISL_7", "EPI7"), ("EPI_ISL_7", "EPI77")} <= set(sel.keys)
 
 
+def test_a_list_counts_the_isolates_it_names_that_are_not_stored(
+    two_accessions: Store, tmp_path: Path
+) -> None:
+    exc = listing(tmp_path / "exc.tsv", "exclude",
+                  ("EPI_ISL_6", "EPI6"), ("EPI_ISL_6", "EPI66"),  # one isolate, two rows
+                  ("EPI_ISL_8", "EPI8"), ("EPI_ISL_9", "EPI9"))  # fmt: skip
+    sel = S.select(two_accessions, rules(S.Rule("exc", "exclude_list", "named", file=exc)))
+    assert [(c.removed, c.unmatched) for c in sel.counts] == [(2, 2)]
+
+
+def test_a_strict_list_must_name_only_stored_isolates(
+    two_accessions: Store, tmp_path: Path
+) -> None:
+    exact = listing(tmp_path / "exact.tsv", "exclude", ("EPI_ISL_6", "EPI999"))
+    S.select(two_accessions, rules(S.Rule("exc", "exclude_list", "x", file=exact, strict=True)))
+    gone = listing(tmp_path / "gone.tsv", "include", ("EPI_ISL_7", "EPI7"), ("EPI_ISL_9", "EPI9"))
+    with pytest.raises(S.SelectionError, match=r"inc \(1 unmatched\)"):
+        S.select(two_accessions, rules(
+            HOST, S.Rule("inc", "include_list", "x", file=gone, strict=True)
+        ))  # fmt: skip
+
+
+def test_strict_is_for_list_rules_only(store: Store) -> None:
+    with pytest.raises(S.SelectionError, match="strict applies to list rules only"):
+        S.select(store, rules(S.Rule("host", "host", "human", allow=["Human"], strict=True)))
+
+
 def test_a_rule_that_changes_nothing_is_an_error_unless_optional(store: Store) -> None:
     never = S.Rule("floor", "date_floor", "R4", floor="2000-01-01")
     with pytest.raises(S.SelectionError, match="changed nothing.*floor"):
