@@ -13,7 +13,11 @@ here, not in config, so no config can change what beats what:
 4. ``exclude_list`` (R6) removes listed records; exclude beats include.
    A list names isolates: a row matches **every** stored accession of its EPI_ISL, whatever
    accession it gives (Q281 a). GISAID gives one isolate an accession per linked submission and
-   can re-issue one, so a list keyed by the pair stopped matching without a word;
+   can re-issue one, so a list keyed by the pair stopped matching without a word. Each list rule
+   counts its ``unmatched`` EPI_ISLs, those not in this store version; a rule marked ``strict``
+   makes any an error. Long inherited lists carry rows that predate the store and keep the
+   default; a short named exclusion is strict, so a row that stops matching cannot put its
+   sequence back in the tree unannounced;
 5. ``low_divergence`` removes records far too close to the outgroup for their collection year
    (:func:`_low_divergence`). It runs last because "expected for the year" is measured on
    what the other rules left;
@@ -80,6 +84,7 @@ class Rule:
     max_deleted_aa: int = -1  # qc
     min_ratio: float = 0.0  # low_divergence: distance / the year's median, below this is out
     min_year_records: int = 0  # low_divergence: a year with fewer has no median to trust
+    strict: bool = False  # include_list / exclude_list: an unmatched EPI_ISL is an error
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,8 @@ class RuleCount:
     #: Records the rule could not judge and so kept (low_divergence): no date, too little
     #: sequence to compare, or a year with too few records for a median.
     untested: int = 0
+    #: List rules: listed EPI_ISLs with no record in this store version.
+    unmatched: int = 0
 
 
 @dataclass
@@ -171,19 +178,20 @@ def select(
         kept -= caught - saved
         counts.append(_count(rule, len(caught - saved), len(saved), len(kept)))
     for rule in by_kind["include_list"]:
-        listed = _listed(rule, records) - {config.outgroup.key}
-        added = listed - kept
+        listed, unmatched = _listed(rule, records)
+        added = listed - {config.outgroup.key} - kept
         kept |= added
-        counts.append(_count(rule, 0, len(added), len(kept)))
+        counts.append(replace(_count(rule, 0, len(added), len(kept)), unmatched=unmatched))
     for rule in by_kind["qc"]:
         limits = QcThresholds(rule.max_unknown_aa, rule.max_deleted_aa)
         removed = {k for k in kept if qc_failures(records[k].aligned, limits)}
         kept -= removed
         counts.append(_count(rule, len(removed), 0, len(kept)))
     for rule in by_kind["exclude_list"]:
-        removed = _listed(rule, records) & kept
+        listed, unmatched = _listed(rule, records)
+        removed = listed & kept
         kept -= removed
-        counts.append(_count(rule, len(removed), 0, len(kept)))
+        counts.append(replace(_count(rule, len(removed), 0, len(kept)), unmatched=unmatched))
     for rule in by_kind["low_divergence"]:
         removed, untested = _low_divergence(rule, kept, records, config.outgroup.key)
         kept -= removed
@@ -196,6 +204,13 @@ def select(
     if idle:
         raise SelectionError(
             f"{config.dataset}: rule(s) changed nothing and are not optional: {idle}"
+        )
+    partial = [f"{c.rule} ({c.unmatched} unmatched)"
+               for c, r in zip(counts, _in_order(config.rules), strict=True)
+               if r.strict and c.unmatched]  # fmt: skip
+    if partial:
+        raise SelectionError(
+            f"{config.dataset}: strict list rule(s) name EPI_ISLs not in {ref}: {partial}"
         )
     ordered = sorted(kept, key=lambda k: (records[k].first or datetime.date.max, k))
     return Selection(
@@ -239,6 +254,8 @@ def _check_rules(rules: Sequence[Rule], cut: Cut | None) -> None:
             problems.append(
                 f"{rule.id}: low_divergence needs 0 < min_ratio < 1 and min_year_records >= 1"
             )
+        if rule.strict and rule.kind not in ("include_list", "exclude_list"):
+            problems.append(f"{rule.id}: strict applies to list rules only")
         if rule.kind == "cut" and cut is None:
             problems.append(f"{rule.id}: a cut rule needs the cycle's cut pin")
     if len({r.id for r in rules}) != len(rules):
@@ -334,8 +351,9 @@ def _keys(store: Store, ref: StoreRef) -> frozenset[Key]:
     return frozenset((e, a) for e, a in rows)
 
 
-def _listed(rule: Rule, records: dict[Key, _Record]) -> set[Key]:
-    """Every stored record of an EPI_ISL the list names, under any accession (Q281 a).
+def _listed(rule: Rule, records: dict[Key, _Record]) -> tuple[set[Key], int]:
+    """Every stored record of an EPI_ISL the list names, under any accession (Q281 a), and how
+    many listed EPI_ISLs are not in this store version.
 
     The row's accession says which submission the list was written against; it does not limit
     the match. EPI_ISLs not in this store version match nothing yet.
@@ -348,7 +366,8 @@ def _listed(rule: Rule, records: dict[Key, _Record]) -> set[Key]:
         for row in csv.DictReader(lines, delimiter="\t")
         if row.get("list", want) == want and row["epi_isl"]
     }
-    return {key for key in records if key[0] in epi_isls}
+    found = {key for key in records if key[0] in epi_isls}
+    return found, len(epi_isls - {epi for epi, _ in found})
 
 
 def _host_overrides(rule: Rule, records: dict[Key, _Record]) -> set[Key]:

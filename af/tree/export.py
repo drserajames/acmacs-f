@@ -397,7 +397,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     seconds = (datetime.datetime.now(datetime.UTC) - started).total_seconds()
     for count in record.counts:
         change = f"+{count['added']}" if count["added"] else f"-{count['removed']}"
-        print(f"  {count['rule']:<24} {change:>9}  -> {count['remaining']}")
+        note = f"  ({count['unmatched']} unmatched)" if count.get("unmatched") else ""
+        print(f"  {count['rule']:<24} {change:>9}  -> {count['remaining']}{note}")
     label = f"  TEST-ONLY: {record.test_only}" if record.test_only else ""
     print(
         f"{record.subtype}: {record.leaves} leaves (outgroup {record.outgroup}), "
