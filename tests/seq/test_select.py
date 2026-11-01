@@ -98,6 +98,45 @@ def test_include_adds_back_but_qc_and_exclude_still_apply(store: Store, tmp_path
     assert ("EPI_ISL_4", "EPI4") not in sel.keys  # exclude beats include
 
 
+@pytest.fixture
+def two_accessions(tmp_path: Path) -> Store:
+    """Isolate 6 has two stored accessions; isolate 7 two more, both from swine."""
+    st = Store.create(tmp_path / "store")
+    publish(st, "p1", [
+        record(1, accession="EPI1", collection_date=parse_date("2009-05-01")),  # the outgroup
+        record(2, accession="EPI2"),
+        record(6, accession="EPI6"), record(6, accession="EPI66"),
+        record(7, accession="EPI7", host="Swine"), record(7, accession="EPI77", host="Swine"),
+    ])  # fmt: skip
+    return st
+
+
+def test_an_exclude_row_takes_every_accession_of_its_isolate(
+    two_accessions: Store, tmp_path: Path
+) -> None:
+    exc = listing(tmp_path / "exc.tsv", "exclude", ("EPI_ISL_6", "EPI6"))
+    sel = S.select(two_accessions, rules(S.Rule("exc", "exclude_list", "named", file=exc)))
+    assert [(c.removed, c.remaining) for c in sel.counts] == [(2, 3)]
+    assert not {("EPI_ISL_6", "EPI6"), ("EPI_ISL_6", "EPI66")} & set(sel.keys)
+
+
+def test_a_row_whose_accession_is_not_stored_still_names_its_isolate(
+    two_accessions: Store, tmp_path: Path
+) -> None:
+    exc = listing(tmp_path / "exc.tsv", "exclude", ("EPI_ISL_6", "EPI999"))  # re-issued
+    sel = S.select(two_accessions, rules(S.Rule("exc", "exclude_list", "named", file=exc)))
+    assert [c.removed for c in sel.counts] == [2]
+
+
+def test_an_include_row_brings_back_every_accession_of_its_isolate(
+    two_accessions: Store, tmp_path: Path
+) -> None:
+    inc = listing(tmp_path / "inc.tsv", "include", ("EPI_ISL_7", "EPI77"))
+    sel = S.select(two_accessions, rules(HOST, S.Rule("inc", "include_list", "named", file=inc)))
+    assert [(c.rule, c.removed, c.added) for c in sel.counts] == [("host", 2, 0), ("inc", 0, 2)]
+    assert {("EPI_ISL_7", "EPI7"), ("EPI_ISL_7", "EPI77")} <= set(sel.keys)
+
+
 def test_a_rule_that_changes_nothing_is_an_error_unless_optional(store: Store) -> None:
     never = S.Rule("floor", "date_floor", "R4", floor="2000-01-01")
     with pytest.raises(S.SelectionError, match="changed nothing.*floor"):
