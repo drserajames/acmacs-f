@@ -302,6 +302,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
                 "derived_from",
                 "to",
                 "target_legend",
+                "settled_against",
                 "max_stress_rise",
                 "settled_within",
                 "min_settled",
@@ -334,13 +335,14 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
                 tuple(b.get("movers", ())),
                 (float(shift[0]), float(shift[1])) if shift is not None else None,
                 b.get("derived_from"),
-                b["target_legend"],
+                b.get("target_legend", ""),
                 float(b["max_stress_rise"]),
                 float(b["settled_within"]),
                 int(b["min_settled"]),
                 float(b["max_other_move"]),
                 _path(b["movers_file"], base) if "movers_file" in b else None,
                 b.get("to"),
+                b.get("settled_against", "target"),
             )
         )
     column_bases = []
