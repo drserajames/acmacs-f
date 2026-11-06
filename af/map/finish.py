@@ -15,6 +15,8 @@ from typing import Any
 
 import numpy as np
 
+from af.map.hand import HandLabels
+from af.map.hand import resolve as resolve_hand
 from af.map.i7 import check_provenance_inputs, i7_document, write_i7
 from af.map.labels import Placed, place_labels
 from af.map.render import (
@@ -96,6 +98,51 @@ def _page(
     return _Page(scene, np.where(shown[:, None], xy, np.nan), priorities, furniture, radii)
 
 
+@dataclass(frozen=True)
+class EditorRequest:
+    """Write a map's label editor (af.map.editor) to ``path``; Save offers ``save_as``."""
+
+    path: Path
+    map_name: str
+    chain: str
+    save_as: str
+
+
+def _write_editor(
+    editor: EditorRequest, scene: Scene, frame: Frame, page: np.ndarray, shown: np.ndarray,
+    all_rows: list[int], labels: dict[str, Placed], hand: HandLabels | None,
+    furniture: tuple[Box, ...], look: Look, styles: Mapping[str, PointStyle] | None,
+) -> None:  # fmt: skip
+    """The page's editor. A label the hand file hides is offered where the placer would put it
+    among all the page's labels, so restoring it in the editor shows a sensible place."""
+    from af.map.editor import write_map_editor
+
+    keys = {scene.points[i].id: _hand_key(scene.points[i]) for i in all_rows}
+    hidden_ids = [scene.points[i].id for i in all_rows if scene.points[i].id not in labels]
+    hidden: list[tuple[str, Placed]] = []
+    if hidden_ids:
+        texts = [scene.points[i].mark or "" for i in all_rows]
+        sizes = [text_size(t, look.label_size) for t in texts]
+        free = place_labels(
+            page[all_rows], texts, page[shown], furniture,
+            sizes=[(w / look.page_points, h / look.page_points) for w, h in sizes],
+            mark_radius=look.antigen_radius * look.mark_scale,
+            gap=look.label_gap / look.page_points,
+        )  # fmt: skip
+        where = {scene.points[i].id: p for i, p in zip(all_rows, free, strict=True)}
+        hidden = [(pid, where[pid]) for pid in hidden_ids]
+    write_map_editor(
+        editor.path, map_name=editor.map_name, chain=editor.chain, save_as=editor.save_as,
+        scene=scene, frame=frame, labels=labels, keys=keys, hidden=hidden, hand=hand,
+        furniture=furniture, look=look, styles=styles,
+    )  # fmt: skip
+
+
+def _hand_key(p: Any) -> str:
+    """How a hand labels row names a point (af.map.hand): name + passage, as vaccine rows bind."""
+    return f"{p.name} {p.passage or ''}".strip()
+
+
 def _ordinal(day: dt.date | None) -> int:
     return day.toordinal() if day is not None else 0
 
@@ -162,6 +209,8 @@ def finish_map(
     caption: Sequence[str] = (),
     addendum: dict[str, Any] | None = None,
     require_shown: bool = True,
+    hand: HandLabels | None = None,
+    editor: EditorRequest | None = None,
 ) -> FinishedMap:
     """Produce ``out_pdf`` and its I7 for one chart and window.
 
@@ -182,7 +231,9 @@ def finish_map(
     ``addendum``: what an addendum figure adds (af.map.addenda), recorded in the I7 as is.
     ``require_shown`` False draws in the given ``frame`` even where this page's furniture covers
     a recent antigen (an addendum figure keeps its map's zoom), and records in the I7 what each
-    priority has hidden."""
+    priority has hidden.
+    ``hand``: the map's labels placed or hidden by hand (af.map.hand), on every window page.
+    ``editor``: also write the map's label editor (af.map.editor) from this page."""
     # fail before drawing anything
     if created.tzinfo is None:
         raise ValueError("I7 'created' needs a time zone")
@@ -200,8 +251,15 @@ def finish_map(
         )
     frame = choice.frame
     page = frame.page(xy)
-    ids = [p.id for p in scene.points if p.mark is not None and p.shown]
     rows = [i for i, p in enumerate(scene.points) if p.mark is not None and p.shown]
+    all_rows = list(rows)
+    pins: dict[str, tuple[float, float]] = {}
+    if hand is not None:
+        labelled = [(scene.points[i].id, _hand_key(scene.points[i]), scene.points[i].mark or "")
+                    for i in rows]  # fmt: skip
+        pins, hidden_by_hand = resolve_hand(hand, labelled)
+        rows = [i for i in rows if scene.points[i].id not in hidden_by_hand]
+    ids = [scene.points[i].id for i in rows]
     texts = [scene.points[i].mark or "" for i in rows]
     sizes = [text_size(t, look.label_size) for t in texts]  # in the figure font
     placed = place_labels(
@@ -212,9 +270,13 @@ def finish_map(
         sizes=[(w / look.page_points, h / look.page_points) for w, h in sizes],
         mark_radius=look.antigen_radius * look.mark_scale,
         gap=look.label_gap / look.page_points,
+        pinned={k: pins[pid] for k, pid in enumerate(ids) if pid in pins},
     )
     labels = dict(zip(ids, placed, strict=True))
     draw_pdf(scene, frame, labels, out_pdf, look, styles, circles, caption)
+    if editor is not None:
+        _write_editor(editor, scene, frame, page, shown, all_rows, labels, hand, furniture, look,
+                      styles)  # fmt: skip
     doc = i7_document(
         scene,
         frame,

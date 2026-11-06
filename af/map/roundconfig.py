@@ -255,6 +255,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
             "frame_shift",
             "vaccine_disable",
             "vaccine_choose",
+            "hand_labels",
         },
         where,
     )
@@ -454,6 +455,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
         vaccine_disable=tuple(disable),
         vaccine_choose=tuple(choose),
         colouring=m.get("colouring"),
+        hand_labels=_path(m["hand_labels"], base) if "hand_labels" in m else None,
     )
 
 

@@ -126,6 +126,44 @@ class Placed:
     box: tuple[float, float, float, float]  # left, top, right, bottom
     overlaps: int  # other labels or furniture overlapped (0 wanted)
     covered_points: int  # drawn points under the label
+    hand: bool = False  # held where a hand put it (af.map.hand), never moved by the placer
+
+
+class HandLabelClash(ValueError):
+    """A label held by hand sits where the placer would have moved it: off the page, on the
+    legend or title, on another hand label, or on a mark. Names both, so the hand file can be
+    mended (the label editor shows the same predicate in red)."""
+
+
+def pinned_box(
+    anchor: tuple[float, float], offset: tuple[float, float], size: tuple[float, float]
+) -> tuple[float, float, float, float]:
+    """A hand label's box: its top-left at the point plus ``offset``, in the page units the
+    placer works in (fractions of the page width). The one conversion (af.map.hand)."""
+    left, top = anchor[0] + offset[0], anchor[1] + offset[1]
+    return (left, top, left + size[0], top + size[1])
+
+
+def hand_clashes(
+    boxes: Sequence[tuple[str, tuple[float, float, float, float]]],
+    furniture: Sequence[Box],
+    marks: Array,
+    mark_radius: float | None,
+    gap: float = 0.0,
+) -> list[str]:
+    """What each hand label would have been moved for, as the placer ranks it: off the page,
+    on furniture, on another hand label (with ``gap``), on a mark. One line per clash."""
+    out = []
+    for i, (text, box) in enumerate(boxes):
+        if box[0] < 0 or box[1] < 0 or box[2] > 1 or box[3] > 1:
+            out.append(f"{text!r} runs off the page")
+        out += [f"{text!r} is on the {b.name}" for b in furniture
+                if _overlap(box, (b.left, b.top, b.right, b.bottom))]  # fmt: skip
+        out += [f"{text!r} is on the label {other!r}" for other, obox in boxes[i + 1 :]
+                if _overlap(_grown(box, gap), obox)]  # fmt: skip
+        if mark_radius is not None and sum(_on_circle(box, m, mark_radius) for m in marks):
+            out.append(f"{text!r} is on a vaccine mark")
+    return out
 
 
 def place_labels(
@@ -140,6 +178,7 @@ def place_labels(
     height: float = 0.03,
     radii: Sequence[float] = (0.0275, 0.04, 0.056, 0.075, 0.1, 0.13),
     gap: float = 0.0,
+    pinned: Mapping[int, tuple[float, float]] | None = None,
 ) -> list[Placed]:
     """Greedy placement, in order: try positions around each anchor at increasing distance and
     keep the one that (1) stays on the page, (2) overlaps the furniture (legend, title) least,
@@ -160,15 +199,37 @@ def place_labels(
     hides it, which no halo mends. ``gap`` (page fraction) is the room kept between two labels:
     boxes that merely touch count as clear, and two labels stacked edge to edge read as one block
     with one's descenders on the other's capitals (R4 review, 18 Oct 2026).
+
+    ``pinned`` (label index -> offset, :func:`pinned_box`): labels held where a hand put them
+    (af.map.hand). They are placed first and never moved; the others are placed round them. One
+    the placer would have moved raises :class:`HandLabelClash`.
     """
-    placed: list[Placed] = []
+    pinned = pinned or {}
     boxes: list[tuple[float, float, float, float]] = [
         (b.left, b.top, b.right, b.bottom) for b in furniture
     ]
     n_furniture = len(boxes)
     if sizes is None:
         sizes = [(char_width * len(t), height) for t in texts]
-    for (x, y), text, (w, h) in zip(anchors, texts, sizes, strict=True):
+    held = {
+        i: pinned_box((float(anchors[i][0]), float(anchors[i][1])), off, sizes[i])
+        for i, off in pinned.items()
+    }
+    clashes = hand_clashes([(texts[i], b) for i, b in held.items()], furniture, anchors,
+                           mark_radius, gap)  # fmt: skip
+    if clashes:
+        raise HandLabelClash(
+            "hand labels where the placer would move them:\n  " + "\n  ".join(clashes)
+        )
+    boxes += list(held.values())
+    out: dict[int, Placed] = {
+        i: Placed(texts[i], (float(anchors[i][0]), float(anchors[i][1])), box, 0,
+                  int(_inside(drawn, box).sum()), hand=True)
+        for i, box in held.items()
+    }  # fmt: skip
+    for i, ((x, y), text, (w, h)) in enumerate(zip(anchors, texts, sizes, strict=True)):
+        if i in held:
+            continue
         best: tuple[tuple[float, ...], tuple[float, float, float, float], int, int] | None = None
         for r in radii:
             for step in range(12):
@@ -197,8 +258,8 @@ def place_labels(
         assert best is not None
         _, box, hits, covered = best
         boxes.append(box)
-        placed.append(Placed(text, (float(x), float(y)), box, hits, covered))
-    return placed
+        out[i] = Placed(text, (float(x), float(y)), box, hits, covered)
+    return [out[i] for i in range(len(texts))]
 
 
 def _on_circle(box: tuple[float, float, float, float], centre: Array, radius: float) -> bool:

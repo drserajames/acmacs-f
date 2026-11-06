@@ -102,6 +102,8 @@ def i7_document(
             d["serum_id"] = p.serum_id
         if p.id in labels:
             d["label"] = labels[p.id].text
+            if labels[p.id].hand:
+                d["label_hand"] = True  # held where af.map.hand put it
         if styles and p.id in styles and styles[p.id].recorded():
             d["style"] = styles[p.id].recorded()
         return d

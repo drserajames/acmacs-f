@@ -60,8 +60,10 @@ from af.map.curate import (
     apply_move,
     near_cap_flags,
 )
+from af.map.editor import editor_path, save_name
 from af.map.figure import chart_points
-from af.map.finish import finish_map, shared_frame
+from af.map.finish import EditorRequest, finish_map, shared_frame
+from af.map.hand import load_hand_labels
 from af.map.labels import LabelAbbreviations, label_text
 from af.map.new_antigens import new_antigen_styles, outlines_on_page
 from af.map.orient import Orientation, RotationOverride, drawn_pairs, orient
@@ -785,6 +787,15 @@ def build_map(
     title_base = map_title(chart, cfg.title, config.titles)
     if fonts is not None:  # the font files the figure is drawn in (rule 5)
         inputs.update(fonts.inputs())
+    hand = None
+    if cfg.hand_labels is not None:
+        # the map's labels placed by hand (af.map.hand): an input, and its rows recorded (rule 9)
+        hand = load_hand_labels(cfg.hand_labels)
+        inputs["hand_labels"] = {
+            "path": str(cfg.hand_labels),
+            "sha256": hashlib.sha256(cfg.hand_labels.read_bytes()).hexdigest(),
+        }
+        decisions["hand_labels"] = hand.record(cfg.hand_labels)
     outlines: dict[str, PointStyle] | None = None
     outline_record: list[dict[str, Any]] = []
     if config.new_antigen_outlines:
@@ -824,6 +835,16 @@ def build_map(
         # every page then checks the moved frame still shows the recent antigens
         frame, record = shift_frame(frame, cfg.frame_shift)
         provenance.setdefault("decisions", {})["frame_shift"] = record
+    editor = None
+    if hand is not None:
+        # the map's label editor, from its first window's page (af.map.editor)
+        chain_input = inputs.get("chain") or {}
+        editor = EditorRequest(
+            editor_path(out_root, cfg.folder),
+            cfg.folder,
+            f"{chain_input.get('dataset', cfg.chain)}@{chain_input.get('version', '?')}",
+            save_name(cfg.hand_labels, cfg.folder),
+        )
     for window, title in windows:
         out = out_root / "map" / cfg.folder / window.name / "v1" / "figure.pdf"
         page_styles, page_provenance = outlines, provenance
@@ -853,7 +874,10 @@ def build_map(
             flags=flags,
             look=look,
             styles=page_styles,
+            hand=hand,
+            editor=editor,
         )
+        editor = None  # one editor per map
         figures.append(result.i7)
     return MapResult(
         cfg.folder,
