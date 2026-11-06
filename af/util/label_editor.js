@@ -186,7 +186,7 @@ function startLabelEditor(A) {
   }
 
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-  const named = (l) => Object.values(l.keys).join(" … ");
+  const named = (l) => Object.values(l.keys).filter((v) => typeof v === "string").join(" … "); // a count checks, it does not name
 
   function status(l) {
     if (l.hidden) return l.fileHide ? `hidden by hand: ${l.fileHide.reason} (${l.fileHide.by}, ${l.fileHide.date})` : "hidden now";
@@ -338,7 +338,7 @@ function startLabelEditor(A) {
 
   const q = (s) => JSON.stringify(String(s)); // a TOML basic string
   const num = (v) => (Math.round(v * 1e6) / 1e6).toString();
-  const keyLines = (keys) => Object.entries(keys).map(([k, v]) => `${k} = ${q(v)}`);
+  const keyLines = (keys) => Object.entries(keys).map(([k, v]) => `${k} = ${typeof v === "number" ? num(v) : q(v)}`);
 
   function save() {
     // Save always saves: nothing typed is required, and red only stops the build, never the save.

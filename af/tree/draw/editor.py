@@ -120,7 +120,7 @@ def _label(k: int, lab: dict, hidden: bool) -> dict:
         "lines": lab["text"].split(" "),
         "anchor": lab["node"],
         "box": lab["box"],
-        "keys": {"first": lab["first"], "last": lab["last"]},
+        "keys": {"first": lab["first"], "last": lab["last"], "leaves": lab["leaves"]},
         "glyph_w": lab["glyph_w"],
         "line_w": lab["line_w"],
         "tether": lab.get("tether", lab["node"]),  # where its leader ends
@@ -132,7 +132,7 @@ def _label(k: int, lab: dict, hidden: bool) -> dict:
 def _shown(k: int, lab: dict) -> dict:
     pin = lab["pin"]
     if pin is not None:
-        keys = {"first": pin["first"], "last": pin["last"]}
+        keys = {"first": pin["first"], "last": pin["last"], "leaves": lab["leaves"]}
         pin = {"hand": pin["hand"], **_row(pin["reason"]), "keys": keys}
     return {**_label(k, lab, False), "pin": pin, "hide": None}
 

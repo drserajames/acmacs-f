@@ -30,7 +30,8 @@ They are called on the shown labels only. ``data`` (the page's ``#data``), in po
 - ``adapter``: anything else the adapter needs.
 
 A saved row is the label's keys (a pin's or hide's own, when it has them), its text, ``dx`` and
-``dy`` for a pin, then reason, by and date.
+``dy`` for a pin, then reason, by and date. A key's value is a string, or a number written as a
+TOML number (a check on the node, such as the tree's leaf count, so not shown as its name).
 """
 
 from __future__ import annotations

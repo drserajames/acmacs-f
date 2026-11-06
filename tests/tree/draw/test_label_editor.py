@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("numpy", reason="numpy not installed: af.tree.draw needs it (pyproject, WS1)")
 pytest.importorskip("matplotlib", reason="matplotlib not installed: af.tree.draw needs it")
 
-from af.tree.draw.aa_labels import LabelHide  # noqa: E402
+from af.tree.draw.aa_labels import LabelHide, LabelRuleError  # noqa: E402
 from af.tree.draw.figure import LabelPin, LabelPinError, make_figure  # noqa: E402
 from af.tree.draw.hand import HandLabelsError, load_hand_labels  # noqa: E402
 from af.tree.draw.render import Geometry, HandLabelClash  # noqa: E402
@@ -61,21 +61,30 @@ def test_the_editor_is_written_from_the_same_drawing_and_the_pdf_keeps_its_bytes
     assert data["page"] == {"width": Geometry().width, "height": Geometry().height}
 
 
-def test_a_saved_file_draws_each_label_exactly_where_it_was_left(tmp_path):
-    _, rows = _layout(tmp_path)
+def _hand_file(tmp_path, rows, leaves=None):
+    """A hand labels file as the editor saves it: K2N moved 10 left and 5 down, L7F hidden;
+    ``leaves`` the leaf counts written, the nodes' own unless given (None: none written)."""
     k2n = rows["K2N"]
     height = Geometry().height
-    dx = (k2n["box"][0] - 10 + 1 - k2n["node"][0]) / height  # moved 10 left and 5 down
+    dx = (k2n["box"][0] - 10 + 1 - k2n["node"][0]) / height
     dy = (k2n["box"][1] + 5 - k2n["node"][1]) / height
+    n = {"K2N": rows["K2N"]["leaves"], "L7F": rows["L7F"]["leaves"]} if leaves is None else leaves
+    count = {t: f"leaves = {c}\n" if c else "" for t, c in n.items()}
     path = tmp_path / "labels-t.toml"
     path.write_text(
         'figure = "TEST tree"\n\n[[label_pins]]\n'
-        f'first = "{K2N[0]}"\nlast = "{K2N[1]}"\ntext = "K2N"\ndx = {dx}\ndy = {dy}\n'
+        f'first = "{K2N[0]}"\nlast = "{K2N[1]}"\n{count["K2N"]}text = "K2N"\ndx = {dx}\ndy = {dy}\n'
         'reason = "invented: clear of the strain"\nby = "AB"\ndate = "2026-10-30"\n\n'
-        f'[[hide_labels]]\nfirst = "{L7F[0]}"\nlast = "{L7F[1]}"\ntext = "L7F"\n'
+        f'[[hide_labels]]\nfirst = "{L7F[0]}"\nlast = "{L7F[1]}"\n{count["L7F"]}text = "L7F"\n'
         'reason = "invented: not wanted"\nby = "AB"\ndate = "2026-10-30"\n'
     )
-    pins, hides = load_hand_labels(path)
+    return path
+
+
+def test_a_saved_file_draws_each_label_exactly_where_it_was_left(tmp_path):
+    _, rows = _layout(tmp_path)
+    k2n = rows["K2N"]
+    pins, hides = load_hand_labels(_hand_file(tmp_path, rows))
     assert pins[0].hand and hides[0].hand
     assert pins[0].reason == "invented: clear of the strain (AB, 2026-10-30)"
     report, after = _layout(tmp_path, pins, hides)
@@ -85,6 +94,7 @@ def test_a_saved_file_draws_each_label_exactly_where_it_was_left(tmp_path):
     assert "L7F" not in after
     assert report["label_pins"]["pinned by hand"] == 1
     assert report["aa_label_hides"][0]["hand"] is True
+    assert "hand rows without a leaf count" not in report["label_pins"]
     data = _editor_data((tmp_path / "f.labels.html").read_text())
     hidden = [lab for lab in data["labels"] if lab["hidden"]]
     assert [lab["text"] for lab in hidden] == ["L7F"]  # the editor can bring it back
@@ -95,8 +105,35 @@ def test_a_saved_file_draws_each_label_exactly_where_it_was_left(tmp_path):
         "reason": "invented: clear of the strain",
         "by": "AB",
         "date": "2026-10-30",
-        "keys": {"first": K2N[0], "last": K2N[1]},
+        "keys": {"first": K2N[0], "last": K2N[1], "leaves": k2n["leaves"]},
     }
+    assert hidden[0]["keys"]["leaves"] == rows["L7F"]["leaves"]
+
+
+@pytest.mark.filterwarnings("ignore:.*without the node's leaf count")
+def test_a_row_saved_on_a_node_of_another_size_is_refused(tmp_path):
+    # the tree changed shape under the row: its MRCA could be another label of the same text
+    _, rows = _layout(tmp_path)
+    wrong = rows["K2N"]["leaves"] + 1
+    pins, hides = load_hand_labels(_hand_file(tmp_path, rows, {"K2N": wrong, "L7F": None}))
+    with pytest.raises(
+        LabelPinError, match=f"has {rows['K2N']['leaves']} leaves, the row was saved on {wrong}"
+    ):
+        _layout(tmp_path, pins)
+    pins, hides = load_hand_labels(_hand_file(tmp_path, rows, {"K2N": None, "L7F": 3}))
+    with pytest.raises(LabelRuleError, match="L7F: the node of .* the row was saved on 3"):
+        _layout(tmp_path, hides=hides)
+
+
+def test_rows_saved_before_they_carried_a_leaf_count_are_read_and_listed(tmp_path):
+    # Sarah's interim rows are saved by the editor before this one (00, 6 Nov 2026)
+    _, rows = _layout(tmp_path)
+    with pytest.warns(UserWarning, match="2 row\\(s\\) without the node's leaf count"):
+        pins, hides = load_hand_labels(_hand_file(tmp_path, rows, {"K2N": None, "L7F": None}))
+    report, after = _layout(tmp_path, pins, hides)
+    assert "L7F" not in after and report["label_pins"]["pinned by hand"] == 1
+    assert report["label_pins"]["hand rows without a leaf count"] == ["K2N", "L7F"]
+    assert "leaves" not in report["aa_label_hides"][0]
 
 
 @pytest.mark.parametrize(
