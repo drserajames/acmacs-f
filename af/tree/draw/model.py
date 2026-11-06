@@ -84,6 +84,18 @@ class DrawTree:
     def leaves(self) -> list[int]:
         return [i for i in range(len(self.parent)) if not self.children[i]]
 
+    def leaf_count(self, i: int) -> int:
+        """Leaves under node ``i``, drawn or hidden: what a hand label row records of its node,
+        so a row read back on a tree of another shape is refused (af.tree.draw.hand)."""
+        n, stack = 0, [i]
+        while stack:
+            j = stack.pop()
+            if self.children[j]:
+                stack.extend(self.children[j])
+            else:
+                n += 1
+        return n
+
     def ancestors(self, i: int) -> list[int]:
         """Proper ancestors of node ``i``, nearest first."""
         out = []

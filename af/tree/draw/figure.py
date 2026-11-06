@@ -17,7 +17,14 @@ from typing import Any, Protocol
 from af.store import StoreRef
 from af.util.fonts import FigureFonts
 
-from .aa_labels import AALabel, LabelHide, LabelParams, hide_labels, select_labels
+from .aa_labels import (
+    AALabel,
+    LabelHide,
+    LabelParams,
+    hide_labels,
+    select_labels,
+    shape_changed,
+)
 from .defaults import load_defaults
 from .editor import EditorRequest
 from .i7 import tree_block, write_i7
@@ -71,6 +78,9 @@ class LabelPin:
     # would have been moved for is an error (render.HandLabelClash), and it supersedes a pin
     # from the round's config on the same label.
     hand: bool = False
+    # The node's leaf count when the row was saved (DrawTree.leaf_count): a node of another count
+    # refuses the pin, as the tree changed shape under it. None: saved before rows carried it.
+    leaves: int | None = None
 
 
 class LabelPinError(ValueError):
@@ -157,6 +167,10 @@ def make_figure(
     pins, pin_report, hand = resolve_pins(
         tree, labels, config.label_pins, [lab for lab, _ in hand_hidden]
     )
+    rows: list[LabelPin | LabelHide] = [*config.label_pins, *config.hide_labels]
+    unchecked = sorted(r.text for r in rows if r.hand and r.leaves is None)
+    if unchecked:  # saved before rows carried their node's leaf count: read, but not checked
+        pin_report["hand rows without a leaf count"] = unchecked
 
     marked = None
     geometry = config.geometry
@@ -245,9 +259,10 @@ def make_figure(
             for lab in labels
         ],
         "aa_label_filter": label_counts,
-        # a hide's hand flag only where set, so other figures keep their bytes
+        # a hide's hand flag and leaf count only where set, so other figures keep their bytes
         "aa_label_hides": [
-            {k: v for k, v in asdict(h).items() if k != "hand" or v} for h in config.hide_labels
+            {k: v for k, v in asdict(h).items() if k not in ("hand", "leaves") or v}
+            for h in config.hide_labels
         ],
         "aa_label_placement": drawn.label_metrics,
         "dash_bars": dash_bars,
@@ -346,7 +361,11 @@ def resolve_pins(
         if p.x_by not in ("height", "width"):
             errors.append(f"{p.text}: x_by {p.x_by!r} is neither 'height' nor 'width'")
             continue
-        key = (_mrca(tree, node_of[p.first], node_of[p.last]), tuple(sorted(p.text.split())))
+        node = _mrca(tree, node_of[p.first], node_of[p.last])
+        if p.leaves is not None and (n := tree.leaf_count(node)) != p.leaves:
+            errors.append(f"{p.text}: {shape_changed(p.first, p.last, n, p.leaves)}")
+            continue
+        key = (node, tuple(sorted(p.text.split())))
         found = by_key.get(key)
         if found is None and key in hidden:
             if p.hand:

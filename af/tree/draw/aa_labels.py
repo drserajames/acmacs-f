@@ -98,6 +98,8 @@ class LabelHide:
     # Hidden in the label editor (af.tree.draw.hand): a pin on the same label from the round's
     # config is then superseded, not an error.
     hand: bool = False
+    # The node's leaf count when the row was saved, as figure.LabelPin.leaves.
+    leaves: int | None = None
 
 
 def leaf_consensus(seqs: Sequence[str | None], pos1: int) -> tuple[str, float]:
@@ -311,10 +313,19 @@ def hide_labels(
             found = " ".join(lab.subs) if lab else "no label"
             problems.append(f"{h.text}: the node of {h.first} .. {h.last} has {found}")
             continue
+        if h.leaves is not None and (n := tree.leaf_count(node)) != h.leaves:
+            problems.append(f"{h.text}: {shape_changed(h.first, h.last, n, h.leaves)}")
+            continue
         drop.add(node)
     if problems:
         raise LabelRuleError("label hide(s) match no label:\n  " + "\n  ".join(problems))
     return [lab for lab in labels if lab.node not in drop], len(drop)
+
+
+def shape_changed(first: str, last: str, found: int, saved: int) -> str:
+    """Why a hand row's node no longer matches: the tree's shape changed under it, and the
+    label of that text may now be another one (a repeated substitution's, say)."""
+    return f"the node of {first} .. {last} has {found} leaves, the row was saved on {saved}"
 
 
 def _to_target(labels: list[AALabel], target: int) -> tuple[list[AALabel], int]:

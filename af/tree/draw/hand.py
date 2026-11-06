@@ -11,6 +11,7 @@ why and by whom (rule 9): a position with no reason cannot be judged when the tr
     [[label_pins]]                          # the label on the MRCA of first and last, its
     first = "EPI_ISL_..."                   # box's top-left at the node + (dx, dy) x the
     last = "EPI_ISL_..."                    # page height (figure.LabelPin)
+    leaves = 144                            # the node's leaf count when saved
     text = "K2N A6S"
     dx = -0.0123
     dy = 0.0045
@@ -21,15 +22,23 @@ why and by whom (rule 9): a position with no reason cannot be judged when the tr
     [[hide_labels]]                         # not printed (aa_labels.LabelHide)
     first = "EPI_ISL_..."
     last = "EPI_ISL_..."
+    leaves = 38
     text = "L7F"
     reason = "the clade bracket already says it"
     by = "AB"
     date = "2026-10-31"
+
+``leaves`` is how a row knows its node again: the MRCA of two leaves is the same node however
+a rebuild orders tied children, but a tree of another shape can make it a different node
+carrying a label of the same text (a substitution repeated across subtrees), and the count
+refuses that. A row without it, written by the editor before it saved one, is read with a
+warning and not checked.
 """
 
 from __future__ import annotations
 
 import datetime
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,6 +62,7 @@ class HandPin:
     reason: str
     by: str
     date: str
+    leaves: int | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +73,7 @@ class HandHide:
     reason: str
     by: str
     date: str
+    leaves: int | None = None
 
 
 @dataclass(frozen=True)
@@ -86,16 +97,30 @@ def load_hand_labels(path: Path) -> tuple[list[LabelPin], list[LabelHide]]:
     if problems:
         listed = "\n  ".join(problems)
         raise HandLabelsError(f"{path}: {len(problems)} row(s) refused:\n  {listed}")
+    read: list[HandPin | HandHide] = [*rows.label_pins, *rows.hide_labels]
+    unchecked = [r.text for r in read if r.leaves is None]
+    if unchecked:
+        warnings.warn(
+            f"{path}: {len(unchecked)} row(s) without the node's leaf count, saved by an older"
+            f" editor, are read but not checked against the tree's shape: {', '.join(unchecked)}."
+            " Saving in the editor again adds it.",
+            stacklevel=2,
+        )
     pins = [
-        LabelPin(p.first, p.last, p.text, p.dx, p.dy, _reason(p), hand=True)
+        LabelPin(p.first, p.last, p.text, p.dx, p.dy, _reason(p), hand=True, leaves=p.leaves)
         for p in rows.label_pins
     ]
-    hides = [LabelHide(h.first, h.last, h.text, _reason(h), hand=True) for h in rows.hide_labels]
+    hides = [
+        LabelHide(h.first, h.last, h.text, _reason(h), hand=True, leaves=h.leaves)
+        for h in rows.hide_labels
+    ]
     return pins, hides
 
 
 def _problems(row: HandPin | HandHide) -> list[str]:
     out = [f"no {name}" for name in ("reason", "by") if not getattr(row, name).strip()]
+    if row.leaves is not None and row.leaves < 1:
+        out.append(f"leaves {row.leaves} is not a leaf count")
     try:
         datetime.date.fromisoformat(row.date)
     except ValueError:
