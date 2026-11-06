@@ -134,3 +134,45 @@ def test_a_map_names_its_hand_labels_file_beside_the_config(tmp_path: Path) -> N
     config, _ = load_maps_config(write_config(tmp_path, text))
     (m,) = [m for m in config.maps if m.folder == "example-lab"]
     assert m.hand_labels == (tmp_path / "labels-example-lab.toml").resolve()
+
+
+def test_the_label_editor_shows_the_page_its_pins_and_its_hidden_labels(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    import re
+
+    from af.map.finish import EditorRequest, finish_map
+
+    path = write(tmp_path, pin("ag100", "Te/25-cell", 0.03, -0.06) + hide("ag101", "Te/25-egg"))
+    editor = tmp_path / "map" / "labels-editor.html"
+    finish_map(
+        synthetic_points(),
+        chart="synthetic",
+        scheme=SCHEME,
+        window=Window("12m", SINCE),
+        title="Synthetic by group",
+        frame_size=14.0,
+        must_show_since=SINCE,
+        vaccine_labels={"ag100": "Te/25-cell", "ag101": "Te/25-egg"},
+        out_pdf=tmp_path / "map" / "12m" / "figure.pdf",
+        created=dt.datetime(2026, 11, 6, 12, 0, tzinfo=dt.UTC),
+        provenance={"inputs": {"chain": {"name": "synthetic", "sha256": "0" * 64}}},
+        hand=load_hand_labels(path),
+        editor=EditorRequest(editor, "x", "lab/x/merged@0123456789abcdef", "labels-x.toml"),
+    )
+    html = editor.read_text()
+    found = re.search(r"<script type='application/json' id='data'>(.*?)</script>", html, re.S)
+    assert found and "startLabelEditor(ADAPTER)" in html and "hand_clashes" in html
+    data = json.loads(found.group(1).replace("<\\/", "</"))
+    assert data["save_as"] == "labels-x.toml" and data["header"]["map"] == "x"
+    labels = {lab["keys"]["point"]: lab for lab in data["labels"]}
+    held, hidden = labels["ag100"], labels["ag101"]
+    width = data["page"]["width"]
+    assert held["pin"]["hand"] and held["pin"]["by"] == "AB" and not held["hidden"]
+    # the box is the hand row's offset from the point, in page points
+    assert held["box"][0] - held["anchor"][0] == pytest.approx(0.03 * width)
+    assert (
+        hidden["hidden"] and hidden["hide"]["reason"] == "said beside it" and hidden["pin"] is None
+    )
+    assert {"furniture", "mark_radius", "gap", "font_size", "halo", "points"} <= set(
+        data["adapter"]
+    )

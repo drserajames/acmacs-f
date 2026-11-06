@@ -60,8 +60,9 @@ from af.map.curate import (
     apply_move,
     near_cap_flags,
 )
+from af.map.editor import editor_path, save_name
 from af.map.figure import chart_points
-from af.map.finish import finish_map, shared_frame
+from af.map.finish import EditorRequest, finish_map, shared_frame
 from af.map.hand import load_hand_labels
 from af.map.labels import LabelAbbreviations, label_text
 from af.map.new_antigens import new_antigen_styles, outlines_on_page
@@ -834,6 +835,16 @@ def build_map(
         # every page then checks the moved frame still shows the recent antigens
         frame, record = shift_frame(frame, cfg.frame_shift)
         provenance.setdefault("decisions", {})["frame_shift"] = record
+    editor = None
+    if hand is not None:
+        # the map's label editor, from its first window's page (af.map.editor)
+        chain_input = inputs.get("chain") or {}
+        editor = EditorRequest(
+            editor_path(out_root, cfg.folder),
+            cfg.folder,
+            f"{chain_input.get('dataset', cfg.chain)}@{chain_input.get('version', '?')}",
+            save_name(cfg.hand_labels, cfg.folder),
+        )
     for window, title in windows:
         out = out_root / "map" / cfg.folder / window.name / "v1" / "figure.pdf"
         page_styles, page_provenance = outlines, provenance
@@ -864,7 +875,9 @@ def build_map(
             look=look,
             styles=page_styles,
             hand=hand,
+            editor=editor,
         )
+        editor = None  # one editor per map
         figures.append(result.i7)
     return MapResult(
         cfg.folder,
