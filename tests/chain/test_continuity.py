@@ -105,14 +105,21 @@ def test_thresholds_are_data_with_reasons(tmp_path):
     assert any("apart[1]: reason is empty" in p for p in e.value.problems)
 
 
-def _version(root: Path, version: str, parent: str | None, chart: Chart, params: dict) -> None:
+def _version(
+    root: Path,
+    version: str,
+    parent: str | None,
+    chart: Chart,
+    params: dict,
+    extra_inputs: tuple | list = (),
+) -> None:
     v = root / "versions" / version
     (v / "steps" / "0000").mkdir(parents=True)
     write_chart(chart, v / "steps" / "0000" / "chosen.ace")
     (v / "chain.json").write_text(
         json.dumps({"steps": [{"directory": "steps/0000", "chosen_file": "chosen.ace"}]})
     )
-    inputs = [{"store": {"dataset": "labx/h3", "kind": "tables", "version": "t1"}}]
+    inputs = [{"store": {"dataset": "labx/h3", "kind": "tables", "version": "t1"}}, *extra_inputs]
     (v / "PROVENANCE.json").write_text(json.dumps({"inputs": inputs, "parameters": params}))
     with (root / "HISTORY.jsonl").open("a") as f:
         f.write(json.dumps({"event": "published", "version": version, "parent": parent}) + "\n")
@@ -134,6 +141,10 @@ def store(tmp_path):
     lower = {"seed": 1, "options": {"move_lower": True}, "move_lower_rule": {"name": "rule-1"}}
     _version(root, "v9", "v2", new, lower)
     _version(root, "v10", "v9", new, {**lower, "move_lower_rule": {"name": "rule-2"}})
+    seeded = {"dataset": "labx/h3/merged", "version": "v1", "step": "0000"}
+    source = {"store": {"dataset": "labx/h3/merged", "kind": "chains", "version": "v1"}}
+    params = {"seed": 1, "adopted_from": seeded, "seeded_from": {**seeded, "starts": 50}}
+    _version(root, "v11", "v2", new, params, extra_inputs=[source])
     (tmp_path / "t.toml").write_text(TOML)
     return tmp_path
 
@@ -262,3 +273,12 @@ def test_the_refine_count_is_a_search_setting_and_was_five_before_it_was_recorde
     rec = _run(store, "v8")
     assert rec["same_problem"] is True and rec["search_differ"] == {"refine_best": [5, 7]}
     assert "Only the search differs (refine_best 5 -> 7)" in sentences(rec)[1]
+
+
+def test_a_seeded_map_cites_its_source_but_fits_the_same_problem(store):
+    """af.chain.adopt --seeded-from: the source chain is a provenance input beside the tables;
+    it is where the search started, not other tables, so the stresses still compare (Q309)."""
+    rec = _run(store, "v11")
+    assert rec["same_problem"] is True and rec["parameters_differ"] == []
+    assert set(rec["search_differ"]) == {"adopted_from", "seeded_from"}
+    assert "NOT comparable" not in sentences(rec)[1]
