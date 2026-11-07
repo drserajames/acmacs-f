@@ -24,6 +24,13 @@ builder:
   another alignment is behind in content; no record, or a malformed one, is refused. The check
   never computes an export, and runs for slots that are not pinned (a pinned slot keeps its
   older inputs on purpose);
+- treats the version a chain was **seeded from** as the chain's lineage, not as a second input:
+  a chain whose layout continues another version's map (af.chain.adopt, chosen "seeded"; Sarah,
+  Q309) cites that version among its inputs, often an older version of its own dataset. Only the
+  exact recorded seed counts (chain.json's ``seeded_from`` version, with a step whose ``chosen``
+  is "seeded"); it is recorded as ``seeds`` and listed apart in the manifest, and is not followed
+  upstream (its tables are the seed's inputs, not the figure's). Any other older version a chain
+  cites is an input as before, under the one-version rule;
 - writes the report manifest in the store's snapshot format (``af.store.write_manifest``), which
   is what "reproduce this report" starts from.
 
@@ -122,6 +129,10 @@ class StoreUse:
     # Versions a figure only compares with (:func:`comparison_refs`) -> the slots citing them:
     # not inputs, so neither in refs nor followed upstream, and need not be CURRENT.
     comparison_refs: dict[StoreRef, list[str]] = field(default_factory=dict)
+    # The version each seeded chain was continued from (:func:`recorded_seed`) -> the chain
+    # version that records it and the slots resting on that chain: lineage, so neither in refs
+    # nor followed upstream, and need not be CURRENT; it must resolve.
+    seeds: dict[StoreRef, tuple[StoreRef, list[str]]] = field(default_factory=dict)
 
     def all_refs(self) -> list[StoreRef]:
         """Every version the report rests on: its own, then the pinned-only older ones."""
@@ -147,6 +158,10 @@ class StoreUse:
                 str(ref): slots
                 for ref, slots in sorted(self.comparison_refs.items(), key=lambda kv: str(kv[0]))
             },
+            "seeds": {
+                str(ref): {"into": str(into), "slots": slots}
+                for ref, (into, slots) in sorted(self.seeds.items(), key=lambda kv: str(kv[0]))
+            },
         }
 
 
@@ -157,12 +172,14 @@ Chosen = dict[tuple[str, str], tuple[StoreRef, set[str]]]
 def write_report_manifest(path: Path, use: StoreUse, description: str) -> Path:
     """The report manifest: the store's snapshot document of the report's own versions, plus
     ``pinned``: each older version reached only through pinned slots, with those slots, and
-    ``compared``: each version a figure only compares with, with the slots that cite it.
+    ``compared``: each version a figure only compares with, with the slots that cite it, and
+    ``seeded``: each version a drawn chain was seeded from, with that chain and its slots.
 
     A snapshot names one version per dataset (af.store refuses repeats), so the pinned older
     versions sit beside ``refs``, not in it; together they are every version the report rests
-    on. The compared versions are not inputs, so they are listed apart, where nobody takes them
-    for one. With no pins and no comparisons the document is exactly the snapshot format.
+    on. The compared and seed versions are not inputs, so they are listed apart, where nobody
+    takes them for one. With no pins, comparisons or seeds the document is exactly the snapshot
+    format.
     """
     document = refs_document(use.refs, description)
     if use.pinned_versions:
@@ -174,6 +191,11 @@ def write_report_manifest(path: Path, use: StoreUse, description: str) -> Path:
         document["compared"] = [
             {"store": ref.to_json(), "slots": slots}
             for ref, slots in sorted(use.comparison_refs.items(), key=lambda kv: str(kv[0]))
+        ]
+    if use.seeds:
+        document["seeded"] = [
+            {"store": ref.to_json(), "into": into.to_json(), "slots": slots}
+            for ref, (into, slots) in sorted(use.seeds.items(), key=lambda kv: str(kv[0]))
         ]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
@@ -273,6 +295,44 @@ def upstream_refs(store: Store, ref: StoreRef) -> list[StoreRef]:
     """The store refs a version was built from, as its PROVENANCE.json records them."""
     record = json.loads((store.resolve(ref) / PROVENANCE).read_text())
     return [StoreRef.from_json(item["store"]) for item in record["inputs"] if "store" in item]
+
+
+CHAIN_RECORD = "chain.json"
+
+
+def recorded_seed(store: Store, ref: StoreRef) -> StoreRef | None:
+    """The chain version ``ref`` was seeded from, exactly as its chain record names it, or None.
+
+    af.chain.adopt continues another version's map onto new tables (chosen "seeded"; Sarah,
+    Q309, 7 Nov 2026) and cites that version among the new version's inputs, so a report
+    following inputs upstream would find two versions of one chain, or the seed's older tables,
+    under the figure. The seed is the layout's lineage, not a second analysis. Only the record
+    counts: chain.json's top-level ``seeded_from`` (dataset and version) together with a step
+    whose ``chosen`` is "seeded"; anything short of that is not a seed, and an older version it
+    cites stays an input under the one-version rule. A seeded record that does not name its
+    seed is refused.
+    """
+    if ref.kind != "chains":
+        return None
+    path = store.resolve(ref) / CHAIN_RECORD
+    if not path.is_file():
+        return None
+    doc = json.loads(path.read_text())
+    seed, steps = doc.get("seeded_from"), doc.get("steps") or []
+    seeded = any(isinstance(s, dict) and s.get("chosen") == "seeded" for s in steps)
+    if not seeded or seed is None:
+        return None
+    dataset = seed.get("dataset") if isinstance(seed, dict) else None
+    version = seed.get("version") if isinstance(seed, dict) else None
+    if not isinstance(dataset, str) or not isinstance(version, str):
+        raise ProvenanceError(
+            f"chains/{ref.dataset} {ref.version}: chain.json records a seeded step, but its "
+            f"seeded_from names no dataset and version: {seed!r}"
+        )
+    for up in upstream_refs(store, ref):
+        if (up.kind, up.dataset, up.version) == ("chains", dataset, version):
+            return up
+    return None
 
 
 def clades_label_only(
@@ -424,6 +484,8 @@ def expand_upstream(
     read = {ref.dataset: ref for ref in use.refs if ref.kind == "sequences"}
     labels: dict[StoreRef, StoreRef | None] = {}
     exports: dict[StoreRef, StoreRef | None] = {}
+    seeds: dict[StoreRef, StoreRef | None] = {}
+    seeded: dict[StoreRef, tuple[StoreRef, set[str]]] = {}
     seen: set[tuple[StoreRef, str]] = set()
     while queue:
         ref, slot = queue.pop()
@@ -438,7 +500,13 @@ def expand_upstream(
             if ref not in exports:
                 exports[ref] = tree_label_only(store, ref, read, use, export_records)
             label_only = exports[ref]
-        queue.extend((up, slot) for up in upstream_refs(store, ref) if up != label_only)
+        if ref.kind == "chains" and ref not in seeds:
+            seeds[ref] = recorded_seed(store, ref)
+        seed = seeds.get(ref)
+        if seed is not None:
+            seeded.setdefault(seed, (ref, set()))[1].add(slot)
+        queue.extend((up, slot) for up in upstream_refs(store, ref) if up not in (label_only, seed))
+    use.seeds = {seed: (into, sorted(slots)) for seed, (into, slots) in seeded.items()}
     use.pinned_resolved_by_current = []
     chosen, use.pinned_versions = one_version_each(
         by_dataset, pinned or set(), "under", store.current, use.pinned_resolved_by_current
@@ -464,7 +532,7 @@ def check_against_store(
         raise ProvenanceError(f"{len(problems)} store problem(s):\n  " + "\n  ".join(problems))
     pinned = {slot for slot, r in figs.items() if r.pinned}
     expand_upstream(use, store, pinned, export_records)
-    problems = check_refs(store, use.all_refs(), deep=deep)
+    problems = check_refs(store, [*use.all_refs(), *use.seeds], deep=deep)
     for ref in use.refs:
         try:
             current = store.current(ref.kind, ref.dataset)
