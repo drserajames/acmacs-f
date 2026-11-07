@@ -22,7 +22,14 @@ const ADAPTER = (() => {
     });
   }
   const leaderEnd = (b) => [b[2], (b[1] + b[3]) / 2];
-  const leader = (l) => [leaderEnd(l.box), l.anchor];
+  const tether = (l) => l.tether || l.anchor; // where the leader ends (render._tether)
+  function leader(l) { // render._leader: off the right edge, or a line's top or bottom when over its node
+    const t = tether(l);
+    if (t[0] >= l.box[2]) return [leaderEnd(l.box), t];
+    const lines = glyphLines(l), top = lines[0], bottom = lines[lines.length - 1];
+    if (t[1] < (top[1] + bottom[3]) / 2) return [[(top[0] + top[2]) / 2, top[1] - 1], t];
+    return [[(bottom[0] + bottom[2]) / 2, bottom[3] + 1], t];
+  }
   function clash(a, b) { // render._ink_clash: stacked closer than a stack's row gap, else SIDE
     for (const ra of glyphLines(a)) {
       for (const rb of glyphLines(b)) {
@@ -73,7 +80,7 @@ const ADAPTER = (() => {
         const b = shown[j];
         const lb = leader(b);
         if (segmentsCross(la[0], la[1], lb[0], lb[1])) add([a.id, b.id], `${a.text} and ${b.text}: leaders cross`);
-        const ends = Math.hypot(a.anchor[0] - b.anchor[0], a.anchor[1] - b.anchor[1]);
+        const ends = Math.hypot(la[1][0] - lb[1][0], la[1][1] - lb[1][1]);
         const angle = Math.abs(Math.atan2(la[1][1] - la[0][1], la[1][0] - la[0][0]) - Math.atan2(lb[1][1] - lb[0][1], lb[1][0] - lb[0][0])) * 180 / Math.PI;
         const long = Math.min(Math.hypot(la[1][0] - la[0][0], la[1][1] - la[0][1]), Math.hypot(lb[1][0] - lb[0][0], lb[1][1] - lb[0][1]));
         if (ends > 0 && ends < P.font_size && angle < 12 && long > 3 * P.font_size) {

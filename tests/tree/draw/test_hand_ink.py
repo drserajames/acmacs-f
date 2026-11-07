@@ -10,6 +10,7 @@ pytest.importorskip("numpy", reason="numpy not installed: af.tree.draw needs it 
 pytest.importorskip("matplotlib", reason="matplotlib not installed: af.tree.draw needs it")
 
 from af.tree.draw.place import Placed  # noqa: E402
+from af.tree.draw.place import segment_hits_box as _segment_hits_box  # noqa: E402
 from af.tree.draw.render import (  # noqa: E402
     Geometry,
     HandLabelClash,
@@ -17,11 +18,12 @@ from af.tree.draw.render import (  # noqa: E402
     _glyph_lines,
     _hits,
     _ink_clash,
+    _leader,
     hand_clashes,
     hand_leaders,
 )
 
-from .test_label_editor import _layout, _pin_at  # noqa: E402
+from .test_label_editor import _editor_data, _layout, _pin_at  # noqa: E402
 
 FS = 10.0
 G = Geometry(label_font=FS, label_pitch=1.18, pin_clearance=1.0, label_beside_gap=9.0)
@@ -130,3 +132,42 @@ def test_two_hand_labels_side_by_side_3_units_apart_are_drawn(tmp_path):
         report, after = _layout(tmp_path, [k2n, l7f], geometry=geometry)
         assert after["L7F"]["box"][0] == pytest.approx(20.0 + w + gap, abs=2e-3)
         assert report["label_pins"]["pinned by hand"] == 2
+
+
+# ---- leaders (ae e6f4792, e614d5f) ----------------------------------------------------------
+
+
+def test_a_leader_leaves_the_right_edge_of_a_label_left_of_its_node():
+    box = _box(100.0, 50.0, "K2N")
+    assert _leader(box, "K2N", (130.0, 60.0), width, G) == ((box[2], 50.0), (130.0, 60.0))
+
+
+@pytest.mark.parametrize("node_y, edge", [(30.0, "top"), (70.0, "bottom")])
+def test_a_label_over_its_own_node_leaves_from_its_nearer_lines_top_or_bottom(node_y, edge):
+    # a label placed above (or below) its branch, the node under its letters: a leader from the
+    # right edge would cross them, so it leaves the middle of the nearer line, a point off
+    text = "K2N\nA6S L7F"
+    box = _box(100.0, 50.0, text)
+    top, bottom = _glyph_lines(box, text, width, G)
+    start, end = _leader(box, text, (90.0, node_y), width, G)
+    line = top if edge == "top" else bottom
+    assert start[0] == pytest.approx((line[0] + line[2]) / 2)
+    assert start[1] == pytest.approx(line[1] - 1 if edge == "top" else line[3] + 1)
+    assert end == (90.0, node_y)
+    assert not any(_segment_hits_box(start, end, r, 0.0) for r in (top, bottom))
+
+
+def test_leaders_can_end_mid_branch_and_pins_still_offset_from_the_node(tmp_path):
+    _, plain = _layout(tmp_path)
+    assert all("tether" not in r for r in plain.values())  # off: the draw report is as before
+    on = replace(Geometry(), leader_to_branch_middle=True)
+    _, rows = _layout(tmp_path, geometry=on)
+    for r in rows.values():
+        assert r["tether"][1] == r["node"][1] and r["tether"][0] < r["node"][0]
+        assert r["node"] == plain[r["text"]]["node"]
+    data = _editor_data((tmp_path / "f.labels.html").read_text())
+    assert [lab["tether"] for lab in data["labels"]] == [r["tether"] for r in rows.values()]
+    # a pin is placed from the node point whichever way its leader goes
+    pin = _pin_at(plain["K2N"], 20.0, 150.0, Geometry().height)
+    _, pinned = _layout(tmp_path, [pin], geometry=on)
+    assert pinned["K2N"]["box"][:2] == pytest.approx([20.0, 150.0], abs=2e-3)

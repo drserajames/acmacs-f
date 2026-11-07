@@ -174,6 +174,11 @@ class Geometry:
     # hand_leader_pad sizes of a line. Pin clearing and the placer keep label_beside_gap.
     hand_side_gap: float = 0.08
     hand_leader_pad: float = 0.05
+    # Where a label's leader ends: the node point (False), or the middle of the node's own
+    # horizontal edge, as AD and ae draw (ae e614d5f, draw-tree.cc mid_x; the Sep 2026 shipped
+    # pages). The candidates are searched about that point, so turning it on moves the
+    # automatic labels; a pin's offset is still from the node point.
+    leader_to_branch_middle: bool = False
     # Baseline pitch inside a multi-line substitution label, in label sizes. None: matplotlib's
     # linespacing 1.15, which for these fonts sets lines 0.93 sizes apart (R8 review: 21% tighter
     # than the shipped pages' 1.18).
@@ -692,10 +697,7 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
     font = FontProperties(family=_families(spec)[1], size=g.label_font)
     for o in obstacles:
         grid.add_box(o)
-    items = [
-        (lab.node, "\n".join(lab.subs), (float(pg.nx[lab.node]), float(pg.ny[lab.node])))
-        for lab in spec.labels
-    ]
+    items = [(lab.node, "\n".join(lab.subs), _tether(spec, pg, lab.node)) for lab in spec.labels]
     # The candidate offsets were tuned for 6.8-unit labels; bigger labels also get the same
     # search in proportion (the tuned offsets stay, so a label near the margin keeps its
     # tight positions).
@@ -713,9 +715,7 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
     hand = {k for k in fixed if k in spec.label_hand}
     moves = None
     if g.pin_clearance is not None:
-        anchors = {
-            k: (float(pg.nx[spec.labels[k].node]), float(pg.ny[spec.labels[k].node])) for k in fixed
-        }
+        anchors = {k: _tether(spec, pg, spec.labels[k].node) for k in fixed}
         fixed, moves = _clear_pins(spec, fixed, obstacles, width, g, anchors, hand)
     placed = place_labels(
         items, grid, width, line_height, search=search, weights=_weights(g), fixed=fixed or None
@@ -756,7 +756,7 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
                     alpha=0.0,
                     linespacing=1.15,
                 )
-        ex, ey = leader_end(p.box)
+        (ex, ey), _ = _leader(p.box, p.text, p.anchor, width, g)
         ax.plot([ex, p.anchor[0]], [ey, p.anchor[1]], color="#4d4d4d", lw=0.35)
     metrics = placement_metrics(placed, grid)
     if g.label_beside_gap is not None:
@@ -770,7 +770,7 @@ def glyph_metrics(placed: Sequence[Placed], width: Callable[[str], float], g: Ge
     leaders that run through another label's glyphs (R8 review: rowpairs, strike-throughs)."""
     assert g.label_beside_gap is not None
     glyphs = [_glyph_box(p.box, p.text, width, g) for p in placed]
-    leaders = [(leader_end(p.box), p.anchor) for p in placed]
+    leaders = [_leader(p.box, p.text, p.anchor, width, g) for p in placed]
     n_beside = n_through = 0
     for i, a in enumerate(glyphs):
         for b in glyphs[i + 1 :]:
@@ -815,6 +815,33 @@ def _glyph_lines(box: Box, text: str, width: Callable[[str], float], g: Geometry
         cy = yc + (i - (len(lines) - 1) / 2) * pitch
         out.append((right - width(t), cy - half, right, cy + half))
     return out
+
+
+def _tether(spec: FigureSpec, pg: _Page, node: int) -> Point:
+    """Where a label's leader ends (``leader_to_branch_middle``): the node point, or the middle
+    of the horizontal edge from the node's parent's column to the node."""
+    x, y = float(pg.nx[node]), float(pg.ny[node])
+    parent = spec.tree.parent[node]
+    if spec.geometry.leader_to_branch_middle and parent >= 0:
+        x = (float(pg.nx[parent]) + x) / 2
+    return (x, y)
+
+
+def _leader(
+    box: Box, text: str, anchor: Point, width: Callable[[str], float], g: Geometry
+) -> tuple[Point, Point]:
+    """A label's leader, from where it leaves the label to ``anchor``. It leaves the middle of
+    the box's right edge (place.leader_end: the placer keeps labels left of their nodes), but a
+    label placed over or right of its own node would rule that leader across its letters: it
+    then leaves the centre of its nearer line's top or bottom, a point off the capitals, as AD
+    does (ae e6f4792: 3 of 121 hand labels drew through their own glyphs)."""
+    if anchor[0] >= box[2]:
+        return leader_end(box), anchor
+    lines = _glyph_lines(box, text, width, g)
+    top, bottom = lines[0], lines[-1]
+    if anchor[1] < (top[1] + bottom[3]) / 2:
+        return ((top[0] + top[2]) / 2, top[1] - 1.0), anchor
+    return ((bottom[0] + bottom[2]) / 2, bottom[3] + 1.0), anchor
 
 
 def _ink_clash(a: Sequence[Box], b: Sequence[Box], g: Geometry) -> bool:
@@ -870,7 +897,7 @@ def _settled(
     g: Geometry,
     hand: bool = False,
 ) -> _Settled:
-    leader = (leader_end(box), anchor) if anchor is not None else None
+    leader = _leader(box, text, anchor, width, g) if anchor is not None else None
     lines = tuple(_glyph_lines(box, text, width, g))
     return _Settled(_glyph_box(box, text, width, g), box, leader, lines, hand)
 
@@ -1057,7 +1084,7 @@ def hand_leaders(
     pad = g.hand_leader_pad * g.label_font
     out = []
     for i, p in enumerate(placed):
-        leader = (leader_end(p.box), p.anchor)
+        leader = _leader(p.box, p.text, p.anchor, width, g)
         for j, q in enumerate(placed):
             mine = p.box in hand_boxes or q.box in hand_boxes
             if j != i and mine and any(segment_hits_box(*leader, r, pad) for r in lines[j]):
@@ -1273,7 +1300,7 @@ def render(spec: FigureSpec, pdf_path: Path, editor: EditorRequest | None = None
     if editor is not None:
         for artist in labels_drawn + ax.texts[before_names:]:  # names: invisible, slow in a PNG
             artist.set_visible(False)
-        layout = _editor_layout(spec, placed, editor, _text_width(label_font))
+        layout = _editor_layout(spec, pg, placed, editor, _text_width(label_font))
         write_editor(
             editor,
             fig,
@@ -1298,13 +1325,16 @@ def render(spec: FigureSpec, pdf_path: Path, editor: EditorRequest | None = None
 
 def _editor_layout(
     spec: FigureSpec,
+    pg: _Page,
     placed: Sequence[Placed],
     editor: EditorRequest,
     width: Callable[[str], float],
 ) -> list[dict]:
     """Each drawn label as the editor and the draw report read it: its text, the leaves that
     name its node, the node point and box (figure units), its glyphs' width and each line's (as
-    :func:`_glyph_box` and :func:`_glyph_lines` measure them), and the pin holding it, if any."""
+    :func:`_glyph_box` and :func:`_glyph_lines` measure them), and the pin holding it, if any.
+    With ``leader_to_branch_middle``, also where its leader ends (``tether``): a pin's offset
+    is from the node point, its leader goes to the tether."""
     index = {lab.node: k for k, lab in enumerate(spec.labels)}  # a Placed's key is its node
     out = []
     for p in placed:
@@ -1315,7 +1345,7 @@ def _editor_layout(
                 "text": " ".join(lab.subs),
                 "first": lab.first,
                 "last": lab.last,
-                "node": [round(float(v), 3) for v in p.anchor],
+                "node": [round(float(pg.nx[lab.node]), 3), round(float(pg.ny[lab.node]), 3)],
                 "box": [round(float(v), 3) for v in p.box],
                 "glyph_w": round(float(max(width(t) for t in lab.subs)), 3),
                 "line_w": [round(float(width(t)), 3) for t in lab.subs],
@@ -1324,6 +1354,8 @@ def _editor_layout(
                 else {"first": pin.first, "last": pin.last, "reason": pin.reason, "hand": pin.hand},
             }
         )
+        if spec.geometry.leader_to_branch_middle:
+            out[-1]["tether"] = [round(float(v), 3) for v in p.anchor]
     return out
 
 
@@ -1396,6 +1428,8 @@ def _editor_hidden(
                 "line_w": [round(float(width(t)), 3) for t in lab.subs],
             }
         )
+        if spec.geometry.leader_to_branch_middle:
+            out[-1]["tether"] = [round(v, 3) for v in _tether(spec, pg, lab.node)]
     return out
 
 
