@@ -167,6 +167,13 @@ class Geometry:
     # this close (None: the placer's own, 0). None: neither, and not counted.
     label_beside_gap: float | None = None
     label_beside_weight: float | None = None
+    # A label placed by hand is checked glyph line to glyph line, as ae's ink rule (ae ed4a2ab;
+    # Sarah Q306, Q307, 7 Nov 2026: boxes may overlap where the letters don't): its lines may sit
+    # side by side or diagonally this many label sizes from another label's, and stacked one
+    # stack's row gap (label_pitch - 0.72 sizes) apart; a leader is through a label within
+    # hand_leader_pad sizes of a line. Pin clearing and the placer keep label_beside_gap.
+    hand_side_gap: float = 0.08
+    hand_leader_pad: float = 0.05
     # Baseline pitch inside a multi-line substitution label, in label sizes. None: matplotlib's
     # linespacing 1.15, which for these fonts sets lines 0.93 sizes apart (R8 review: 21% tighter
     # than the shipped pages' 1.18).
@@ -715,7 +722,8 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
     )
     if g.pin_clearance is not None and moves is not None:
         movable = {fixed[k] for k in fixed if k not in hand}
-        placed = _clear_pins_after(placed, movable, obstacles, width, g, moves)
+        held = {fixed[k] for k in hand}
+        placed = _clear_pins_after(placed, movable, obstacles, width, g, moves, held)
     if hand:
         clashes = hand_clashes(placed, {fixed[k] for k in hand}, obstacles, width, g)
         if clashes:
@@ -795,6 +803,38 @@ def _glyph_box(box: Box, text: str, width: Callable[[str], float], g: Geometry) 
     return (box[2] - 1 - w, yc - h / 2, box[2] - 1, yc + h / 2)
 
 
+def _glyph_lines(box: Box, text: str, width: Callable[[str], float], g: Geometry) -> list[Box]:
+    """Each line's glyphs, where :func:`_glyph_box` puts the label's: right-aligned one unit in,
+    that line's own width, capitals high (0.72 of the size) on rows ``label_pitch`` apart about
+    the box's centre. A short line leaves room beside it (ae ed4a2ab's per-line rects)."""
+    lines = text.split("\n")
+    pitch = (1.15 if g.label_pitch is None else g.label_pitch) * g.label_font
+    yc, right, half = (box[1] + box[3]) / 2, box[2] - 1, 0.36 * g.label_font
+    out = []
+    for i, t in enumerate(lines):
+        cy = yc + (i - (len(lines) - 1) / 2) * pitch
+        out.append((right - width(t), cy - half, right, cy + half))
+    return out
+
+
+def _ink_clash(a: Sequence[Box], b: Sequence[Box], g: Geometry) -> bool:
+    """Do two labels' glyph lines read as touching (ae's ink rule, ed4a2ab)? Lines over each
+    other closer than a stack's row gap (as a label's own lines are), or side by side or
+    diagonally closer than ``hand_side_gap`` label sizes."""
+    side, stack = g.hand_side_gap * g.label_font, _row_gap(g)
+    for ra in a:
+        for rb in b:
+            gx = max(ra[0], rb[0]) - min(ra[2], rb[2])  # < 0: they share columns
+            gy = max(ra[1], rb[1]) - min(ra[3], rb[3])  # < 0: they share rows
+            if gx < 0 and gy < stack - 1e-6:  # a stack's own lines are exactly this apart
+                return True
+            if gy < 0 and gx < side:
+                return True
+            if gx >= 0 and gy >= 0 and float(np.hypot(gx, gy)) < side:
+                return True
+    return False
+
+
 def _hits(a: Box, b: Box, gap: float, gap_y: float | None = None) -> bool:
     gy = gap if gap_y is None else gap_y
     return min(a[2], b[2]) + gap > max(a[0], b[0]) and min(a[3], b[3]) + gy > max(a[1], b[1])
@@ -816,13 +856,23 @@ class _Settled:
     glyph: Box
     box: Box | None = None
     leader: tuple[Point, Point] | None = None
+    # a hand label's glyph lines: a pin cleared off it also keeps hand_clashes's rule, so the
+    # move clearing makes is one the build then accepts
+    lines: tuple[Box, ...] = ()
+    hand: bool = False
 
 
 def _settled(
-    box: Box, text: str, anchor: Point | None, width: Callable[[str], float], g: Geometry
+    box: Box,
+    text: str,
+    anchor: Point | None,
+    width: Callable[[str], float],
+    g: Geometry,
+    hand: bool = False,
 ) -> _Settled:
     leader = (leader_end(box), anchor) if anchor is not None else None
-    return _Settled(_glyph_box(box, text, width, g), box, leader)
+    lines = tuple(_glyph_lines(box, text, width, g))
+    return _Settled(_glyph_box(box, text, width, g), box, leader, lines, hand)
 
 
 def _clashes(
@@ -836,6 +886,8 @@ def _clashes(
     rows = _row_gap(g, g.pin_clear_row_pitch if moving else None)
     for o in others:
         if _hits(me.glyph, o.glyph, gap):
+            return True
+        if o.hand and _ink_clash(me.lines, o.lines, g):
             return True
         apart = g.label_beside_gap
         if apart is not None and o.box and _hits(me.glyph, o.glyph, apart, rows):
@@ -924,7 +976,7 @@ def _clear_pins(
         anchor = anchors.get(k) if anchors is not None else None
         if k in by_hand:
             out[k] = box
-            settled.append(_settled(box, text, anchor, width, g))
+            settled.append(_settled(box, text, anchor, width, g, hand=True))
             continue
         move = _least_move(box, text, anchor, settled, width, g, gap)
         moved = _shifted(box, move)
@@ -942,6 +994,7 @@ def _clear_pins_after(
     width: Callable[[str], float],
     g: Geometry,
     moves: list[dict],
+    hand: set[Box] | None = None,
 ) -> list[Placed]:
     """After placement: a pinned label an automatic label prints over (no clear spot was left
     for the automatic one; or that sits beside it or crosses its leader, as
@@ -952,7 +1005,12 @@ def _clear_pins_after(
     for i, p in enumerate(out):
         if p.box not in pinned_boxes:
             continue
-        others = [_settled(q.box, q.text, q.anchor, width, g) for j, q in enumerate(out) if j != i]
+        held = hand or set()
+        others = [
+            _settled(q.box, q.text, q.anchor, width, g, q.box in held)
+            for j, q in enumerate(out)
+            if j != i
+        ]
         others += [_Settled(o) for o in obstacles]
         if not _clashes(_settled(p.box, p.text, p.anchor, width, g), others, 0.0, g):
             continue
@@ -969,11 +1027,12 @@ def hand_clashes(
     width: Callable[[str], float],
     g: Geometry,
 ) -> list[str]:
-    """Each clash pin clearing would have moved a hand label for (:func:`_clashes`: glyphs
-    closer than ``pin_clearance``, or side by side as ``label_beside_gap`` sets): with another
-    label, or with a strain label. Checked whether or not clearing is on."""
+    """Each clash a hand label is refused for, glyph line to glyph line (:func:`_ink_clash`,
+    ae's ink rule; Sarah Q306, Q307): with another label, or a line within ``pin_clearance`` of a
+    strain label. Pin clearing's own rule (:func:`_clashes`, with ``label_beside_gap``) is for
+    the pins it moves; a hand label is never moved, so only what reads as touching stops it."""
     gap = g.pin_clearance or 0.0
-    settled = [_settled(p.box, p.text, p.anchor, width, g) for p in placed]
+    lines = [_glyph_lines(p.box, p.text, width, g) for p in placed]
     out = []
     for i, p in enumerate(placed):
         if p.box not in hand_boxes:
@@ -981,9 +1040,9 @@ def hand_clashes(
         name = p.text.replace("\n", " ")
         for j, q in enumerate(placed):
             once = not (q.box in hand_boxes and j < i)  # a pair of hand labels is named once
-            if j != i and once and _clashes(settled[i], [settled[j]], gap, g):
+            if j != i and once and _ink_clash(lines[i], lines[j], g):
                 out.append(f"{name}: against {q.text.replace(chr(10), ' ')}")
-        if any(_clashes(settled[i], [_Settled(o)], gap, g) for o in obstacles):
+        if any(_hits(r, o, gap) for r in lines[i] for o in obstacles):
             out.append(f"{name}: against a strain label")
     return out
 
@@ -991,15 +1050,17 @@ def hand_clashes(
 def hand_leaders(
     placed: Sequence[Placed], hand_boxes: set[Box], width: Callable[[str], float], g: Geometry
 ) -> list[str]:
-    """Leaders through a label's glyphs where the leader's label or the label is a hand label:
-    listed, not refused (the automatic placer leaves some too; the editor shows them)."""
-    glyphs = [_glyph_box(p.box, p.text, width, g) for p in placed]
+    """Leaders within ``hand_leader_pad`` label sizes of a label's glyph lines where the
+    leader's label or the label is a hand label: listed, not refused (the automatic placer
+    leaves some too; the editor shows them)."""
+    lines = [_glyph_lines(p.box, p.text, width, g) for p in placed]
+    pad = g.hand_leader_pad * g.label_font
     out = []
     for i, p in enumerate(placed):
         leader = (leader_end(p.box), p.anchor)
         for j, q in enumerate(placed):
             mine = p.box in hand_boxes or q.box in hand_boxes
-            if j != i and mine and segment_hits_box(*leader, glyphs[j], 0.0):
+            if j != i and mine and any(segment_hits_box(*leader, r, pad) for r in lines[j]):
                 a, b = p.text.replace("\n", " "), q.text.replace("\n", " ")
                 out.append(f"{a}'s leader through {b}")
     return out
@@ -1242,8 +1303,8 @@ def _editor_layout(
     width: Callable[[str], float],
 ) -> list[dict]:
     """Each drawn label as the editor and the draw report read it: its text, the leaves that
-    name its node, the node point and box (figure units), its glyphs' width (as
-    :func:`_glyph_box` measures it), and the pin holding it, if any."""
+    name its node, the node point and box (figure units), its glyphs' width and each line's (as
+    :func:`_glyph_box` and :func:`_glyph_lines` measure them), and the pin holding it, if any."""
     index = {lab.node: k for k, lab in enumerate(spec.labels)}  # a Placed's key is its node
     out = []
     for p in placed:
@@ -1257,6 +1318,7 @@ def _editor_layout(
                 "node": [round(float(v), 3) for v in p.anchor],
                 "box": [round(float(v), 3) for v in p.box],
                 "glyph_w": round(float(max(width(t) for t in lab.subs)), 3),
+                "line_w": [round(float(width(t)), 3) for t in lab.subs],
                 "pin": None
                 if pin is None
                 else {"first": pin.first, "last": pin.last, "reason": pin.reason, "hand": pin.hand},
@@ -1274,7 +1336,7 @@ def _editor_page(
     font: FontProperties,
 ) -> dict:
     """What the editor needs to draw and check labels as the renderer does: the page, the label
-    style, the occupancy placement used, and the settings of :func:`_clashes`."""
+    style, the occupancy placement used, and the settings of :func:`hand_clashes`."""
     g = spec.geometry
     return {
         "figure": spec.title,
@@ -1291,6 +1353,8 @@ def _editor_page(
         "clearance": g.pin_clearance or 0.0,
         "beside_gap": g.label_beside_gap,
         "row_gap": _row_gap(g),
+        "side_gap": g.hand_side_gap * g.label_font,
+        "leader_pad": g.hand_leader_pad * g.label_font,
         "ink": ink,
         "obstacles": [list(o) for o in obstacles],
         "inset": list(inset) if inset else None,
@@ -1329,6 +1393,7 @@ def _editor_hidden(
                     for v in (node[0] - 10 - bw, node[1] - bh / 2, node[0] - 10, node[1] + bh / 2)
                 ],
                 "glyph_w": round(float(bw) - 2, 3),
+                "line_w": [round(float(width(t)), 3) for t in lab.subs],
             }
         )
     return out

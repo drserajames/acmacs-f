@@ -121,6 +121,7 @@ def _label(k: int, lab: dict, hidden: bool) -> dict:
         "box": lab["box"],
         "keys": {"first": lab["first"], "last": lab["last"]},
         "glyph_w": lab["glyph_w"],
+        "line_w": lab["line_w"],
         "hidden": hidden,
     }
 

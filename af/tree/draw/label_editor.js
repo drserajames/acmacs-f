@@ -1,7 +1,8 @@
 // The tree's adapter for the label editor (af.util.label_editor; written by af.tree.draw.editor).
 // A label hangs off its node by a leader to its box's right edge. The checks are the renderer's
-// (render._clashes, hand_clashes, hand_leaders, place.placement_metrics), rerun as labels move,
-// on each label's glyph width and the occupancy placement used, as the renderer measured them.
+// (render.hand_clashes, hand_leaders, place.placement_metrics), rerun as labels move, on each
+// label's glyph lines and the occupancy placement used, as the renderer measured them. A label
+// that will be a hand pin is checked glyph line to glyph line (ae's ink rule; Q306, Q307).
 "use strict";
 
 const ADAPTER = (() => {
@@ -9,18 +10,29 @@ const ADAPTER = (() => {
   const H = D.page.height;
   const INK = Uint8Array.from(atob(P.ink.bits), (c) => c.charCodeAt(0));
 
-  function glyph(l) {
-    const n = l.lines.length;
-    const h = P.font_size * (P.pitch * (n - 1) + 0.72);
-    const yc = (l.box[1] + l.box[3]) / 2;
-    return [l.box[2] - 1 - l.glyph_w, yc - h / 2, l.box[2] - 1, yc + h / 2];
+  const SIDE = P.side_gap === undefined ? 0.08 * P.font_size : P.side_gap;
+  const PAD = P.leader_pad === undefined ? 0.05 * P.font_size : P.leader_pad;
+  function glyphLines(l) { // render._glyph_lines: each line its own width, capitals high
+    const n = l.lines.length, yc = (l.box[1] + l.box[3]) / 2, right = l.box[2] - 1, half = 0.36 * P.font_size;
+    const longest = Math.max(...l.lines.map((t) => t.length));
+    const w = l.line_w || l.lines.map((t) => l.glyph_w * t.length / longest); // a page drawn before line_w: mono
+    return l.lines.map((t, i) => {
+      const cy = yc + (i - (n - 1) / 2) * P.pitch * P.font_size;
+      return [right - w[i], cy - half, right, cy + half];
+    });
   }
   const leaderEnd = (b) => [b[2], (b[1] + b[3]) / 2];
   const leader = (l) => [leaderEnd(l.box), l.anchor];
-  function clash(a, b) { // render._clashes, not moving: glyphs within the clearance, or side by side
-    const ga = glyph(a), gb = glyph(b);
-    if (hits(ga, gb, P.clearance)) return true;
-    return P.beside_gap !== null && hits(ga, gb, P.beside_gap, P.row_gap);
+  function clash(a, b) { // render._ink_clash: stacked closer than a stack's row gap, else SIDE
+    for (const ra of glyphLines(a)) {
+      for (const rb of glyphLines(b)) {
+        const gx = Math.max(ra[0], rb[0]) - Math.min(ra[2], rb[2]), gy = Math.max(ra[1], rb[1]) - Math.min(ra[3], rb[3]);
+        if (gx < 0 && gy < P.row_gap) return true;
+        if (gy < 0 && gx < SIDE) return true;
+        if (gx >= 0 && gy >= 0 && Math.hypot(gx, gy) < SIDE) return true;
+      }
+    }
+    return false;
   }
   function inkUnder(b) { // place.Grid.cost > 0
     const i0 = Math.max(0, Math.floor(b[1])), i1 = Math.min(P.ink.rows, Math.ceil(b[3]));
@@ -44,7 +56,7 @@ const ADAPTER = (() => {
           out.push({ ids: [a.id, b.id], text: `${a.text} and ${b.text} too close: the build refuses it` });
         }
       }
-      if (willBeHand(a) && P.obstacles.some((o) => hits(glyph(a), o, P.clearance))) {
+      if (willBeHand(a) && glyphLines(a).some((r) => P.obstacles.some((o) => hits(r, o, P.clearance)))) {
         out.push({ ids: [a.id], text: `${a.text} on a strain label: the build refuses it` });
       }
     }
@@ -69,7 +81,7 @@ const ADAPTER = (() => {
         }
       }
       for (const b of shown) {
-        if (b !== a && segmentHitsBox(la[0], la[1], glyph(b), 0)) add([a.id, b.id], `${a.text}: leader through ${b.text}`);
+        if (b !== a && glyphLines(b).some((r) => segmentHitsBox(la[0], la[1], r, PAD))) add([a.id, b.id], `${a.text}: leader through ${b.text}`);
       }
       if (inkUnder(a.box)) add([a.id], `${a.text} on the tree`);
       if (P.inset && segmentHitsBox(la[0], la[1], P.inset, 0)) add([a.id], `${a.text}: leader over the map`);

@@ -295,7 +295,7 @@ function startLabelEditor(A) {
   window.addEventListener("pointercancel", endDrag);
   window.addEventListener("blur", endDrag);
   window.addEventListener("keydown", (ev) => {
-    if (ev.target.closest("input, textarea")) return;
+    if (ev.target.closest && ev.target.closest("input, textarea")) return;
     if ((ev.metaKey || ev.ctrlKey) && !ev.shiftKey && ev.key.toLowerCase() === "z") { ev.preventDefault(); stepBack(); refresh(); return; }
     if (selected === null) return;
     const step = ev.shiftKey ? 2.5 : 0.25;
