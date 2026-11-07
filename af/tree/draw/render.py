@@ -214,6 +214,11 @@ class Geometry:
     placer_tree_ink: str = "veto"
     placer_label_clash: str = "ink"
     placer_beside_gap: float | None = None
+    # With placer_tree_ink "soft", the cost of each 0.76-unit grid cell of tree under a label's
+    # padded box. Not label_ink_weight's scale: R10 H1 kept labels off the tree as well as the
+    # grid placer does only from ~3e4 (09's sweep, 7 Nov 2026); below that the search trades a
+    # label overlap for a label on the tree.
+    placer_ink_weight: float = 100_000.0
     placer_seed: int = 2463534242
     # Clade bracket arrowheads, in points (FancyArrowPatch head length and half-width), and
     # the largest share of its bracket a head may take (None: no cap); past it the head
@@ -884,12 +889,12 @@ def _place_ae(
         height=g.height,
         mrca_fs=g.label_font,
     )
-    # The grid placer's per-tree weights (R6): only the ink weight has an ae counterpart, the
-    # cost per inked cell when tree ink is soft. The others are named in the report, not used:
-    # ae's shape model replaces length and flat, its conflicts are hard where af's crossing
-    # weight was a cost, its soft penetration is not af's overlap area, and af's beside rule is
-    # placer_beside_gap.
+    # The grid placer's per-tree weights (R6) have no ae counterpart on ae's scale, and are
+    # named in the report, not used: ae's shape model replaces length and flat, its conflicts
+    # are hard where af's crossing weight was a cost, its soft penetration is not af's overlap
+    # area, af's beside rule is placer_beside_gap and its ink weight placer_ink_weight.
     unused = {
+        "label_ink_weight": g.label_ink_weight,
         "label_length_weight": g.label_length_weight,
         "label_flat_weight": g.label_flat_weight,
         "label_overlap_weight": g.label_overlap_weight,
@@ -897,12 +902,9 @@ def _place_ae(
         "label_beside_weight": g.label_beside_weight,
         "label_beside_gap": g.label_beside_gap,
     }
-    tree_ink = _choice(g.placer_tree_ink, ("veto", "soft"), "placer_tree_ink")
-    if tree_ink == "veto":
-        unused["label_ink_weight"] = g.label_ink_weight
     opts = Options(
-        tree_ink=tree_ink,
-        soft_ink_weight=g.label_ink_weight if g.label_ink_weight is not None else 1000.0,
+        tree_ink=_choice(g.placer_tree_ink, ("veto", "soft"), "placer_tree_ink"),
+        soft_ink_weight=g.placer_ink_weight,
         label_clash=_choice(g.placer_label_clash, ("ink", "main"), "placer_label_clash"),
         beside_gap=g.placer_beside_gap,
         schedule=Schedule(seed=g.placer_seed),

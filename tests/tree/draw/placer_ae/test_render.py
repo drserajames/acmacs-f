@@ -33,7 +33,7 @@ def test_the_ae_placer_places_every_label_and_reports_its_own_measure(tmp_path):
     assert rep["metrics"]["n"] == len(ae["aa_label_layout"])
     assert rep["options"] == {
         "tree_ink": "veto",
-        "soft_ink_weight": 1000.0,
+        "soft_ink_weight": 100000.0,
         "label_clash": "ink",
         "beside_gap": None,
         "seed": 2463534242,
