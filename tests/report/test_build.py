@@ -653,6 +653,99 @@ def test_a_genuine_input_clash_is_still_refused_beside_a_comparison(tmp_path: Pa
                                tmp_path / "m.json", deep=False)  # fmt: skip
 
 
+def _seeded_chain(
+    tmp: Path, record: dict[str, Any] | None
+) -> tuple[Path, Path, Store, StoreRef, StoreRef, StoreRef, StoreRef]:
+    """Both maps draw a chain continued from an older version of itself (af.chain.adopt,
+    Q309): the seed sits on tables v1, the new version on tables v2 (CURRENT) and cites the seed
+    among its inputs. ``record`` is the new version's chain.json (None: none written)."""
+    cfg, root = _setup(tmp, allow=False)
+    store = Store.create(tmp / "store")
+    tree = _publish(store, "trees", "a/report", "tree v1")
+    old = _publish(store, "tables", "labx/m", "tables v1")
+    seed = _publish(store, "chains", "labx/m", "previous report's chain", (old,))
+    new = _publish(store, "tables", "labx/m", "tables v2")
+    started = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
+    with store.build("chains", "labx/m") as version:
+        (version.path / "data.txt").write_text("continued chain")
+        if record is not None:
+            doc = json.loads(json.dumps(record).replace("SEED", seed.version))
+            (version.path / "chain.json").write_text(json.dumps(doc))
+        seeded = version.publish(Provenance("test", (new, seed), {}, started, started))
+    later = T0 + dt.timedelta(hours=1)
+    _real_figure(root, "tree/a/x", [tree], later, "v1")
+    for slot in ("map/m1/all", "map/m2/all"):
+        _real_figure(root, slot, [seeded, tree], later, "v1")
+    return cfg, root, store, old, seed, new, seeded
+
+
+SEEDED = {"seeded_from": {"dataset": "labx/m", "version": "SEED"}, "steps": [{"chosen": "seeded"}]}
+
+
+def test_a_recorded_seed_is_lineage_not_a_second_version(tmp_path: Path) -> None:
+    """The chain's own seed (seeded_from + chosen "seeded") is listed apart, and neither it nor
+    its older tables count against the one-version rule; the figures rest on the new tables."""
+    cfg, root, store, old, seed, new, seeded = _seeded_chain(tmp_path, SEEDED)
+    use = build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                                 tmp_path / "m.json", deep=False)  # fmt: skip
+    assert use.seeds == {seed: (seeded, ["map/m1/all", "map/m2/all"])}
+    assert seeded in use.refs and new in use.refs
+    assert seed not in use.all_refs() and old not in use.all_refs()
+    assert use.pinned_versions == {}
+    assert use.to_json()["seeds"] == {
+        str(seed): {"into": str(seeded), "slots": ["map/m1/all", "map/m2/all"]}
+    }
+    document = json.loads(
+        provenance.write_report_manifest(tmp_path / "m.json", use, "test").read_text()
+    )
+    assert document["seeded"] == [
+        {"store": seed.to_json(), "into": seeded.to_json(), "slots": ["map/m1/all", "map/m2/all"]}
+    ]
+    assert seed.to_json() not in document["refs"] and old.to_json() not in document["refs"]
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        None,  # no chain record at all
+        {"steps": [{"chosen": "seeded"}]},  # seeded step, but seeded_from not recorded
+        {"seeded_from": {"dataset": "labx/m", "version": "SEED"}, "steps": [{"chosen": "adopted"}]},
+        {
+            "seeded_from": {"dataset": "labx/m", "version": "0000000000000000"},
+            "steps": [{"chosen": "seeded"}],
+        },  # records some other version as its seed
+    ],  # fmt: skip
+)
+def test_an_older_version_cited_without_its_seed_record_is_still_refused(
+    tmp_path: Path, record: dict[str, Any] | None
+) -> None:
+    """Only the exact recorded seed is lineage: any other older version of the chain a version
+    cites (or the seed with no record) is an input, refused under the one-version rule."""
+    cfg, root, store, *_ = _seeded_chain(tmp_path, record)
+    with pytest.raises(ProvenanceError, match=r"rest on different versions(.|\n)*chains/labx/m"):
+        build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                               tmp_path / "m.json", deep=False)  # fmt: skip
+
+
+def test_a_seeded_record_that_names_no_seed_is_refused(tmp_path: Path) -> None:
+    cfg, root, store, *_ = _seeded_chain(
+        tmp_path, {"seeded_from": {"dataset": "labx/m"}, "steps": [{"chosen": "seeded"}]}
+    )
+    with pytest.raises(ProvenanceError, match="seeded_from names no dataset and version"):
+        build.check_provenance(load(cfg), build.resolve_all(load(cfg), root), store.root,
+                               tmp_path / "m.json", deep=False)  # fmt: skip
+
+
+@needs_latex
+def test_the_build_record_and_manifest_list_the_seed(tmp_path: Path) -> None:
+    cfg, root, store, old, seed, new, seeded = _seeded_chain(tmp_path, SEEDED)
+    manifest = tmp_path / "manifest.json"
+    build.build(cfg, root, tmp_path / "out", store_root=store.root, manifest_path=manifest)
+    assert set(read_manifest(manifest)) >= {seeded, new} and seed not in read_manifest(manifest)
+    record = json.loads((tmp_path / "out" / "test-report.build.json").read_text())
+    assert record["store"]["seeds"][str(seed)]["into"] == str(seeded)
+
+
 def test_a_pinned_slot_may_be_drawn_from_an_older_version_of_a_shared_dataset(
     tmp_path: Path,
 ) -> None:
