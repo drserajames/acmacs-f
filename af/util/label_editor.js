@@ -49,8 +49,49 @@ function startLabelEditor(A) {
   }));
   let selected = null;
   let zoom = 1;
+  let notice = ""; // said until the first change
   const ui = { boxes: false, freeze: true, freezeWhy: "", by: "" };
   try { ui.by = localStorage.getItem("af-label-editor-by") || ""; } catch (e) { /* private window */ }
+
+  // Undo steps back one change at a time (a drag, a nudge, a hide, a put back), Cmd/Ctrl-Z too.
+  // A step is every label's place before the change, so undoing never depends on which is selected.
+  const history = [];
+  const snapshot = () => labels.map((l) => ({ box: l.box.slice(), hidden: l.hidden, why: l.why }));
+  const same = (a, b) => a.every((s, k) => s.hidden === b[k].hidden && s.box.every((v, j) => v === b[k].box[j]));
+  function remember(id, kind) { history.push({ id, kind, at: Date.now(), was: snapshot() }); }
+  function stepBack() {
+    const step = history.pop();
+    if (!step) {
+      notice = "Nothing to undo: no label has been moved, nudged, hidden or put back since this page was opened.";
+      return;
+    }
+    step.was.forEach((s, k) => { labels[k].box = s.box; labels[k].hidden = s.hidden; labels[k].why = s.why; });
+    selected = step.id;
+  }
+
+  // The page remembers its work in this browser, so a reload or a crash before Save loses nothing.
+  // Keyed by the page's own data: a page drawn again (from a saved file) starts from its own build.
+  const KEPT = "af-label-editor:" + hash(document.getElementById("data").textContent);
+  function keep() {
+    const changed = labels.filter((l) => l.hidden !== (l.fileHide !== null) || l.why || l.box.some((v, k) => v !== l.box0[k]));
+    try {
+      if (!changed.length && !ui.freezeWhy) localStorage.removeItem(KEPT);
+      else localStorage.setItem(KEPT, JSON.stringify({ at: new Date().toISOString(), freeze: ui.freeze, freezeWhy: ui.freezeWhy,
+        labels: changed.map((l) => ({ id: l.id, text: l.text, box: l.box, hidden: l.hidden, why: l.why })) }));
+    } catch (e) { /* storage full or blocked: Save still works */ }
+  }
+  function restore() {
+    let kept = null;
+    try { kept = JSON.parse(localStorage.getItem(KEPT) || "null"); } catch (e) { return null; }
+    if (!kept) return null;
+    for (const k of kept.labels) {
+      const l = labels[k.id];
+      if (!l || l.text !== k.text) return null; // not this page's: leave it alone
+    }
+    for (const k of kept.labels) Object.assign(labels[k.id], { box: k.box, hidden: k.hidden, why: k.why });
+    ui.freeze = kept.freeze; ui.freezeWhy = kept.freezeWhy || "";
+    return kept;
+  }
 
   const moved = (l) => !l.hidden && (l.fileHide !== null || l.box.some((v, k) => Math.abs(v - l.box0[k]) > 1e-6));
   const handFile = (l) => !l.hidden && l.pin !== null && l.pin.hand && !moved(l);
@@ -140,6 +181,7 @@ function startLabelEditor(A) {
     const refused = found.filter((p) => p.level === "refused"), warned = found.filter((p) => p.level === "warned");
     const sel = selected === null ? null : labels[selected];
     const toFreeze = n(frozen);
+    keep();
     panel.innerHTML = `
       <h1>${esc(D.title)}</h1>
       ${D.subtitle ? `<div class="sub">${esc(D.subtitle)}</div>` : ""}
@@ -153,9 +195,10 @@ function startLabelEditor(A) {
       <div class="help">${ui.freeze ? "What you see is what prints." : "Labels you have not moved are placed again by the next build, and may move."}</div>
       <div class="row"><button class="primary" id="save">Save</button>
         <button id="boxes">${ui.boxes ? "Hide" : "Show"} boxes</button>
-        <button id="out">−</button><button id="fit">Fit</button><button id="in">+</button>
-        <button id="resetall">Undo all</button></div>
-      <div id="message"></div>
+        <button id="out">−</button><button id="fit">Fit</button><button id="in">+</button></div>
+      <div class="row"><button id="undo" title="Cmd-Z or Ctrl-Z">Undo${history.length ? " " + esc(stepName(history[history.length - 1])) : ""}</button>
+        <button id="resetall">Put all back</button></div>
+      <div id="message">${notice && !history.length ? esc(notice) : ""}</div>
       <div class="counts"><span>${n((l) => !l.hidden)} labels</span><span class="moved">${n(moved)} moved</span>
         <span>${n((l) => l.hidden)} hidden</span><span class="refused">${refused.length} refused</span><span class="warned">${warned.length} warnings</span></div>
       ${sel ? `<h2>Selected</h2>
@@ -163,7 +206,7 @@ function startLabelEditor(A) {
         <div class="sub">${esc(D.names || "of")} ${esc(named(sel))}</div>
         ${moved(sel) || newlyHidden(sel) ? `<label for="why">Why (saved with the label)</label>
           <textarea id="why" class="${sel.why.trim() ? "" : "need"}" placeholder="${esc(sel.pin && sel.pin.reason ? "was: " + sel.pin.reason : "")}">${esc(sel.why)}</textarea>` : ""}
-        <div class="row"><button id="reset">Undo</button><button id="hide">${sel.hidden ? "Bring back" : "Hide"}</button></div>
+        <div class="row"><button id="reset" title="where the build placed it">Put back</button><button id="hide">${sel.hidden ? "Bring back" : "Hide"}</button></div>
         <div class="help">Drag the label, or nudge it with the arrow keys (shift: 10 times as far).</div>` : `<div class="help">Click a label to select it; drag it to move it.</div>`}
       <h2>Problems</h2>
       <ul>${found.map((p, k) => `<li class="${p.level}" data-k="${k}">${esc(p.text)}</li>`).join("") || "<li>none</li>"}</ul>
@@ -187,17 +230,29 @@ function startLabelEditor(A) {
     on("in", "click", () => { zoom *= 1.25; refresh(); });
     on("out", "click", () => { zoom /= 1.25; refresh(); });
     on("fit", "click", () => { fit(); refresh(); });
-    on("resetall", "click", () => { if (confirm("Undo every move and hide made since this page was opened?")) { labels.forEach(undo); refresh(); } });
-    on("reset", "click", () => { undo(labels[selected]); refresh(); });
-    on("hide", "click", () => { const l = labels[selected]; l.hidden = !l.hidden; if (!l.hidden && !l.fileHide) l.why = ""; refresh(); });
-    panel.querySelectorAll("li[data-k]").forEach((li) => li.addEventListener("click", () => { selected = found[+li.dataset.k].ids[0]; refresh(); }));
+    on("undo", "click", () => { stepBack(); refresh(); });
+    on("resetall", "click", () => { if (confirm("Put every label back where the build placed it? (Undo then steps back from this.)")) { remember(null, "put all back"); labels.forEach(putBack); refresh(); } });
+    on("reset", "click", () => { remember(selected, "put back"); putBack(labels[selected]); refresh(); });
+    on("hide", "click", () => { const l = labels[selected]; remember(l.id, l.hidden ? "bring back" : "hide"); l.hidden = !l.hidden; if (!l.hidden && !l.fileHide) l.why = ""; refresh(); });
+    on("freezewhy", "input", keep);
+    on("why", "input", keep);
+    // a problem names two labels: clicking it again selects the other one
+    panel.querySelectorAll("li[data-k]").forEach((li) => li.addEventListener("click", () => {
+      const ids = found[+li.dataset.k].ids;
+      selected = ids[(ids.indexOf(selected) + 1) % ids.length];
+      refresh();
+    }));
     panel.querySelectorAll("li[data-id]").forEach((li) => li.addEventListener("click", () => { selected = +li.dataset.id; refresh(); }));
   }
 
-  function undo(l) {
+  function putBack(l) {
     l.box = l.box0.slice();
     l.hidden = l.fileHide !== null;
     l.why = "";
+  }
+  function stepName(step) {
+    const what = step.id === null ? "" : " " + labels[step.id].text;
+    return `(${step.kind}${what})`;
   }
 
   function fit() { zoom = Math.max(0.2, (stage.clientHeight - 32) / P.height); }
@@ -216,24 +271,41 @@ function startLabelEditor(A) {
     const l = labels[+g.dataset.id];
     selected = l.id;
     const p = toFigure(ev);
-    drag = { l, x: p.x, y: p.y, box: l.box.slice() };
+    drag = { l, x: p.x, y: p.y, box: l.box.slice(), was: snapshot() };
+    try { svg.setPointerCapture(ev.pointerId); } catch (e) { /* not captured: window still ends it */ }
     ev.preventDefault();
     refresh();
   });
+  function endDrag() {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    if (!same(d.was, snapshot())) history.push({ id: d.l.id, kind: "move", at: Date.now(), was: d.was });
+    refresh();
+  }
   window.addEventListener("pointermove", (ev) => {
     if (!drag) return;
+    if (ev.pointerType === "mouse" && !(ev.buttons & 1)) { endDrag(); return; } // released where the page did not see it
     const p = toFigure(ev);
     const dx = Math.round((p.x - drag.x) * 20) / 20, dy = Math.round((p.y - drag.y) * 20) / 20;
     drag.l.box = [drag.box[0] + dx, drag.box[1] + dy, drag.box[2] + dx, drag.box[3] + dy];
     draw(problems());
   });
-  window.addEventListener("pointerup", () => { if (drag) { drag = null; refresh(); } });
+  window.addEventListener("pointerup", endDrag);
+  window.addEventListener("pointercancel", endDrag);
+  window.addEventListener("blur", endDrag);
   window.addEventListener("keydown", (ev) => {
-    if (selected === null || ev.target.closest("input, textarea")) return;
+    if (ev.target.closest("input, textarea")) return;
+    if ((ev.metaKey || ev.ctrlKey) && !ev.shiftKey && ev.key.toLowerCase() === "z") { ev.preventDefault(); stepBack(); refresh(); return; }
+    if (selected === null) return;
     const step = ev.shiftKey ? 2.5 : 0.25;
     const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[ev.key];
     if (!d) return;
     const l = labels[selected];
+    // nudges of one label in a row are one step
+    const last = history[history.length - 1];
+    if (last && last.kind === "nudge" && last.id === l.id && Date.now() - last.at < 2000) last.at = Date.now();
+    else remember(l.id, "nudge");
     l.box = [l.box[0] + d[0], l.box[1] + d[1], l.box[2] + d[0], l.box[3] + d[1]];
     ev.preventDefault();
     refresh();
@@ -289,6 +361,17 @@ function startLabelEditor(A) {
     msg.textContent = `Saved as ${D.save_as} (your downloads folder).${D.saved ? " " + D.saved : ""}`;
   }
 
+  let keeps = true;
+  try { localStorage.setItem(KEPT + ":test", "1"); keeps = localStorage.getItem(KEPT + ":test") === "1"; localStorage.removeItem(KEPT + ":test"); } catch (e) { keeps = false; }
+  const kept = keeps ? restore() : null;
+  if (!keeps) notice = "This browser will not keep unsaved work on this page: Save before you reload or close it.";
+  if (kept) notice = `Your unsaved work on this page from ${new Date(kept.at).toLocaleString()} is back (${kept.labels.length} label(s)). Put all back starts again from the build.`;
   fit();
   refresh();
+}
+
+function hash(s) { // FNV-1a: which page this is, for what the browser keeps
+  let h = 0x811c9dc5;
+  for (let k = 0; k < s.length; k++) { h ^= s.charCodeAt(k); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(16) + "-" + s.length;
 }
