@@ -233,8 +233,23 @@ def _chosen(version_dir: Path) -> Path:
 
 
 def _problem(version_dir: Path) -> dict[str, Any]:
+    """The version's inputs and parameters, as the problem it fitted. An adopted or seeded map
+    (af.chain.adopt) cites the chain whose layout it took as an input beside its tables; that
+    map is where the search started (adopted_from, compared with the search settings), not part
+    of the problem, so it is left out here or every such pair would read as other tables."""
     prov = json.loads((version_dir / "PROVENANCE.json").read_text())
-    return {"inputs": prov["inputs"], "parameters": prov["parameters"]}
+    source = prov["parameters"].get("adopted_from")
+    inputs = [i for i in prov["inputs"] if not (source and _is_source(i, source))]
+    return {"inputs": inputs, "parameters": prov["parameters"]}
+
+
+def _is_source(item: dict[str, Any], source: dict[str, Any]) -> bool:
+    s = item.get("store") or {}
+    return (s.get("kind"), s.get("dataset"), s.get("version")) == (
+        "chains",
+        source.get("dataset"),
+        source.get("version"),
+    )
 
 
 def _search_apart(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
