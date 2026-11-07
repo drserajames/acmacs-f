@@ -4,6 +4,8 @@ once more under this dataset's own arithmetic, and passed through its own trappe
 
     python -m af.chain.adopt <chain.toml> <run.toml> --version <id> --from <dataset>@<version>
         [--step NNNN]
+    python -m af.chain.adopt <chain.toml> <run.toml> --version <id>
+        --seeded-from <dataset>@<version> --starts N --decided "<who, when, why>" [--step NNNN]
 
 Why (Q210 b, 16 Oct 2026; OWED 39): an incremental chain and a from-scratch merge of the same tables
 are the same problem, but can sit in different minima (h3-hint: the incremental arrangement is 1.4%
@@ -24,6 +26,17 @@ It refuses, before anything is minimised, unless:
   avidity adjustments and unmovable points) are identical;
 - the source layout, placed, has the stress its map recorded (to the last bits an arithmetic moves).
 The new version is published only when the run config says publish, with the target as its parent.
+
+`--seeded-from` (Q309, 7 Nov 2026) is for a source that is NOT the same problem: an earlier map of
+fewer tables, e.g. the version a report drew before new tables arrived. Points pair as a reference
+check pairs them (af.chain.reference: staged identity); the source's coordinates seed every point
+that pairs, and the rest are placed at random (best of N starts) and map-fitted, the lower kept --
+af.chain.reference.seeded_relax, the very computation a reference check measures with, so what is
+published is what was measured. That layout then goes through the minimise and trapped-point loop
+above, checked against the stress the relax reached. Refused when the two share no point, or when
+the published stress is above the relax's. The step records chosen "seeded" and `seeded_from`
+(source, starts, seed, placement, the relax's stress, and `--decided`, the ruling that asked for
+it). The source may be an earlier version of the same dataset; the parent is still the target.
 """
 
 from __future__ import annotations
@@ -44,10 +57,12 @@ import numpy as np
 from af.chain.__main__ import (
     RunSettings,
     _optimiser,
+    arithmetic,
     check_tables_dataset,
     dataset_from_path,
     measure_references,
 )
+from af.chain.backend import ADOPT_STRESS_TOLERANCE
 from af.chain.config import ChainConfig, ChainConfigError, load_chain_config
 from af.chain.diagnostics import step_diagnostics
 from af.chain.engine import (
@@ -69,6 +84,7 @@ from af.chain.engine import (
 )
 from af.chain.finish import FinishError, Source, check_source
 from af.chain.publish import KIND, publish_chain
+from af.chain.reference import composition, seeded_relax
 from af.chain.review import build_review
 from af.chart.ace import read_chart, write_chart
 from af.chart.identity import AntigenKey, SerumKey, antigen_identity, serum_identity
@@ -131,6 +147,59 @@ class Adopted:
             "map_sha256": self.map_sha256,
             "stress": self.stress,
         }
+
+
+@dataclass(frozen=True)
+class Seeding:
+    """A layout reached from a different problem's map (--seeded-from): what the record says."""
+
+    starts: int
+    seed: int
+    placement: str
+    stress: float  # the seeded relax's stress, which the adopted map may only go below
+    tried: dict[str, dict[str, Any]]
+    seeded_points: int
+    points: int
+    paired: dict[str, int]  # antigens and sera paired with the source, by af.chain.reference
+    decided: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "starts": self.starts,
+            "seed": self.seed,
+            "placement": self.placement,
+            "relaxed_stress": self.stress,
+            "placements": self.tried,
+            "seeded_points": self.seeded_points,
+            "points": self.points,
+            "paired": self.paired,
+            "decided": self.decided,
+        }
+
+
+def seed_from(
+    target: Source, adopted: Adopted, *, starts: int, seed: int, numerics: str, threads: int,
+    decided: str,
+) -> tuple[np.ndarray, Seeding]:  # fmt: skip
+    """The source map's coordinates relaxed onto the target's chart (af.chain.reference
+    .seeded_relax), in the target's point order; refused when the two share no point."""
+    t_chart, s_chart = read_chart(target.chosen), read_chart(adopted.chosen)
+    comp = composition(t_chart, s_chart)
+    ag, sr = comp.pop("_pairs")
+    if not ag and not sr:
+        raise AdoptError(
+            f"{adopted.dataset}@{adopted.version} shares no point with {target.version}:"
+            " nothing to seed"
+        )
+    s = seeded_relax(
+        t_chart, s_chart, (ag, sr), starts=starts, seed=seed, numerics=numerics, threads=threads
+    )
+    seeding = Seeding(
+        starts=starts, seed=seed, placement=s.placement, stress=float(s.best.stress), tried=s.tried,
+        seeded_points=int(s.tried[s.placement]["seeded_points"]), points=t_chart.n_points,
+        paired={"antigens": len(ag), "sera": len(sr)}, decided=decided,
+    )  # fmt: skip
+    return np.asarray(s.best.layout, dtype=float), seeding
 
 
 def _keys(chart: Chart) -> tuple[list[AntigenKey | None], list[SerumKey | None]]:
@@ -307,16 +376,18 @@ def adopt_step(
     step: Step,
     target: Source,
     adopted: Adopted,
-    pairing: Pairing,
+    pairing: Pairing | None,
     layout: np.ndarray,
     mapper: Mapper,
+    seeding: Seeding | None = None,
 ) -> Step:
     """The adoption as a pipeline step: the chain's own inputs and parameters plus the source
     map, so it is never taken for a search, and a rerun that changed nothing reuses it."""
     d0 = step_dir(root, 0)
     action = functools.partial(
-        _adopt, cfg, target=target, adopted=adopted, pairing=pairing, layout=layout, mapper=mapper
-    )
+        _adopt, cfg, target=target, adopted=adopted, pairing=pairing, layout=layout,
+        mapper=mapper, seeding=seeding,
+    )  # fmt: skip
     return Step(
         name="step-0000",
         action=_action(action, d0),
@@ -327,8 +398,22 @@ def adopt_step(
             **step.parameters,
             "adopted_from": adopted.to_json(),
             "adopted_onto": {"version": target.version, "map_sha256": target.map_sha256},
+            **({"seeded_from": _seeded_from(adopted, seeding)} if seeding else {}),
         },
     )
+
+
+def _seeded_from(adopted: Adopted, seeding: Seeding) -> dict[str, Any]:
+    """The seed and how it was used. Its stresses are named apart: the source map's own, on its
+    own problem, and the relax's, on this one (the stress the published map may only go below)."""
+    return {
+        "dataset": adopted.dataset,
+        "version": adopted.version,
+        "step": adopted.step,
+        "chosen_sha256": adopted.map_sha256,
+        "source_stress": adopted.stress,
+        **seeding.to_json(),
+    }
 
 
 def _adopt(
@@ -338,9 +423,10 @@ def _adopt(
     *,
     target: Source,
     adopted: Adopted,
-    pairing: Pairing,
+    pairing: Pairing | None,
     layout: np.ndarray,
     mapper: Mapper,
+    seeding: Seeding | None = None,
 ) -> None:
     m = merge_all_tables(cfg)
     write_chart(m.merged, directory / "merge.ace")
@@ -348,12 +434,19 @@ def _adopt(
         raise AdoptError(f"{target.version}: the tables no longer merge to its merge.ace")
     o = cfg.options
     try:
+        # a seeded layout is checked against the stress its relax reached, on this problem
+        expect = seeding.stress if seeding else adopted.stress
         made = mapper.optimiser.adopt(
-            m.arrays, layout, adopted.stress, move_groups=o.move_groups,
+            m.arrays, layout, expect, move_groups=o.move_groups,
             move_lower=o.move_lower, move_lower_rule=o.move_lower_rule,
         )  # fmt: skip
     except ValueError as e:
         raise AdoptError(f"{adopted.dataset}@{adopted.version}: {e}") from e
+    if seeding and made["stress"] > seeding.stress * (1 + ADOPT_STRESS_TOLERANCE):
+        raise AdoptError(
+            f"seeded from {adopted.dataset}@{adopted.version}: the map's stress {made['stress']!r}"
+            f" is above the seeded relax's {seeding.stress!r}"
+        )
     # The adopted map is projection 0 BY DECISION, not by stress: the target's own basins follow
     # it unchanged, and one of them may be lower (the step records both stresses).
     own = read_chart(target.chosen).projections
@@ -363,10 +456,14 @@ def _adopt(
     record = {
         **{k: base[k] for k in ("index", "table_id", "merge_all")},
         "optimiser": mapper.optimiser.name,
-        "chosen": "adopted",  # projection 0 by decision; not necessarily the lowest stress
-        "stress": {"adopted": made["stress"], "target": target.stress, "source": adopted.stress},
-        "adopted_from": {**adopted.to_json(), "paired_by_titres": list(pairing.by_titres)},
+        # projection 0 by decision; not necessarily the lowest stress
+        "chosen": "seeded" if seeding else "adopted",
+        "stress": {"adopted": made["stress"], "target": target.stress, "source": adopted.stress}
+        | ({"seeded": seeding.stress} if seeding else {}),
+        "adopted_from": adopted.to_json()
+        | ({"paired_by_titres": list(pairing.by_titres)} if pairing else {}),
         "adopted_onto": target.to_json(),
+        **({"seeded_from": _seeded_from(adopted, seeding)} if seeding else {}),
         "adopt": made["adopt"],
         **{k: v for k, v in base.items() if k not in ("index", "table_id", "merge_all")},
     }
@@ -383,15 +480,16 @@ def adopt_chain(
     root: Path,
     target: Source,
     adopted: Adopted,
-    pairing: Pairing,
+    pairing: Pairing | None,
     layout: np.ndarray,
     optimiser: Any,
     step: Step,
     site: str | None = None,
+    seeding: Seeding | None = None,
 ) -> StepResult:
     """Run the adoption into `root` (its own chain root) and write its chain.json."""
     mapper = Mapper(optimiser, None, site)
-    one = adopt_step(cfg, root, step, target, adopted, pairing, layout, mapper)
+    one = adopt_step(cfg, root, step, target, adopted, pairing, layout, mapper, seeding)
     [outcome] = Pipeline([one], state_dir=root / "state", runner=LocalRunner(), root=root).run()
     d0 = step_dir(root, 0)
     result = StepResult(
@@ -402,6 +500,8 @@ def adopt_chain(
     doc = json.loads(path.read_text())
     doc["adopted_from"] = adopted.to_json()
     doc["adopted_onto"] = target.to_json()
+    if seeding:
+        doc["seeded_from"] = _seeded_from(adopted, seeding)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(doc, indent=1))
     tmp.replace(path)
@@ -415,12 +515,23 @@ def main(argv: list[str]) -> int:
     parser.add_argument("chain", type=Path, help="chain config (TOML) of the dataset adopting")
     parser.add_argument("run", type=Path, help="run config (TOML)")
     parser.add_argument("--version", required=True, help="the dataset's CURRENT version")
-    parser.add_argument(
-        "--from", dest="source", required=True,
-        help="<dataset>@<version>: the published chain whose map is adopted",
+    which = parser.add_mutually_exclusive_group(required=True)
+    which.add_argument(
+        "--from", dest="source",
+        help="<dataset>@<version>: the published chain whose map (the same problem) is adopted",
+    )  # fmt: skip
+    which.add_argument(
+        "--seeded-from", dest="seeded",
+        help="<dataset>@<version>: a published map of another problem whose layout seeds this",
     )  # fmt: skip
     parser.add_argument("--step", help="its step (NNNN); default its last")
+    parser.add_argument("--starts", type=int, help="with --seeded-from: random placements tried")
+    parser.add_argument("--decided", help="with --seeded-from: who asked for it, when and why")
     args = parser.parse_args(argv)
+    if args.seeded is not None and (args.starts is None or args.starts < 1 or not args.decided):
+        parser.error("--seeded-from needs --starts (>= 1) and --decided")
+    if args.seeded is None and (args.starts is not None or args.decided is not None):
+        parser.error("--starts and --decided go with --seeded-from")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     dataset = dataset_from_path(args.chain)
     check_tables_dataset(args.chain, dataset)
@@ -441,22 +552,43 @@ def main(argv: list[str]) -> int:
         target = check_source(cfg, Path(run.paths.store), dataset, args.version, step, work.root)
     except FinishError as e:
         raise AdoptError(str(e)) from e
-    adopted = find_source(Path(run.paths.store), args.source, args.step)
-    if adopted.dataset == dataset:
-        raise AdoptError(f"{dataset}: a dataset adopts another's layout, not its own")
-    layout, pairing, _ = place(cfg, target, adopted)
-    log.info(
-        "%s@%s and %s@%s are the same problem: %d points, %d paired by titres",
-        dataset, args.version, adopted.dataset, adopted.version, len(layout),
-        len(pairing.by_titres),
-    )  # fmt: skip
-    root = work.root / "adopt" / args.version / f"{adopted.version}-{adopted.step}"
+    seeding: Seeding | None = None
+    pairing: Pairing | None = None
+    if args.seeded is None:
+        adopted = find_source(Path(run.paths.store), args.source, args.step)
+        if adopted.dataset == dataset:
+            raise AdoptError(f"{dataset}: a dataset adopts another's layout, not its own")
+        layout, pairing, _ = place(cfg, target, adopted)
+        log.info(
+            "%s@%s and %s@%s are the same problem: %d points, %d paired by titres",
+            dataset, args.version, adopted.dataset, adopted.version, len(layout),
+            len(pairing.by_titres),
+        )  # fmt: skip
+        root = work.root / "adopt" / args.version / f"{adopted.version}-{adopted.step}"
+    else:
+        adopted = find_source(Path(run.paths.store), args.seeded, args.step)
+        if (adopted.dataset, adopted.version) == (dataset, args.version):
+            raise AdoptError(f"{dataset}@{args.version}: a map is not seeded from itself")
+        layout, seeding = seed_from(
+            target, adopted, starts=args.starts, seed=cfg.seed, numerics=arithmetic(run),
+            threads=run.threads, decided=args.decided,
+        )  # fmt: skip
+        log.info(
+            "%s@%s seeded from %s@%s: %d of %d points seeded, placement %s, relaxed %.6f"
+            " (target %.6f)",
+            dataset, args.version, adopted.dataset, adopted.version, seeding.seeded_points,
+            seeding.points, seeding.placement, seeding.stress, target.stress,
+        )  # fmt: skip
+        root = work.root / "adopt" / args.version / f"seeded-{adopted.version}-{adopted.step}"
     root.mkdir(parents=True, exist_ok=True)
-    result = adopt_chain(cfg, root, target, adopted, pairing, layout, optimiser, step, run.site)
+    result = adopt_chain(
+        cfg, root, target, adopted, pairing, layout, optimiser, step, run.site, seeding
+    )
     log.info(
-        "%s@%s adopted %s@%s step %s: stress %.6f (source %.6f, target %.6f; %s)",
-        dataset, args.version, adopted.dataset, adopted.version, adopted.step,
-        result.record["stress"]["adopted"], adopted.stress, target.stress,
+        "%s@%s %s %s@%s step %s: stress %.6f (source %.6f, target %.6f%s; %s)",
+        dataset, args.version, "seeded from" if seeding else "adopted", adopted.dataset,
+        adopted.version, adopted.step, result.record["stress"]["adopted"], adopted.stress,
+        target.stress, f", seeded relax {seeding.stress:.6f}" if seeding else "",
         "reused" if result.reused else "made",
     )  # fmt: skip
     if cfg.references:

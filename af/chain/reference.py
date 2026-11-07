@@ -28,6 +28,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -174,7 +175,19 @@ def _map_fitted(start: np.ndarray, layout: np.ndarray) -> tuple[np.ndarray, int]
     return out, int(fill.sum())
 
 
-def basin(
+@dataclass(frozen=True)
+class Seeded:
+    """The lowest layout the reference's coordinates reach on this map's problem (seeded_relax)."""
+
+    problem: Any  # af.map.optimise.MapProblem: this map's chart, under the arithmetic asked for
+    layout: np.ndarray  # this map's own (published) layout
+    own: float  # its stress in `problem`
+    placement: str  # "random" or "map-fitted": the placement of the unpaired points that won
+    tried: dict[str, dict[str, Any]]  # each placement tried, with its seeded stress
+    best: Any  # the lower placement's projection (layout, stress)
+
+
+def seeded_relax(
     chart: Chart,
     ref: Chart,
     pairs: tuple[dict[int, int], dict[int, int]],
@@ -183,8 +196,12 @@ def basin(
     seed: int,
     numerics: str,
     threads: int = 0,
-) -> dict[str, Any]:
-    """`numerics` is the optimiser arithmetic to measure under (`af.map.optimise.NUMERICS_OFFERED`):
+) -> Seeded:
+    """The reference's coordinates for every point that pairs, relaxed on THIS map's chart, the
+    unpaired points placed both ways (module docstring), the lower kept. `basin` measures with
+    it; af.chain.adopt --seeded-from publishes its layout, so the two are one computation.
+
+    `numerics` is the optimiser arithmetic to measure under (`af.map.optimise.NUMERICS_OFFERED`):
     the one the map was made with, so the seeded stress and the map's are of one kind."""
     from af.map.optimise import MapProblem, relax, stress
 
@@ -228,7 +245,25 @@ def basin(
         tried[name] |= {"seeded_stress": float(p.stress), "seeded_minus_map": float(p.stress) - own}
     # the lower stress; a tie keeps the random placement, the only one recorded before
     placement = min(found, key=lambda n: (found[n].stress, n != "random"))
-    best = found[placement]
+    return Seeded(problem, layout, own, placement, tried, found[placement])
+
+
+def basin(
+    chart: Chart,
+    ref: Chart,
+    pairs: tuple[dict[int, int], dict[int, int]],
+    *,
+    starts: int,
+    seed: int,
+    numerics: str,
+    threads: int = 0,
+) -> dict[str, Any]:
+    """Did the search find the best layout? `seeded_relax`, and how far its layout sits from this
+    map's (module docstring)."""
+    s = seeded_relax(
+        chart, ref, pairs, starts=starts, seed=seed, numerics=numerics, threads=threads
+    )
+    layout, own, tried, placement, best = s.layout, s.own, s.tried, s.placement, s.best
     fit = procrustes(layout, np.asarray(best.layout))
     dist = np.nan_to_num(fit.distances)
     order = np.argsort(-dist)[:MOVERS]
