@@ -53,3 +53,5 @@ body {
 .leader { stroke: #4d4d4d; stroke-width: .35; }
 .node { fill: var(--accent); display: none; }
 .lab.selected + .node, .node.on { display: inline; }
+#stage svg { touch-action: none; } /* a drag is the page's, never the browser's scroll */
+#panel button:disabled { color: var(--muted); cursor: default; }
