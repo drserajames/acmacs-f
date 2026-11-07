@@ -40,7 +40,7 @@ class Label:
 
     @property
     def th(self) -> float:
-        return len(self.lines) * ROW * self.fs
+        return len(self.lines) * (self.fs * ROW)  # ae's order (M:2587), to the last bit
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 
@@ -202,6 +203,18 @@ class Geometry:
     label_flat_weight: float | None = None
     label_overlap_weight: float | None = None
     label_crossing_weight: float | None = None
+    # Which automatic placer: af's own ("grid": place.py) or ae's, ported ("ae": placer_ae, angle
+    # and length candidates searched over all labels at once, leaders to the middle of the
+    # branch, ae's glyph rule between labels; Sarah, 7 Nov 2026). Under "ae", where af departs
+    # from ae by a ruling, a switch: tree ink a veto ("veto", ae) or a cost per inked cell
+    # ("soft", R6); ae's glyph rule between labels ("ink") or ae main's box rule ("main"), and
+    # af's beside gap (R8 M3, 9 units) on top when placer_beside_gap is set. Hand pins keep af's
+    # rules under either placer.
+    placer: str = "grid"
+    placer_tree_ink: str = "veto"
+    placer_label_clash: str = "ink"
+    placer_beside_gap: float | None = None
+    placer_seed: int = 2463534242
     # Clade bracket arrowheads, in points (FancyArrowPatch head length and half-width), and
     # the largest share of its bracket a head may take (None: no cap); past it the head
     # shrinks, so a short bracket's two heads never meet (R6 review: a bow-tie on J.1.1).
@@ -306,6 +319,8 @@ class _Page:
         xmax = g.x_max or float(np.nanmax(lay.node_x[lay.leaf_nodes])) or 1.0
         self.nx = g.tree_left + lay.node_x / xmax * (self.tree_right - g.tree_left)
         self.ny = g.top + (lay.node_y + 0.5) * self.row_h
+        self.strokes: list[Box] = []  # the tree's exact stroke rects (placer "ae" only)
+        self.inset: Box | None = None  # the continent inset's box, once drawn
 
     def row_y(self, rows: np.ndarray | int) -> np.ndarray:
         return self.g.top + (np.asarray(rows) + 0.5) * self.row_h
@@ -392,6 +407,14 @@ def _draw_tree(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, colours: np.nd
     # 100,000-leaf tree): a fixed width painted big trees solid black.
     width = min(spec.geometry.branch_stroke * pg.row_h, 0.5)  # small trees: a normal line
     ax.add_collection(LineCollection(segs, colors=seg_colours, linewidths=width))
+    if spec.geometry.placer == "ae":  # ae keeps labels off the exact strokes, not a raster
+        hw = width / 2
+        pg.strokes = [
+            (min(x0, x1), y0 - hw, max(x0, x1), y0 + hw)
+            if y0 == y1
+            else (x0 - hw, min(y0, y1), x0 + hw, max(y0, y1))
+            for (x0, y0), (x1, y1) in segs
+        ]
     for (x0, y0), (x1, y1) in segs:
         if y0 == y1:
             grid.add_hline(x0, x1, y0)
@@ -717,9 +740,15 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
     if g.pin_clearance is not None:
         anchors = {k: _tether(spec, pg, spec.labels[k].node) for k in fixed}
         fixed, moves = _clear_pins(spec, fixed, obstacles, width, g, anchors, hand)
-    placed = place_labels(
-        items, grid, width, line_height, search=search, weights=_weights(g), fixed=fixed or None
-    )
+    ae_report = None
+    if g.placer == "ae":
+        placed, ae_report = _place_ae(spec, pg, font, width, line_height, fixed, hand, obstacles)
+    elif g.placer == "grid":
+        placed = place_labels(
+            items, grid, width, line_height, search=search, weights=_weights(g), fixed=fixed or None
+        )
+    else:
+        raise ValueError(f"unknown placer {g.placer!r}: 'grid' or 'ae'")
     if g.pin_clearance is not None and moves is not None:
         movable = {fixed[k] for k in fixed if k not in hand}
         held = {fixed[k] for k in hand}
@@ -756,12 +785,166 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
                     alpha=0.0,
                     linespacing=1.15,
                 )
+        if g.placer == "ae":
+            seg = _ae_leader(p, font, g)
+            if seg is not None:
+                ax.plot([seg[0][0], seg[1][0]], [seg[0][1], seg[1][1]], color="#4d4d4d", lw=0.35)
+            continue
         (ex, ey), _ = _leader(p.box, p.text, p.anchor, width, g)
         ax.plot([ex, p.anchor[0]], [ey, p.anchor[1]], color="#4d4d4d", lw=0.35)
     metrics = placement_metrics(placed, grid)
     if g.label_beside_gap is not None:
         metrics |= glyph_metrics(placed, width, g)
+    if ae_report is not None:
+        metrics["ae"] = ae_report
     return placed, metrics, moves
+
+
+# ---- the ae placer (Geometry.placer = "ae"; placer_ae) -----------------------------------------
+# af's boxes are the placer's: the text plus a unit left and right, 1.2 sizes a line plus a unit
+# tall, the text drawn right-aligned a unit in. ae's are the text's own: the pen advance wide,
+# 1.18 sizes a line. Both are centred on the same line block and end their text at the same x,
+# so a label converts both ways and the editor, pin clearing and the hand checks are unchanged.
+
+
+def _ae_advance(font: FontProperties) -> Callable[[str], float]:
+    """A line's pen advance in the label font: ae sizes labels by it, not by the ink (ae
+    95d65dd: the ink extent under-measures a mono line)."""
+    ft = font_manager.get_font(font_manager.findfont(font))
+    ft.set_size(font.get_size_in_points(), 72)
+    cache: dict[str, float] = {}
+
+    def advance(s: str) -> float:
+        if s not in cache:
+            cache[s] = sum(ft.load_char(ord(c)).linearHoriAdvance for c in s) / 65536
+        return cache[s]
+
+    return advance
+
+
+def _ae_box(box: Box, lines: Sequence[str], advance: Callable[[str], float], fs: float) -> Box:
+    x1, cy = box[2] - 1, (box[1] + box[3]) / 2
+    tw, th = max(advance(t) for t in lines), len(lines) * 1.18 * fs
+    return (x1 - tw, cy - th / 2, x1, cy + th / 2)
+
+
+def _af_box(
+    box: Box, lines: Sequence[str], width: Callable[[str], float], line_height: float
+) -> Box:
+    x1, cy = box[2] + 1, (box[1] + box[3]) / 2
+    bw, bh = max(width(t) for t in lines) + 2, line_height * len(lines) + 1
+    return (x1 - bw, cy - bh / 2, x1, cy + bh / 2)
+
+
+def _ae_end(spec: FigureSpec, pg: _Page, node: int) -> Point:
+    """ae ends every leader at the middle of the node's own horizontal edge (mid_x)."""
+    x, y = float(pg.nx[node]), float(pg.ny[node])
+    parent = spec.tree.parent[node]
+    return ((float(pg.nx[parent]) + x) / 2 if parent >= 0 else x, y)
+
+
+def _place_ae(
+    spec: FigureSpec,
+    pg: _Page,
+    font: FontProperties,
+    width: Callable[[str], float],
+    line_height: float,
+    fixed: Mapping[int, Box],
+    hand: set[int],
+    obstacles: Sequence[Box],
+) -> tuple[list[Placed], dict]:
+    from .placer_ae.run import place
+    from .placer_ae.scene import Label, Options, Scene, Schedule
+
+    g = pg.g
+    advance = _ae_advance(font)
+    labels = []
+    for k, lab in enumerate(spec.labels):
+        lines = tuple(lab.subs)
+        node = (float(pg.nx[lab.node]), float(pg.ny[lab.node]))
+        pinned = _ae_box(fixed[k], lines, advance, g.label_font) if k in fixed else None
+        labels.append(
+            Label(
+                lab.node,
+                "\n".join(lines),
+                lines,
+                tuple(advance(t) for t in lines),
+                g.label_font,
+                node,
+                _ae_end(spec, pg, lab.node),
+                pinned,
+                k in hand,
+            )
+        )
+    scene = Scene(
+        labels=tuple(labels),
+        strokes=tuple(pg.strokes),
+        obstacles=tuple(obstacles) + ((pg.inset,) if pg.inset is not None else ()),
+        band=(g.label_left, g.top - 4, pg.tree_right, pg.bottom + 2),
+        height=g.height,
+        mrca_fs=g.label_font,
+    )
+    # The grid placer's per-tree weights (R6): only the ink weight has an ae counterpart, the
+    # cost per inked cell when tree ink is soft. The others are named in the report, not used:
+    # ae's shape model replaces length and flat, its conflicts are hard where af's crossing
+    # weight was a cost, its soft penetration is not af's overlap area, and af's beside rule is
+    # placer_beside_gap.
+    unused = {
+        "label_length_weight": g.label_length_weight,
+        "label_flat_weight": g.label_flat_weight,
+        "label_overlap_weight": g.label_overlap_weight,
+        "label_crossing_weight": g.label_crossing_weight,
+        "label_beside_weight": g.label_beside_weight,
+        "label_beside_gap": g.label_beside_gap,
+    }
+    tree_ink = _choice(g.placer_tree_ink, ("veto", "soft"), "placer_tree_ink")
+    if tree_ink == "veto":
+        unused["label_ink_weight"] = g.label_ink_weight
+    opts = Options(
+        tree_ink=tree_ink,
+        soft_ink_weight=g.label_ink_weight if g.label_ink_weight is not None else 1000.0,
+        label_clash=_choice(g.placer_label_clash, ("ink", "main"), "placer_label_clash"),
+        beside_gap=g.placer_beside_gap,
+        schedule=Schedule(seed=g.placer_seed),
+    )
+    result = place(scene, opts)
+    result.report["grid_weights_not_used"] = sorted(k for k, v in unused.items() if v is not None)
+    result.report["options"] = {
+        "tree_ink": opts.tree_ink,
+        "soft_ink_weight": opts.soft_ink_weight,
+        "label_clash": opts.label_clash,
+        "beside_gap": opts.beside_gap,
+        "seed": opts.schedule.seed,
+    }
+    placed = [
+        Placed(lab.key, lab.text, lab.end, _af_box(box, lab.lines, width, line_height), cost)
+        for (lab, box, _), cost in zip(result.placed, result.base, strict=True)
+    ]
+    placed.sort(key=lambda p: (p.anchor[1], p.key))  # as the grid placer returns them
+    return placed, result.report
+
+
+def _choice(value: str, allowed: tuple[str, ...], name: str) -> Any:
+    """A placer switch's value, refused unless it is one of ``allowed`` (rule 1)."""
+    if value not in allowed:
+        raise ValueError(f"{name} {value!r}: one of {', '.join(allowed)}")
+    return value
+
+
+def _ae_leader(p: Placed, font: FontProperties, g: Geometry) -> tuple[Point, Point] | None:
+    """ae's drawn leader for a placed label: from where it attaches (its text's end, or the
+    middle of its nearer cap edge when it is over its branch) to the branch, a little short of
+    the text; none when the two are within 0.4 sizes."""
+    from .placer_ae.geometry import attach_pt
+    from .placer_ae.measure import drawn_leader
+    from .placer_ae.scene import Label
+
+    lines = tuple(p.text.split("\n"))
+    advance = _ae_advance(font)
+    box = _ae_box(p.box, lines, advance, g.label_font)
+    lws = tuple(advance(t) for t in lines)
+    lab = Label(p.key, p.text, lines, lws, g.label_font, p.anchor, p.anchor)
+    return drawn_leader(lab, attach_pt(p.anchor, g.label_font, box))
 
 
 def glyph_metrics(placed: Sequence[Placed], width: Callable[[str], float], g: Geometry) -> dict:
@@ -1260,6 +1443,7 @@ def render(spec: FigureSpec, pdf_path: Path, editor: EditorRequest | None = None
     last_column = bracket_left + max(spec.selection.slots.values(), default=0) * g.clade_slot + 2
     _draw_dash_bars(ax, spec, pg, last_column + g.bars_gap)
     inset = _draw_key(ax, spec, pg, grid)
+    pg.inset = inset
     first = len(ax.texts), len(ax.lines)  # the labels' artists follow: the editor hides them
     if g.strain_x is None or g.strains_first:  # strain labels first: the aa labels keep off them
         strain_boxes, strain_report = _draw_strains(ax, spec, pg, grid)
