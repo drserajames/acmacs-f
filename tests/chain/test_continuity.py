@@ -282,3 +282,4 @@ def test_a_seeded_map_cites_its_source_but_fits_the_same_problem(store):
     assert rec["same_problem"] is True and rec["parameters_differ"] == []
     assert set(rec["search_differ"]) == {"adopted_from", "seeded_from"}
     assert "NOT comparable" not in sentences(rec)[1]
+    assert "seeded_from none -> labx/h3/merged@v1" in sentences(rec)[1]

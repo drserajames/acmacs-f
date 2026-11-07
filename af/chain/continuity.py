@@ -423,12 +423,15 @@ def sentences(rec: dict[str, Any], *, movers: int = 8) -> list[str]:
 
 
 def _setting(value: Any) -> str:
-    """A search setting as a reader wants it: a named rule by its name, a finish rule by what it
-    turns on."""
+    """A search setting as a reader wants it: a named rule by its name, the map a layout was
+    adopted or seeded from (af.chain.adopt) by dataset@version, a finish rule by what it turns
+    on."""
     if value is None:
         return "none"
     if isinstance(value, dict) and "name" in value:
         return str(value["name"])
+    if isinstance(value, dict) and "dataset" in value and "version" in value:
+        return f"{value['dataset']}@{value['version']}"
     if isinstance(value, dict):
         return ", ".join(k for k, v in value.items() if v is True) or "none"
     return str(value)
