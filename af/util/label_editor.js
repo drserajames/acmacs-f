@@ -49,7 +49,9 @@ function startLabelEditor(A) {
   }));
   let selected = null;
   let zoom = 1;
-  let notice = ""; // said until the first change
+  let notice = ""; // said until the next change
+  let edits = 0, noticeAt = 0; // every change counts; a notice shows while no change has followed it
+  const say = (t) => { notice = t; noticeAt = edits; };
   const ui = { boxes: false, freeze: true, freezeWhy: "", by: "" };
   try { ui.by = localStorage.getItem("af-label-editor-by") || ""; } catch (e) { /* private window */ }
 
@@ -58,13 +60,14 @@ function startLabelEditor(A) {
   const history = [];
   const snapshot = () => labels.map((l) => ({ box: l.box.slice(), hidden: l.hidden, why: l.why }));
   const same = (a, b) => a.every((s, k) => s.hidden === b[k].hidden && s.box.every((v, j) => v === b[k].box[j]));
-  function remember(id, kind) { history.push({ id, kind, at: Date.now(), was: snapshot() }); }
+  function remember(id, kind) { history.push({ id, kind, at: Date.now(), was: snapshot() }); edits++; }
   function stepBack() {
     const step = history.pop();
     if (!step) {
-      notice = "Nothing to undo: no label has been moved, nudged, hidden or put back since this page was opened.";
+      say("Nothing to undo: no label has been moved, nudged, hidden or put back since this page was opened.");
       return;
     }
+    edits++;
     step.was.forEach((s, k) => { labels[k].box = s.box; labels[k].hidden = s.hidden; labels[k].why = s.why; });
     selected = step.id;
   }
@@ -80,17 +83,31 @@ function startLabelEditor(A) {
         labels: changed.map((l) => ({ id: l.id, text: l.text, box: l.box, hidden: l.hidden, why: l.why })) }));
     } catch (e) { /* storage full or blocked: Save still works */ }
   }
+  const fits = (kept) => kept && Array.isArray(kept.labels) && kept.labels.length > 0
+    && kept.labels.every((k) => labels[k.id] && labels[k.id].text === k.text);
   function restore() {
     let kept = null;
     try { kept = JSON.parse(localStorage.getItem(KEPT) || "null"); } catch (e) { return null; }
+    if (kept && !fits(kept)) return null; // not this page's: leave it alone
+    if (!kept) kept = earlier();
     if (!kept) return null;
-    for (const k of kept.labels) {
-      const l = labels[k.id];
-      if (!l || l.text !== k.text) return null; // not this page's: leave it alone
-    }
     for (const k of kept.labels) Object.assign(labels[k.id], { box: k.box, hidden: k.hidden, why: k.why });
     ui.freeze = kept.freeze; ui.freezeWhy = kept.freezeWhy || "";
     return kept;
+  }
+  // A page redrawn with the same labels (a new script, or a field added to its data) has a new key: take the
+  // newest work kept by an earlier copy whose every label is this page's, by place and text. Never deleted.
+  function earlier() {
+    let best = null;
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key || !key.startsWith("af-label-editor:") || key === KEPT || key.endsWith(":test")) continue;
+        const kept = JSON.parse(localStorage.getItem(key) || "null");
+        if (fits(kept) && (!best || kept.at > best.at)) best = { ...kept, from: key };
+      }
+    } catch (e) { return null; }
+    return best;
   }
 
   const moved = (l) => !l.hidden && (l.fileHide !== null || l.box.some((v, k) => Math.abs(v - l.box0[k]) > 1e-6));
@@ -99,7 +116,13 @@ function startLabelEditor(A) {
   // a hand pin once saved: what the build will never move, and refuses to draw clashing
   const willBeHand = (l) => moved(l) || handFile(l) || frozen(l);
   const newlyHidden = (l) => l.hidden && l.fileHide === null;
-  const needsWhy = (l) => (moved(l) || newlyHidden(l)) && !l.why.trim();
+  // A why is optional: a row with none says what was done, with who and when (design rule 9).
+  const AUTO = {
+    moved: "placed by hand in the label editor",
+    hidden: "hidden by hand in the label editor",
+    frozen: "kept where the build placed it, in the label editor",
+  };
+  let askedBy = false; // initials are asked for at most once on a page, then remembered
 
   function problems() {
     const shown = labels.filter((l) => !l.hidden);
@@ -186,26 +209,26 @@ function startLabelEditor(A) {
       <h1>${esc(D.title)}</h1>
       ${D.subtitle ? `<div class="sub">${esc(D.subtitle)}</div>` : ""}
       <div class="sub">Saves as <b>${esc(D.save_as)}</b>${D.saves ? ", " + esc(D.saves) : ""}.</div>
-      <label for="by">Your name or initials</label>
-      <input type="text" id="by" value="${esc(ui.by)}" class="${ui.by.trim() ? "" : "need"}">
+      <label for="by">Your initials (remembered)</label>
+      <input type="text" id="by" value="${esc(ui.by)}">
       <div class="row"><label style="margin:0;font-weight:400"><input type="checkbox" id="freeze" ${ui.freeze ? "checked" : ""}>
         Keep every label I have not moved where it is now (${toFreeze})</label></div>
-      ${ui.freeze && toFreeze ? `<label for="freezewhy">Why keep them where they are</label>
-        <textarea id="freezewhy" class="${ui.freezeWhy.trim() ? "" : "need"}">${esc(ui.freezeWhy)}</textarea>` : ""}
+      ${ui.freeze && toFreeze ? `<label for="freezewhy">Why keep them where they are (optional)</label>
+        <textarea id="freezewhy" placeholder="${esc(AUTO.frozen)}">${esc(ui.freezeWhy)}</textarea>` : ""}
       <div class="help">${ui.freeze ? "What you see is what prints." : "Labels you have not moved are placed again by the next build, and may move."}</div>
-      <div class="row"><button class="primary" id="save">Save</button>
+      <div class="row"><button class="primary" id="save">Save ${esc(D.save_as)}</button>
         <button id="boxes">${ui.boxes ? "Hide" : "Show"} boxes</button>
         <button id="out">−</button><button id="fit">Fit</button><button id="in">+</button></div>
       <div class="row"><button id="undo" title="Cmd-Z or Ctrl-Z">Undo${history.length ? " " + esc(stepName(history[history.length - 1])) : ""}</button>
         <button id="resetall">Put all back</button></div>
-      <div id="message">${notice && !history.length ? esc(notice) : ""}</div>
+      <div id="message">${notice && noticeAt === edits ? esc(notice) : ""}</div>
       <div class="counts"><span>${n((l) => !l.hidden)} labels</span><span class="moved">${n(moved)} moved</span>
         <span>${n((l) => l.hidden)} hidden</span><span class="refused">${refused.length} refused</span><span class="warned">${warned.length} warnings</span></div>
       ${sel ? `<h2>Selected</h2>
         <div><b>${esc(sel.text)}</b></div><div class="sub">${esc(status(sel))}</div>
         <div class="sub">${esc(D.names || "of")} ${esc(named(sel))}</div>
-        ${moved(sel) || newlyHidden(sel) ? `<label for="why">Why (saved with the label)</label>
-          <textarea id="why" class="${sel.why.trim() ? "" : "need"}" placeholder="${esc(sel.pin && sel.pin.reason ? "was: " + sel.pin.reason : "")}">${esc(sel.why)}</textarea>` : ""}
+        ${moved(sel) || newlyHidden(sel) ? `<label for="why">Why (optional)</label>
+          <textarea id="why" placeholder="${esc(sel.hidden ? AUTO.hidden : AUTO.moved)}">${esc(sel.why)}</textarea>` : ""}
         <div class="row"><button id="reset" title="where the build placed it">Put back</button><button id="hide">${sel.hidden ? "Bring back" : "Hide"}</button></div>
         <div class="help">Drag the label, or nudge it with the arrow keys (shift: 10 times as far).</div>` : `<div class="help">Click a label to select it; drag it to move it.</div>`}
       <h2>Problems</h2>
@@ -213,18 +236,18 @@ function startLabelEditor(A) {
       <h2>Hidden</h2>
       <ul>${labels.filter((l) => l.hidden).map((l) => `<li data-id="${l.id}">${esc(l.text)}</li>`).join("") || "<li>none</li>"}</ul>
       <h2>How this saves</h2>
-      <div class="help">Every label you move or hide needs a why, and every row records your name and the date.
-        The build reads the file back, puts each label exactly where you left it and never moves it;
-        a label it would have had to move (red here) stops the build with its name.</div>`;
+      <div class="help">Save always saves. A why is optional: a label without one is saved as "${esc(AUTO.moved)}"
+        (or hidden, or kept), with your initials and the date. The build reads the file back, puts each label exactly
+        where you left it and never moves it; a label it would have had to move (red here) stops the build with its name.</div>`;
     bind(found);
   }
 
   function bind(found) {
     const on = (id, ev, f) => { const e = document.getElementById(id); if (e) e.addEventListener(ev, f); };
-    on("by", "input", (e) => { ui.by = e.target.value; e.target.classList.toggle("need", !ui.by.trim()); try { localStorage.setItem("af-label-editor-by", ui.by); } catch (x) { /* ignore */ } });
+    on("by", "input", (e) => { ui.by = e.target.value; try { localStorage.setItem("af-label-editor-by", ui.by); } catch (x) { /* ignore */ } });
     on("freeze", "change", (e) => { ui.freeze = e.target.checked; refresh(); });
-    on("freezewhy", "input", (e) => { ui.freezeWhy = e.target.value; e.target.classList.toggle("need", !ui.freezeWhy.trim()); });
-    on("why", "input", (e) => { labels[selected].why = e.target.value; e.target.classList.toggle("need", !e.target.value.trim()); });
+    on("freezewhy", "input", (e) => { ui.freezeWhy = e.target.value; });
+    on("why", "input", (e) => { labels[selected].why = e.target.value; });
     on("save", "click", save);
     on("boxes", "click", () => { ui.boxes = !ui.boxes; refresh(); });
     on("in", "click", () => { zoom *= 1.25; refresh(); });
@@ -280,7 +303,7 @@ function startLabelEditor(A) {
     if (!drag) return;
     const d = drag;
     drag = null;
-    if (!same(d.was, snapshot())) history.push({ id: d.l.id, kind: "move", at: Date.now(), was: d.was });
+    if (!same(d.was, snapshot())) { history.push({ id: d.l.id, kind: "move", at: Date.now(), was: d.was }); edits++; }
     refresh();
   }
   window.addEventListener("pointermove", (ev) => {
@@ -304,7 +327,7 @@ function startLabelEditor(A) {
     const l = labels[selected];
     // nudges of one label in a row are one step
     const last = history[history.length - 1];
-    if (last && last.kind === "nudge" && last.id === l.id && Date.now() - last.at < 2000) last.at = Date.now();
+    if (last && last.kind === "nudge" && last.id === l.id && Date.now() - last.at < 2000) { last.at = Date.now(); edits++; }
     else remember(l.id, "nudge");
     l.box = [l.box[0] + d[0], l.box[1] + d[1], l.box[2] + d[0], l.box[3] + d[1]];
     ev.preventDefault();
@@ -318,30 +341,28 @@ function startLabelEditor(A) {
   const keyLines = (keys) => Object.entries(keys).map(([k, v]) => `${k} = ${q(v)}`);
 
   function save() {
-    const msg = document.getElementById("message");
-    const by = ui.by.trim();
-    const missing = labels.filter(needsWhy);
-    const refusals = [];
-    if (!by) refusals.push("Write your name or initials: every row records who did it.");
-    if (missing.length) refusals.push(`Write why for: ${missing.map((l) => l.text).join(", ")}.`);
-    if (ui.freeze && labels.some(frozen) && !ui.freezeWhy.trim()) refusals.push("Write why the labels you have not moved are kept where they are.");
-    if (refusals.length) {
-      msg.className = "refused";
-      msg.textContent = "Not saved. " + refusals.join(" ");
-      if (missing.length) { selected = missing[0].id; refresh(); document.getElementById("message").className = "refused"; document.getElementById("message").textContent = "Not saved. " + refusals.join(" "); }
-      return;
+    // Save always saves: nothing typed is required, and red only stops the build, never the save.
+    if (!ui.by.trim() && !askedBy) {
+      askedBy = true;
+      let given = null;
+      try { given = window.prompt("Your initials, saved with each label (asked once):", ""); } catch (e) { /* no dialogs */ }
+      if (given && given.trim()) {
+        ui.by = given.trim();
+        try { localStorage.setItem("af-label-editor-by", ui.by); } catch (e) { /* ignore */ }
+      }
     }
+    const by = ui.by.trim() || "not given";
     const red = problems().filter((p) => p.level === "refused");
-    if (red.length && !confirm(`${red.length} problem(s) are red: the build will stop on them until they are moved.\n\n${red.map((p) => p.text).join("\n")}\n\nSave anyway?`)) return;
+    const why = (l, auto) => l.why.trim() || auto;
     const today = new Date();
     const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
     const lines = [...(D.comment || []).map((c) => `# ${c}`), ...keyLines(D.header || {})];
     for (const l of labels) {
       if (l.hidden) continue;
       let r = null;
-      if (moved(l)) r = { reason: l.why.trim(), by, date };
+      if (moved(l)) r = { reason: why(l, AUTO.moved), by, date };
       else if (handFile(l)) r = { reason: l.pin.reason, by: l.pin.by, date: l.pin.date };
-      else if (frozen(l)) r = { reason: ui.freezeWhy.trim(), by, date };
+      else if (frozen(l)) r = { reason: ui.freezeWhy.trim() || AUTO.frozen, by, date };
       if (!r) continue;
       const o = A.offset(l);
       lines.push("", `[[${TABLES.pin}]]`, ...keyLines((l.pin && l.pin.keys) || l.keys), `text = ${q(l.text)}`,
@@ -349,7 +370,7 @@ function startLabelEditor(A) {
     }
     for (const l of labels) {
       if (!l.hidden) continue;
-      const r = l.fileHide ? l.fileHide : { reason: l.why.trim(), by, date };
+      const r = l.fileHide ? l.fileHide : { reason: why(l, AUTO.hidden), by, date };
       lines.push("", `[[${TABLES.hide}]]`, ...keyLines(r.keys || l.keys), `text = ${q(l.text)}`,
         `reason = ${q(r.reason)}`, `by = ${q(r.by)}`, `date = ${q(r.date)}`);
     }
@@ -357,15 +378,21 @@ function startLabelEditor(A) {
     a.href = URL.createObjectURL(new Blob([lines.join("\n") + "\n"], { type: "application/toml" }));
     a.download = D.save_as;
     a.click();
-    msg.className = "";
-    msg.textContent = `Saved as ${D.save_as} (your downloads folder).${D.saved ? " " + D.saved : ""}`;
+    const at = today.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const placed = labels.filter((l) => !l.hidden && (moved(l) || handFile(l) || frozen(l))).length;
+    say(`Saved at ${at}: ${D.save_as} went to your browser's downloads folder, normally Downloads (if a file of that `
+      + `name was already there, the browser may have added a number to the new one's name). It places ${placed} label(s) and hides `
+      + `${labels.filter((l) => l.hidden).length}.`
+      + (red.length ? ` ${red.length} red problem(s) will stop the build until they are moved: save again after moving them.` : "")
+      + (D.saved ? " " + D.saved : ""));
+    refresh();
   }
 
   let keeps = true;
   try { localStorage.setItem(KEPT + ":test", "1"); keeps = localStorage.getItem(KEPT + ":test") === "1"; localStorage.removeItem(KEPT + ":test"); } catch (e) { keeps = false; }
   const kept = keeps ? restore() : null;
-  if (!keeps) notice = "This browser will not keep unsaved work on this page: Save before you reload or close it.";
-  if (kept) notice = `Your unsaved work on this page from ${new Date(kept.at).toLocaleString()} is back (${kept.labels.length} label(s)). Put all back starts again from the build.`;
+  if (!keeps) say("This browser will not keep unsaved work on this page: Save before you reload or close it.");
+  if (kept) say(`Your unsaved work ${kept.from ? "from an earlier copy of this page" : "on this page"}, from ${new Date(kept.at).toLocaleString()}, is back (${kept.labels.length} label(s)). Put all back starts again from the build.`);
   fit();
   refresh();
 }

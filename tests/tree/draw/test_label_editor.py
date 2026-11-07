@@ -116,6 +116,34 @@ def test_a_row_without_a_why_a_name_or_a_date_refuses_the_file(tmp_path, row, pr
         load_hand_labels(path)
 
 
+def test_the_editors_own_reasons_and_name_satisfy_the_loader(tmp_path):
+    # Save never asks for a why or a name: rows without one carry the editor's own reason and,
+    # when no initials were given, "not given". Those must load (rule 9: named, counted, dated).
+    from importlib import resources
+
+    js = resources.files("af.util").joinpath("label_editor.js").read_text()
+    auto = dict(re.findall(r'^\s+(moved|hidden|frozen): "([^"]+)",$', js, re.M))
+    assert set(auto) == {"moved", "hidden", "frozen"}
+    assert 'ui.by.trim() || "not given"' in js
+    assert "Not saved" not in js  # nothing typed is required
+    path = tmp_path / "h.toml"
+    path.write_text(
+        f'[[label_pins]]\nfirst = "{K2N[0]}"\nlast = "{K2N[1]}"\ntext = "K2N"\ndx = -0.05\n'
+        f'dy = 0.0\nreason = "{auto["moved"]}"\nby = "not given"\ndate = "2026-11-07"\n\n'
+        '[[label_pins]]\nfirst = "EPI_ISL_0000001"\nlast = "EPI_ISL_0000002"\n'
+        'text = "A6S"\ndx = -0.05\n'
+        f'dy = 0.0\nreason = "{auto["frozen"]}"\nby = "AB"\ndate = "2026-11-07"\n\n'
+        f'[[hide_labels]]\nfirst = "{L7F[0]}"\nlast = "{L7F[1]}"\ntext = "L7F"\n'
+        f'reason = "{auto["hidden"]}"\nby = "AB"\ndate = "2026-11-07"\n'
+    )
+    pins, hides = load_hand_labels(path)
+    assert [p.reason for p in pins] == [
+        f"{auto['moved']} (not given, 2026-11-07)",
+        f"{auto['frozen']} (AB, 2026-11-07)",
+    ]
+    assert hides[0].reason == f"{auto['hidden']} (AB, 2026-11-07)"
+
+
 def test_hand_rows_supersede_config_rows_on_the_same_label(tmp_path):
     _, rows = _layout(tmp_path)
     height = Geometry().height
