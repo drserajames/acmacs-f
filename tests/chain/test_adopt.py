@@ -348,17 +348,19 @@ def test_the_version_before_new_tables_seeds_the_rebuild(both):
 
 
 def test_a_seed_sharing_no_point_is_refused(both, tmp_path):
-    from af.chain.adopt import seed_from
+    from af.chain.adopt import Adopted, seed_from
+    from af.chain.finish import Source
     from af.chart.ace import read_chart, write_chart
 
     target = _vdir(both, MERGED, both.version) / "steps/0000/chosen.ace"
     chart = read_chart(target)
-    for p in [*chart.antigens, *chart.sera]:
-        p.name = "OTHER-" + p.name
+    for ag in chart.antigens:
+        ag.name = "OTHER-" + ag.name
     for s in chart.sera:
-        s.serum_id = "X" + s.serum_id
-    stranger = write_chart(chart, tmp_path / "stranger.ace")
-    t = SimpleNamespace(chosen=target, version=both.version)
-    a = SimpleNamespace(chosen=stranger, dataset="testlab/h9/other", version="0" * 16)
+        s.name, s.serum_id = "OTHER-" + s.name, "X" + s.serum_id
+    (tmp_path / "stranger").mkdir()
+    stranger = write_chart(chart, tmp_path / "stranger" / "chosen.ace")
+    t = Source(both.version, target.parent, "", 0.0)
+    a = Adopted("testlab/h9/other", "0" * 16, "0000", stranger.parent, "", 0.0)
     with pytest.raises(AdoptError, match="shares no point"):
         seed_from(t, a, starts=2, seed=1, numerics="strict-fp-1", threads=1, decided=DECIDED)
