@@ -84,8 +84,9 @@ def publish_chain(store_root: Path, dataset: str, chain_root: Path) -> StoreRef:
             | ({"refine_best": doc["refine_best"]} if "refine_best" in doc else {})
             # a finished map (af.chain.finish): the version it came from and the rule applied
             | {k: doc[k] for k in ("finished_from", "finish") if k in doc}
-            # an adopted map (af.chain.adopt): whose layout it took, and the version it replaced
-            | {k: doc[k] for k in ("adopted_from", "adopted_onto") if k in doc},
+            # an adopted map (af.chain.adopt): whose layout it took, and the version it replaced;
+            # a seeded one (--seeded-from) also how the layout was reached from that map
+            | {k: doc[k] for k in ("adopted_from", "adopted_onto", "seeded_from") if k in doc},
             started=started,
             finished=datetime.datetime.now(datetime.UTC),
         )

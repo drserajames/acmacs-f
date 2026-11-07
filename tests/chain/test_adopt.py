@@ -251,3 +251,114 @@ def test_the_optimiser_refuses_a_layout_not_placed_point_for_point(tmp_path):
         core.adopt(arrays, swapped, recorded)
     with pytest.raises(ValueError, match="cannot adopt"):
         StubOptimiser().adopt(arrays, layout, recorded)
+
+
+# ---- --seeded-from: a different problem's map seeds this one (Q309) ---------------------------
+
+DECIDED = "test ruling, for the record"
+
+
+def _seeded(both, source: str, *extra: str) -> int:
+    return adopt_main([str(both.merged), str(both.run), "--version", both.version,
+                       "--seeded-from", source, *extra])  # fmt: skip
+
+
+def test_an_earlier_maps_layout_seeds_the_next_merged_version(both):
+    """The main chain's FIRST step holds one table of three: not the merged map's problem, so
+    --from refuses it (above) and --seeded-from seeds from it. What is published is what
+    af.chain.reference measured, taken through adopt's minimise: never above the seeded relax."""
+    from af.chain.reference import composition, seeded_relax
+    from af.chart.ace import read_chart
+
+    assert _seeded(both, f"{MAIN}@{both.main}", "--step", "0000", "--starts", "4",
+                   "--decided", DECIDED) == 0  # fmt: skip
+    store = Store.open(both.root / "store")
+    new = store.current("chains", MERGED).version
+    assert new != both.version
+    assert store.history("chains", MERGED)[-1]["parent"] == both.version  # the target, not the seed
+    vdir = _vdir(both, MERGED, new)
+    step = json.loads((vdir / "steps/0000/step.json").read_text())
+    chain = json.loads((vdir / "chain.json").read_text())
+    assert step["chosen"] == "seeded"
+    seeded = step["seeded_from"]
+    assert seeded["dataset"] == MAIN and seeded["version"] == both.main and seeded["step"] == "0000"
+    assert seeded["starts"] == 4 and seeded["seed"] == 3 and seeded["decided"] == DECIDED
+    assert seeded["placement"] in ("random", "map-fitted") and seeded["paired"]["antigens"] > 0
+    assert chain["seeded_from"] == seeded and chain["numerics"] == "strict-fp-1"
+    assert step["adopted_from"]["version"] == both.main
+    assert step["adopted_onto"]["version"] == both.version
+    assert step["stress"]["seeded"] == seeded["relaxed_stress"]
+    assert step["stress"]["adopted"] <= seeded["relaxed_stress"] * (1 + 1e-12)
+    assert seeded["source_stress"] == step["stress"]["source"] == step["adopted_from"]["stress"]
+    assert seeded["chosen_sha256"] == step["adopted_from"]["map_sha256"]
+    # the seeded relax is the reference check's own computation, so it reproduces exactly
+    target_chosen = _vdir(both, MERGED, both.version) / "steps/0000/chosen.ace"
+    source_chosen = _vdir(both, MAIN, both.main) / "steps/0000/chosen.ace"
+    t, s = read_chart(target_chosen), read_chart(source_chosen)
+    again = seeded_relax(t, s, composition(t, s)["_pairs"], starts=4, seed=3,
+                         numerics="strict-fp-1", threads=1)  # fmt: skip
+    assert float(again.best.stress) == seeded["relaxed_stress"]
+    assert again.placement == seeded["placement"]
+    # provenance names the seed's version as an input, with how it was used
+    provenance = json.loads((vdir / "PROVENANCE.json").read_text())
+    stores = [i["store"] for i in provenance["inputs"] if "store" in i]
+    assert {"kind": "chains", "dataset": MAIN, "version": both.main} in [
+        {k: x[k] for k in ("kind", "dataset", "version")} for x in stores
+    ]
+    assert provenance["parameters"]["seeded_from"]["decided"] == DECIDED
+
+
+def test_seeding_needs_starts_and_a_decision(both):
+    with pytest.raises(SystemExit):
+        _seeded(both, f"{MAIN}@{both.main}")
+    with pytest.raises(SystemExit):
+        _seeded(both, f"{MAIN}@{both.main}", "--starts", "4")
+    with pytest.raises(SystemExit):
+        _adopt(both, None, "--starts", "4")
+
+
+def test_a_map_is_not_seeded_from_itself(both):
+    with pytest.raises(AdoptError, match="not seeded from itself"):
+        _seeded(both, f"{MERGED}@{both.version}", "--starts", "4", "--decided", DECIDED)
+
+
+def test_the_version_before_new_tables_seeds_the_rebuild(both):
+    """Q309's case: the source is the same dataset's earlier version, built before the newest
+    table arrived (a report's map); the target is today's rebuild with it. The parent stays the
+    rebuild: the seed is a search setting, not a lineage."""
+    text = both.merged.read_text()
+    both.merged.write_text(text.replace("merge_all = true\n", 'merge_all = true\n')
+                           .replace('group = "', 'date_to = "2021-02-28"\ngroup = "'))  # fmt: skip
+    assert chain_main([str(both.merged), str(both.run)]) == 0  # 2 of the 3 tables
+    store = Store.open(both.root / "store")
+    before = store.current("chains", MERGED).version
+    both.merged.write_text(text)
+    assert chain_main([str(both.merged), str(both.run)]) == 0  # all 3 again: a rebuild
+    rebuild = store.current("chains", MERGED).version
+    assert rebuild not in (before,)
+    both.version = rebuild
+    assert _seeded(both, f"{MERGED}@{before}", "--starts", "2", "--decided", DECIDED) == 0
+    after = store.current("chains", MERGED).version
+    assert after not in (before, rebuild)
+    assert store.history("chains", MERGED)[-1]["parent"] == rebuild
+    step = json.loads((_vdir(both, MERGED, after) / "steps/0000/step.json").read_text())
+    assert step["chosen"] == "seeded"
+    assert step["seeded_from"]["dataset"] == MERGED and step["seeded_from"]["version"] == before
+    assert step["stress"]["adopted"] <= step["stress"]["seeded"] * (1 + 1e-12)
+
+
+def test_a_seed_sharing_no_point_is_refused(both, tmp_path):
+    from af.chain.adopt import seed_from
+    from af.chart.ace import read_chart, write_chart
+
+    target = _vdir(both, MERGED, both.version) / "steps/0000/chosen.ace"
+    chart = read_chart(target)
+    for p in [*chart.antigens, *chart.sera]:
+        p.name = "OTHER-" + p.name
+    for s in chart.sera:
+        s.serum_id = "X" + s.serum_id
+    stranger = write_chart(chart, tmp_path / "stranger.ace")
+    t = SimpleNamespace(chosen=target, version=both.version)
+    a = SimpleNamespace(chosen=stranger, dataset="testlab/h9/other", version="0" * 16)
+    with pytest.raises(AdoptError, match="shares no point"):
+        seed_from(t, a, starts=2, seed=1, numerics="strict-fp-1", threads=1, decided=DECIDED)

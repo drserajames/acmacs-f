@@ -288,6 +288,7 @@ def record(
     adopted = [ap.pop("adopted_from", None), an.pop("adopted_from", None)]
     ap.pop("adopted_onto", None)
     an.pop("adopted_onto", None)
+    seeded = [ap.pop("seeded_from", None), an.pop("seeded_from", None)]  # --seeded-from: likewise
     # the move-lower rule a map was made under (options.move_lower): a search setting with it
     lower_rule = [ap.pop("move_lower_rule", None), an.pop("move_lower_rule", None)]
     keys = sorted(set(an) | set(ap))
@@ -299,6 +300,8 @@ def record(
         search["finish"] = finish
     if adopted[0] != adopted[1]:
         search["adopted_from"] = adopted
+    if seeded[0] != seeded[1]:
+        search["seeded_from"] = seeded
     if lower_rule[0] != lower_rule[1]:
         search["move_lower_rule"] = lower_rule
     same = pn["inputs"] == pp["inputs"] and not differ

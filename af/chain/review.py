@@ -258,9 +258,16 @@ def _step_info(s: dict, r: dict) -> list[str]:
             if "finished_from" in r
             else ""
         )
-        + (  # af.chain.adopt: the other chain whose layout this map took
-            f" · layout adopted from {_e(r['adopted_from']['dataset'])}@"
+        + (  # af.chain.adopt: the other chain whose layout this map took (or was seeded from)
+            f" · layout {'seeded' if 'seeded_from' in r else 'adopted'} from"
+            f" {_e(r['adopted_from']['dataset'])}@"
             f"{_e(r['adopted_from']['version'])} step {_e(r['adopted_from']['step'])}"
+            + (
+                f" ({r['seeded_from']['starts']} starts, {_e(r['seeded_from']['placement'])};"
+                f" {_e(r['seeded_from']['decided'])})"
+                if "seeded_from" in r
+                else ""
+            )
             if "adopted_from" in r
             else ""
         ),
