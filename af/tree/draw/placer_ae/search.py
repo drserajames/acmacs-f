@@ -418,6 +418,13 @@ def _repair_pair(st: _State, i: int, j: int) -> bool:
         return False
     v = np.where(ok, p.base_l[i][:, None] + p.base_l[j][None, :], _BIG)
     bci, bcj = divmod(int(np.argmin(v)), m.shape[1])  # row-major: ae's ci-outer loop
+    # Not ae's: take the clean pair only when it costs less than the conflicts it clears. ae's
+    # bases stay far below one conflict, so this never binds there; with tree ink a cost
+    # (Options.tree_ink "soft") a base can exceed many, and A2 would put a label on the tree
+    # to clear one conflict (a dense report tree, 7 Nov 2026: one label on 529 inked cells).
+    held = int(st.conf_vec(i)[ci]) + int(st.conf_vec(j)[cj]) - int(m[ci, cj])
+    if v[bci, bcj] >= p.base_l[i][ci] + p.base_l[j][cj] + st.wc_l * held:
+        return False
     st.set(i, bci)
     st.set(j, bcj)
     return True
