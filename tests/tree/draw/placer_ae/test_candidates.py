@@ -250,6 +250,28 @@ def test_pinned_label_one_candidate_and_reserved():
     assert rows(cf)[0][:2] != FIRST12[0][:2]
 
 
+def test_a_config_pin_may_move_by_the_moves_given_a_hand_pin_never():
+    box = (120.0, 505.0, 137.1, 516.21)
+    pin = label(key=2, end=(176.0, 500.0), pinned=box)
+    sc = scene(labels=(pin, label(key=1)))
+    opts = Options(pin_moves=((0.0, 0.0), (4.0, 0.0), (0.0, -1.0), (-2.0, 1.0)), pin_move_cost=50.0)
+    cp = C.make_candidates(sc, opts)[0]
+    assert cp.box(0) == box and float(cp.base[0]) == 0.0  # where it was put: first, free
+    moved = {
+        (round(cp.x0[i] - box[0], 6), round(cp.y0[i] - box[1], 6)): float(cp.base[i])
+        for i in range(1, len(cp))
+    }
+    assert moved == pytest.approx(
+        {(0.0, -1.0): 50.0, (-2.0, 1.0): 50.0 * math.sqrt(2.0), (4.0, 0.0): 100.0}
+    )
+    assert list(cp.base) == sorted(cp.base)
+    # not a wall in the obstacle grid: the pair tables keep the others off it
+    assert not C.obstacle_grid(sc, opts).occ.any()
+    hand = Label(**{**pin.__dict__, "hand": True})
+    assert len(C.make_candidates(scene(labels=(hand,)), opts)[0]) == 1
+    assert C.obstacle_grid(scene(labels=(hand,)), opts).occ.any()
+
+
 def test_soft_tree_ink_is_a_cost_veto_is_a_veto():
     # a connector at x 135 through the oracle's best box (and not along its leader, x 145-175)
     extra = (135.0 - HW, 505.0, 135.0 + HW, 520.0)

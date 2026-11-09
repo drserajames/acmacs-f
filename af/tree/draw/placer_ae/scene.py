@@ -120,6 +120,17 @@ class Options:
     # Two boxes that touch vertically are a row gap apart to the last bit: ae's float arithmetic
     # calls that a clash, af's hand rule (render._ink_clash) does not. af's is taken.
     stack_tolerance: float = 1e-6
+    # ae counts every conflict alike (pconf), so one label printed on another weighs no more
+    # than two leaders crossing, and on a crowded tree the search takes the overprint (R10 H1,
+    # 09, 9 Nov 2026). overlap_weight counts a glyph overlap (ae's ink rule at its own gap m;
+    # the beside gap's wider rule apart) as that many conflicts. 1: ae.
+    overlap_weight: int = 1
+    # Labels pinned by config (not by hand) may move by any of these (dx, dy), each costing
+    # pin_move_cost per unit of hypot(dx / 2, dy) (af's pin clearing, where a sideways unit
+    # counts half), searched with the rest instead of af's clearing pass after placement.
+    # Empty: every pin is one fixed candidate, as ae's.
+    pin_moves: tuple[tuple[float, float], ...] = ()
+    pin_move_cost: float = 100.0
     leader_end: Literal["mid", "node"] = "mid"
     weights: Weights = field(default_factory=Weights)
     schedule: Schedule = field(default_factory=Schedule)

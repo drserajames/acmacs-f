@@ -14,6 +14,7 @@ from af.tree.draw.placer_ae.predicates import (
     pconf,
     psoft,
     text_clash,
+    text_conflicts,
 )
 from af.tree.draw.placer_ae.scene import Label, Options, Scene
 
@@ -81,6 +82,21 @@ def test_conflicts_count_each_kind_once():
     c = _placed((150.0, 140.0, 167.1, 151.21), end=(200.0, 100.0), attach=(150.0, 145.6))
     d = _placed((160.0, 115.0, 177.1, 126.21), end=(300.0, 300.0))
     assert leader_over_text(c, d, K_INK)
+
+
+def test_an_overlap_weight_counts_glyph_overlaps_only():
+    over = _placed((115.1, 108.21, 132.2, 119.42))  # glyphs clash at ae's own gap
+    beside = _placed((125.0, 100.0, 142.1, 111.21))  # 7.9 apart: inside the 9 unit rule only
+    k1 = consts(_scene(), Options(beside_gap=9.0))
+    k8 = consts(_scene(), Options(beside_gap=9.0, overlap_weight=8))
+    assert text_conflicts(_placed(P), over, k1) == 1 == text_conflicts(_placed(P), beside, k1)
+    assert text_conflicts(_placed(P), over, k8) == 8
+    assert text_conflicts(_placed(P), beside, k8) == 1
+    assert pconf(_placed(P), over, k8) == 8 + pconf(_placed(P), over, k1) - 1
+    assert text_conflicts(_placed(P), _placed((300.0, 100.0, 317.1, 111.21)), k8) == 0
+    for bad in (0, 101):
+        with pytest.raises(ValueError, match="overlap_weight"):
+            consts(_scene(), Options(overlap_weight=bad))
 
 
 def test_soft_penetration_is_zero_far_apart_and_grows_with_overlap():

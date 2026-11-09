@@ -220,6 +220,15 @@ class Geometry:
     # label overlap for a label on the tree.
     placer_ink_weight: float = 100_000.0
     placer_seed: int = 2463534242
+    # Under "ae": a glyph overlap counts this many of ae's conflicts (1: ae, where an overprint
+    # weighs what a leader crossing does and R10 H1's crowded top took four), and labels pinned
+    # by config (not by hand) move inside ae's search, within pin clearing's reach (sideways
+    # pin_clear_dx, up or down 10, at placer_pin_move_cost a unit, sideways counting half),
+    # instead of a pass after it (09, 9 Nov 2026). False: ae's fixed pins; pin clearing's pass
+    # still runs after placement either way.
+    placer_overlap_weight: int = 1
+    placer_pins_move: bool = False
+    placer_pin_move_cost: float = 100.0
     # Clade bracket arrowheads, in points (FancyArrowPatch head length and half-width), and
     # the largest share of its bracket a head may take (None: no cap); past it the head
     # shrinks, so a short bracket's two heads never meet (R6 review: a bow-tie on J.1.1).
@@ -748,6 +757,8 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
     ae_report = None
     if g.placer == "ae":
         placed, ae_report = _place_ae(spec, pg, font, width, line_height, fixed, hand, obstacles)
+        if moves is not None:  # pins ae's search moved, listed as pin clearing lists its own
+            moves += [_move_row(m["text"], (m["dx"], m["dy"])) for m in ae_report["pins_moved"]]
     elif g.placer == "grid":
         placed = place_labels(
             items, grid, width, line_height, search=search, weights=_weights(g), fixed=fixed or None
@@ -907,15 +918,30 @@ def _place_ae(
         soft_ink_weight=g.placer_ink_weight,
         label_clash=_choice(g.placer_label_clash, ("ink", "main"), "placer_label_clash"),
         beside_gap=g.placer_beside_gap,
+        overlap_weight=g.placer_overlap_weight,
+        pin_moves=_ae_pin_moves(g),
+        pin_move_cost=g.placer_pin_move_cost,
         schedule=Schedule(seed=g.placer_seed),
     )
     result = place(scene, opts)
+    result.report["pins_moved"] = [
+        {
+            "text": " ".join(lab.lines),
+            "dx": round(box[0] - lab.pinned[0], 2),
+            "dy": round(box[1] - lab.pinned[1], 2),
+        }
+        for lab, box, _ in result.placed
+        if lab.pinned is not None and box[:2] != lab.pinned[:2]
+    ]
     result.report["grid_weights_not_used"] = sorted(k for k, v in unused.items() if v is not None)
     result.report["options"] = {
         "tree_ink": opts.tree_ink,
         "soft_ink_weight": opts.soft_ink_weight,
         "label_clash": opts.label_clash,
         "beside_gap": opts.beside_gap,
+        "overlap_weight": opts.overlap_weight,
+        "pins_move": bool(opts.pin_moves),
+        "pin_move_cost": opts.pin_move_cost,
         "seed": opts.schedule.seed,
     }
     placed = [
@@ -924,6 +950,16 @@ def _place_ae(
     ]
     placed.sort(key=lambda p: (p.anchor[1], p.key))  # as the grid placer returns them
     return placed, result.report
+
+
+def _ae_pin_moves(g: Geometry) -> tuple[tuple[float, float], ...]:
+    """placer_pins_move's tries: pin clearing's reach (sideways pin_clear_dx, up or down 10
+    units) on a coarser lattice than its own (2 units across, 1 up and down: 21 rows of up to
+    17), so each pin brings a few hundred candidates, not 13,000. Empty: pins fixed."""
+    if not g.placer_pins_move:
+        return ()
+    n = int(g.pin_clear_dx // 2)
+    return tuple((2.0 * i, float(j)) for i in range(-n, n + 1) for j in range(-10, 11))
 
 
 def _choice(value: str, allowed: tuple[str, ...], name: str) -> Any:

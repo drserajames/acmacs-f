@@ -102,11 +102,17 @@ OPTS = [
     for mode in ("ink", "main")
     for gap in (None, 9.0)
     for tol in (0.0, 1e-6)
+] + [
+    Options(label_clash=mode, beside_gap=gap, overlap_weight=8)
+    for mode in ("ink", "main")
+    for gap in (None, 9.0)
 ]
 
 
 @pytest.mark.parametrize(
-    "opts", OPTS, ids=lambda o: f"{o.label_clash}-{o.beside_gap}-{o.stack_tolerance}"
+    "opts",
+    OPTS,
+    ids=lambda o: f"{o.label_clash}-{o.beside_gap}-{o.stack_tolerance}-{o.overlap_weight}",
 )
 @pytest.mark.parametrize("seed", [1, 2, 3])
 @pytest.mark.parametrize("snap", [False, True])

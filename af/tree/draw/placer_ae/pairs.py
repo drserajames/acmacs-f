@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TypeVar
 
 import numpy as np
@@ -263,10 +263,21 @@ def _leaders_cross(p: _View, q: _View) -> Mask:
     return _cross(ex, ey, p.cx, p.cy, fx, fy, q.cx, q.cy)
 
 
+def _text_conflicts(p: _View, q: _View, k: Consts) -> NDArray[np.int8]:
+    """predicates.text_conflicts: ae's 0/1, or wt for an overlap at m and 1 beside only."""
+    if k.wt == 1:
+        return _text_clash(p, q, k).astype(np.int8)
+    over = _text_clash(p, q, replace(k, side=k.m))
+    out = over.astype(np.int8) * np.int8(k.wt)
+    if k.side > k.m:
+        out = out + (_text_clash(p, q, k) & ~over).astype(np.int8)
+    return np.asarray(out, dtype=np.int8)
+
+
 def _conf(p: _View, q: _View, k: Consts) -> NDArray[np.int8]:
     """pconf: the int sum of the four kinds."""
     total = (
-        _text_clash(p, q, k).astype(np.int8)
+        _text_conflicts(p, q, k)
         + _leaders_cross(p, q).astype(np.int8)
         + _leader_over_text(p, q, k).astype(np.int8)
         + _leader_over_text(q, p, k).astype(np.int8)

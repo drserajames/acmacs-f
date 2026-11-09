@@ -213,13 +213,14 @@ def tree_grid(scene: Scene) -> OccGrid:
 
 def obstacle_grid(scene: Scene, opts: Options) -> OccGrid:
     """Strain labels, title, inset (each as ae's mark_box of corner and size), then every pinned
-    label's padded box (M:2580-2585), all before any candidate."""
+    label's padded box (M:2580-2585), all before any candidate. A pin that may move
+    (Options.pin_moves) is not marked: the pair tables keep the others off it wherever it goes."""
     g = OccGrid(scene.band, scene.mrca_fs)
     for b in scene.obstacles:
         g.mark_box(b[0], b[1], b[2] - b[0], b[3] - b[1])
     pad = scene.mrca_fs * opts.weights.pad
     for lab in scene.labels:
-        if lab.pinned is not None:
+        if lab.pinned is not None and not movable(lab, opts):
             tw, th = lab.tw, text_height(lab)
             g.mark_box(lab.pinned[0] - pad, lab.pinned[1] - pad, tw + 2.0 * pad, th + 2.0 * pad)
     return g
@@ -447,7 +448,7 @@ def label_candidates(ctx: Context, lab: Label, stats: dict[str, int] | None = No
     before thinning), near (pass 1), final."""
     tw, th = lab.tw, text_height(lab)
     if lab.pinned is not None:
-        return _pinned(lab)
+        return _pin_moves(ctx, lab) if movable(lab, ctx.opts) else _pinned(lab)
     return _thin(ctx, lab, tw, th, raw_candidates(ctx, lab), stats)
 
 
@@ -470,6 +471,33 @@ def _pinned(lab: Label) -> Cands:
     box = lab.pinned
     cx, cy = attach_pt(lab.end, lab.fs, box)
     return Cands.of([(box[0], box[1], box[2], box[3], cx, cy, 0.0, 0)])
+
+
+def movable(lab: Label, opts: Options) -> bool:
+    """A config pin with moves to try; a hand pin never moves (af's rule: the editor's place)."""
+    return lab.pinned is not None and not lab.hand and bool(opts.pin_moves)
+
+
+def _pin_moves(ctx: Context, lab: Label) -> Cands:
+    """A config pin where it is (cost 0, unchecked, as _pinned) and at each of Options.pin_moves
+    whose box passes the tiers' box test, costing pin_move_cost per unit of hypot(dx / 2, dy)
+    plus any soft tree ink: least moved first."""
+    assert lab.pinned is not None
+    x0, y0, x1, y1 = lab.pinned
+    o = ctx.opts
+    moves = sorted(
+        {m for m in o.pin_moves if m != (0.0, 0.0)},
+        key=lambda m: (math.hypot(m[0] / 2, m[1]), abs(m[1]), m[1], m[0]),
+    )
+    dx = np.array([m[0] for m in moves], dtype=np.float64)
+    dy = np.array([m[1] for m in moves], dtype=np.float64)
+    ok, soft = _box_test(ctx, x0 + dx, y0 + dy, x1 - x0, y1 - y0)
+    rows = [(x0, y0, x1, y1, *attach_pt(lab.end, lab.fs, lab.pinned), 0.0, 0)]
+    for i in np.flatnonzero(ok):
+        b = (x0 + dx[i], y0 + dy[i], x1 + dx[i], y1 + dy[i])
+        cost = o.pin_move_cost * math.hypot(dx[i] / 2, dy[i]) + float(soft[i])
+        rows.append((*b, *attach_pt(lab.end, lab.fs, b), cost, 0))
+    return Cands.of(rows)
 
 
 def _box_test(

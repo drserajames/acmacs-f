@@ -10,7 +10,7 @@ attach point); its leader runs from ``label.end`` to the attach point.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .geometry import glyph_rects, grow, rects_clash, seg_box, seg_box_len, seg_seg_d, segs_cross
 from .scene import CAP, ROW, Box, Label, Options, Point, Scene
@@ -26,10 +26,13 @@ class Consts:
     side: float  # side-by-side glyph gap: m, or af's beside gap if wider (Options.beside_gap)
     tolerance: float  # stacked knife edge (Options.stack_tolerance)
     ink: bool  # ae's ink rule (glyph lines) or main's box rule
+    wt: int = 1  # a glyph overlap counts this many conflicts (Options.overlap_weight; 1: ae)
 
 
 def consts(scene: Scene, opts: Options) -> Consts:
     fs, w = scene.mrca_fs, opts.weights
+    if not 1 <= opts.overlap_weight <= 100:  # the pair tables are int8: 100 + 3 still fits
+        raise ValueError(f"overlap_weight {opts.overlap_weight}: 1 to 100")
     m = w.m * fs
     return Consts(
         m=m,
@@ -40,6 +43,7 @@ def consts(scene: Scene, opts: Options) -> Consts:
         side=max(m, opts.beside_gap or 0.0),
         tolerance=opts.stack_tolerance,
         ink=opts.label_clash == "ink",
+        wt=opts.overlap_weight,
     )
 
 
@@ -71,6 +75,16 @@ def _beside_boxes(a: Box, b: Box, gap: float) -> bool:
     return min(a[3], b[3]) > max(a[1], b[1]) and max(a[0], b[0]) - min(a[2], b[2]) < gap
 
 
+def text_conflicts(p: Placed, q: Placed, k: Consts) -> int:
+    """text_clash as a count: ae's 0 or 1, or with ``k.wt`` > 1, wt for glyphs that clash at
+    ae's own gap m and 1 for a pair that clashes only by the beside gap."""
+    if k.wt == 1:
+        return int(text_clash(p, q, k))
+    if text_clash(p, q, replace(k, side=k.m)):
+        return k.wt
+    return int(k.side > k.m and text_clash(p, q, k))
+
+
 def leader_over_text(p: Placed, q: Placed, k: Consts) -> bool:
     """p's leader over q's text: main, q's box grown by mt; ink, any of q's glyph lines grown."""
     lp, _, ap = p
@@ -87,9 +101,10 @@ def leaders_cross(p: Placed, q: Placed) -> bool:
 
 
 def pconf(p: Placed, q: Placed, k: Consts) -> int:
-    """The hard conflict count, 0-4 (weight wc)."""
+    """The hard conflict count, 0-4 (weight wc); with ``k.wt`` > 1 a glyph overlap counts wt
+    and a pair only inside the wider beside gap 1 (:func:`text_conflicts`)."""
     return (
-        int(text_clash(p, q, k))
+        text_conflicts(p, q, k)
         + int(leaders_cross(p, q))
         + int(leader_over_text(p, q, k))
         + int(leader_over_text(q, p, k))

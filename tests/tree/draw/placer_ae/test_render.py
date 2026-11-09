@@ -36,8 +36,12 @@ def test_the_ae_placer_places_every_label_and_reports_its_own_measure(tmp_path):
         "soft_ink_weight": 100000.0,
         "label_clash": "ink",
         "beside_gap": None,
+        "overlap_weight": 1,
+        "pins_move": False,
+        "pin_move_cost": 100.0,
         "seed": 2463534242,
     }
+    assert rep["pins_moved"] == []
     assert rep["search"]["conflicts"]["B"] == len(rep["residual_conflicts"]) or rep["warning"]
     assert "ae" not in grid["aa_label_placement"]
 
@@ -57,12 +61,24 @@ def test_leaders_end_mid_branch_under_ae(tmp_path):
         assert r["box"][2] <= r["node"][0]  # left of the branch point, as ae samples them
 
 
-@pytest.mark.parametrize("switch", [{"placer_tree_ink": "soft"}, {"placer_beside_gap": 9.0}])
+@pytest.mark.parametrize(
+    "switch",
+    [
+        {"placer_tree_ink": "soft"},
+        {"placer_beside_gap": 9.0},
+        {"placer_overlap_weight": 8},
+        {"placer_pins_move": True, "pin_clearance": 1.0, "pin_clear_dx": 16.0},
+    ],
+)
 def test_the_ruling_switches_run(tmp_path, switch):
     rep, _ = _draw(tmp_path, "s", placer="ae", **switch)
-    opts = rep["aa_label_placement"]["ae"]["options"]
+    ae = rep["aa_label_placement"]["ae"]
+    opts = ae["options"]
     assert opts["tree_ink"] == switch.get("placer_tree_ink", "veto")
     assert opts["beside_gap"] == switch.get("placer_beside_gap")
+    assert opts["overlap_weight"] == switch.get("placer_overlap_weight", 1)
+    assert opts["pins_move"] == switch.get("placer_pins_move", False)
+    assert all(m["dx"] or m["dy"] for m in ae["pins_moved"])
 
 
 def test_an_unknown_switch_value_is_refused(tmp_path):
