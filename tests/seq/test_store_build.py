@@ -146,9 +146,20 @@ class TestRows:
 
 
 def publish(
-    store: Store, pull_id: str, records: list[SequenceRecord], dataset: str = "h3"
+    store: Store,
+    pull_id: str,
+    records: list[SequenceRecord],
+    dataset: str = "h3",
+    errors: dict[str, str] | None = None,
 ) -> StoreRef:
-    results = {processed.seq_id(r): aligned(r) for r in records}
+    """``errors`` maps an EPI_ISL id to the alignment error its record gets in this pull."""
+    errors = errors or {}
+    results = {
+        processed.seq_id(r): aligned(r, error=errors[r.epi_isl], nucleotides=None)
+        if r.epi_isl in errors
+        else aligned(r)
+        for r in records
+    }
     return processed.publish_pull(
         store, dataset, pull_id,
         processed.isolates_table(records, dataset, pull_id),
@@ -218,6 +229,90 @@ class TestPublish:
         publish(store, "p1", [record(1)])
         with pytest.raises(processed.StoreBuildError, match=r"sequences: nuc_raw, seq_hash"):
             publish(store, "p2", [record(1, nucleotides="ACGTACGA")])
+
+    @pytest.mark.parametrize(
+        ("published", "repulled", "kept"),
+        [
+            ({}, {"update_date": "2021-05-02"}, {"update_date": 1}),
+            (
+                {"embargoed_until": "2021-12-31"},
+                {"embargoed_until": ""},
+                {"embargoed": 1, "embargoed_until": 1},
+            ),
+            (
+                {"location": "Europe / Exampleland"},
+                {"location": "Europe / Exampleland / Exampleshire"},
+                {"location": 1, "place": 1},
+            ),
+            (
+                {"location": "Europe / Exampleland"},
+                {"location": "Asia / Otherland"},
+                {"country": 1, "location": 1, "region": 1},
+            ),
+        ],
+        ids=["update-date", "expired-embargo", "refined-place", "region-and-country"],
+    )
+    def test_a_copy_differing_only_in_updatable_columns_keeps_the_published_one(
+        self,
+        tmp_path: Path,
+        published: dict[str, str],
+        repulled: dict[str, str],
+        kept: dict[str, int],
+    ) -> None:
+        store = Store.create(tmp_path / "store")
+        publish(store, "p1", [record(1, **published)])
+        second = publish(store, "p2", [record(1, **repulled), record(2)])
+        rows = processed.read_table(store, second, "isolates").to_pylist()
+        assert sorted((r["epi_isl"], r["source_pull"]) for r in rows) == [
+            ("EPI_ISL_1", "p1"), ("EPI_ISL_2", "p2"),
+        ]  # fmt: skip
+        mine = next(r for r in rows if r["epi_isl"] == "EPI_ISL_1")
+        expected = processed.isolates_table([record(1, **published)], "h3", "p1").to_pylist()[0]
+        assert {c: mine[c] for c in kept} == {c: expected[c] for c in kept}
+        assert _provenance(store, second)["already_published"] == {"p1": 1}
+        assert _provenance(store, second)["published_copy_kept"] == kept
+
+    def test_an_identical_copy_records_no_kept_columns(self, tmp_path: Path) -> None:
+        store = Store.create(tmp_path / "store")
+        publish(store, "p1", [record(1)])
+        second = publish(store, "p2", [record(1)])
+        assert "published_copy_kept" not in _provenance(store, second)
+
+    def test_an_updatable_and_another_difference_together_are_refused(self, tmp_path: Path) -> None:
+        store = Store.create(tmp_path / "store")
+        publish(store, "p1", [record(1)])
+        with pytest.raises(
+            processed.StoreBuildError, match=r"different content.*isolates: update_date, passage"
+        ):
+            publish(store, "p2", [record(1, passage="SIAT2", update_date="2021-05-02")])
+
+    def test_an_updatable_difference_with_a_new_sequence_is_refused(self, tmp_path: Path) -> None:
+        store = Store.create(tmp_path / "store")
+        publish(store, "p1", [record(1)])
+        with pytest.raises(processed.StoreBuildError, match=r"sequences: nuc_raw"):
+            publish(store, "p2", [record(1, nucleotides="ACGTACGA", update_date="2021-05-02")])
+
+    def test_nextclade_s_input_position_is_not_a_difference(self, tmp_path: Path) -> None:
+        store = Store.create(tmp_path / "store")
+        message = "When processing sequence #{n} 'EPI_ISL_1.EPI900001': seed alignment failed"
+        first = publish(store, "p1", [record(1)], errors={"EPI_ISL_1": message.format(n=3)})
+        second = publish(
+            store, "p2", [record(2), record(1)], errors={"EPI_ISL_1": message.format(n=41)}
+        )
+        assert _provenance(store, second)["already_published"] == {"p1": 1}
+        assert "published_copy_kept" not in _provenance(store, second)
+        stored = processed.read_table(store, second, "sequences", ["epi_isl", "align_error"])
+        assert dict(zip(*stored.to_pydict().values(), strict=True))["EPI_ISL_1"] == message.format(
+            n=3
+        )
+        assert first != second
+
+    def test_a_different_alignment_error_is_still_refused(self, tmp_path: Path) -> None:
+        store = Store.create(tmp_path / "store")
+        message = "When processing sequence #{n} 'EPI_ISL_1.EPI900001': {why}"
+        publish(store, "p1", [record(1)], errors={"EPI_ISL_1": message.format(n=3, why="seed")})
+        with pytest.raises(processed.StoreBuildError, match=r"sequences: align_error"):
+            publish(store, "p2", [record(1)], errors={"EPI_ISL_1": message.format(n=3, why="cds")})
 
     def test_a_refused_copy_publishes_nothing(self, tmp_path: Path) -> None:
         store = Store.create(tmp_path / "store")
