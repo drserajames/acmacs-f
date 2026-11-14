@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import re
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -473,7 +474,9 @@ def publish_pull(
     Every other pull's partitions are hard-linked from the current version. A key in two
     pulls would make one virus two tree leaves, so a key another pull already holds is
     written once: an identical copy is dropped from this pull and counted in the
-    provenance (``already_published``), and a copy that differs is refused.
+    provenance (``already_published``). A copy that differs only in
+    :data:`KEEP_PUBLISHED_COLUMNS` is dropped too, the published copy kept, and the columns
+    counted (``published_copy_kept``); any other difference is refused.
     """
     if isolates.num_rows != sequences.num_rows:
         raise StoreBuildError(
@@ -481,7 +484,7 @@ def publish_pull(
         )
     with store.build(KIND, dataset) as builder:
         others = _link_other_pulls(builder, pull_id)
-        isolates, sequences, repeated = _drop_already_published(
+        isolates, sequences, repeated, kept = _drop_already_published(
             builder.path, pull_id, isolates, sequences
         )
         for name, table in zip(TABLES, (isolates, sequences), strict=True):
@@ -489,10 +492,12 @@ def publish_pull(
             path.parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(table, path, compression="zstd")
         _check_keys_across_pulls(builder.path)
+        # Recorded only when it happened, so a pull with none publishes what it always did.
+        extra = {"published_copy_kept": kept} if kept else {}
         provenance = Provenance(
             step="seq.store-pull",
             inputs=tuple(inputs),
-            parameters={**parameters, "already_published": repeated},
+            parameters={**parameters, "already_published": repeated, **extra},
             started=started,
             finished=datetime.datetime.now(datetime.UTC),
         )
@@ -501,6 +506,7 @@ def publish_pull(
             "rows": isolates.num_rows,
             "other_pulls": others,
             "already_published": sum(repeated.values()),
+            **extra,
         }
         return builder.publish(provenance, summary=summary)
 
@@ -524,25 +530,46 @@ def _link_other_pulls(builder: VersionBuilder, pull_id: str) -> int:
 #: of one record differ in these and in nothing else.
 _DELIVERY_COLUMNS = frozenset({"source_pull"})
 
+#: Isolate columns GISAID changes on a record after the fact without changing what the record
+#: is: the update stamp, a publishing embargo that has since expired, and a location it later
+#: made more precise. A re-pull that differs from the published copy only here keeps the
+#: published copy, counted per column; every other difference, the sequence above all, is
+#: still refused. Re-pulls overlap earlier pulls by design (GISAID records become visible
+#: weeks after their submission date), so these differences are routine, not edits to decide.
+KEEP_PUBLISHED_COLUMNS = frozenset(
+    {"update_date", "embargoed", "embargoed_until", "location", "region", "country", "place"}
+)
+
+#: Nextclade prefixes a failed alignment's message with the record's position in that run's
+#: input, so the same record's message differs between two pulls that hold it at different
+#: positions. Compared without it; the stored text keeps it.
+_NEXTCLADE_POSITION = re.compile(r"^When processing sequence #\d+ '[^']*': ")
+
 Key = tuple[str, str]
 
 
 def _drop_already_published(
     version: Path, pull_id: str, isolates: pa.Table, sequences: pa.Table
-) -> tuple[pa.Table, pa.Table, dict[str, int]]:
+) -> tuple[pa.Table, pa.Table, dict[str, int], dict[str, int]]:
     """This pull's tables without the records another pull already holds, and their count.
 
     Pulls overlap: a targeted fetch can name a record that a later window pull also
     returns. The copy already published is kept, so no other pull's partition is ever
     rewritten, and when the two copies are identical apart from the delivering pull, which
-    one stays changes nothing a reader sees. Copies that differ in anything else (GISAID
-    edited the record between the two fetches) are refused: which edit wins is a rule
-    nobody has written, and guessing it would change data silently.
+    one stays changes nothing a reader sees. Copies that differ only in
+    :data:`KEEP_PUBLISHED_COLUMNS` (an update stamp, an expired embargo, a refined location)
+    keep the published copy too, so no other pull's partition is rewritten; the columns are
+    counted. Copies that differ in anything else (the sequence, the name, the dates, the
+    passage) are refused: which edit wins there is a rule nobody has written, and guessing it
+    would change data silently. Nextclade's error text is compared without the record's
+    position in the run's input, which is not a fact about the record.
 
-    Returns ``{other pull: records dropped because it holds them}``, empty when none.
+    Returns this pull's tables without those records, ``{other pull: records dropped because
+    it holds them}`` and ``{column: records whose published copy was kept despite it}``, both
+    empty when none.
     """
     if not (version / "isolates").is_dir():
-        return isolates, sequences, {}  # the first pull of this dataset
+        return isolates, sequences, {}, {}  # the first pull of this dataset
     incoming = set(_keys(isolates))
     held = pq.read_table(version / "isolates", columns=["epi_isl", "accession", "source_pull"],
                          partitioning=None)  # fmt: skip
@@ -553,22 +580,34 @@ def _drop_already_published(
         if (epi_isl, accession) in incoming:
             holder[(epi_isl, accession)] = pull
     if not holder:
-        return isolates, sequences, {}
+        return isolates, sequences, {}, {}
+    found: dict[Key, dict[str, list[str]]] = {}
+    for name, table in zip(TABLES, (isolates, sequences), strict=True):
+        for key, columns in _differences(version / name, table, holder).items():
+            found.setdefault(key, {})[name] = columns
     differ = [
-        f"{epi_isl}/{accession} ({name}: {', '.join(columns)}) in {holder[(epi_isl, accession)]}"
-        for name, table in zip(TABLES, (isolates, sequences), strict=True)
-        for (epi_isl, accession), columns in _differences(version / name, table, holder).items()
+        f"{key[0]}/{key[1]} ({name}: {', '.join(columns)}) in {holder[key]}"
+        for key, by_table in found.items()
+        if not _keeps_published(by_table)
+        for name, columns in by_table.items()
     ]
     if differ:
         raise StoreBuildError(
             f"{pull_id}: {len(differ)} record(s) already published by another pull with "
             f"different content; which copy wins is not decided: {sorted(differ)[:3]}"
         )
+    kept = Counter(column for by_table in found.values() for column in by_table["isolates"])
     return (
         _without(isolates, holder),
         _without(sequences, holder),
         dict(sorted(Counter(holder.values()).items())),
+        dict(sorted(kept.items())),
     )
+
+
+def _keeps_published(by_table: Mapping[str, Sequence[str]]) -> bool:
+    """True when the copies differ only in isolate columns GISAID updates after the fact."""
+    return set(by_table) == {"isolates"} and set(by_table["isolates"]) <= KEEP_PUBLISHED_COLUMNS
 
 
 def _keys(table: pa.Table) -> list[Key]:
@@ -585,10 +624,21 @@ def _differences(stored: Path, table: pa.Table, keys: Mapping[Key, str]) -> dict
     found = {}
     for key in keys:
         row, other = mine[key], theirs[key]
-        columns = [c for c in row if c not in _DELIVERY_COLUMNS and row[c] != other.get(c)]
+        columns = [
+            c
+            for c in row
+            if c not in _DELIVERY_COLUMNS and _comparable(c, row[c]) != _comparable(c, other.get(c))
+        ]
         if columns:
             found[key] = columns
     return found
+
+
+def _comparable(column: str, value: Any) -> Any:
+    """The value as two copies of one record are compared: align_error without its position."""
+    if column == "align_error" and isinstance(value, str):
+        return _NEXTCLADE_POSITION.sub("", value)
+    return value
 
 
 def _rows_by_key(table: pa.Table) -> dict[Key, dict[str, Any]]:
