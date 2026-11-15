@@ -208,6 +208,39 @@ class VaccineChooseConfig:
     decided: dt.date | None = None  # optional: older rules carry no date
 
 
+#: How much a map note may say: a line or two of small type, not a paragraph on the map.
+NOTE_MAX_LINES = 2
+NOTE_MAX_CHARS = 120
+
+
+@dataclass(frozen=True)
+class NoteConfig:
+    """A short note printed small inside the map's frame, under the title, on every window page:
+    what a reader must know to read the map, such as that no new data arrived since the last
+    report (Q323). It is page furniture, so the frame and the labels keep clear of it."""
+
+    text: tuple[str, ...]
+    reason: str
+    decided: dt.date
+
+    def __post_init__(self) -> None:
+        if not 1 <= len(self.text) <= NOTE_MAX_LINES:
+            raise ValueError(f"note: {len(self.text)} lines; give 1 to {NOTE_MAX_LINES}")
+        for line in self.text:
+            if not line.strip():
+                raise ValueError("note: an empty line")
+            if len(line) > NOTE_MAX_CHARS:
+                raise ValueError(
+                    f"note: a line of {len(line)} characters; at most {NOTE_MAX_CHARS}"
+                )
+        if not self.reason.strip():
+            raise ValueError("note: no reason")
+
+    def record(self) -> dict[str, object]:
+        """What each figure's provenance says about the note (rule 9: named, with its reason)."""
+        return {"text": list(self.text), "reason": self.reason, "decided": self.decided.isoformat()}
+
+
 @dataclass(frozen=True)
 class ChainUntilConfig:
     """Draw the chain as it stood after one named table, not its latest step.
@@ -252,6 +285,8 @@ class MapConfig:
     # The map's labels placed by hand (af.map.hand): one file per map, beside the config. Named
     # means it must exist; a file of comments only has no rows.
     hand_labels: Path | None = None
+    # A short note in the frame, under the title (NoteConfig).
+    note: NoteConfig | None = None
 
     def __post_init__(self) -> None:
         if not self.chain and not self.layout_stand_in:
