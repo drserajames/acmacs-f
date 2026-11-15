@@ -1522,13 +1522,14 @@ def render(spec: FigureSpec, pdf_path: Path, editor: EditorRequest | None = None
     if editor is not None:
         for artist in labels_drawn + ax.texts[before_names:]:  # names: invisible, slow in a PNG
             artist.set_visible(False)
-        layout = _editor_layout(spec, pg, placed, editor, _text_width(label_font))
+        advance = _ae_advance(label_font) if g.placer == "ae" else None
+        layout = _editor_layout(spec, pg, placed, editor, _text_width(label_font), advance)
         write_editor(
             editor,
             fig,
             layout,
             _editor_page(spec, pg, ink, obstacles, inset, label_font),
-            _editor_hidden(spec, pg, editor, _text_width(label_font)),
+            _editor_hidden(spec, pg, editor, _text_width(label_font), advance),
         )
     plt.close(fig)
     return Drawn(
@@ -1551,12 +1552,15 @@ def _editor_layout(
     placed: Sequence[Placed],
     editor: EditorRequest,
     width: Callable[[str], float],
+    advance: Callable[[str], float] | None = None,
 ) -> list[dict]:
     """Each drawn label as the editor and the draw report read it: its text, the leaves that
     name its node, the node point and box (figure units), its glyphs' width and each line's (as
     :func:`_glyph_box` and :func:`_glyph_lines` measure them), and the pin holding it, if any.
-    With ``leader_to_branch_middle``, also where its leader ends (``tether``): a pin's offset
-    is from the node point, its leader goes to the tether."""
+    With ``leader_to_branch_middle`` or the ae placer, also where its leader ends (``tether``):
+    a pin's offset is from the node point, its leader goes to the tether. Under ae (``advance``
+    given), also its longest line's pen advance (``advance_w``), which sizes ae's box and so
+    where ae's drawn leader leaves the label (:func:`_ae_leader`)."""
     index = {lab.node: k for k, lab in enumerate(spec.labels)}  # a Placed's key is its node
     out = []
     for p in placed:
@@ -1576,8 +1580,10 @@ def _editor_layout(
                 else {"first": pin.first, "last": pin.last, "reason": pin.reason, "hand": pin.hand},
             }
         )
-        if spec.geometry.leader_to_branch_middle:
+        if spec.geometry.leader_to_branch_middle or advance is not None:
             out[-1]["tether"] = [round(float(v), 3) for v in p.anchor]
+        if advance is not None:
+            out[-1]["advance_w"] = round(float(max(advance(t) for t in lab.subs)), 3)
     return out
 
 
@@ -1590,9 +1596,11 @@ def _editor_page(
     font: FontProperties,
 ) -> dict:
     """What the editor needs to draw and check labels as the renderer does: the page, the label
-    style, the occupancy placement used, and the settings of :func:`hand_clashes`."""
+    style, the occupancy placement used, and the settings of :func:`hand_clashes`. Under ae, also
+    ae's leader constants (``ae_leader``): the editor then draws each leader as
+    :func:`_ae_leader` does; its checks stay the renderer's (:func:`hand_leaders`, ruling 4)."""
     g = spec.geometry
-    return {
+    page = {
         "figure": spec.title,
         "width": g.width,
         "height": g.height,
@@ -1614,6 +1622,18 @@ def _editor_page(
         "inset": list(inset) if inset else None,
         "font_file": font_manager.findfont(font),
     }
+    if g.placer == "ae":
+        from .placer_ae.geometry import ATTACH_INSET
+        from .placer_ae.measure import LEADER_GAP, NO_LEADER
+        from .placer_ae.scene import ROW
+
+        page["ae_leader"] = {
+            "row": ROW,
+            "inset": ATTACH_INSET,
+            "gap": LEADER_GAP,
+            "none_within": NO_LEADER,
+        }
+    return page
 
 
 def _baseline(font: FontProperties) -> float:
@@ -1627,9 +1647,14 @@ def _baseline(font: FontProperties) -> float:
 
 
 def _editor_hidden(
-    spec: FigureSpec, pg: _Page, editor: EditorRequest, width: Callable[[str], float]
+    spec: FigureSpec,
+    pg: _Page,
+    editor: EditorRequest,
+    width: Callable[[str], float],
+    advance: Callable[[str], float] | None = None,
 ) -> list[dict]:
-    """The labels hidden by hand, with their node points, so the editor can bring one back."""
+    """The labels hidden by hand, with their node points, so the editor can bring one back
+    (``advance``: under ae, as :func:`_editor_layout`)."""
     out = []
     for lab, hide in editor.hidden:
         node = (float(pg.nx[lab.node]), float(pg.ny[lab.node]))
@@ -1650,7 +1675,10 @@ def _editor_hidden(
                 "line_w": [round(float(width(t)), 3) for t in lab.subs],
             }
         )
-        if spec.geometry.leader_to_branch_middle:
+        if advance is not None:
+            out[-1]["tether"] = [round(v, 3) for v in _ae_end(spec, pg, lab.node)]
+            out[-1]["advance_w"] = round(float(max(advance(t) for t in lab.subs)), 3)
+        elif spec.geometry.leader_to_branch_middle:
             out[-1]["tether"] = [round(v, 3) for v in _tether(spec, pg, lab.node)]
     return out
 

@@ -12,6 +12,8 @@ import math
 
 from .scene import CAP, ROW, Box, Point
 
+ATTACH_INSET = 0.23  # x fs: a leader leaving a box's top or bottom starts this far inside it
+
 
 def orient(p: Point, q: Point, r: Point) -> int:
     v = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
@@ -83,7 +85,7 @@ def attach_pt(end: Point, fs: float, box: Box) -> Point:
     x0, y0, x1, y1 = box
     if end[0] > x1:
         return (x1, (y0 + y1) / 2)
-    ink = 0.23 * fs
+    ink = ATTACH_INSET * fs
     return ((x0 + x1) / 2, y1 - ink if y1 < end[1] else y0 + ink)
 
 

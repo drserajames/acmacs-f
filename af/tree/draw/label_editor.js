@@ -1,5 +1,6 @@
 // The tree's adapter for the label editor (af.util.label_editor; written by af.tree.draw.editor).
-// A label hangs off its node by a leader to its box's right edge. The checks are the renderer's
+// A label hangs off its node by a leader to its box's right edge (under the ae placer, drawn as
+// ae draws it). The checks are the renderer's
 // (render.hand_clashes, hand_leaders, place.placement_metrics), rerun as labels move, on each
 // label's glyph lines and the occupancy placement used, as the renderer measured them. A label
 // that will be a hand pin is checked glyph line to glyph line (ae's ink rule; Q306, Q307).
@@ -29,6 +30,16 @@ const ADAPTER = (() => {
     const lines = glyphLines(l), top = lines[0], bottom = lines[lines.length - 1];
     if (t[1] < (top[1] + bottom[3]) / 2) return [[(top[0] + top[2]) / 2, top[1] - 1], t];
     return [[(bottom[0] + bottom[2]) / 2, bottom[3] + 1], t];
+  }
+  const AE = P.ae_leader; // under the ae placer: draw each leader as ae does (render._ae_leader)
+  function aeLeader(l) { // ae's box (pen advance, AE.row a line), placer_ae attach_pt, drawn_leader
+    const fs = P.font_size, x1 = l.box[2] - 1, cy = (l.box[1] + l.box[3]) / 2;
+    const th = l.lines.length * AE.row * fs, x0 = x1 - l.advance_w, y0 = cy - th / 2, y1 = cy + th / 2;
+    const e = tether(l);
+    const c = e[0] > x1 ? [x1, cy] : [(x0 + x1) / 2, y1 < e[1] ? y1 - AE.inset * fs : y0 + AE.inset * fs];
+    if (Math.abs(c[0] - e[0]) <= AE.none_within * fs && Math.abs(c[1] - e[1]) <= AE.none_within * fs) return null;
+    const lx = e[0] - c[0], ly = e[1] - c[1], ll = Math.hypot(lx, ly), gap = Math.min(fs * AE.gap, ll * 0.4);
+    return [e, [c[0] + lx / ll * gap, c[1] + ly / ll * gap]];
   }
   function clash(a, b) { // render._ink_clash: stacked closer than a stack's row gap, else SIDE
     for (const ra of glyphLines(a)) {
@@ -105,7 +116,7 @@ const ADAPTER = (() => {
       text,
       anchor: "end",
     }));
-    return { leader: leader(l), lines };
+    return { leader: AE ? aeLeader(l) : leader(l), lines }; // checks keep leader(l): the renderer's
   }
 
   return {
