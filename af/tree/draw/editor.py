@@ -113,6 +113,7 @@ def _row(reason: str) -> dict[str, str]:
 
 
 def _label(k: int, lab: dict, hidden: bool) -> dict:
+    ae = {"advance_w": lab["advance_w"]} if "advance_w" in lab else {}  # ae's leaders (render)
     return {
         "id": k,
         "text": lab["text"],
@@ -124,6 +125,7 @@ def _label(k: int, lab: dict, hidden: bool) -> dict:
         "line_w": lab["line_w"],
         "tether": lab.get("tether", lab["node"]),  # where its leader ends
         "hidden": hidden,
+        **ae,
     }
 
 
