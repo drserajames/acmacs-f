@@ -29,6 +29,7 @@ from af.map.config import (
     MapConfig,
     MapsConfig,
     MoveConfig,
+    NoteConfig,
     RotationConfig,
     TitlesConfig,
     VaccineChooseConfig,
@@ -256,6 +257,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
             "vaccine_disable",
             "vaccine_choose",
             "hand_labels",
+            "note",
         },
         where,
     )
@@ -438,6 +440,23 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
         until = ChainUntilConfig(
             u["table"], u["reason"], _date(u["decided"], f"{where} chain_until")
         )
+    note = None
+    if "note" in m:
+        n = m["note"]
+        if not isinstance(n, Mapping):
+            raise ConfigError(f"{where} note: expected a table with text, reason and decided")
+        _known(dict(n), {"text", "reason", "decided"}, f"{where} note")
+        text = n.get("text")
+        if not isinstance(text, list) or not all(isinstance(t, str) for t in text):
+            raise ConfigError(f"{where} note: text must be a list of strings")
+        try:
+            note = NoteConfig(
+                tuple(text), str(n.get("reason", "")), _date(n["decided"], f"{where} note")
+            )
+        except KeyError as exc:
+            raise ConfigError(f"{where} note: no {exc.args[0]}") from exc
+        except ValueError as exc:
+            raise ConfigError(f"{where} {exc}") from exc
     return MapConfig(
         folder=m["folder"],
         clade_scheme=m["clade_scheme"],
@@ -456,6 +475,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
         vaccine_choose=tuple(choose),
         colouring=m.get("colouring"),
         hand_labels=_path(m["hand_labels"], base) if "hand_labels" in m else None,
+        note=note,
     )
 
 

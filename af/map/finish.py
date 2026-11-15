@@ -27,6 +27,7 @@ from af.map.render import (
     draw_pdf,
     legend_box,
     marker_extent,
+    note_box,
     recent_hidden,
     text_size,
     title_box,
@@ -73,9 +74,12 @@ def _page(
     vaccine_labels: dict[str, str],
     look: Look,
     styles: Mapping[str, PointStyle] | None,
+    note: Sequence[str] = (),
 ) -> _Page:
     scene = style_points(points, scheme, window, title=title, vaccines=vaccine_labels)
-    furniture = (legend_box(scene, look), title_box(scene, look))
+    furniture: tuple[Box, ...] = (legend_box(scene, look), title_box(scene, look))
+    if note:  # a map note is furniture too (Q323); without one the page is as it always was
+        furniture = (*furniture, note_box(note, look))
     xy = scene.xy()
     shown = np.array([p.shown for p in scene.points])
     antigen = np.array([p.kind == "antigen" for p in scene.points])
@@ -157,6 +161,7 @@ def shared_frame(
     vaccine_labels: dict[str, str],
     look: Look = DEFAULT_LOOK,
     styles: Mapping[str, PointStyle] | None = None,
+    note: Sequence[str] = (),
 ) -> Frame:
     """One frame for all of a map's windows (each a window and its title), as the shipped maps
     use one viewport on the all, 12m and 6m pages: a reader turning the pages sees the same
@@ -166,13 +171,14 @@ def shared_frame(
     window's page is framed as it would be alone, and the older pages take what is left; the
     all page, where every antigen is in the window, no longer pulls the frame off the recent
     viruses (h1-cnic, R6 review). Positions and marker sizes are the same on every page:
-    windows grey points, they do not move, hide or resize them."""
+    windows grey points, they do not move, hide or resize them. ``note``: the map's note
+    (:func:`finish_map`), furniture on every page."""
     if not windows:
         raise ValueError("shared_frame needs at least one window")
     # the most recent window first (stable among equal dates); a window of every antigen last
     by_recency = sorted(windows, key=lambda wt: (wt[0].since is None, -_ordinal(wt[0].since)))
     pages = [
-        _page(points, scheme, w, t, must_show_since, vaccine_labels, look, styles)
+        _page(points, scheme, w, t, must_show_since, vaccine_labels, look, styles, note)
         for w, t in by_recency
     ]
     first, *rest = pages
@@ -211,6 +217,7 @@ def finish_map(
     require_shown: bool = True,
     hand: HandLabels | None = None,
     editor: EditorRequest | None = None,
+    note: Sequence[str] = (),
 ) -> FinishedMap:
     """Produce ``out_pdf`` and its I7 for one chart and window.
 
@@ -233,12 +240,19 @@ def finish_map(
     a recent antigen (an addendum figure keeps its map's zoom), and records in the I7 what each
     priority has hidden.
     ``hand``: the map's labels placed or hidden by hand (af.map.hand), on every window page.
-    ``editor``: also write the map's label editor (af.map.editor) from this page."""
+    ``editor``: also write the map's label editor (af.map.editor) from this page.
+    ``note``: a map's short note (Q323), printed where ``caption`` is and recorded in the I7 as
+    its caption, but furniture: the frame and the labels keep clear of it. Not with a caption,
+    and only on a square page (the box is measured for one)."""
     # fail before drawing anything
     if created.tzinfo is None:
         raise ValueError("I7 'created' needs a time zone")
     check_provenance_inputs(provenance.get("inputs"))
-    pg = _page(points, scheme, window, title, must_show_since, vaccine_labels, look, styles)
+    if note and caption:
+        raise ValueError("a map note and a caption print in the same place: give one")
+    if note and frame is not None and frame.aspect != 1.0:
+        raise ValueError(f"a map note needs a square frame, got aspect {frame.aspect}")
+    pg = _page(points, scheme, window, title, must_show_since, vaccine_labels, look, styles, note)
     scene, xy, furniture = pg.scene, pg.scene.xy(), pg.furniture
     shown = np.array([p.shown for p in scene.points])
     if frame is None:
@@ -273,6 +287,7 @@ def finish_map(
         pinned={k: pins[pid] for k, pid in enumerate(ids) if pid in pins},
     )
     labels = dict(zip(ids, placed, strict=True))
+    caption = tuple(note) or caption
     draw_pdf(scene, frame, labels, out_pdf, look, styles, circles, caption)
     if editor is not None:
         _write_editor(editor, scene, frame, page, shown, all_rows, labels, hand, furniture, look,

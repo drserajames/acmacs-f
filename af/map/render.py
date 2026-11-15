@@ -241,6 +241,31 @@ def title_box(scene: Scene, look: Look) -> Box:
     return Box("title", 0.0, 0.0, min(0.95, right), bottom)
 
 
+#: Where caption (and note) lines are drawn: left edge and the first line's top, as page
+#: fractions, and the line pitch in multiples of the caption size (ae's names overlay).
+CAPTION_LEFT = 0.024
+CAPTION_TOP = 0.115
+CAPTION_PITCH = 1.25
+
+
+def note_box(lines: Sequence[str], look: Look) -> Box:
+    """The room a map note takes (Q323), as furniture: the frame search and the label placer
+    keep clear of it, as they do of the title. It covers the lines :func:`draw_scene` prints as
+    its caption, measured in the figure font, from the page's left edge (as the title box does)
+    to ``look.title_clear`` past the longest line, with half a caption size above and below.
+    For a square page, the only kind a report map's frame is
+    (:func:`af.map.viewport.choose_frame`)."""
+    if not lines:
+        raise ValueError("note_box needs at least one line")
+    pts, size = look.page_points, look.caption_size
+    width = max(text_size(line, size)[0] for line in lines)
+    height = max(text_size(line, size)[1] for line in lines)
+    pad = 0.5 * size / pts
+    right = CAPTION_LEFT + (width + look.title_clear) / pts
+    bottom = CAPTION_TOP + ((len(lines) - 1) * CAPTION_PITCH * size + height) / pts + pad
+    return Box("note", 0.0, CAPTION_TOP - pad, min(0.95, right), bottom)
+
+
 def draw_pdf(
     scene: Scene,
     frame: Frame,
@@ -374,8 +399,8 @@ def draw_scene(
     for k, line in enumerate(caption):
         # ae's names overlay: 7 points, 1.25 line pitch, its first line's top 0.115 of the page down
         ax.text(
-            0.024,
-            0.115 * a + k * look.caption_size * 1.25 / look.page_points,
+            CAPTION_LEFT,
+            CAPTION_TOP * a + k * look.caption_size * CAPTION_PITCH / look.page_points,
             line,
             fontsize=look.caption_size * scale,
             va="top",

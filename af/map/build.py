@@ -796,6 +796,10 @@ def build_map(
             "sha256": hashlib.sha256(cfg.hand_labels.read_bytes()).hexdigest(),
         }
         decisions["hand_labels"] = hand.record(cfg.hand_labels)
+    note: tuple[str, ...] = ()
+    if cfg.note is not None:  # a short note in the frame, on every page (Q323)
+        note = cfg.note.text
+        decisions["note"] = cfg.note.record()
     outlines: dict[str, PointStyle] | None = None
     outline_record: list[dict[str, Any]] = []
     if config.new_antigen_outlines:
@@ -830,6 +834,7 @@ def build_map(
         must_show_since=config.defaults.must_show_since,
         vaccine_labels=vlabels,
         look=look,
+        note=note,
     )
     if cfg.frame_shift is not None:
         # every page then checks the moved frame still shows the recent antigens
@@ -876,6 +881,7 @@ def build_map(
             styles=page_styles,
             hand=hand,
             editor=editor,
+            note=note,
         )
         editor = None  # one editor per map
         figures.append(result.i7)
