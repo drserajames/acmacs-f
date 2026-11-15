@@ -5,8 +5,9 @@ how the map was created - direct from chain, column bases, additional modificati
 statement is read from something a step recorded, never recomputed or inferred:
 
 - the map figure's I7: ``provenance.inputs`` (the chain version, the colour source),
-  ``provenance.decisions`` (moves, blocks, hides, map-stage column bases, sera, chain_until,
-  vaccine rules), ``provenance.stand_in``, ``map.orientation`` and ``map.flags``;
+  ``provenance.decisions`` (moves, blocks, hides, the note in the frame, map-stage column
+  bases, sera, chain_until, vaccine rules), ``provenance.stand_in``, ``map.orientation`` and
+  ``map.flags``;
 - the chain version in the store (opened through its manifest hash): ``chain.json`` (mode,
   tables, column-basis adjustments, selection, non-ferret sera, reference checks),
   ``PROVENANCE.json`` (seed, optimiser, options) and the last step's ``step.json`` (release,
@@ -419,6 +420,20 @@ def _moves(note: Note, dec: dict[str, Any], cfg: dict[str, Any] | None) -> None:
             note.item(f"Move {configured}: " + note.gap(what, "figure provenance.decisions.moves"))
 
 
+def _map_note_text(note: Note, dec: dict[str, Any], cfg: dict[str, Any] | None) -> None:
+    """The note printed in the map's frame (af.map.config.NoteConfig, Q323): a hand-written
+    statement on the page, so it is named with its words, reason and date (rule 9). A configured
+    note the figure does not record is counted, as a configured move is."""
+    recorded = dec.get("note")
+    if recorded:
+        words = " / ".join(str(line) for line in recorded.get("text") or [])
+        when = _when(note, recorded, "map note(s)")
+        note.item(f'Note in the frame: "{words}" ({recorded.get("reason", "")}; {when})')
+    elif (cfg or {}).get("note"):
+        what = "the configured note as drawn"
+        note.item("Note in the frame: " + note.gap(what, "figure provenance.decisions.note"))
+
+
 def _vaccines(
     note: Note, dec: dict[str, Any], cfg: dict[str, Any] | None,
     dates: VaccineDates | None = None,
@@ -494,6 +509,7 @@ def _map_stage(
         when = _when(note, hide, "hide(s)")
         reason = hide.get("reason", "")
         note.item(f"Hide {hide.get('name')}: {hide.get('count')} point(s) ({reason}; {when})")
+    _map_note_text(note, dec, cfg)
     column_bases = dec.get("column_bases", [])
     for cb in [column_bases] if isinstance(column_bases, dict) else column_bases:
         when = _when(note, cb, "map-stage column-basis change(s)")
