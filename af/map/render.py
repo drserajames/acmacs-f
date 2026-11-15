@@ -248,22 +248,35 @@ CAPTION_TOP = 0.115
 CAPTION_PITCH = 1.25
 
 
+def note_size(look: Look) -> float:
+    """A map note's text size (Q326): the legend entries', so the note reads as page text and
+    not as fine print. One fact: a round that sets a subtype's legend size sets its note's too.
+    The circle addenda's caption keeps ``look.caption_size``."""
+    return look.legend_text_size
+
+
 def note_box(lines: Sequence[str], look: Look) -> Box:
     """The room a map note takes (Q323), as furniture: the frame search and the label placer
     keep clear of it, as they do of the title. It covers the lines :func:`draw_scene` prints as
     its caption, measured in the figure font, from the page's left edge (as the title box does)
-    to ``look.title_clear`` past the longest line, with half a caption size above and below.
-    For a square page, the only kind a report map's frame is
+    to ``look.title_clear`` past the longest line, with half a text size above and below, at
+    :func:`note_size`. A line too long to fit inside 0.95 of the page is an error, not a box
+    cut short of its text. For a square page, the only kind a report map's frame is
     (:func:`af.map.viewport.choose_frame`)."""
     if not lines:
         raise ValueError("note_box needs at least one line")
-    pts, size = look.page_points, look.caption_size
+    pts, size = look.page_points, note_size(look)
     width = max(text_size(line, size)[0] for line in lines)
     height = max(text_size(line, size)[1] for line in lines)
     pad = 0.5 * size / pts
     right = CAPTION_LEFT + (width + look.title_clear) / pts
+    if right > 0.95:
+        raise ValueError(
+            f"a map note line is {width:.0f} points wide at {size} points, too wide for the"
+            " page: shorten it or split it into two lines"
+        )
     bottom = CAPTION_TOP + ((len(lines) - 1) * CAPTION_PITCH * size + height) / pts + pad
-    return Box("note", 0.0, CAPTION_TOP - pad, min(0.95, right), bottom)
+    return Box("note", 0.0, CAPTION_TOP - pad, right, bottom)
 
 
 def draw_pdf(
@@ -275,6 +288,7 @@ def draw_pdf(
     styles: Mapping[str, PointStyle] | None = None,
     circles: Sequence[CircleMark] = (),
     caption: Sequence[str] = (),
+    caption_size: float | None = None,
 ) -> None:
     """Draw ``scene`` inside ``frame`` to ``out_pdf`` (one page). The drawing itself is
     :func:`draw_scene`, shared with :func:`af.map.figure.draw_axes`."""
@@ -286,7 +300,17 @@ def draw_pdf(
     side = look.page_points / 72.0
     fig = plt.figure(figsize=(side, side * frame.aspect), dpi=72)
     ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
-    draw_scene(ax, scene, frame, labels, look, styles=styles, circles=circles, caption=caption)
+    draw_scene(
+        ax,
+        scene,
+        frame,
+        labels,
+        look,
+        styles=styles,
+        circles=circles,
+        caption=caption,
+        caption_size=caption_size,
+    )
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_pdf)
     plt.close(fig)
@@ -307,12 +331,15 @@ def draw_scene(
     styles: Mapping[str, PointStyle] | None = None,
     circles: Sequence[CircleMark] = (),
     caption: Sequence[str] = (),
+    caption_size: float | None = None,
 ) -> tuple[str, ...]:
     """Draw a scene on an Axes whose data limits become the page (0..1, y down).
 
     ``styles`` override single points' drawing, by point id. ``circles`` are drawn round their
     points (a point not shown, or with no coordinates, is an error: nothing to centre on).
-    ``caption`` lines are printed small under the title, as the circle addenda list their sera.
+    ``caption`` lines are printed small under the title, as the circle addenda list their sera,
+    at ``caption_size`` points (default ``look.caption_size``; a map note passes
+    :func:`note_size`).
     Returns the ids of shown points
     that lie outside the frame, which the Axes clips: a caller can mark where they went.
 
@@ -396,13 +423,14 @@ def draw_scene(
                 patheffects.withStroke(linewidth=look.label_halo * scale, foreground="white")
             ],
         )
+    cap = look.caption_size if caption_size is None else caption_size
     for k, line in enumerate(caption):
         # ae's names overlay: 7 points, 1.25 line pitch, its first line's top 0.115 of the page down
         ax.text(
             CAPTION_LEFT,
-            CAPTION_TOP * a + k * look.caption_size * CAPTION_PITCH / look.page_points,
+            CAPTION_TOP * a + k * cap * CAPTION_PITCH / look.page_points,
             line,
-            fontsize=look.caption_size * scale,
+            fontsize=cap * scale,
             va="top",
             ha="left",
             zorder=9,

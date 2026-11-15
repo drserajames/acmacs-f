@@ -28,6 +28,7 @@ from af.map.render import (
     legend_box,
     marker_extent,
     note_box,
+    note_size,
     recent_hidden,
     text_size,
     title_box,
@@ -241,7 +242,8 @@ def finish_map(
     priority has hidden.
     ``hand``: the map's labels placed or hidden by hand (af.map.hand), on every window page.
     ``editor``: also write the map's label editor (af.map.editor) from this page.
-    ``note``: a map's short note (Q323), printed where ``caption`` is and recorded in the I7 as
+    ``note``: a map's short note (Q323), printed where ``caption`` is, at the legend's text size
+    (Q326), and recorded in the I7 as
     its caption, but furniture: the frame and the labels keep clear of it. Not with a caption,
     and only on a square page (the box is measured for one)."""
     # fail before drawing anything
@@ -287,8 +289,9 @@ def finish_map(
         pinned={k: pins[pid] for k, pid in enumerate(ids) if pid in pins},
     )
     labels = dict(zip(ids, placed, strict=True))
+    size = note_size(look) if note else None
     caption = tuple(note) or caption
-    draw_pdf(scene, frame, labels, out_pdf, look, styles, circles, caption)
+    draw_pdf(scene, frame, labels, out_pdf, look, styles, circles, caption, size)
     if editor is not None:
         _write_editor(editor, scene, frame, page, shown, all_rows, labels, hand, furniture, look,
                       styles)  # fmt: skip

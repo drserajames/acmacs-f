@@ -218,3 +218,66 @@ def test_every_window_shares_a_frame_that_keeps_clear_of_the_note(
         )  # fmt: skip
         assert result.frame.frame == with_n and result.recent_hidden == 0
         assert json.loads(result.i7.read_text())["map"]["caption"] == [NOTE]
+
+
+def _ink(
+    scene: Any, frame: Any, out: Path, caption: list[str], size: float | None, look: Any
+) -> Any:
+    """The pixels (600 dpi) a caption adds to a page: the same scene and frame, no labels, drawn
+    with and without it, so the difference is the caption's ink and nothing else."""
+    from matplotlib.image import imread
+
+    from af.map.render import draw_pdf
+
+    rasters = []
+    for tag, lines in (("with", caption), ("without", [])):
+        pdf = out / f"{tag}.pdf"
+        draw_pdf(scene, frame, {}, pdf, look, caption=lines, caption_size=size)
+        subprocess.run(
+            ["pdftoppm", "-r", "600", "-png", "-singlefile", str(pdf), str(out / tag)], check=True
+        )
+        png = out / f"{tag}.png"
+        assert png.stat().st_size > 0
+        rasters.append(imread(png)[..., :3])
+    ink = np.abs(rasters[0] - rasters[1]).max(axis=2) > 0
+    assert ink.any()
+    return ink
+
+
+def test_the_note_prints_at_the_legend_size_inside_its_box(tmp_path: Path) -> None:
+    """Q326: the note is printed at the legend entries' text size, and its furniture box,
+    measured at that size, holds all of its ink. A bigger legend means a bigger note (one fact,
+    not two); the circle addenda's caption keeps its own small size."""
+    pytest.importorskip("matplotlib")
+    if not shutil.which("pdftoppm"):
+        pytest.skip("pdftoppm not installed")
+    import dataclasses
+
+    from af.map.render import DEFAULT_LOOK, note_box, note_size
+
+    assert note_size(DEFAULT_LOOK) == DEFAULT_LOOK.legend_text_size != DEFAULT_LOOK.caption_size
+    big = dataclasses.replace(DEFAULT_LOOK, legend_text_size=16.0)
+    base = finish(tmp_path, "base", synthetic_points())
+    heights: dict[str, int] = {}
+    for name, look in (("default", DEFAULT_LOOK), ("big", big)):
+        (tmp_path / name).mkdir(exist_ok=True)
+        ink = _ink(base.scene, base.frame.frame, tmp_path / name, [NOTE], note_size(look), look)
+        rows, cols = np.nonzero(ink)
+        side = ink.shape[1]  # a square page
+        box = note_box([NOTE], look)
+        assert box.top * side <= rows.min() and rows.max() < box.bottom * side
+        assert box.left * side <= cols.min() and cols.max() < box.right * side
+        heights[name] = int(rows.max() - rows.min() + 1)
+    assert heights["big"] / heights["default"] == pytest.approx(16.0 / 12.23, rel=0.03)
+    (tmp_path / "caption").mkdir()
+    ink = _ink(base.scene, base.frame.frame, tmp_path / "caption", [NOTE], None, DEFAULT_LOOK)
+    rows, _ = np.nonzero(ink)
+    small = (rows.max() - rows.min() + 1) / heights["default"]
+    assert small == pytest.approx(7.0 / 12.23, rel=0.03)
+
+
+def test_a_note_too_wide_for_the_page_is_refused() -> None:
+    from af.map.render import DEFAULT_LOOK, note_box
+
+    with pytest.raises(ValueError, match="too wide"):
+        note_box(["W" * 120], DEFAULT_LOOK)
