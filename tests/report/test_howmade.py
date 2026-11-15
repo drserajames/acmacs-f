@@ -346,6 +346,37 @@ def test_sd_limit_drops_come_from_the_diagnostics_or_a_record_checked_against_th
     assert what in note.missing
 
 
+def test_the_note_in_the_frame_is_named_with_its_words_reason_and_date(tmp_path: Path) -> None:
+    """Q323: a note drawn in the map's frame is a hand override (rule 9): its words, reason and
+    date are said; an undated one is counted, and a configured note no figure records is MISSING."""
+    store = Store.create(tmp_path / "store")
+    ref = _chain(store, full=True)
+    plain = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, None, [])
+    fig = _figure(ref, full=True)
+    fig["provenance"]["decisions"]["note"] = {
+        "text": ["No new data since the last report"], "reason": "a reason",
+        "decided": "2026-11-15"}  # fmt: skip
+    noted = howmade.map_note("labx-hi", [fig], store, None, [])
+    line = '- Note in the frame: "No new data since the last report" (a reason; 2026-11-15)'
+    assert line in noted.lines
+    assert [x for x in noted.lines if x != line] == plain.lines  # nothing else moves
+    assert noted.missing == plain.missing
+    fig["provenance"]["decisions"]["note"].pop("decided")
+    undated = howmade.map_note("labx-hi", [fig], store, None, [])
+    assert "decision dates of 1 map note(s)" in undated.missing
+    configured = {"folder": "labx-hi", "note": {"text": ["words"], "reason": "r"}}
+    unrecorded = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, configured, [])
+    assert "the configured note as drawn" in unrecorded.missing
+
+
+def test_a_map_without_a_note_says_nothing_about_one(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "store")
+    ref = _chain(store, full=True)
+    note = howmade.map_note("labx-hi", [_figure(ref, full=True)], store, {"folder": "labx-hi"}, [])
+    assert not any("Note in the frame" in line for line in note.lines)
+    assert not any("note" in m for m in note.missing)
+
+
 def test_an_undatable_vaccine_rule_says_not_known_and_is_not_counted(tmp_path: Path) -> None:
     """Sarah, 8 Oct (Q126): a date no source gives is "not known", printed, not a blank."""
     from af.report.vaccine_dates import VaccineDates
