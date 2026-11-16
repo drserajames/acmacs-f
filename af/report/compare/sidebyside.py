@@ -10,6 +10,10 @@ records (``<round>/report/<id>.build.json``):
 - ``<id>-procrustes-vs-<ref>.pdf``: per map slot in both reports, the two figures, the new one with
   Procrustes arrows (af.report.compare.arrows), and the numbers.
 
+In every pair of pictures the reference is on the left (above, when stacked) and the newer report
+on the right (below): Sarah, 16 Nov 2026, "with reference on the left and more recent on the
+right". The arrows page draws the new map alone, as before.
+
 ``<ref>`` names the reference: its round folder with the shared report id removed, so the
 M1-maps round ``2026-1023-vidrl-interim-m1maps`` compared with ``2026-1023-vidrl-interim`` gives
 ``m1maps``. No date in the names: the documents are rebuilt by this command and overwrite
@@ -156,9 +160,9 @@ def write_sbs(
             continue
         diff = pixels.pixel_diff(new_pdf, n + 1, ref_pdf, n + 1)
         w, h = a[n]
-        labels = (f"{sides[0]} p{n + 1}", f"{sides[1]} p{n + 1}")
-        pictures = (doc.picture(new_pdf, n + 1), doc.picture(ref_pdf, n + 1))
-        pair = side_by_side(*pictures, labels, stacked=w > h)
+        labels = (f"{sides[1]} p{n + 1}", f"{sides[0]} p{n + 1}")
+        pictures = (doc.picture(ref_pdf, n + 1), doc.picture(new_pdf, n + 1))
+        pair = side_by_side(*pictures, labels, stacked=w > h)  # the reference first: left, above
         doc.add(rf"\hbox{{\footnotesize p{n + 1}: {tex_escape(diff.text())}}}\kern4pt" + pair)
         rows.append({"page": n + 1, "differing": diff.differing, "share": diff.share,
                      "mean_abs": diff.mean_abs, "sizes": [diff.size_a, diff.size_b]})  # fmt: skip
@@ -167,7 +171,7 @@ def write_sbs(
                                   f"{r['differing']:,} pixels differ ({100 * r['share']:.2f}\\%)")
         for r in rows
     ]  # fmt: skip
-    lines = [r"\medskip new on the left (or above), reference on the right (or below).", *pages]
+    lines = [r"\medskip reference on the left (or above), new on the right (or below).", *pages]
     doc.pages.insert(0, doc.page(cover("Two reports side by side", sides, floor(new_pdf), lines)))
     doc.write(out_pdf)
     return rows
@@ -207,10 +211,10 @@ def write_procrustes(
                         rf"\hbox{{\large\bfseries {tex_escape(pair.slot)}}}"
                         rf"\hbox{{\footnotesize {tex_escape(diff.text())}. "
                         rf"{PIXELS_ARE_NOT_POSITIONS}}}\kern4pt"
-                        + side_by_side(
-                            doc.picture(pair.new_pdf),
+                        + side_by_side(  # the reference on the left, as in the sbs document
                             doc.picture(pair.ref_pdf),
-                            (f"new: {sides[0]}", f"reference: {sides[1]}"),
+                            doc.picture(pair.new_pdf),
+                            (f"reference: {sides[1]}", f"new: {sides[0]}"),
                         )  # fmt: skip
                     )
                 page_rows.append(row)
@@ -377,16 +381,17 @@ def main(argv: list[str] | None = None) -> int:
     out = args.out or new_pdf.parent
     sides = (f"{rounds[0]} (af {commits[0]})", f"{rounds[1]} (af {commits[1]})")
     pairs, one_sided = map_pairs(new, ref)
+    pages = write_sbs(new_pdf, ref_pdf, sides, out / f"{report_id}-{SBS}-vs-{short}.pdf", banner)
+    print(f"wrote {out}/{report_id}-{SBS}-vs-{short}.pdf", file=sys.stderr)
     name = f"{report_id}-{PROCRUSTES}-vs-{short}.pdf"
     rows = write_procrustes(pairs, sides, one_sided, out / name, banner=banner)
-    pages = write_sbs(new_pdf, ref_pdf, sides, out / f"{report_id}-{SBS}-vs-{short}.pdf", banner)
     (out / f"{report_id}-{PROCRUSTES}-vs-{short}.json").write_text(
         json.dumps({"sides": sides, "maps": rows, "pages": pages}, indent=1, default=str)
     )
     for r in rows:
         print(f"{r['slot']}: {r['matched']} matched, RMSD {r['rmsd']:.3f}, "
               f">{arrows.FAR:g}u {r[FAR_KEY]}", file=sys.stderr)  # fmt: skip
-    print(f"wrote {out}/{report_id}-{{{SBS},{PROCRUSTES}}}-vs-{short}.pdf", file=sys.stderr)
+    print(f"wrote {out}/{name}", file=sys.stderr)
     return 0
 
 
