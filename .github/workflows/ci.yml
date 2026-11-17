@@ -154,5 +154,5 @@ jobs:
         run: |
           set -o pipefail
           skip=""
-          if [ "$RUNNER_OS" = macOS ]; then skip="--skip-tool pdflatex --skip-tool pdftoppm"; fi
+          if [ "$RUNNER_OS" = macOS ]; then skip="--skip-tool pdflatex --skip-tool pdftoppm --skip-tool pdftotext"; fi
           python -m pytest -m tool --require-tools $skip -rs | tee tools.log

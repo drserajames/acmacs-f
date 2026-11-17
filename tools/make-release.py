@@ -697,7 +697,7 @@ def verify_one_openmp(python: str, env: dict[str, str]) -> None:
 
 # System tools environment.yml does not provide, so a release cannot run their tool tests. CI's
 # macOS job skips the same list; tests/test_make_release.py holds the two together.
-UNPROVIDED_TOOLS = ("pdflatex", "pdftoppm")
+UNPROVIDED_TOOLS = ("pdflatex", "pdftoppm", "pdftotext")
 
 NUMERICS_TESTS = "tests/map/test_numerics.py"
 NUMERICS_PROBE = (
