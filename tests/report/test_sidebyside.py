@@ -263,3 +263,57 @@ def test_windows_whose_orientation_text_differs_keep_their_pages(
     out = tmp_path / "out"
     assert sidebyside.main([str(a), str(b), "--out", str(out)]) == 0
     assert len(sidebyside.page_sizes(out / "r-procrustes-vs-older.pdf")) == 7
+
+
+def _words(pdf: Path, page: int) -> dict[str, tuple[float, float]]:
+    """Each word on one page of ``pdf`` with its top-left corner in pt (the first, if repeated)."""
+    import re
+    import subprocess
+
+    out = subprocess.run(
+        ["pdftotext", "-bbox", "-f", str(page), "-l", str(page), str(pdf), "-"],
+        capture_output=True, text=True, check=True,
+    ).stdout  # fmt: skip
+    found: dict[str, tuple[float, float]] = {}
+    for x, y, word in re.findall(r'<word xMin="([\d.]+)" yMin="([\d.]+)"[^>]*>(.*?)</word>', out):
+        found.setdefault(word, (float(x), float(y)))
+    return found
+
+
+@pytest.mark.tool(build.LATEX)
+@pytest.mark.tool(pixels.PDFTOPPM)
+@pytest.mark.tool("pdftotext")
+def test_the_reference_is_on_the_left_or_above_and_the_newer_report_on_the_right_or_below(
+    tmp_path: Path,
+) -> None:
+    """Sarah, 16 Nov 2026: "with reference on the left and more recent on the right", in both
+    documents: the page pairs (portrait beside, landscape stacked) and the map figure pairs."""
+    import matplotlib
+
+    matplotlib.use("pdf")
+    import matplotlib.pyplot as plt
+
+    def pdf(name: str, w: float, h: float) -> Path:
+        fig = plt.figure(figsize=(w / 72, h / 72), dpi=72)
+        fig.text(0.1, 0.5, name)
+        fig.savefig(tmp_path / f"{name}.pdf")
+        plt.close(fig)
+        return tmp_path / f"{name}.pdf"
+
+    sides = ("NEWERSIDE", "OLDERSIDE")
+    for w, h, stacked in ((300, 400, False), (400, 300, True)):
+        out = tmp_path / f"sbs-{stacked}.pdf"
+        sidebyside.write_sbs(pdf("newpage", w, h), pdf("refpage", w, h), sides, out)
+        words = _words(out, 2)  # page 1 is the cover
+        (rx, ry), (nx, ny) = words["OLDERSIDE"], words["NEWERSIDE"]
+        assert (ry < ny and rx == pytest.approx(nx)) if stacked else (rx < nx and ry == ny)
+        assert words["refpage"][stacked] < words["newpage"][stacked]  # the pictures follow
+        assert "reference on the left (or above)" in " ".join(_words(out, 1))
+
+    ref, new = _pair()
+    a = _record(tmp_path, "r", {"map/x/all": new}, "c0")
+    b = _record(tmp_path, "r-older", {"map/x/all": ref}, "c0")
+    assert sidebyside.main([str(a), str(b), "--out", str(tmp_path / "p")]) == 0
+    words = _words(tmp_path / "p" / "r-procrustes-vs-older.pdf", 2)
+    (rx, ry), (nx, ny) = words["reference:"], words["new:"]
+    assert rx < nx and ry == ny
