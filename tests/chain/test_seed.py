@@ -8,6 +8,7 @@ stress; neither survives a chain's steps on its own.
 import dataclasses
 import json
 import math
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -159,9 +160,9 @@ def test_bake_refuses_a_transformation_of_the_wrong_shape():
 def test_baking_does_not_move_the_stress():
     """A rotation or a flip moves no point relative to another, so the stress is the same."""
     chart = chart_with([Projection(layout(5), transformation=FLIP_X @ ROTATE_90)])
-    before = seed_stress(chart, chart.projections[0])
+    before, _ = seed_stress(chart, chart.projections[0])
     baked = bake_transformation(chart)
-    after = seed_stress(baked.chart, baked.chart.projections[0])
+    after, _ = seed_stress(baked.chart, baked.chart.projections[0])
     assert after == pytest.approx(before, rel=1e-12)
 
 
@@ -171,7 +172,7 @@ def test_baking_does_not_move_the_stress():
 
 def test_stress_check_passes_and_records_both_numbers():
     chart = chart_with([Projection(layout(5))])
-    computed = seed_stress(chart, chart.projections[0])
+    computed, _ = seed_stress(chart, chart.projections[0])
     chart.projections[0].stress = computed
     checked = seed_stress_check(chart, chart.projections[0])
     assert checked.stored == computed
@@ -196,7 +197,7 @@ def test_stress_check_without_a_stored_stress_records_the_computed_one():
 
 def test_stress_check_tolerance_is_relative_and_configurable():
     chart = chart_with([Projection(layout(5))])
-    computed = seed_stress(chart, chart.projections[0])
+    computed, _ = seed_stress(chart, chart.projections[0])
     chart.projections[0].stress = computed * (1 + 1e-4)
     with pytest.raises(SeedError):
         seed_stress_check(chart, chart.projections[0], 1e-6)
@@ -429,3 +430,46 @@ def test_a_first_map_chain_without_seed_chart_is_unchanged(seed_with_orientation
     assert chosen.projections[0].transformation is not None
     assert results[0].record["stress"] == {"seed": seed.projections[1].stress_value}
     assert "seed_projection" not in results[0].record
+
+
+def test_a_point_with_no_coordinates_is_left_out_and_counted():
+    """A seed can give a point no coordinates and still not call it disconnected.
+
+    Such a point has no position, so it cannot contribute a distance. Leaving it in makes the
+    whole stress NaN; it is left out, as a disconnected point is, and counted, because that is a
+    reading of a malformed chart rather than something the file says.
+    """
+    chart = chart_with([Projection(layout(5))])
+    whole, none_missing = seed_stress(chart, chart.projections[0])
+    assert none_missing == 0
+
+    lost = layout(5)
+    lost[2] = [math.nan, math.nan]
+    chart = chart_with([Projection(lost)])
+    computed, missing = seed_stress(chart, chart.projections[0])
+    assert missing == 1
+    assert math.isfinite(computed)
+    assert computed != whole  # that point's titres no longer contribute
+    checked = seed_stress_check(chart, chart.projections[0])
+    assert checked.points_without_coordinates == 1
+    assert checked.to_json()["points_without_coordinates"] == 1
+
+
+def test_a_point_the_seed_itself_disconnects_is_not_counted_as_missing():
+    """Only an UNDECLARED coordinate-less point is the anomaly; a declared one is ordinary."""
+    lost = layout(5)
+    lost[2] = [math.nan, math.nan]
+    chart = chart_with([Projection(lost, disconnected=(2,))])
+    computed, missing = seed_stress(chart, chart.projections[0])
+    assert missing == 0
+    assert math.isfinite(computed)
+
+
+def test_stress_check_refuses_a_stress_that_is_not_a_number():
+    """`nan > tolerance` is false, so a NaN would pass this check at any tolerance."""
+    chart = chart_with([Projection(layout(5), stress=1.0)])
+    with mock.patch("af.chain.seed.seed_stress", return_value=(math.nan, 0)):
+        with pytest.raises(SeedError, match="cannot compute the seed's stress"):
+            seed_stress_check(chart, chart.projections[0], 1e-6)
+        with pytest.raises(SeedError, match="cannot compute the seed's stress"):
+            seed_stress_check(chart, chart.projections[0], 1.0)

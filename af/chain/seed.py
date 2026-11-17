@@ -169,6 +169,10 @@ class SeedStress:
     difference: float | None  # computed - stored
     relative: float | None  # |difference| / |stored|
     tolerance: float
+    # points the seed gives no coordinates but does not list as disconnected, left out of the
+    # computation here (see seed_stress). An assumption inside the number, so it is recorded
+    # beside it rather than implied.
+    points_without_coordinates: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -177,31 +181,44 @@ class SeedStress:
             "difference": self.difference,
             "relative": self.relative,
             "tolerance": self.tolerance,
+            "points_without_coordinates": self.points_without_coordinates,
         }
 
 
-def seed_stress(chart: Chart, projection: Projection) -> float:
-    """The stress of a seed's projection, computed here from the seed's own titres and bases.
+def seed_stress(chart: Chart, projection: Projection) -> tuple[float, int]:
+    """The stress of a seed's projection, and how many points it had to leave out to get it.
 
     The seed's numbers, not the chain's: its projection's own minimum column basis, its forced
     bases where it has them, its own disconnected points (so no point is disconnected here that
     the seed kept), and its avidity adjustments. Nothing is optimised; the layout is the seed's.
+
+    A seed can give a point no coordinates and still not list it as disconnected -- measured on
+    the Feb 2026 round, where two maps carry 1 and 2 such points (07-chains, 17 Nov 2026). Such a
+    point has no position, so it cannot contribute a distance, and leaving it in makes the whole
+    stress NaN, which compares false against every tolerance and so passes a check whose entire
+    job is to compare. They are therefore left out, exactly as a disconnected point is, and
+    COUNTED, because that is a reading of a malformed chart and not a property of the file.
     """
     from af.map.optimise import MapProblem, stress
 
     arrays = chart.optimiser_arrays(
         projection.minimum_column_basis or "none", projection, disconnect_threshold=None
     )
+    layout = np.asarray(projection.layout, dtype=float)
+    disconnected = np.asarray(arrays["disconnected"], dtype=bool)
+    no_coordinates = ~np.isfinite(layout).all(axis=1) & ~disconnected
     problem = MapProblem(
         titre_value=arrays["titre_value"],
         titre_type=arrays["titre_type"],
         column_bases=np.asarray(arrays["column_bases"], dtype=float),
-        disconnected=np.asarray(arrays["disconnected"], dtype=bool),
+        disconnected=disconnected | no_coordinates,
         dodgy_is_regular=bool(arrays["dodgy_is_regular"]),
         avidity_adjust=arrays.get("avidity_adjust"),
         unmovable=arrays.get("unmovable"),
     )
-    return stress(problem, np.asarray(projection.layout, dtype=float))
+    # a left-out point's own coordinates are never read, but NaN in the array would still
+    # poison the arithmetic, so they are zeroed after the point is disconnected
+    return stress(problem, np.nan_to_num(layout, nan=0.0)), int(no_coordinates.sum())
 
 
 def seed_stress_check(
@@ -210,12 +227,21 @@ def seed_stress_check(
     """Recompute the seed's stress and compare it with the stored one; refuse past `tolerance`.
 
     A seed with no stored stress is not an error: the computed value is recorded with no
-    comparison, because there is nothing to disagree with.
+    comparison, because there is nothing to disagree with. A stress that is not a finite number
+    IS an error, and is refused rather than recorded: `nan > tolerance` is false, so a NaN would
+    otherwise pass this check silently however tight the tolerance (measured 17 Nov 2026 on two
+    Feb maps, which passed at 1e-6 with NaN recorded).
     """
-    computed = seed_stress(chart, projection)
+    computed, no_coordinates = seed_stress(chart, projection)
+    if not np.isfinite(computed):
+        raise SeedError(
+            f"step 0 cannot compute the seed's stress: it comes out {computed!r}, which no"
+            " tolerance can judge. The seed's titres, column bases or layout are not being read"
+            " as the program that made it wrote them."
+        )
     stored = None if projection.stress is None else float(projection.stress)
     if stored is None:
-        return SeedStress(None, computed, None, None, tolerance)
+        return SeedStress(None, computed, None, None, tolerance, no_coordinates)
     difference = computed - stored
     relative = abs(difference) / abs(stored) if stored else abs(difference)
     if relative > tolerance:
@@ -225,7 +251,7 @@ def seed_stress_check(
             " titres, column bases or layout are not being read as the program that made it"
             " wrote them."
         )
-    return SeedStress(stored, computed, difference, relative, tolerance)
+    return SeedStress(stored, computed, difference, relative, tolerance, no_coordinates)
 
 
 # ----------------------------------------------------------------------
