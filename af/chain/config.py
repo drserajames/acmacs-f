@@ -229,6 +229,17 @@ class SeedChart:
     frame the seed was drawn in; the matrix is recorded in the step. `stress_tolerance`: how far
     the stress recomputed at step 0 may differ, relatively, from the stress the seed stores,
     before the chain refuses to start.
+
+    `source_dates_from`: another chart to read the seed's per-layer dates from, for a seed that
+    has titre layers but no source list of its own (4 of the 18 Feb 2026 round maps; the sibling
+    `downloaded.raw.ace` the same chain wrote keeps the list). It supplies DATES ONLY -- the
+    layout, the projections and the titres remain the seed's -- and
+    `af.chain.bridge.seed_layer_dates` refuses it unless that chart holds the same layers as the
+    seed: the same points in the same order and every layer's titres equal, which is what ties a
+    layer to its table. Differences in the other fields (a passage, say) are counted and recorded
+    in step 0 rather than refused.
+    In those Feb maps the raw sibling's projections are a different, lower-stress layout, so a
+    chain that took coordinates from there would quietly not be the map the round drew.
     """
 
     bridge: bool
@@ -237,6 +248,7 @@ class SeedChart:
     projection: int = 0
     bake_transformation: bool = True
     stress_tolerance: float = STRESS_TOLERANCE
+    source_dates_from: Path | None = None
 
     def __post_init__(self) -> None:
         if self.projection < 0:
@@ -258,7 +270,12 @@ class SeedChart:
             )
 
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        doc = asdict(self)
+        # a Path is not JSON; the chain record keeps the resolved path as text, as first_map does
+        doc["source_dates_from"] = (
+            None if self.source_dates_from is None else str(self.source_dates_from)
+        )
+        return doc
 
 
 @dataclass(frozen=True)
@@ -682,11 +699,13 @@ def _seed_tables(
 ) -> tuple[list[TableRef], list[TableRef]]:
     """Split today's tables into the ones the seed holds and the ones a step would merge, by the
     seed chart's own source list (so the split cannot drift from the file it describes)."""
-    from af.chain.bridge import BridgeError, seed_source_dates, seed_split
+    from af.chain.bridge import BridgeError, seed_layer_dates, seed_split
     from af.chart.ace import read_chart
 
     try:
-        dates = seed_source_dates(read_chart(first_map))
+        dates = seed_layer_dates(
+            read_chart(first_map), first_map, seed_chart.source_dates_from
+        ).dates
     except (BridgeError, OSError, ValueError) as e:
         raise ChainConfigError(f"{first_map}: cannot read the seed's tables: {e}") from None
     split = seed_split(dates, tables)

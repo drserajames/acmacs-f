@@ -626,7 +626,15 @@ def seed_split(cfg: ChainConfig) -> bridge.SeedSplit:
     """A seed's tables: which it holds, which the store adds within it, which follow."""
     assert cfg.first_map is not None
     seed = read_chart(cfg.first_map)
-    return bridge.seed_split(bridge.seed_source_dates(seed), cfg.tables)
+    return bridge.seed_split(seed_dates(cfg, seed).dates, cfg.tables)
+
+
+def seed_dates(cfg: ChainConfig, seed: Chart) -> bridge.SeedDates:
+    """The seed's per-layer dates, where they came from, and how many points differ in their other
+    fields there (`[seed_chart] source_dates_from`; af.chain.bridge.seed_layer_dates)."""
+    assert cfg.first_map is not None
+    dates_from = cfg.seed_chart.source_dates_from if cfg.seed_chart is not None else None
+    return bridge.seed_layer_dates(seed, cfg.first_map, dates_from)
 
 
 def stepped_tables(cfg: ChainConfig, split: bridge.SeedSplit | None = None) -> list[TableRef]:
@@ -674,7 +682,8 @@ def _first_step(
         chart = read_chart(cfg.first_map)
         if not chart.projections:
             raise ChainError(f"{cfg.first_map}: seed chart has no projections")
-        chart, seed_record = _seed_layout(cfg, chart, len(bridge.seed_source_dates(chart)))
+        sd = seed_dates(cfg, chart)
+        chart, seed_record = _seed_layout(cfg, chart, len(sd.dates))
         write_chart(chart, directory / CHOSEN)
         record = {
             "index": 0,
@@ -684,6 +693,7 @@ def _first_step(
             # chain built on this same map, wherever the file now sits (af.chain.append)
             "source_sha256": sha256_path(Path(cfg.first_map)),
             "chosen": "seed",
+            "source_dates_from": _dates_record(sd, cfg),
             **seed_record,
         }
         record["diagnostics"] = step_diagnostics(chart, None, None, None, None, None, cfg)
@@ -882,6 +892,7 @@ def _bridged_first_step(
     seed = read_chart(cfg.first_map)
     if not seed.projections:
         raise ChainError(f"{cfg.first_map}: seed chart has no projections")
+    sd = seed_dates(cfg, seed)
     b = bridge.bridge_seed(seed, split, cfg.seed_chart.drop_serum_id_prefix)
     chart, seed_record = _seed_layout(cfg, b.chart, len(split.in_seed) + len(split.af_only))
     write_chart(chart, directory / CHOSEN)
@@ -894,10 +905,28 @@ def _bridged_first_step(
         "source_sha256": sha256_path(Path(cfg.first_map)),
         "chosen": "seed",
         "bridge": {"record": BRIDGE_RECORD, **doc["counts"]},
+        # which file the per-layer dates were read from: the seed itself, or the chart named by
+        # [seed_chart] source_dates_from. Recorded so how-made states it rather than a message.
+        "source_dates_from": _dates_record(sd, cfg),
         **seed_record,
     }
     record["diagnostics"] = step_diagnostics(chart, None, None, None, None, None, cfg)
     _write_step_record(directory, record, mapper)
+
+
+def _dates_record(sd: bridge.SeedDates, cfg: ChainConfig) -> dict[str, Any]:
+    """What step 0 says about where the seed's per-layer dates came from, so how-made reads it as
+    an artefact: the file, and, when it is not the seed itself, how many of its points differ from
+    the seed's in fields other than the name (af.chain.bridge.seed_layer_dates)."""
+    sc = cfg.seed_chart
+    if sc is None or sc.source_dates_from is None:
+        return {"file": sd.source, "the_seed_itself": True}
+    return {
+        "file": sd.source,
+        "the_seed_itself": False,
+        "path": str(sc.source_dates_from),
+        "points_differing_in_other_fields": sd.fields_differ,
+    }
 
 
 def _seed_layout(cfg: ChainConfig, chart: Chart, source_tables: int) -> tuple[Chart, dict]:
