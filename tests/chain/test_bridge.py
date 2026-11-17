@@ -20,6 +20,7 @@ from af.chain.bridge import (
     BridgeError,
     bridge_seed,
     declaration_fragment,
+    seed_layer_dates,
     seed_source_dates,
     seed_split,
 )
@@ -485,3 +486,84 @@ def test_step_choice_incremental_keeps_the_incremental_map(tmp_path):
     results = run_chain(ChainConfig(GROUP, refs, opts, seed=3), tmp_path / "s", StubOptimiser())
     assert all(r.record["chosen"] == "incremental" for r in results[1:])
     assert all(r.record["step_choice"] == "incremental" for r in results[1:])
+
+
+# ----------------------------------------------------------------------
+# a seed whose own source list is missing: [seed_chart] source_dates_from
+
+
+def dated_seed(tmp_path, *, with_sources: bool):
+    """A two-table seed, written to a file, with or without its source list."""
+    seed_ags = [ag("TEST-ALPHA-1"), ag("TEST-GAMMA-7")]
+    seed, refs = build(
+        tmp_path, seed_ags, SEED_SR,
+        [{"date": "20210115", "rows": [["640", "160"], ["320", "1280"]],
+          "ags": [(0, ag("TEST-ALPHA-1")), (1, ag("TEST-GAMMA-7"))], "srs": AF_SR},
+         {"date": "20210220", "rows": [["1280", "80"], ["160", "640"]],
+          "ags": [(0, ag("TEST-ALPHA-1")), (1, ag("TEST-GAMMA-7"))], "srs": AF_SR}],
+    )  # fmt: skip
+    if not with_sources:
+        seed = dataclasses.replace(seed, info={})
+    return seed, refs
+
+
+def test_seed_layer_dates_read_from_a_sibling_chart(tmp_path):
+    """The sibling supplies the dates; the seed keeps its own layout and projections."""
+    listed, refs = dated_seed(tmp_path, with_sources=True)
+    unlisted = dataclasses.replace(
+        listed,
+        info={},
+        projections=[Projection(listed.projections[0].layout + 7.0, stress=99.0)],
+    )
+    seed_path, raw_path = tmp_path / "downloaded.ace", tmp_path / "downloaded.raw.ace"
+    write_chart(unlisted, seed_path)
+    write_chart(listed, raw_path)
+
+    with pytest.raises(BridgeError, match="no source list"):
+        seed_layer_dates(read_chart(seed_path), seed_path)
+    got = seed_layer_dates(read_chart(seed_path), seed_path, raw_path)
+    assert got.source == "downloaded.raw.ace"
+    assert got.fields_differ == 0
+    dates = got.dates
+    assert dates == [d("20210115"), d("20210220")]
+    # and the split that follows is the one the listed seed would have given
+    assert seed_split(dates, refs).counts() == {"in_seed": 2, "af_only": 0, "post_seed": 0}
+
+
+def test_seed_layer_dates_refuses_a_different_chart(tmp_path):
+    """A hard guard: dates may come from elsewhere only if it is the same chart."""
+    listed, _ = dated_seed(tmp_path, with_sources=True)
+    unlisted = dataclasses.replace(listed, info={})
+    seed_path, other_path = tmp_path / "downloaded.ace", tmp_path / "other.ace"
+    write_chart(unlisted, seed_path)
+
+    # a different point: refused on identity, before any date is read
+    renamed = dataclasses.replace(listed, antigens=[ag("TEST-OMEGA-9"), listed.antigens[1]])
+    write_chart(renamed, other_path)
+    with pytest.raises(BridgeError, match="same layers.*antigen 0 is a different virus"):
+        seed_layer_dates(read_chart(seed_path), seed_path, other_path)
+
+    # the same points, one titre changed: refused on the layers
+    layers = [dict(x) for x in listed.titres.layers]
+    layers[0][(0, 0)] = Titre.parse("20")
+    retitred = dataclasses.replace(listed, titres=Titres(listed.titres.table, layers))
+    write_chart(retitred, other_path)
+    with pytest.raises(BridgeError, match="same layers.*titres of layer 0 differ"):
+        seed_layer_dates(read_chart(seed_path), seed_path, other_path)
+
+
+def test_seed_layer_dates_refuses_when_the_seed_has_its_own(tmp_path):
+    """The key is only for a seed with no list of its own: otherwise there would be two answers."""
+    listed, _ = dated_seed(tmp_path, with_sources=True)
+    seed_path = tmp_path / "downloaded.ace"
+    write_chart(listed, seed_path)
+    with pytest.raises(BridgeError, match="has its own source list"):
+        seed_layer_dates(read_chart(seed_path), seed_path, seed_path)
+
+
+def test_source_dates_from_resolves_and_serialises(tmp_path):
+    """The config key is a path like first_map, relative to the chain file, and JSON-able."""
+    sc = SeedChart(bridge=True, source_dates_from=tmp_path / "downloaded.raw.ace")
+    assert sc.to_json()["source_dates_from"] == str(tmp_path / "downloaded.raw.ace")
+    assert json.dumps(sc.to_json())  # a Path would raise here
+    assert SeedChart(bridge=True).to_json()["source_dates_from"] is None

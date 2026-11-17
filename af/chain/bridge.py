@@ -35,7 +35,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from af.chain.config import TableRef
 from af.chart.ace import read_chart
@@ -96,6 +96,106 @@ def seed_source_dates(chart: Chart) -> list[datetime.date]:
         except ValueError:
             raise BridgeError(f"seed source {n} has no readable date: {s.get('D')!r}") from None
     return dates
+
+
+class SeedDates(NamedTuple):
+    """One date per layer of a seed, where they were read from, and what that cost.
+
+    `fields_differ` counts the points whose other identity fields (passage, reassortant,
+    annotations, serum id) differ between the seed and the file the dates came from. Those
+    differences do not make the dates wrong -- a layer is tied to its table by its titres, not by
+    a passage -- but they say the two files are not byte copies, so they are counted, recorded in
+    step 0 and declared, never passed over in silence.
+    """
+
+    dates: list[datetime.date]
+    source: str
+    fields_differ: int = 0
+
+
+def _same_layers(seed: Chart, other: Chart) -> tuple[str | None, int]:
+    """(what makes `other` unusable for `seed`'s dates, how many points differ in other fields).
+
+    What must hold for another file's source list to describe this chart's layers is that the two
+    hold THE SAME LAYERS: the same number of them, each with the same titre at the same
+    (antigen, serum) index. That ties layer k to the same table in both files, which is the only
+    thing a date is read for. The point names must line up too, because a layer is addressed by
+    index and the dates would otherwise describe a different arrangement of points.
+
+    Projections are deliberately not compared: they are exactly what differs between a round's
+    `downloaded.ace` and its `downloaded.raw.ace`, and nothing here reads them. Passage and
+    annotation differences are counted, not refused: measured on the Feb 2026 maps, one of the
+    three affected seeds differs from its raw sibling in the passage of 27 antigens of 6,829,
+    with every layer equal key for key.
+    """
+    if len(seed.antigens) != len(other.antigens) or len(seed.sera) != len(other.sera):
+        return (
+            f"{len(seed.antigens)}x{len(seed.sera)} points against"
+            f" {len(other.antigens)}x{len(other.sera)}"
+        ), 0
+    for n, (a, b) in enumerate(zip(seed.antigens, other.antigens, strict=True)):
+        if a.name != b.name:
+            return f"antigen {n} is a different virus", 0
+    for n, (x, y) in enumerate(zip(seed.sera, other.sera, strict=True)):
+        if x.name != y.name:
+            return f"serum {n} is a different virus", 0
+    if len(seed.titres.layers) != len(other.titres.layers):
+        return f"{len(seed.titres.layers)} titre layers against {len(other.titres.layers)}", 0
+    for n, (one, two) in enumerate(zip(seed.titres.layers, other.titres.layers, strict=True)):
+        if {k: str(v) for k, v in one.items()} != {k: str(v) for k, v in two.items()}:
+            return f"the titres of layer {n} differ", 0
+
+    # the raw fields, not antigen_identity/serum_identity: those are None for a DISTINCT or
+    # unpassaged point, so two different such points would compare equal here
+    def ag_fields(a: Antigen) -> tuple:
+        return (a.reassortant, tuple(a.annotations), a.passage)
+
+    def sr_fields(s: Serum) -> tuple:
+        return (s.reassortant, tuple(s.annotations), s.serum_id, s.passage)
+
+    differ = sum(
+        ag_fields(a) != ag_fields(b) for a, b in zip(seed.antigens, other.antigens, strict=True)
+    ) + sum(sr_fields(x) != sr_fields(y) for x, y in zip(seed.sera, other.sera, strict=True))
+    return None, differ
+
+
+def seed_layer_dates(
+    seed: Chart, seed_path: Path | str, dates_from: Path | None = None
+) -> SeedDates:
+    """One date per layer of `seed`, and where they came from.
+
+    Normally the seed's own source list (`seed_source_dates`). Some charts have titre layers but
+    no source list: a round's `downloaded.ace` can lack it where the sibling `downloaded.raw.ace`
+    the same chain wrote keeps it (4 of the 18 Feb 2026 maps; 07-chains, 17 Nov 2026). Those
+    dates describe this chart's layers too, but only if the other file holds the same layers, so
+    `dates_from` is checked by `_same_layers` and refused otherwise.
+
+    `dates_from` gives DATES, never coordinates: the seed's layout stays the seed's. In those Feb
+    maps the raw sibling's projections are a different and lower-stress layout, so a chain that
+    took its coordinates from there would silently not be the map the round drew.
+    """
+    if dates_from is None:
+        return SeedDates(seed_source_dates(seed), Path(seed_path).name)
+    try:
+        seed_source_dates(seed)
+    except BridgeError:
+        pass
+    else:
+        # one editable copy of each fact: where the seed states its own tables, that is the
+        # answer, and a second file saying otherwise is a configuration mistake, not a choice
+        raise BridgeError(
+            f"[seed_chart] source_dates_from is set, but the seed {Path(seed_path).name} has its"
+            " own source list; remove the key (it is only for a seed that has none)"
+        )
+    other = read_chart(dates_from)
+    differs, fields_differ = _same_layers(seed, other)
+    if differs is not None:
+        raise BridgeError(
+            f"[seed_chart] source_dates_from {Path(dates_from).name} does not hold the same layers"
+            f" as the seed {Path(seed_path).name}: {differs}. Its dates cannot describe the seed's"
+            " layers."
+        )
+    return SeedDates(seed_source_dates(other), Path(dates_from).name, fields_differ)
 
 
 def seed_split(seed_dates: Sequence[datetime.date], tables: Sequence[TableRef]) -> SeedSplit:
