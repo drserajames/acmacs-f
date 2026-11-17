@@ -8,12 +8,14 @@ import pytest
 pytest.importorskip("numpy", reason="numpy not installed: af.tree.draw needs it (pyproject, WS1)")
 pytest.importorskip("matplotlib", reason="matplotlib not installed: af.tree.draw needs it")
 
+from matplotlib.font_manager import FontProperties  # noqa: E402
+
 from af.tree.draw.aa_labels import LabelHide  # noqa: E402
 from af.tree.draw.figure import make_figure  # noqa: E402
 from af.tree.draw.placer_ae.geometry import ATTACH_INSET, attach_pt  # noqa: E402
 from af.tree.draw.placer_ae.measure import LEADER_GAP, NO_LEADER, drawn_leader  # noqa: E402
 from af.tree.draw.placer_ae.scene import ROW, Label  # noqa: E402
-from af.tree.draw.render import Geometry  # noqa: E402
+from af.tree.draw.render import Geometry, _ae_advance, _text_width  # noqa: E402
 
 from ..synthetic import PARENTS, standard_tree  # noqa: E402
 from ..test_figure import _pin_config  # noqa: E402
@@ -136,6 +138,26 @@ def test_the_editor_draws_aes_leaders_under_ae_and_nothing_changes_under_grid(tm
     data = _editor_data((tmp_path / "grid.labels.html").read_text())
     assert "ae_leader" not in data["adapter"]
     assert all("advance_w" not in lab for lab in data["labels"])
+
+
+def test_an_advance_is_taken_at_the_labels_size_whatever_resized_the_shared_font():
+    """matplotlib shares one FT2Font per file, and TextPath sets it to 100 pt: an advance read
+    after a width (the editor's order) once came out 100/size times too wide."""
+    font = FontProperties(family="DejaVu Sans Mono", size=9.5)
+    want = _ae_advance(font)("A6S")
+    advance = _ae_advance(font)
+    _text_width(font)("L7F")  # resizes the shared font to TextPath's 100 pt
+    assert advance("A6S") == pytest.approx(want)
+    assert advance("A6S") == pytest.approx(3 * 0.6 * 9.5, rel=0.01)  # a mono advance is 0.6 em
+
+
+def test_the_editors_advance_is_the_labels_own_width_under_ae(tmp_path):
+    ae, _ = _draw(tmp_path, "ae", placer="ae")
+    data = _editor_data((tmp_path / "ae.labels.html").read_text())
+    fs = data["adapter"]["font_size"]
+    for lab in data["labels"]:
+        widest = max(len(t) for t in lab["lines"])
+        assert lab["advance_w"] == pytest.approx(widest * 0.6 * fs, rel=0.01)
 
 
 def test_a_hidden_label_brought_back_under_ae_has_aes_leader(tmp_path):

@@ -826,12 +826,16 @@ def _draw_labels(ax: Axes, spec: FigureSpec, pg: _Page, grid: Grid, obstacles: l
 def _ae_advance(font: FontProperties) -> Callable[[str], float]:
     """A line's pen advance in the label font: ae sizes labels by it, not by the ink (ae
     95d65dd: the ink extent under-measures a mono line)."""
+    # get_font hands back matplotlib's shared, cached FT2Font, which TextPath (_text_width) and
+    # the renderer resize too (TextPath to 100 pt): size it again on every measure, or an
+    # advance taken after any of them is read at their size, not the label's.
     ft = font_manager.get_font(font_manager.findfont(font))
-    ft.set_size(font.get_size_in_points(), 72)
+    size = font.get_size_in_points()
     cache: dict[str, float] = {}
 
     def advance(s: str) -> float:
         if s not in cache:
+            ft.set_size(size, 72)
             cache[s] = sum(ft.load_char(ord(c)).linearHoriAdvance for c in s) / 65536
         return cache[s]
 
