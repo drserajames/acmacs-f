@@ -31,6 +31,13 @@ def sleeper(tmp_path: Path, name: str) -> Job:
     )
 
 
+def two_arrays(tmp_path: Path) -> list[Job]:
+    """Sleepers "a" and "b" with different resources, so they go as two separate arrays."""
+    b = sleeper(tmp_path, "b")
+    b = Job(b.name, b.command, b.cwd, b.log, b.outputs, resources=b.resources.__class__(threads=2))
+    return [sleeper(tmp_path, "a"), b]
+
+
 def signal_after(seconds: float, signum: int) -> threading.Timer:
     timer = threading.Timer(seconds, os.kill, (os.getpid(), signum))
     timer.start()
@@ -44,24 +51,101 @@ def test_slurm_driver_cancels_jobs_on_signal(
     runner = SlurmRunner(
         work_dir=tmp_path / "slurm", sbatch=str(fake_sbatch), scancel=str(fake_scancel)
     )
-    jobs = [sleeper(tmp_path, "a"), sleeper(tmp_path, "b")]
-    jobs[1] = Job(
-        jobs[1].name,
-        jobs[1].command,
-        jobs[1].cwd,
-        jobs[1].log,
-        jobs[1].outputs,
-        resources=jobs[1].resources.__class__(threads=2),
-    )  # two separate arrays
     started = time.monotonic()
     signal_after(1.0, signum)
     with pytest.raises(EXPECTED):
-        runner.run_many(jobs)
+        runner.run_many(two_arrays(tmp_path))
     assert time.monotonic() - started < 20, "the driver waited for the jobs instead of cancelling"
-    cancelled = (fake_sbatch.parent / "scancel-calls.txt").read_text().split()
+    cancelled = scancel_counts(fake_sbatch)
     assert len(cancelled) == 2, "both in-flight arrays cancelled"
     assert all(name.startswith("--name=af-") for name in cancelled)
     assert not list(tmp_path.glob("late-*")), "no job ran on after the driver stopped"
+
+
+def scancel_counts(fake_sbatch: Path) -> dict[str, int]:
+    calls = (fake_sbatch.parent / "scancel-calls.txt").read_text().split()
+    return {name: calls.count(name) for name in calls}
+
+
+def marker_passes(tmp_path: Path, job: str) -> list[str]:
+    (marker,) = [
+        m
+        for m in (tmp_path / "slurm").glob("batch-*/CANCELLED")
+        if f"scancel --name=af-{job}-" in m.read_text()
+    ]
+    return [line for line in marker.read_text().splitlines() if ", pass " in line]
+
+
+@pytest.mark.parametrize("signum", SIGNALS, ids=lambda s: signal.Signals(s).name)
+def test_slurm_cancel_repeats_until_a_late_job_stops(
+    tmp_path: Path,
+    fake_sbatch: Path,
+    fake_scancel: Path,
+    signum: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job the first scancel misses is cancelled on a later pass, and only that job.
+
+    Array "b" records its pid 3 s after it starts, so the cancel at 2 s cannot reach it:
+    the same miss as a real scancel that arrives before the controller has registered
+    a just-submitted job. With a single scancel the driver waited out the whole job.
+    Array "a" stopped at the first cancel and must not be cancelled again.
+    """
+    monkeypatch.setenv("LATE_PIDFILE_JOB", "af-b-")
+    monkeypatch.setenv("LATE_PIDFILE_SECONDS", "3")
+    runner = SlurmRunner(
+        work_dir=tmp_path / "slurm",
+        sbatch=str(fake_sbatch),
+        scancel=str(fake_scancel),
+        cancel_interval_seconds=1.0,
+    )
+    started = time.monotonic()
+    signal_after(2.0, signum)
+    with pytest.raises(EXPECTED):
+        runner.run_many(two_arrays(tmp_path))
+    assert time.monotonic() - started < 20, "the driver waited for the late job"
+    counts = scancel_counts(fake_sbatch)
+    (a,) = [name for name in counts if name.startswith("--name=af-a-")]
+    (b,) = [name for name in counts if name.startswith("--name=af-b-")]
+    assert counts[a] == 1, "a job that stopped is not cancelled again"
+    assert counts[b] >= 2, "the job the first scancel missed was cancelled again"
+    assert len(marker_passes(tmp_path, "a")) == 1
+    assert len(marker_passes(tmp_path, "b")) == counts[b], "CANCELLED records every pass"
+    assert not list(tmp_path.glob("late-*")), "no job ran on after the driver stopped"
+
+
+@pytest.mark.parametrize("signum", SIGNALS, ids=lambda s: signal.Signals(s).name)
+def test_slurm_cancel_gives_up_on_an_sbatch_that_never_returns(
+    tmp_path: Path,
+    fake_sbatch: Path,
+    fake_scancel: Path,
+    signum: int,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cancelling is bounded: after cancel_retry_seconds the driver stops waiting, names
+    the jobs that may still be running, and exits instead of hanging on their sbatch."""
+    monkeypatch.setenv("SBATCH_IGNORES_CANCEL", "1")
+    runner = SlurmRunner(
+        work_dir=tmp_path / "slurm",
+        sbatch=str(fake_sbatch),
+        scancel=str(fake_scancel),
+        cancel_interval_seconds=0.5,
+        cancel_retry_seconds=2.0,
+    )
+    job = Job("h", ["/bin/sh", "-c", "sleep 30"], tmp_path, tmp_path / "h.log", [])
+    started = time.monotonic()
+    signal_after(1.0, signum)
+    with pytest.raises(EXPECTED):
+        runner.run_many([job])
+    elapsed = time.monotonic() - started
+    assert 2.5 < elapsed < 15, f"stopped after {elapsed:.1f} s, bound is 1 s + 2 s"
+    (name,) = scancel_counts(fake_sbatch)
+    assert scancel_counts(fake_sbatch)[name] >= 3
+    (marker,) = (tmp_path / "slurm").glob("batch-*/CANCELLED")
+    text = marker.read_text()
+    assert "gave up" in text and f"{name.removeprefix('--')} by hand" in text
+    assert "cancel by hand" in caplog.text
 
 
 @pytest.mark.parametrize("signum", SIGNALS, ids=lambda s: signal.Signals(s).name)

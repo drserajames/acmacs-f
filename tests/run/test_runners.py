@@ -207,14 +207,28 @@ def test_slurm_interrupt_cancels_submitted_jobs(
     scancel.chmod(0o755)
     import af.run.slurm as slurm_module
 
-    real_run = slurm_module.subprocess.run
+    real_popen = slurm_module.subprocess.Popen
 
-    def fake_run(argv: list[str], **kwargs: object) -> object:
-        if argv[0] == "sbatch":
+    class InterruptedSbatch:
+        """sbatch --wait, interrupted while it waits."""
+
+        returncode = None
+
+        def wait(self) -> int:
             raise KeyboardInterrupt
-        return real_run(argv, **kwargs)  # type: ignore[call-overload]
 
-    monkeypatch.setattr(slurm_module.subprocess, "run", fake_run)
+        def poll(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            pass
+
+    def fake_popen(argv: list[str], **kwargs: object) -> object:
+        if argv[0] == "sbatch":
+            return InterruptedSbatch()
+        return real_popen(argv, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(slurm_module.subprocess, "Popen", fake_popen)
     runner = SlurmRunner(work_dir=tmp_path / "slurm", scancel=str(scancel))
     with pytest.raises(KeyboardInterrupt):
         runner.run(shell_job(tmp_path, "long", "sleep 1000", ["x.txt"]))
