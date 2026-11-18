@@ -1559,12 +1559,12 @@ def _editor_layout(
     advance: Callable[[str], float] | None = None,
 ) -> list[dict]:
     """Each drawn label as the editor and the draw report read it: its text, the leaves that
-    name its node, the node point and box (figure units), its glyphs' width and each line's (as
-    :func:`_glyph_box` and :func:`_glyph_lines` measure them), and the pin holding it, if any.
-    With ``leader_to_branch_middle`` or the ae placer, also where its leader ends (``tether``):
-    a pin's offset is from the node point, its leader goes to the tether. Under ae (``advance``
-    given), also its longest line's pen advance (``advance_w``), which sizes ae's box and so
-    where ae's drawn leader leaves the label (:func:`_ae_leader`)."""
+    name its node and its leaf count, the node point and box (figure units), its glyphs' width
+    and each line's (as :func:`_glyph_box` and :func:`_glyph_lines` measure them), and the pin
+    holding it, if any. With ``leader_to_branch_middle`` or the ae placer, also where its leader
+    ends (``tether``): a pin's offset is from the node point, its leader goes to the tether.
+    Under ae (``advance`` given), also its longest line's pen advance (``advance_w``), which
+    sizes ae's box and so where ae's drawn leader leaves the label (:func:`_ae_leader`)."""
     index = {lab.node: k for k, lab in enumerate(spec.labels)}  # a Placed's key is its node
     out = []
     for p in placed:
@@ -1575,6 +1575,7 @@ def _editor_layout(
                 "text": " ".join(lab.subs),
                 "first": lab.first,
                 "last": lab.last,
+                "leaves": spec.tree.leaf_count(lab.node),
                 "node": [round(float(pg.nx[lab.node]), 3), round(float(pg.ny[lab.node]), 3)],
                 "box": [round(float(v), 3) for v in p.box],
                 "glyph_w": round(float(max(width(t) for t in lab.subs)), 3),
@@ -1669,6 +1670,7 @@ def _editor_hidden(
                 "text": " ".join(lab.subs),
                 "first": hide.first,
                 "last": hide.last,
+                "leaves": spec.tree.leaf_count(lab.node),
                 "reason": hide.reason,
                 "node": [round(v, 3) for v in node],
                 "box": [
