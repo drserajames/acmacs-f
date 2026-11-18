@@ -21,7 +21,7 @@ from af.pipeline.config import RunnerSettings
 from af.run import Runner
 from af.seq import build, processed, pulls
 from af.seq.dates import parse as parse_date
-from af.seq.gisaid import SequenceRecord, Workbook
+from af.seq.gisaid import NAME_PREFIX_DROPPED, SequenceRecord, Workbook
 from af.seq.nextclade import Aligned
 from af.store import PathsConfig, Store, Work, busy
 from af.store.ref import StoreError, StoreRef
@@ -324,6 +324,67 @@ class TestPublish:
         publish(store, "p1", [record(1)], errors={"EPI_ISL_1": message.format(n=3, why="seed")})
         with pytest.raises(processed.StoreBuildError, match=r"sequences: align_error"):
             publish(store, "p2", [record(1)], errors={"EPI_ISL_1": message.format(n=3, why="cds")})
+
+    # OWED 62 a: af now drops a sample id before a complete name; the copy published before
+    # still carries the whole GISAID name as af used to normalise it.
+    RAW = "SAMPLE0001/A/EXAMPLETOWN/71/2021"
+    MANGLED = "SAMPLE0001/A/EXAMPLETOWN-71/2021"  # what af.seq.names makes of RAW
+    CURATED = "A/EXAMPLETOWN/71/2021"  # ... and of RAW without its first part
+
+    def published_and_curated(
+        self, old: dict[str, object] | None = None, new: dict[str, object] | None = None
+    ) -> tuple[SequenceRecord, SequenceRecord]:
+        before = dict(gisaid_name=self.RAW, name=self.MANGLED,
+                      problems=("name.type", "name.fields", "lineage.example"))  # fmt: skip
+        after = dict(gisaid_name=self.RAW, name=self.CURATED,
+                     problems=("lineage.example", NAME_PREFIX_DROPPED))  # fmt: skip
+        return record(1, **{**before, **(old or {})}), record(1, **{**after, **(new or {})})
+
+    def test_a_name_af_has_since_curated_keeps_the_published_copy(self, tmp_path: Path) -> None:
+        store = Store.create(tmp_path / "store")
+        old, new = self.published_and_curated()
+        publish(store, "p1", [old])
+        second = publish(store, "p2", [new, record(2)])
+        assert _provenance(store, second)["already_published"] == {"p1": 1}
+        assert _provenance(store, second)["published_copy_kept"] == {"name": 1}
+        stored = processed.read_table(store, second, "isolates", ["epi_isl", "name"]).to_pylist()
+        assert {"epi_isl": "EPI_ISL_1", "name": self.MANGLED} in stored  # not rewritten
+
+    def test_a_curated_name_counts_beside_the_updatable_columns(self, tmp_path: Path) -> None:
+        store = Store.create(tmp_path / "store")
+        old, new = self.published_and_curated(new={"update_date": "2021-05-02"})
+        publish(store, "p1", [old])
+        second = publish(store, "p2", [new])
+        assert _provenance(store, second)["published_copy_kept"] == {"name": 1, "update_date": 1}
+
+    @pytest.mark.parametrize(
+        ("old", "new", "columns"),
+        [
+            # the stripped name differs by one character from what af makes of the GISAID name
+            ({}, {"name": "A/EXAMPLETOWN/72/2021"}, "name, problems"),
+            # the published name is not what af made of the whole GISAID name
+            ({"name": "SAMPLE0001/A/EXAMPLETOWN-72/2021"}, {}, "name, problems"),
+            # not the same GISAID name
+            ({"gisaid_name": "SAMPLE0002/A/EXAMPLETOWN/71/2021"}, {}, "gisaid_name"),
+            # no curation flag on the incoming copy
+            ({}, {"problems": ("lineage.example",)}, "name, problems"),
+            # another problem differs besides the swap
+            ({}, {"problems": ("lineage.other", NAME_PREFIX_DROPPED)}, "name, problems"),
+            # the swap is not exactly the whole name's problems
+            ({"problems": ("name.type", "lineage.example")}, {}, "name, problems"),
+            # every other column must still pass the existing comparison
+            ({}, {"passage": "SIAT2"}, "passage"),
+        ],
+    )
+    def test_any_other_name_change_is_still_refused(
+        self, tmp_path: Path, old: dict[str, object], new: dict[str, object], columns: str
+    ) -> None:
+        store = Store.create(tmp_path / "store")
+        published, incoming = self.published_and_curated(old, new)
+        first = publish(store, "p1", [published])
+        with pytest.raises(processed.StoreBuildError, match=columns):
+            publish(store, "p2", [incoming])
+        assert store.current(processed.KIND, "h3") == first
 
     def test_a_refused_copy_publishes_nothing(self, tmp_path: Path) -> None:
         store = Store.create(tmp_path / "store")
