@@ -290,7 +290,7 @@ def test_the_about_page_is_checked(tmp_path: Path) -> None:
         load(cfg)
     assert "report.about.title: empty" in str(err.value)
     assert ("{tree_method} is not a placeholder for an about page (known: ['data_cutoff', "
-            "'period'])") in str(err.value)  # fmt: skip
+            "'newest_table', 'period'])") in str(err.value)  # fmt: skip
     to_cutoff = 'intro = "Month by month to {data_cutoff}.'
     cfg.write_text(_with_about(ABOUT).replace('intro = "Month by month from {period}.', to_cutoff))
     with pytest.raises(ConfigError, match="data_cutoff.* is not a placeholder for a geo section"):
@@ -305,3 +305,138 @@ def test_a_report_with_an_about_page_builds(tmp_path: Path) -> None:
     record = json.loads((tmp_path / "out" / "r.build.json").read_text())
     assert record["about"][1].startswith("Its data end on 30 September 2026")
     assert record["output"]["pages"] >= 5
+
+
+# The newest table (Sarah, Q303 c, 6 Nov 2026: read from the build's own tables, not typed)
+
+
+def _chain(store: Store, dataset: str, dates: list[str | None]) -> dict[str, Any]:
+    """A chain version whose chain.json lists tables of these dates; the figure's citation of it."""
+    tables = [{"table_id": f"t{i}", **({"date": d} if d else {})} for i, d in enumerate(dates)]
+    with store.build("chains", dataset) as version:
+        (version.path / "chain.json").write_text(json.dumps({"config": {"tables": tables}}))
+        ref = version.publish(Provenance("test", (), {}, T0, T0))
+    return {"kind": "chains", "dataset": ref.dataset, "version": ref.version,
+            "manifest_sha256": ref.manifest_sha256}  # fmt: skip
+
+
+def _map(chain: dict[str, Any] | None, placeholder: bool = False) -> dict[str, Any]:
+    return {"placeholder": placeholder, "provenance": {"inputs": {"chain": chain} if chain else {}}}
+
+
+def test_the_newest_table_is_read_from_the_drawn_maps_chains(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "store")
+    a = _chain(store, "labx/m", ["2026-09-04", "2026-10-23", "2026-08-13"])  # not in date order
+    b = _chain(store, "laby/m", ["2026-10-05"])
+    figures = {
+        "map/a/all": _map(a), "map/a/6m": _map(a),  # one chain, two windows: read once
+        "map/b/all": _map(b),
+        "map/c/all": _map(None, placeholder=True),  # a placeholder draws no table
+        "tree/x/report": _map(None),  # not a map
+    }  # fmt: skip
+    latest, chains, gaps = text.newest_table(store, figures)
+    assert gaps == []
+    assert latest == dt.date(2026, 10, 23)
+    assert chains == {
+        f"labx/m@{a['version']}": "2026-10-23",
+        f"laby/m@{b['version']}": "2026-10-05",
+    }
+    assert text.date_text(latest) == "23 October 2026"
+
+
+def test_a_map_whose_newest_table_is_not_recorded_is_a_gap(tmp_path: Path) -> None:
+    """A date printed without it could be wrong: no date at all, rather than a guessed one."""
+    store = Store.create(tmp_path / "store")
+    good = _chain(store, "labx/m", ["2026-10-23"])
+    empty = _chain(store, "laby/m", [])
+    undated = _chain(store, "labz/m", ["2026-09-01", None])
+    latest, chains, gaps = text.newest_table(store, {
+        "map/a/all": _map(good), "map/b/all": _map(None), "map/c/all": _map(empty),
+        "map/d/all": _map(undated),
+    })  # fmt: skip
+    assert latest is None and list(chains) == [f"labx/m@{good['version']}"]
+    assert gaps == [
+        "map/b/all: cites no chain (figure provenance.inputs.chain)",
+        f"map/c/all (laby/m@{empty['version']}): chain.json config.tables lists no table",
+        f"map/d/all (labz/m@{undated['version']}): tables with no date ['t1']",
+    ]
+    assert text.newest_table(store, {"tree/x/report": _map(None)})[2] == [
+        "no drawn map to read a newest table from"]  # fmt: skip
+
+
+SUBTITLE = (
+    'title = "Test"\nsubtitle = "Data received to 1 November 2026; newest table {newest_table}"'
+)
+
+
+MAP_BODY = {"chart": "c", "window": {"name": "all"}, "viewport": [0, 0, 1, 1],
+            "clade_scheme": "s", "antigens": [], "sera": [], "legend": []}  # fmt: skip
+
+
+def _with_map(tmp: Path, chain: dict[str, Any] | None, about: str = "") -> tuple[Path, Path]:
+    """CONFIG with a maps section whose one figure cites ``chain``, the subtitle printing the
+    newest table."""
+    cfg = tmp / "r.toml"
+    maps = (
+        '\n[[sections]]\nkind = "maps"\ntitle = "Maps"\nslots = ["map/x"]\n'
+        '[[sections.windows]]\nname = "all"\ntitle = "All"\n'
+    )
+    body = CONFIG.replace("ALLOW", "true").replace('title = "Test"', SUBTITLE)
+    cfg.write_text(body.replace("end_page = true\n", "end_page = true\n" + about) + maps)
+    root = tmp / "figs"
+    for slot in load(cfg).all_slots():
+        i7 = placeholder.make(root, slot, slot, T0)
+        if slot.startswith("map/"):
+            doc = json.loads(i7.read_text()) | _map(chain) | {"kind": "map", "map": MAP_BODY}
+            doc["provenance"] |= {"producer": "test", "created": T0.isoformat()}
+            i7.write_text(json.dumps(doc))
+    return cfg, root
+
+
+def test_the_cover_and_the_about_page_print_the_newest_table(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "store")
+    chain = _chain(store, "labx/m", ["2026-09-04", "2026-10-23"])
+    cfg_path, root = _with_map(tmp_path, chain, ABOUT.replace("{period}", "{newest_table}"))
+    cfg = load(cfg_path)
+    figs = build.resolve_all(cfg, root)
+    facts, record, gaps = build.report_facts(cfg, figs, store)
+    assert gaps == [] and facts == {"newest_table": "23 October 2026"}
+    assert record == {"date": "2026-10-23", "chains": {f"labx/m@{chain['version']}": "2026-10-23"}}
+    out = tmp_path / "build"
+    out.mkdir()
+    with pytest.raises(build.BuildError, match="placeholders not filled"):  # never "{newest_table}"
+        build.write_tex(cfg, figs, out, T0, 0, {}, None, facts)
+    tex = build.write_tex(
+        build.with_facts(cfg, facts), figs, out, T0, 0, {}, None, facts
+    ).read_text()
+    assert "Data received to 1 November 2026; newest table 23 October 2026" in tex  # cover
+    assert "pdftitle={Test Data received to 1 November 2026; newest table 23 October 2026}" in tex
+    assert "geographic data cover 23 October 2026." in tex  # about page
+    with pytest.raises(build.BuildError, match=r"\['newest_table'\] not given"):
+        build.about_text(cfg)
+
+
+def test_a_cover_whose_newest_table_is_not_recorded_is_refused(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "store")
+    cfg_path, root = _with_map(tmp_path, None)  # a stand-in map: cites no chain
+    cfg = load(cfg_path)
+    figs = build.resolve_all(cfg, root)
+    assert build.report_facts(cfg, figs, store)[2] == [
+        "map/x/all: cites no chain (figure provenance.inputs.chain)"]  # fmt: skip
+    assert build.report_facts(cfg, figs, None)[2] == [
+        "the newest table (no --store to read the maps' chains)"]  # fmt: skip
+    # a report that prints no newest table reads nothing
+    plain = load(cfg_path)
+    plain = build.with_facts(plain, {"newest_table": "x"})
+    assert build.report_facts(plain, figs, None) == ({}, None, [])
+
+
+def test_the_subtitle_takes_only_the_newest_table(tmp_path: Path) -> None:
+    cfg = tmp_path / "r.toml"
+    cfg.write_text(CONFIG.replace("ALLOW", "true").replace('title = "Test"', SUBTITLE.replace(
+        "{newest_table}", "{period}")))  # fmt: skip
+    refused = r"report.subtitle: \{period\} is not a placeholder for a cover subtitle"
+    with pytest.raises(ConfigError, match=refused + r" \(known: \['newest_table'\]\)"):
+        load(cfg)
+    cfg.write_text(CONFIG.replace("ALLOW", "true").replace('title = "Test"', SUBTITLE))
+    assert "{newest_table}" in load(cfg).report.subtitle

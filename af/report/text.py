@@ -17,8 +17,12 @@ change from round to round:
   clade-key.json (Sarah, Q215). When there is none, the paragraph that says it is left out.
 - ``{data_cutoff}`` (the report's about page only): the report's data cut-off, "23 October 2026".
 
+- ``{newest_table}`` (the cover's subtitle and the about page): the newest table the report's maps
+  were drawn from, "23 October 2026" (:func:`newest_table`).
+
 The report's about page (``[report.about]``), which says what a report is, takes ``{period}`` and
-``{data_cutoff}``: both come from the report config, so it has no gaps.
+``{data_cutoff}``: both come from the report config, so it has no gaps. ``{newest_table}`` comes
+from the drawn maps' chain records, and has gaps like an intro's facts.
 
 A fact no artefact records is a gap: named, and the build is refused, bring-up or final. Internal
 identifiers never reach the page in place of a sentence (00, 18 Oct 2026, after a review found
@@ -40,7 +44,9 @@ PLACEHOLDERS = {
     "tree_method": ("trees",),
     "clade_not_defined": ("geo",),
     "data_cutoff": ("about",),
+    "newest_table": ("cover", "about"),
 }
+NEWEST_TABLE = "newest_table"
 
 
 def placeholders(text: str) -> list[str]:
@@ -155,6 +161,50 @@ def tree_method(
             sentence += ", and zero-length branches were collapsed into multifurcations"
         parts.append(sentence + ".")
     return " ".join(parts), missing
+
+
+def newest_table(
+    store: Store, figures: dict[str, dict[str, Any]]
+) -> tuple[dt.date | None, dict[str, str], list[str]]:
+    """The newest table the drawn maps used; each chain version's newest; and the gaps.
+
+    Sarah, Q303 c (6 Nov 2026): an interim's cut-off line gives the newest table "read from the
+    build's own tables, not typed". A map figure cites the chain version it draws
+    (``provenance.inputs.chain``), and that version's ``chain.json`` lists every table it was
+    selected from (``config.tables``, each dated; a seeded chain lists those inside its seed
+    too). The newest is the latest date over every drawn map. ``figures`` maps slot to figure
+    record; slots outside ``map/`` and placeholders (they draw no table) are not read.
+
+    A map that cites no chain (a stand-in), a chain that lists no tables, or a table with no
+    date is a gap: that map's newest table is not recorded, so a date printed without it could
+    be wrong. No drawn map at all is a gap too.
+    """
+    newest: dict[str, dt.date] = {}
+    gaps: list[str] = []
+    for slot, doc in sorted(figures.items()):
+        if not slot.startswith("map/") or doc.get("placeholder"):
+            continue
+        chain = (doc.get("provenance") or {}).get("inputs", {}).get("chain")
+        if not chain:
+            gaps.append(f"{slot}: cites no chain (figure provenance.inputs.chain)")
+            continue
+        key = f"{chain['dataset']}@{chain['version']}"
+        if key in newest:
+            continue
+        ref = StoreRef("chains", chain["dataset"], chain["version"], chain["manifest_sha256"])
+        tables = json.loads((store.resolve(ref) / "chain.json").read_text())["config"]["tables"]
+        undated = [t.get("table_id", "?") for t in tables if not t.get("date")]
+        if undated:
+            gaps.append(f"{slot} ({key}): tables with no date {undated}")
+            continue
+        if not tables:
+            gaps.append(f"{slot} ({key}): chain.json config.tables lists no table")
+            continue
+        newest[key] = max(dt.date.fromisoformat(t["date"]) for t in tables)
+    if not newest and not gaps:
+        gaps.append("no drawn map to read a newest table from")
+    latest = max(newest.values()) if newest and not gaps else None
+    return latest, {k: d.isoformat() for k, d in sorted(newest.items())}, gaps
 
 
 def fill(text: str, values: dict[str, str]) -> str:
