@@ -120,6 +120,25 @@ def test_an_exclude_row_takes_every_accession_of_its_isolate(
     assert not {("EPI_ISL_6", "EPI6"), ("EPI_ISL_6", "EPI66")} & set(sel.keys)
 
 
+def test_a_withholding_exclude_selects_as_a_plain_one(
+    two_accessions: Store, tmp_path: Path
+) -> None:
+    """``withhold`` is the matcher's business (af.seq.matching_rules); the tree is the same."""
+    exc = listing(tmp_path / "exc.tsv", "exclude", ("EPI_ISL_6", "EPI6"))
+    plain = S.select(two_accessions, rules(S.Rule("exc", "exclude_list", "named", file=exc)))
+    held = S.select(
+        two_accessions, rules(S.Rule("exc", "exclude_list", "named", file=exc, withhold=True))
+    )
+    assert held.keys == plain.keys
+
+
+def test_only_an_exclude_list_can_withhold(two_accessions: Store, tmp_path: Path) -> None:
+    inc = listing(tmp_path / "inc.tsv", "include", ("EPI_ISL_7", "EPI7"))
+    rule = S.Rule("inc", "include_list", "named", file=inc, withhold=True)
+    with pytest.raises(S.SelectionError, match="only an exclude_list rule can withhold"):
+        S.select(two_accessions, rules(HOST, rule))
+
+
 def test_a_row_whose_accession_is_not_stored_still_names_its_isolate(
     two_accessions: Store, tmp_path: Path
 ) -> None:

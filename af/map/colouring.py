@@ -587,6 +587,9 @@ class StoreColours:
             # the sequence datasets this chart's colours come from (its own row, plus any other
             # its antigens matched in): the only ones its figure cites (store_refs(datasets))
             "datasets": sorted(datasets),
+            # stored records no antigen could match, by withholding selection rule; only when
+            # some rule withholds, so a configuration without one records what it did before
+            **({"withheld": dict(self.links.withheld)} if self.links.withheld else {}),
             # antigens of another lineage than the map's (coloured by the map's row), by code
             **(
                 {"lineage_minority": dict(lineage_minority)} if lineage_minority is not None else {}

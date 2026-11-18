@@ -1,5 +1,6 @@
 """Geo and stat from the stores, end to end, with every place and virus invented."""
 
+import dataclasses
 import datetime
 import json
 from pathlib import Path
@@ -232,6 +233,15 @@ def test_clade_tables_behind_the_sequence_store_are_reported(tmp_path: Path, syn
     con = query.connect(store.resolve(store.current("serology", "all")))
     counts = link_from_store(con, store, rules, with_clades=True)
     assert counts.clades_behind == {}  # labels the current sequences version
+    assert counts.withheld == {}
+
+    # a record a selection rule withholds is no candidate: its antigen goes unmatched, counted
+    held = link_from_store(
+        con, store, dataclasses.replace(rules, withheld={"EPI_ISL_1": "h3.copies"}),
+        with_clades=True,
+    )  # fmt: skip
+    assert held.withheld == {"h3.copies": 1}
+    assert held.by_status.get("matched", 0) == counts.by_status["matched"] - 1
 
     # a republish that changes nothing the clade calls read: versions differ, content does not
     newer = tmp_path / "newer.parquet"

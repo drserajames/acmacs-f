@@ -13,12 +13,19 @@ keys of every table are checked against the lab codes the table readers produce
 spelling of a lab is refused before any store is read. Checks that need the store (a
 submitter or a GISAID spelling that no stored sequence has) are the join's:
 :func:`af.serology.joins.link_from_store`.
+
+The tree selection config (``config/selection.toml``) is read too, for one thing only: the
+``exclude_list`` rules marked ``withhold = true``. Their records do not represent the virus they
+are named for, so they must not represent an antigen either: excluding them from the tree alone
+left them free to be matched and painted with their fallback clade (OWED 57). Other exclusions
+are about the tree, not the sequence, and leave the matcher alone.
 """
 
 from __future__ import annotations
 
+import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from af.seq.matching import (
@@ -32,6 +39,7 @@ from af.seq.matching import (
     read_passage_rules,
 )
 from af.seq.passage_match import PassageMatcher
+from af.seq.select import listed_epi_isls, parse_rules
 from af.store import ExternalInput
 from af.tables.labs import read_lab_codes
 
@@ -43,6 +51,8 @@ LOCATION_EQUIVALENTS = Path("rules/sequences/location-equivalents.tsv")
 LABS = Path("rules/tables/labs.tsv")
 PASSAGE_TOKENS = Path("rules/tables/passage_tokens.tsv")
 TABLES = (PASSAGE_CLASSES, LAB_SUBMITTERS, NUMBER_RULES, LOCATION_EQUIVALENTS, LABS, PASSAGE_TOKENS)
+#: The tree selection config; the matcher reads only its withholding rules (:func:`read_withheld`).
+SELECTION = Path("config/selection.toml")
 
 
 @dataclass(frozen=True)
@@ -62,6 +72,8 @@ class MatchingRules:
     inputs: tuple[ExternalInput, ...]
     # which of a preparation's two named records has its passage (Sarah, Q81, 30 Sep)
     passages: PassageMatcher
+    # EPI_ISL -> "<subtype>.<rule id>" of the selection rule withholding it: never a candidate
+    withheld: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.passage:
@@ -79,14 +91,21 @@ class MatchingRules:
         return {str(item.path): item.sha256 for item in self.inputs}
 
     def counts(self) -> dict[str, int]:
-        """Rows per table, for a report: a table that lost its rows shows as a changed count."""
-        return {
+        """Rows per table, for a report: a table that lost its rows shows as a changed count.
+
+        ``withheld`` (EPI_ISLs) only when some rule withholds: a configuration without one
+        reports exactly what it did before the key existed.
+        """
+        counts = {
             "passage": len(self.passage),
             "lab_codes": len(self.lab_codes),
             "submitters": sum(len(names) for names in self.submitters.values()),
             "number_rules": len(self.number_rules),
             "equivalents": len(self.equivalents),
         }
+        if self.withheld:
+            counts["withheld"] = len(self.withheld)
+        return counts
 
 
 def matching_rules(af_data: Path) -> MatchingRules:
@@ -95,9 +114,11 @@ def matching_rules(af_data: Path) -> MatchingRules:
     A missing file is fatal (design rule 4); so is a table keyed by a lab code the table
     readers do not produce.
     """
-    if missing := [str(af_data / p) for p in TABLES if not (af_data / p).is_file()]:
+    if missing := [str(af_data / p) for p in (*TABLES, SELECTION) if not (af_data / p).is_file()]:
         raise FileNotFoundError(f"matching rule tables missing: {', '.join(missing)}")
+    withheld, lists = read_withheld(af_data / SELECTION)
     inputs = tuple(ExternalInput.of(af_data / p) for p in TABLES)
+    inputs += tuple(ExternalInput.of(path) for path in lists)
     lab_codes = read_lab_codes(af_data / LABS)
     return MatchingRules(
         passage=tuple(read_passage_rules(af_data / PASSAGE_CLASSES)),
@@ -107,4 +128,40 @@ def matching_rules(af_data: Path) -> MatchingRules:
         equivalents=tuple(read_location_equivalents(af_data / LOCATION_EQUIVALENTS)),
         inputs=inputs,
         passages=PassageMatcher.read(af_data / PASSAGE_TOKENS),
+        withheld=withheld,
     )
+
+
+def read_withheld(selection: Path) -> tuple[dict[str, str], list[Path]]:
+    """EPI_ISL -> ``"<subtype>.<rule id>"`` for every withholding rule, and their list files.
+
+    Each subtype table is parsed as the tree selection parses it (:func:`af.seq.select
+    .parse_rules`), so a rule means one thing to both. A withholding rule must be an
+    ``exclude_list`` whose file exists and names at least one EPI_ISL (design rule 1). An
+    EPI_ISL two rules withhold keeps the first, in subtype and config order.
+
+    The provenance records the withholding rules' list files, not ``selection.toml``: the join
+    depends on which records are withheld, which those files and the flags fix, and every
+    other edit to the tree selection (a date floor, a weekly-tree list) would otherwise look
+    like a change to every map and geo figure.
+    """
+    data = tomllib.loads(selection.read_text())
+    withheld: dict[str, str] = {}
+    lists: list[Path] = []
+    for subtype, table in data.items():
+        if not (isinstance(table, dict) and "dataset" in table):
+            continue
+        for rule in parse_rules(table, selection.parent).rules:
+            if not rule.withhold:
+                continue
+            name = f"{subtype}.{rule.id}"
+            if rule.kind != "exclude_list" or rule.file is None or not rule.file.is_file():
+                raise ValueError(
+                    f"{selection}: {name}: only an exclude_list with its file can withhold"
+                )
+            if not (listed := listed_epi_isls(rule)):
+                raise ValueError(f"{selection}: {name}: withholds nothing")
+            lists.append(rule.file)
+            for epi_isl in sorted(listed):
+                withheld.setdefault(epi_isl, name)
+    return withheld, lists

@@ -19,6 +19,11 @@ here, not in config, so no config can change what beats what:
    what the other rules left;
 6. the **outgroup** (R8) is exempt from all of it, must be in the store, and comes first.
 
+An ``exclude_list`` rule may also say ``withhold = true``: its records do not represent the
+virus they are named for (a laboratory-strain copy, a mosaic), so the antigen -> sequence
+matcher must never choose one either (:mod:`af.seq.matching_rules`). Most exclusions are about
+the tree, not the sequence, and do not withhold.
+
 Every rule reports what it removed or added. A rule that changes nothing is an error unless it
 is marked optional (design rule 1): a rule that has silently stopped matching is how today's
 exports drifted. Nothing is deduplicated (R9): identical sequences are separate records.
@@ -80,6 +85,7 @@ class Rule:
     max_deleted_aa: int = -1  # qc
     min_ratio: float = 0.0  # low_divergence: distance / the year's median, below this is out
     min_year_records: int = 0  # low_divergence: a year with fewer has no median to trust
+    withhold: bool = False  # exclude_list: no antigen may be matched to these records either
 
 
 @dataclass(frozen=True)
@@ -222,6 +228,8 @@ def _check_rules(rules: Sequence[Rule], cut: Cut | None) -> None:
             rule.file is None or not rule.file.is_file()
         ):
             problems.append(f"{rule.id}: list file {rule.file} missing")
+        if rule.withhold and rule.kind != "exclude_list":
+            problems.append(f"{rule.id}: only an exclude_list rule can withhold")
         if rule.kind == "host" and rule.file is not None and not rule.file.is_file():
             problems.append(f"{rule.id}: override file {rule.file} missing")
         if rule.kind == "qc" and min(rule.max_unknown_aa, rule.max_deleted_aa) < 0:
@@ -340,15 +348,20 @@ def _listed(rule: Rule, records: dict[Key, _Record]) -> set[Key]:
     The row's accession says which submission the list was written against; it does not limit
     the match. EPI_ISLs not in this store version match nothing yet.
     """
+    epi_isls = listed_epi_isls(rule)
+    return {key for key in records if key[0] in epi_isls}
+
+
+def listed_epi_isls(rule: Rule) -> frozenset[str]:
+    """The EPI_ISLs a list rule's file names for its kind (``list`` column, if any)."""
     assert rule.file is not None
     want = rule.kind.removesuffix("_list")
     lines = [line for line in rule.file.read_text().splitlines() if not line.startswith("#")]
-    epi_isls = {
+    return frozenset(
         row["epi_isl"]
         for row in csv.DictReader(lines, delimiter="\t")
         if row.get("list", want) == want and row["epi_isl"]
-    }
-    return {key for key in records if key[0] in epi_isls}
+    )
 
 
 def _host_overrides(rule: Rule, records: dict[Key, _Record]) -> set[Key]:
