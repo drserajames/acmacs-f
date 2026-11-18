@@ -33,8 +33,9 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from af.seq import names
 from af.seq.dates import CollectionDate
-from af.seq.gisaid import SequenceRecord
+from af.seq.gisaid import NAME_PREFIX_DROPPED, SequenceRecord
 from af.seq.nextclade import Aligned, without_position
 from af.store.manifest import Manifest
 from af.store.ref import Input, StoreRef
@@ -535,6 +536,10 @@ _DELIVERY_COLUMNS = frozenset({"source_pull"})
 #: published copy, counted per column; every other difference, the sequence above all, is
 #: still refused. Re-pulls overlap earlier pulls by design (GISAID records become visible
 #: weeks after their submission date), so these differences are routine, not edits to decide.
+#: Stands for "name and problems" in a record's differences when the only change is af dropping a
+#: prefix from its name (:func:`_name_curated`); counted as ``name`` in published_copy_kept.
+_CURATED_NAME = "name (prefix dropped)"
+
 KEEP_PUBLISHED_COLUMNS = frozenset(
     {"update_date", "embargoed", "embargoed_until", "location", "region", "country", "place"}
 )
@@ -556,7 +561,9 @@ def _drop_already_published(
     counted. Copies that differ in anything else (the sequence, the name, the dates, the
     passage) are refused: which edit wins there is a rule nobody has written, and guessing it
     would change data silently. Nextclade's error text is compared without the record's
-    position in the run's input, which is not a fact about the record.
+    position in the run's input, which is not a fact about the record. One name change is not
+    an edit either: af itself dropping a prefix from the same GISAID name since the published
+    copy was stored (:func:`_name_curated`); that keeps the published copy, counted as ``name``.
 
     Returns this pull's tables without those records, ``{other pull: records dropped because
     it holds them}`` and ``{column: records whose published copy was kept despite it}``, both
@@ -590,7 +597,11 @@ def _drop_already_published(
             f"{pull_id}: {len(differ)} record(s) already published by another pull with "
             f"different content; which copy wins is not decided: {sorted(differ)[:3]}"
         )
-    kept = Counter(column for by_table in found.values() for column in by_table["isolates"])
+    kept = Counter(
+        "name" if column == _CURATED_NAME else column
+        for by_table in found.values()
+        for column in by_table["isolates"]
+    )
     return (
         _without(isolates, holder),
         _without(sequences, holder),
@@ -600,8 +611,11 @@ def _drop_already_published(
 
 
 def _keeps_published(by_table: Mapping[str, Sequence[str]]) -> bool:
-    """True when the copies differ only in isolate columns GISAID updates after the fact."""
-    return set(by_table) == {"isolates"} and set(by_table["isolates"]) <= KEEP_PUBLISHED_COLUMNS
+    """True when the copies differ only in isolate columns GISAID updates after the fact, and
+    perhaps in a name af has since curated."""
+    return set(by_table) == {"isolates"} and set(by_table["isolates"]) <= KEEP_PUBLISHED_COLUMNS | {
+        _CURATED_NAME
+    }
 
 
 def _keys(table: pa.Table) -> list[Key]:
@@ -623,9 +637,43 @@ def _differences(stored: Path, table: pa.Table, keys: Mapping[Key, str]) -> dict
             for c in row
             if c not in _DELIVERY_COLUMNS and _comparable(c, row[c]) != _comparable(c, other.get(c))
         ]
+        if {"name", "problems"} <= set(columns) and _name_curated(row, other):
+            columns = [c for c in columns if c not in ("name", "problems")] + [_CURATED_NAME]
         if columns:
             found[key] = columns
     return found
+
+
+def _name_curated(row: Mapping[str, Any], published: Mapping[str, Any]) -> bool:
+    """True when ``row`` differs from ``published`` in name and problems only because af now
+    drops a prefix from the same GISAID name (af.seq.gisaid, OWED 62 a; 00's extension of Q321).
+
+    Every one of these, as exact strings:
+
+    - both copies carry the same ``gisaid_name``, and the incoming copy is flagged
+      :data:`~af.seq.gisaid.NAME_PREFIX_DROPPED`;
+    - the published name is what :func:`af.seq.names.normalise` makes of that GISAID name, and
+      the incoming name what it makes of the GISAID name without its first part, with no problem;
+    - the problems differ by exactly that swap: the published copy has the whole name's
+      problems where the incoming copy has the flag, and every other problem is the same.
+
+    Anything else is a real difference and is refused as before.
+    """
+    raw = row.get("gisaid_name")
+    if not raw or raw != published.get("gisaid_name") or "/" not in raw:
+        return False
+    mine, theirs = list(row.get("problems") or []), list(published.get("problems") or [])
+    if NAME_PREFIX_DROPPED not in mine:
+        return False
+    first = row.get("collection_date_first")
+    # as af.seq.gisaid chooses a two-digit year's century: never from an Excel-serial date
+    collected = first.year if first is not None and "date.excel-serial" not in mine else None
+    whole = names.normalise(raw, collected=collected)
+    rest = names.normalise(raw.split("/", 1)[1], collected=collected)
+    if rest.problems or whole.name != published.get("name") or rest.name != row.get("name"):
+        return False
+    others = [p for p in mine if p != NAME_PREFIX_DROPPED]
+    return sorted(theirs) == sorted(others + whole.problems)
 
 
 def _comparable(column: str, value: Any) -> Any:
