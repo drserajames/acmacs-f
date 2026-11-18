@@ -20,6 +20,14 @@ the next run will use. The waits run in worker threads but signals arrive in the
 main thread, which is why cancelling works from a shared registry of in-flight
 submissions. Only SIGKILL cannot be handled; run long pipelines in tmux anyway.
 
+One scancel is not enough. A job submitted moments before the cancel may not be known
+to the controller yet, and ``scancel --name`` then matches nothing: the job runs to the
+end while the driver waits for it. So cancelling repeats, every
+``cancel_interval_seconds``, for the submissions still in flight, and stops for each
+one as soon as its sbatch returns. After ``cancel_retry_seconds`` it gives up: it logs
+the job names still running, so they can be cancelled by hand, and stops waiting for
+their sbatch. Each pass is recorded in the batch's CANCELLED file.
+
 Arrays longer than ``max_array_size`` (the cluster's MaxArraySize, often 1001) are
 split into several arrays, submitted together.
 
@@ -79,16 +87,20 @@ class SlurmRunner:
     sbatch: str = "sbatch"
     scancel: str = "scancel"
     sacct: str = "sacct"
-    _active: dict[str, Path] = field(
+    cancel_interval_seconds: float = 5.0
+    cancel_retry_seconds: float = 600.0
+    _active: dict[str, _InFlight] = field(
         default_factory=dict, init=False, repr=False, compare=False
-    )  # in-flight submissions: job name -> batch directory
-    _lock: threading.Lock = field(
-        default_factory=threading.Lock, init=False, repr=False, compare=False
-    )
+    )  # in-flight submissions: job name -> batch directory and sbatch process
+    _changed: threading.Condition = field(
+        default_factory=threading.Condition, init=False, repr=False, compare=False
+    )  # guards _active; notified when a submission leaves it
 
     def __post_init__(self) -> None:
         if self.max_array_size is not None and self.max_array_size < 1:
             raise ValueError("max_array_size must be at least 1")
+        if self.cancel_interval_seconds <= 0 or self.cancel_retry_seconds < 0:
+            raise ValueError("cancel_interval_seconds must be > 0, cancel_retry_seconds >= 0")
 
     def run(self, job: Job) -> JobResult:
         return self.run_many([job])[0]
@@ -114,19 +126,56 @@ class SlurmRunner:
         return collect([outcome_by_name[job.name] for job in jobs])
 
     def cancel_active(self) -> None:
-        """scancel every submission still in flight. Their sbatch --wait then returns.
+        """scancel every submission in flight, again and again until its sbatch returns.
 
-        Each cancelled batch directory gets a CANCELLED file saying when and why, so on
-        disk it is clear why its tasks left no status files.
+        Only names still in flight are cancelled, each by its own unique name: one whose
+        sbatch has returned is never cancelled again. Bounded by cancel_retry_seconds,
+        even if an sbatch never returns (see :meth:`_give_up`).
+
+        Each batch directory gets a CANCELLED file with a line per pass, saying when and
+        why, so on disk it is clear why its tasks left no status files and that the
+        cancel was repeated.
         """
-        with self._lock:
-            active = sorted(self._active.items())
-        for name, batch in active:
-            (batch / "CANCELLED").write_text(
-                f"cancelled {now().isoformat()} by the driver (interrupted or terminated); "
-                f"scancel --name={name}\n"
+        deadline = time.monotonic() + self.cancel_retry_seconds
+        passes: dict[str, int] = {}
+        while True:
+            with self._changed:
+                active = sorted(self._active.items())
+            if not active:
+                return
+            if passes and time.monotonic() >= deadline:
+                self._give_up(active, passes)
+                return
+            for name, flight in active:
+                passes[name] = passes.get(name, 0) + 1
+                _note_cancel(flight.batch, name, passes[name])
+                self._cancel(name)
+            pause = min(self.cancel_interval_seconds, deadline - time.monotonic())
+            with self._changed:
+                # Return as soon as nothing is in flight; otherwise retry after the pause.
+                self._changed.wait_for(lambda: not self._active, timeout=max(0.0, pause))
+
+    def _give_up(self, active: list[tuple[str, _InFlight]], passes: dict[str, int]) -> None:
+        """Stop waiting: say which jobs may still be running, and end their sbatch --wait.
+
+        Killing the local sbatch client does not cancel the SLURM job, which is why the
+        names are logged and written to CANCELLED. It does let the waiting thread return,
+        so the driver can exit instead of waiting on it forever.
+        """
+        for name, flight in active:
+            count = passes.get(name, 0)
+            message = (
+                f"gave up {now().isoformat()} after {count} scancel pass(es) over "
+                f"{self.cancel_retry_seconds:g} s; the job may still be running: "
+                f"scancel --name={name} by hand\n"
             )
-            self._cancel(name)
+            with (flight.batch / "CANCELLED").open("a") as marker:
+                marker.write(message)
+            log.error(
+                "SLURM jobs named %s still running after %d cancel(s); cancel by hand", name, count
+            )
+            if flight.process.poll() is None:
+                flight.process.kill()
 
     def _chunks(self, jobs: list[Job]) -> list[list[Job]]:
         size = self.max_array_size or len(jobs)
@@ -146,27 +195,36 @@ class SlurmRunner:
         log.info("submitting %d task(s): %s", len(jobs), shlex.join(argv))
         started = now()
         name = _job_name(jobs, batch)
-        with self._lock:
-            self._active[name] = batch
+        # Output goes to files, not pipes: a pipe stays open while anything sbatch
+        # started still holds it, so after a kill (see _give_up) reading it to the end
+        # would wait on that instead of returning.
+        out_path, err_path = batch / "sbatch.out", batch / "sbatch.err"
         try:
-            submitted = subprocess.run(argv, capture_output=True, text=True)
+            with self._changed, out_path.open("w") as out, err_path.open("w") as err:
+                # Registered together with the process, so a cancel always finds both.
+                process = subprocess.Popen(argv, stdout=out, stderr=err)
+                self._active[name] = _InFlight(batch, process)
         except OSError as error:
             return [Failure(job, f"could not run sbatch: {error}") for job in jobs]
+        try:
+            process.wait()
         except BaseException:
             # Failed while waiting, in this thread: don't leave the jobs running.
             self._cancel(name)
+            process.kill()
             raise
         finally:
-            with self._lock:
+            with self._changed:
                 self._active.pop(name, None)
-        (batch / "sbatch.out").write_text(submitted.stdout + submitted.stderr)
-        log.info("sbatch exited %d for %s", submitted.returncode, batch.name)
-        job_id = _job_id(submitted.stdout)
-        if submitted.returncode != 0 and job_id is None:
+                self._changed.notify_all()
+        stdout, stderr = out_path.read_text(), err_path.read_text()
+        log.info("sbatch exited %d for %s", process.returncode, batch.name)
+        job_id = _job_id(stdout)
+        if process.returncode != 0 and job_id is None:
             # No job id printed: sbatch itself failed (rejected, or not installed), no task ran.
             # (With a job id, a nonzero exit means a task failed or was killed, e.g. at its
             # time limit, which SLURM reports this way without any status file.)
-            reason = f"sbatch failed ({submitted.returncode}): {submitted.stderr.strip()}"
+            reason = f"sbatch failed ({process.returncode}): {stderr.strip()}"
             return [Failure(job, reason) for job in jobs]
         self._wait_for_files(batch, jobs)
         outcomes = [
@@ -256,6 +314,20 @@ class SlurmRunner:
         expected += [artefact.path for job in jobs for artefact in job.outputs]
         while time.monotonic() < deadline and not all(path.exists() for path in expected):
             time.sleep(1)
+
+
+@dataclass(frozen=True)
+class _InFlight:
+    batch: Path
+    process: subprocess.Popen[bytes]
+
+
+def _note_cancel(batch: Path, name: str, number: int) -> None:
+    with (batch / "CANCELLED").open("a") as marker:
+        marker.write(
+            f"cancelled {now().isoformat()} by the driver (interrupted or terminated), "
+            f"pass {number}: scancel --name={name}\n"
+        )
 
 
 def _job_id(stdout: str) -> str | None:
