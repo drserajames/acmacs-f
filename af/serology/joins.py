@@ -28,7 +28,7 @@ it means the clade store is behind the sequence store, or cannot align the seque
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -91,6 +91,9 @@ class LinkCounts:
     # the store versions the join read (link_from_store): {"sequences": {dataset: ref json},
     # "clades": [ref json, ...]}, so a result can be reproduced from them (design rule 5)
     refs: dict[str, Any] = field(default_factory=dict)
+    # stored records no antigen could match, by the selection rule withholding them
+    # (MatchingRules.withheld): "<subtype>.<rule id>" -> records
+    withheld: dict[str, int] = field(default_factory=dict)
 
 
 def link_sequences(
@@ -749,7 +752,9 @@ def indexes_from_store(
     if rules.equivalents:
         # a GISAID spelling no stored sequence has would silently do nothing
         check_equivalents(store, datasets, list(rules.equivalents), read)
-    indexes = {d: index_from_store(store, [d], rules.passage, read) for d in datasets}
+    indexes = {
+        d: index_from_store(store, [d], rules.passage, read, rules.withheld) for d in datasets
+    }
     for index in indexes.values():
         index.submitters = dict(rules.submitters)
         index.number_rules = dict(rules.number_rules)
@@ -818,7 +823,18 @@ def link_from_store(
         "sequences": {d: ref.to_json() for d, ref in read.items()},
         "clades": [ref.to_json() for ref in clade_refs],
     }
+    counts.withheld = withheld_counts(indexes.values())
     return counts
+
+
+def withheld_counts(indexes: Iterable[SequenceIndex]) -> dict[str, int]:
+    """Records the indexes left out, by withholding rule (``withheld.<rule>`` counts)."""
+    out: Counter[str] = Counter()
+    for index in indexes:
+        for key, n in index.counts.items():
+            if key.startswith("withheld."):
+                out[key.removeprefix("withheld.")] += n
+    return dict(sorted(out.items()))
 
 
 def _clades_behind(

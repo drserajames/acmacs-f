@@ -739,3 +739,20 @@ class TestIdentityFromStore:
         assert idx.match(ANTIGEN, M.CELL, passage="SIAT1").chosen is None  # still a tie
         assert idx.counts["identity.raw"] == 2
         assert idx.counts["identity.version-without-alignment"] == 1
+
+    def test_a_withheld_record_is_no_candidate(self, tmp_path: Path) -> None:
+        """The other record of the virus is chosen; the withheld one is counted (OWED 57)."""
+        store = self.build(tmp_path, aligned=True)
+        idx = M.index_from_store(store, ["h3"], RULES, withheld={"EPI_ISL_1": "h3.copies"})
+        match = idx.match(ANTIGEN, M.CELL, passage="SIAT1")
+        assert match.chosen is not None and match.chosen.epi_isl == "EPI_ISL_2"
+        assert "EPI_ISL_1" not in idx.by_epi
+        assert idx.counts["withheld.h3.copies"] == 1 and idx.counts["identity.aligned"] == 1
+
+    def test_an_antigen_whose_records_are_all_withheld_is_unmatched(self, tmp_path: Path) -> None:
+        withheld = {"EPI_ISL_1": "h3.copies", "EPI_ISL_2": "h3.mosaics"}
+        idx = M.index_from_store(self.build(tmp_path, aligned=True), ["h3"], RULES, None, withheld)
+        assert idx.match(ANTIGEN, M.CELL, passage="SIAT1").chosen is None
+        assert {k: v for k, v in idx.counts.items() if k.startswith("withheld.")} == {
+            "withheld.h3.copies": 1, "withheld.h3.mosaics": 1,
+        }  # fmt: skip

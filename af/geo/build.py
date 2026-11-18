@@ -129,6 +129,8 @@ def build_geo(
         "merges": report.geo_merges,
         "merged_preparations": report.geo_merged_preparations,
     }
+    if links is not None and links.withheld:  # records no antigen could match, by rule
+        provenance["withheld"] = dict(links.withheld)
     files: list[Path] = []
     key: dict[str, Any] = {}
     record: dict[str, Any] = {"provenance": provenance, "created": created.isoformat(), "slots": {}}

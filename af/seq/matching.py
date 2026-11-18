@@ -555,8 +555,16 @@ def index_from_store(
     datasets: Iterable[str],
     passage_rules: Sequence[PassageRule],
     refs: Mapping[str, StoreRef] | None = None,
+    withheld: Mapping[str, str] | None = None,
 ) -> SequenceIndex:
-    """Candidates from ``sequences/<dataset>``: the ``refs`` versions, else CURRENT."""
+    """Candidates from ``sequences/<dataset>``: the ``refs`` versions, else CURRENT.
+
+    A record whose EPI_ISL is ``withheld`` (EPI_ISL -> the selection rule withholding it,
+    :attr:`af.seq.matching_rules.MatchingRules.withheld`) is no candidate, under any of its
+    accessions (Q281 a): it does not represent the virus it is named for, so an antigen falls to
+    another record of that virus or stays unmatched. Each is counted, ``withheld.<rule>``.
+    """
+    withheld = withheld or {}
     index = SequenceIndex()
     for dataset in datasets:
         version = store.resolve(sequences_ref(store, dataset, refs))
@@ -580,6 +588,9 @@ def index_from_store(
             [isolates, sequences],
         ).fetchall()  # fmt: skip
         for epi_isl, accession, name, passage, identity, submitter in rows:
+            if (rule := withheld.get(epi_isl)) is not None:
+                index.counts[f"withheld.{rule}"] += 1
+                continue
             kind = passage_class(passage, passage_rules)
             index.counts[f"passage.{kind}"] += 1
             index.counts[f"identity.{identity.split(':', 1)[0]}"] += 1
