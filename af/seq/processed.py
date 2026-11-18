@@ -536,13 +536,13 @@ _DELIVERY_COLUMNS = frozenset({"source_pull"})
 #: published copy, counted per column; every other difference, the sequence above all, is
 #: still refused. Re-pulls overlap earlier pulls by design (GISAID records become visible
 #: weeks after their submission date), so these differences are routine, not edits to decide.
-#: Stands for "name and problems" in a record's differences when the only change is af dropping a
-#: prefix from its name (:func:`_name_curated`); counted as ``name`` in published_copy_kept.
-_CURATED_NAME = "name (prefix dropped)"
-
 KEEP_PUBLISHED_COLUMNS = frozenset(
     {"update_date", "embargoed", "embargoed_until", "location", "region", "country", "place"}
 )
+
+#: Stands for "name and problems" in a record's differences when the only change is af dropping a
+#: prefix from its name (:func:`_name_curated`); counted as ``name`` in published_copy_kept.
+_CURATED_NAME = "name (prefix dropped)"
 
 Key = tuple[str, str]
 
