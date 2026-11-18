@@ -396,6 +396,22 @@ def test_errors_are_grouped_by_kind_not_by_sequence(tmp_path: Path) -> None:
     assert counts.errors == {"Unknown nucleotide: L": 2, "Unable to align: seed": 1}
 
 
+def test_an_error_is_kept_without_the_records_input_position(tmp_path: Path) -> None:
+    """The same record aligned at another position in another pull keeps the same message."""
+    for position in (1, 472):
+        write_output(
+            tmp_path,
+            [tsv_row("s1", errors=f"When processing sequence #{position} 's1': Unable to align")],
+            {},
+        )
+        assert next(nc.read_alignment(tmp_path, REFERENCE)).error == "Unable to align"
+
+
+def test_without_position_leaves_a_message_without_the_prefix_alone() -> None:
+    assert nc.without_position("Unable to align: seed") == "Unable to align: seed"
+    assert nc.without_position("When processing sequence #7 'it's': x") == "x"
+
+
 def test_a_padded_protein_reads_unobservable_where_it_was_not_read(tmp_path: Path) -> None:
     """The contract Sarah set: an HA2 position must never read as a residue (2 Oct).
 

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import datetime
 import hashlib
-import re
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -36,7 +35,7 @@ import pyarrow.parquet as pq
 
 from af.seq.dates import CollectionDate
 from af.seq.gisaid import SequenceRecord
-from af.seq.nextclade import Aligned
+from af.seq.nextclade import Aligned, without_position
 from af.store.manifest import Manifest
 from af.store.ref import Input, StoreRef
 from af.store.store import CURRENT, MANIFEST, Provenance, Store, VersionBuilder
@@ -540,11 +539,6 @@ KEEP_PUBLISHED_COLUMNS = frozenset(
     {"update_date", "embargoed", "embargoed_until", "location", "region", "country", "place"}
 )
 
-#: Nextclade prefixes a failed alignment's message with the record's position in that run's
-#: input, so the same record's message differs between two pulls that hold it at different
-#: positions. Compared without it; the stored text keeps it.
-_NEXTCLADE_POSITION = re.compile(r"^When processing sequence #\d+ '[^']*': ")
-
 Key = tuple[str, str]
 
 
@@ -635,9 +629,13 @@ def _differences(stored: Path, table: pa.Table, keys: Mapping[Key, str]) -> dict
 
 
 def _comparable(column: str, value: Any) -> Any:
-    """The value as two copies of one record are compared: align_error without its position."""
+    """The value as two copies of one record are compared: align_error without its position.
+
+    Rows aligned since af.seq.nextclade stored the message without Nextclade's position prefix
+    need nothing; rows stored before still carry it, and must compare equal to a re-pull's.
+    """
     if column == "align_error" and isinstance(value, str):
-        return _NEXTCLADE_POSITION.sub("", value)
+        return without_position(value)
     return value
 
 

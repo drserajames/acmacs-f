@@ -307,6 +307,17 @@ class TestPublish:
         )
         assert first != second
 
+    def test_a_row_stored_with_the_position_matches_a_re_pull_without(self, tmp_path: Path) -> None:
+        """Rows stored before af.seq.nextclade dropped the prefix keep it (OWED 61)."""
+        store = Store.create(tmp_path / "store")
+        old = "When processing sequence #3 'EPI_ISL_1.EPI900001': seed alignment failed"
+        publish(store, "p1", [record(1)], errors={"EPI_ISL_1": old})
+        second = publish(
+            store, "p2", [record(1), record(2)], errors={"EPI_ISL_1": "seed alignment failed"}
+        )
+        assert _provenance(store, second)["already_published"] == {"p1": 1}
+        assert "published_copy_kept" not in _provenance(store, second)
+
     def test_a_different_alignment_error_is_still_refused(self, tmp_path: Path) -> None:
         store = Store.create(tmp_path / "store")
         message = "When processing sequence #{n} 'EPI_ISL_1.EPI900001': {why}"

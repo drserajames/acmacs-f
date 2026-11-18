@@ -399,7 +399,7 @@ def _reduce(
     reference: Reference,
 ) -> Aligned:
     seq_id = row["seqName"]
-    error = row.get("errors") or None
+    error = without_position(row.get("errors") or "") or None
     start = _int(row.get("alignmentStart"))
     end = _int(row.get("alignmentEnd"))
     covers = (
@@ -612,11 +612,22 @@ def _inserted_aa_in_mature(text: str) -> int:
     return total
 
 
+def without_position(error: str) -> str:
+    """Nextclade's error message without its per-sequence prefix.
+
+    Nextclade starts a failed alignment's message with ``When processing sequence #N '<id>': ``,
+    where N is the record's position in that run's input. The same record aligned in two pulls
+    then has two messages, and the store would see two different records (OWED 61). Kept
+    without it, the message depends on the sequence alone (design rule 8); the id is the
+    record's own key, already stored beside it.
+    """
+    return _ERROR_PREFIX.sub("", error)
+
+
 def _error_kind(error: str) -> str:
-    """Group Nextclade's error messages for counting: drop the per-sequence prefix
-    (``When processing sequence #N '<id>': ``) and keep the first sentence."""
-    message = _ERROR_PREFIX.sub("", error)
-    return message.split(".", 1)[0].strip()[:80]
+    """Group Nextclade's error messages for counting: without the per-sequence prefix,
+    the first sentence."""
+    return without_position(error).split(".", 1)[0].strip()[:80]
 
 
 def _int(text: str | None) -> int | None:
