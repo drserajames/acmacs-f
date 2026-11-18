@@ -298,6 +298,8 @@ def load(path: Path) -> ReportConfig:
         problems.append("report.meeting: end is before start")
     if r.about is not None:
         problems += _about_problems(r.about)
+    for line in lines(r.subtitle):  # the cover's subtitle may print the newest table (Q303 c)
+        problems += _placeholder_problems("report.subtitle", line, "cover", "subtitle")
     for key in ("title", "centre"):
         value = getattr(r, key)
         if isinstance(value, list) and not all(line.strip() for line in value):

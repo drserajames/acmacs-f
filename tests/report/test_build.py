@@ -212,6 +212,42 @@ def test_report_manifest_records_store_refs(tmp_path: Path) -> None:
     assert record["store"]["used_by"]["chains/labx/m"] == ["map/m1/all", "map/m2/all"]
 
 
+@needs_latex
+def test_the_cover_prints_the_newest_table_the_drawn_maps_used(tmp_path: Path) -> None:
+    """Sarah, Q303 c: the newest table is read from the build's own tables, not typed. Through
+    the whole build: the cover, the PDF title and the build record all say it."""
+    cfg, root = _setup(tmp_path, allow=False)
+    cfg.write_text(cfg.read_text().replace(
+        'title = "Test"', 'title = "Test"\nsubtitle = "newest table {newest_table}"'))  # fmt: skip
+    store = Store.create(tmp_path / "store")
+    tree = _publish(store, "trees", "a/report", "tree v1")
+    with store.build("chains", "labx/m") as version:
+        tables = [
+            {"table_id": "t1", "date": "2026-09-04"},
+            {"table_id": "t2", "date": "2026-08-13"},
+        ]
+        (version.path / "chain.json").write_text(json.dumps({"config": {"tables": tables}}))
+        chain = version.publish(Provenance("test", (), {}, T0, T0))
+    later = T0 + dt.timedelta(hours=1)
+    _real_figure(root, "tree/a/x", [tree], later, "v1")
+    for slot in ("map/m1/all", "map/m2/all"):
+        _real_figure(root, slot, [chain, tree], later, "v1")
+        i7 = root / slot / "v1" / "figure.i7.json"
+        doc = json.loads(i7.read_text())
+        doc["provenance"]["inputs"] = {"chain": chain.to_json()}
+        i7.write_text(json.dumps(doc))
+    manifest = tmp_path / "data" / "reports" / "test-report" / "manifest.json"
+    build.build(cfg, root, tmp_path / "out", store_root=store.root, manifest_path=manifest)
+    record = json.loads((tmp_path / "out" / "test-report.build.json").read_text())
+    assert record["subtitle"] == "newest table 4 September 2026"
+    assert record["newest_table"] == {
+        "date": "2026-09-04", "chains": {f"labx/m@{chain.version}": "2026-09-04"}}  # fmt: skip
+    tex = (tmp_path / "out" / "build" / "report.tex").read_text()
+    assert r"\textbf{Test\\ newest table 4 September 2026}" in tex
+    assert "pdftitle={Test newest table 4 September 2026}" in tex
+    assert "{newest_table}" not in tex
+
+
 def test_refs_need_a_store_and_a_manifest_path(tmp_path: Path) -> None:
     cfg, root, *_ = _store_setup(tmp_path)
     with pytest.raises(build.BuildError, match="--store and --manifest"):

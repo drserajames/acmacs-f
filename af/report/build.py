@@ -393,19 +393,52 @@ def intro_texts(
     return out
 
 
-def about_text(cfg: ReportConfig) -> list[str]:
-    """The about page's paragraphs, its placeholders filled from the report config; none without
-    an about page."""
+def report_facts(
+    cfg: ReportConfig, figs: dict[str, Resolved], store: Store | None
+) -> tuple[dict[str, str], dict[str, Any] | None, list[str]]:
+    """Facts the cover's subtitle and the about page print that come from the drawn figures,
+    not the config: ``{newest_table}`` (Sarah, Q303 c: "read from the build's own tables, not
+    typed"). Returns the values, what the build record keeps (None: no text uses them), and the
+    gaps. The store is read only when a text uses one."""
+    about = cfg.report.about
+    texts = [*lines(cfg.report.subtitle), about.text if about is not None else ""]
+    if not any(text.NEWEST_TABLE in text.placeholders(t) for t in texts):
+        return {}, None, []
+    if store is None:
+        return (
+            {text.NEWEST_TABLE: "?"},
+            None,
+            ["the newest table (no --store to read the maps' chains)"],
+        )
+    docs = {slot: r.figure.doc for slot, r in figs.items()}
+    latest, chains, gaps = text.newest_table(store, docs)
+    record = {"date": latest.isoformat() if latest else None, "chains": chains}
+    return {text.NEWEST_TABLE: text.date_text(latest) if latest else "?"}, record, gaps
+
+
+def with_facts(cfg: ReportConfig, facts: dict[str, str]) -> ReportConfig:
+    """``cfg`` with the cover's subtitle as printed, its placeholders filled (config checked that
+    it uses only ``{newest_table}``)."""
+    subtitle = text.fill(cfg.report.subtitle, facts)
+    return dataclasses.replace(cfg, report=dataclasses.replace(cfg.report, subtitle=subtitle))
+
+
+def about_text(cfg: ReportConfig, facts: dict[str, str] | None = None) -> list[str]:
+    """The about page's paragraphs, its placeholders filled from the report config and ``facts``
+    (:func:`report_facts`); none without an about page."""
     about = cfg.report.about
     if about is None:
         return []
     values = {"period": text.period_text(cfg.months()),
-              "data_cutoff": text.date_text(cfg.report.data_cutoff)}  # fmt: skip
+              "data_cutoff": text.date_text(cfg.report.data_cutoff), **(facts or {})}  # fmt: skip
+    missing = sorted(set(text.placeholders(about.text)) - set(values))
+    if missing:
+        raise BuildError(f"report.about.text: {missing} not given (report_facts reads them)")
     filled = text.fill(about.text, values)
     return [p.strip() for p in filled.split("\n\n") if p.strip()]
 
 
-def _about_page(cfg: ReportConfig) -> list[str]:
+def _about_page(cfg: ReportConfig, facts: dict[str, str] | None = None) -> list[str]:
     """After the contents, spaced as an intro page and listed in the contents as a group is."""
     if cfg.report.about is None:
         return []
@@ -414,7 +447,7 @@ def _about_page(cfg: ReportConfig) -> list[str]:
         rf"\section*{{{title}}}",
         rf"\addcontentsline{{toc}}{{section}}{{{title}}}",
         r"\vspace*{3em}",
-        r"\par\vspace{1em}".join(tex_escape(p) for p in about_text(cfg)) + r"\par",
+        r"\par\vspace{1em}".join(tex_escape(p) for p in about_text(cfg, facts)) + r"\par",
         r"\newpage",
     ]
 
@@ -607,9 +640,12 @@ def _span_page(
 def write_tex(
     cfg: ReportConfig, figs: dict[str, Resolved], build: Path, built_at: dt.datetime,
     n_not_from_store: int = 0, intros: dict[int, Intro] | None = None,
-    keys: dict[int, Key] | None = None,
+    keys: dict[int, Key] | None = None, facts: dict[str, str] | None = None,
 ) -> Path:  # fmt: skip
-    """Copy figures in by content hash and write ``report.tex`` (relative paths only)."""
+    """Copy figures in by content hash and write ``report.tex`` (relative paths only). ``cfg``'s
+    subtitle is printed as given (:func:`with_facts` fills it); ``facts`` fill the about page."""
+    if text.placeholders(cfg.report.subtitle):  # never a "{newest_table}" on the cover
+        raise BuildError(f"report.subtitle {cfg.report.subtitle!r}: placeholders not filled")
     fig_dir = build / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
     rel: dict[str, str] = {}
@@ -653,7 +689,7 @@ def write_tex(
         # opening space, without which the cover sat 11.5pt high (review, 18 Oct 2026).
         GEOMETRY.replace("\\usepackage[", "\\newgeometry{").replace("]{geometry}", "}"),
         *_cover(cfg, sum(r.figure.placeholder for r in figs.values()), n_not_from_store, built_at),
-        *_about_page(cfg),
+        *_about_page(cfg, facts),
     ]
     group = None
     intros, keys = intros or {}, keys or {}
@@ -876,11 +912,22 @@ def build(
             raise BuildError(
                 f"{len(gaps)} fact(s) in intro text no artefact records:\n  " + "\n  ".join(gaps)
             )
+        facts, newest, fact_gaps = report_facts(
+            cfg, figs, Store.open(store_root) if store_root else None
+        )
+        if fact_gaps:  # the cover would print a date no record supports
+            raise BuildError(
+                f"{len(fact_gaps)} fact(s) in the subtitle or about page no artefact records:\n  "
+                + "\n  ".join(fact_gaps)
+            )
+        cfg = with_facts(cfg, facts)
         build_dir = out_dir / "build"
         if build_dir.exists():
             shutil.rmtree(build_dir)  # never reuse a stale .aux/.toc or an old figure
         build_dir.mkdir(parents=True)
-        tex = write_tex(cfg, figs, build_dir, built_at, len(use.not_from_store), intros, keys)
+        tex = write_tex(
+            cfg, figs, build_dir, built_at, len(use.not_from_store), intros, keys, facts
+        )
         if UNRECORDED in tex.read_text():  # from any source, config words included
             raise BuildError(f"{tex}: {UNRECORDED!r} would be printed in the report body")
         passes = run_latex(tex, LocalRunner())
@@ -901,7 +948,10 @@ def build(
         dataset: dataclasses.asdict(method) for dataset, method in cfg.imported_tree_methods.items()
     }
     record["clade_key"] = key_record
-    record["about"] = about_text(cfg)  # the about page as printed, placeholders filled
+    record["about"] = about_text(cfg, facts)  # the about page as printed, placeholders filled
+    record["subtitle"] = cfg.report.subtitle  # as printed on the cover
+    # the newest table the drawn maps used, and each chain version's (Q303 c); None: not printed
+    record["newest_table"] = newest
     (out_dir / f"{cfg.report.id}.build.json").write_text(json.dumps(record, indent=1))
     return final
 
