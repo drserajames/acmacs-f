@@ -50,6 +50,23 @@ class TestDefline:
     def test_leading_gt_is_optional(self) -> None:
         assert parse_defline(">A/EXAMPLETOWN/7/2021|a=EPI_ISL_1")[0] == "A/EXAMPLETOWN/7/2021"
 
+    @pytest.mark.parametrize(
+        "header",
+        [
+            ">>B/EXAMPLETOWN/7/2014|a=EPI_ISL_1|b=B|o=EPI900001",
+            # a bare date straight after the name: the workbook's date is the one used
+            ">>B/EXAMPLETOWN/7/2014|2014-07-29|a=EPI_ISL_1|b=B|o=EPI900001",
+        ],
+    )
+    def test_a_name_delivered_with_its_own_gt_reads_clean(self, header: str) -> None:
+        """Delivered by GISAID with a literal '>' starting the name (OWED 62 c)."""
+        name, fields = parse_defline(header)
+        assert (name, fields["a"], fields["o"]) == (
+            "B/EXAMPLETOWN/7/2014",
+            "EPI_ISL_1",
+            "EPI900001",
+        )
+
 
 class TestFasta:
     def test_multi_line_sequences(self, tmp_path) -> None:
@@ -149,6 +166,41 @@ class TestJoin:
         """N means "not known"; R and Y state a real ambiguity. QC treats them differently."""
         _, counts = join([(DEFLINE, "ACGTRYNN")], [row()])
         assert (counts.ambiguous_bases, counts.unknown_bases) == (2, 2)
+
+    @pytest.mark.parametrize(
+        ("submitted", "subtype"),
+        [("SAMPLE0012/A/EXAMPLETOWN/7/2021", "A(H3N2)"), ("SAMPLE0012/B/EXAMPLETOWN/7/2021", "B")],
+    )
+    def test_a_prefix_before_a_complete_name_is_dropped_and_counted(
+        self, submitted: str, subtype: str
+    ) -> None:
+        """A sample id before the strain name (OWED 62 a): the strain name is kept."""
+        defline = DEFLINE.replace("A/EXAMPLETOWN/7/2021", submitted, 1)
+        records, counts = join([(defline, "ACGT")], [row()], subtype=subtype)
+        assert records[0].name == submitted.split("/", 1)[1]
+        assert records[0].gisaid_name == submitted  # as submitted, kept
+        assert gisaid.NAME_PREFIX_DROPPED in records[0].problems
+        assert not any(p.startswith("name.") for p in records[0].problems)
+        assert counts.name_prefix_dropped == 1
+        assert counts.to_json()["name_prefix_dropped"] == 1
+
+    @pytest.mark.parametrize(
+        ("submitted", "subtype"),
+        [
+            ("SAMPLE0012/B/EXAMPLETOWN/7/2021", "A(H3N2)"),  # not the record's own type
+            ("H3N2/EXAMPLETOWN/7/2021", "A(H3N2)"),  # what follows is no complete name
+            ("SAMPLE0012/A/EXAMPLETOWN/2021", "A(H3N2)"),  # nor is this
+            ("SAMPLE0012/A/EXAMPLETOWN/7/2021", None),  # no subtype to check the type against
+        ],
+    )
+    def test_anything_less_keeps_the_name_as_it_came(
+        self, submitted: str, subtype: str | None
+    ) -> None:
+        defline = DEFLINE.replace("A/EXAMPLETOWN/7/2021", submitted, 1)
+        records, counts = join([(defline, "ACGT")], [row()], subtype=subtype)
+        assert "name.type" in records[0].problems
+        assert gisaid.NAME_PREFIX_DROPPED not in records[0].problems
+        assert counts.name_prefix_dropped == 0 and "name_prefix_dropped" not in counts.to_json()
 
     def test_name_problems_are_counted(self) -> None:
         defline = DEFLINE.replace("A/EXAMPLETOWN/7/2021", "EXAMPLEUNQUALIFIED")

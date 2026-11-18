@@ -76,6 +76,10 @@ NAME_YEAR_SEASON = "date.name-year-season"  # name a year ahead, collected Novem
 NAME_YEAR_DIFFERS = "date.name-year-differs"  # any other disagreement: the ones worth reading
 # the name was written with a two-digit year, given its century by the collection year
 NAME_YEAR_TWO_DIGIT = "date.name-year-two-digit"
+#: The name came with a leading part before a complete name of the record's own type (a
+#: submitter's sample id, ``<id>/A/<location>/<isolate>/<year>``), and that part was dropped.
+#: A flag, not a name.* problem: the name that is kept parses cleanly (OWED 62 a).
+NAME_PREFIX_DROPPED = "curation.name-prefix-dropped"
 
 _XL_DATE = 3  # xlrd.XL_CELL_DATE
 _FIELD = re.compile(r"_\|_|\|")
@@ -149,6 +153,7 @@ class PullCounts:
     name_year: Counter[tuple[str, str]] = field(default_factory=Counter)
     name_problems: Counter[str] = field(default_factory=Counter)
     name_two_digit_year: int = 0  # names whose two-digit year was given its century
+    name_prefix_dropped: int = 0  # names kept without a leading part (NAME_PREFIX_DROPPED)
     #: N, i.e. "not known". Counted apart from R/Y/W…, which state a real ambiguity;
     #: Nextclade's QC treats the two differently and so must any threshold of ours.
     unknown_bases: int = 0
@@ -169,6 +174,12 @@ class PullCounts:
             "name_two_digit_year": self.name_two_digit_year,
             "unknown_bases": self.unknown_bases,
             "ambiguous_bases": self.ambiguous_bases,
+            # only when it happened, so a pull without such names reports what it did before
+            **(
+                {"name_prefix_dropped": self.name_prefix_dropped}
+                if self.name_prefix_dropped
+                else {}
+            ),
         }
 
 
@@ -340,7 +351,10 @@ def join(
             if collection_date is not None and "date.excel-serial" not in problems
             else None
         )
-        name = names.normalise(gisaid_name, subtype, collected=collected)
+        name, dropped = _name(gisaid_name, subtype, collected)
+        if dropped:
+            counts.name_prefix_dropped += 1
+            problems.append(NAME_PREFIX_DROPPED)
         for problem in name.problems:
             counts.name_problems[problem] += 1
         problems.extend(name.problems)
@@ -417,6 +431,24 @@ def _check_keys_unique(records: Sequence[SequenceRecord]) -> None:
         raise PullError(
             f"{len(repeated)} (isolate, accession) key(s) appear more than once: {shown}"
         )
+
+
+def _name(gisaid_name: str, subtype: str | None, collected: int | None) -> tuple[names.Name, bool]:
+    """The record's normalised name, and whether a leading part was dropped to get it.
+
+    A name whose first part is not a type is kept as it came, with its problems, unless what
+    follows that part is a complete name with no problem at all, of the record's own type: then
+    the first part is someone's prefix (a sample id before the strain name) and the strain name
+    is unambiguous. Anything less stays flagged; nothing is guessed (af.seq.names). Without the
+    pull's subtype the type cannot be checked, so nothing is dropped.
+    """
+    name = names.normalise(gisaid_name, subtype, collected=collected)
+    if subtype is None or names.TYPE_UNKNOWN not in name.problems or "/" not in gisaid_name:
+        return name, False
+    rest = names.normalise(gisaid_name.split("/", 1)[1], subtype, collected=collected)
+    if rest.problems:
+        return name, False
+    return rest, True
 
 
 def _normalise_nucleotides(sequence: str) -> tuple[str, int]:
