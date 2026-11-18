@@ -407,6 +407,14 @@ def test_an_error_is_kept_without_the_records_input_position(tmp_path: Path) -> 
         assert next(nc.read_alignment(tmp_path, REFERENCE)).error == "Unable to align"
 
 
+def test_an_error_that_is_only_the_prefix_is_still_an_error(tmp_path: Path) -> None:
+    """Stripping must never turn a failed alignment into a success (01's review)."""
+    write_output(tmp_path, [tsv_row("s1", errors="When processing sequence #9 's1': ")], {})
+    record = next(nc.read_alignment(tmp_path, REFERENCE))
+    assert record.error == "When processing sequence #9 's1': "
+    assert not record.covers_mature
+
+
 def test_without_position_leaves_a_message_without_the_prefix_alone() -> None:
     assert nc.without_position("Unable to align: seed") == "Unable to align: seed"
     assert nc.without_position("When processing sequence #7 'it's': x") == "x"

@@ -399,7 +399,9 @@ def _reduce(
     reference: Reference,
 ) -> Aligned:
     seq_id = row["seqName"]
-    error = without_position(row.get("errors") or "") or None
+    raw = row.get("errors") or ""
+    # an error that is only the prefix stays an error: never None, which reads as aligned
+    error = without_position(raw) or raw or None
     start = _int(row.get("alignmentStart"))
     end = _int(row.get("alignmentEnd"))
     covers = (
