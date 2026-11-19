@@ -9,7 +9,7 @@ and an H1 chain had to be rerun from scratch. A release can't change after it is
     python3 tools/make-release.py --repo <git clone> --rev <commit> \\
         --releases <dir> --micromamba <path> --mamba-root <dir> \\
         [--cxx /usr/bin/g++] [--extras dev,geo] [--link <path>] [--resolve] \\
-        [--tools-rev origin/master]
+        [--tools-rev origin/master] [--wheels <dir>]
 
 It makes ``<releases>/<sha12>/`` containing:
 
@@ -69,6 +69,14 @@ inside the release, or it stops; ``fonts_archive_url``, ``fonts_archive_sha256``
 ``fonts_courier_prime_sha256`` and ``fonts_courier_prime_version`` the one Courier Prime file.
 A commit from before them records the fields empty.
 
+**The pip-only packages.** The conda lock pins each package with a checksum; ``pip-freeze.txt``
+pins the pip-only ones (the dev extras) by version alone, and pip fetches them from PyPI.
+``--wheels <dir>`` installs every pip package from ``<dir>`` instead, with no index: the
+directory holds the wheels and a ``SHA256SUMS`` (``sha256sum`` format) listing every one of
+them, fetched and hashed elsewhere. Before anything is built, each wheel must match its line and
+every wheel must be listed, or the release stops. ``pip_wheels`` records the lines it checked;
+empty, the pip packages came from the index.
+
 A commit from before the contract declares no arithmetic and has no such tests: it still
 builds, the log says there was nothing to check, and the names are empty. Its optimiser is
 the original, so it is still compared with the release before: by the tool, and the table the
@@ -96,6 +104,7 @@ import argparse
 import dataclasses
 import datetime
 import fcntl
+import hashlib
 import json
 import os
 import platform
@@ -107,7 +116,7 @@ import tempfile
 import textwrap
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 RELEASE_FILE = "RELEASE.toml"
@@ -171,10 +180,20 @@ def parse_args() -> argparse.Namespace:
         "tools/check-original-arithmetic.py compares its optimiser with the release before "
         "(recorded in RELEASE.toml); default %(default)s",
     )
+    parser.add_argument(
+        "--wheels",
+        type=Path,
+        help="install the pip packages from this directory's wheels, with no index; it must "
+        "hold a SHA256SUMS listing every wheel in it, which is checked first and recorded",
+    )
     return parser.parse_args()
 
 
 def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None:
+    # Before anything is made: a wheel that does not match its hash must stop the release
+    # here, not after the environment is built.
+    wheels = check_wheels(args.wheels) if args.wheels else {}
+    source = pip_source(args.wheels)
     if release.exists():
         if not args.replace_incomplete:
             raise SystemExit(
@@ -211,7 +230,8 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
     build_env = {**base_env, "PATH": f"{env / 'bin'}{os.pathsep}{base_env['PATH']}"}
     if choice.replay:
         step("installing the locked pip-only packages", "pip_lock")
-        install_pip_pins(python, (choice.replay / PIP_FILE).read_text(), build_env, release)
+        pins = (choice.replay / PIP_FILE).read_text()
+        install_pip_pins(python, pins, build_env, release, source)
     # The first launch of a freshly installed cmake can take longer than scikit-build-core's
     # probe allows (macOS scans a new binary; NFS is slow on first read): it then reports
     # "Could not find CMake". Launch the build tools once, untimed.
@@ -235,7 +255,7 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
     # Replaying a lock, every dependency is already in place at its locked version: --no-deps
     # stops pip fetching a newer one from PyPI (it took the day's newest dev extras before).
     no_deps = ["--no-deps"] if choice.replay else []
-    install = [python, "-m", "pip", "install", "--no-build-isolation", *no_deps, *openmp]
+    install = [python, "-m", "pip", "install", "--no-build-isolation", *no_deps, *source, *openmp]
     run([*install, f"{src}[{args.extras}]"], build_env, cwd=release)
 
     step("verifying imports, linkage and the OpenMP runtime", "verify")
@@ -287,7 +307,9 @@ def build(args: argparse.Namespace, repo: Path, sha: str, release: Path) -> None
         )
     packages = package_section(choice, previous, lock, pip)
     (release / "CONTENTS.txt").write_text(packages + contents(repo, sha))
-    write_release_file(args, release, sha, started, build_env, numerics, original, fonts)
+    write_release_file(
+        args, release, sha, started, build_env, numerics, original, fonts, wheels=wheels
+    )
     (release / "bin").symlink_to("env/bin")  # so <release>/bin/python, like o's env/bin/python
     make_read_only(release)
     step(f"release {sha[:12]} ready in {release}")
@@ -407,11 +429,13 @@ def normalise(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower().strip()
 
 
-def install_pip_pins(python: str, freeze: str, env: dict[str, str], cwd: Path) -> None:
+def install_pip_pins(
+    python: str, freeze: str, env: dict[str, str], cwd: Path, source: Sequence[str] = ()
+) -> None:
     """Install, at their locked versions, the lock's pip packages the conda env lacks.
 
     The release's dev extras (pytest, ruff, mypy and their dependencies) come from PyPI, not
-    conda, so the conda lock alone does not hold them.
+    conda, so the conda lock alone does not hold them. ``source`` is :func:`pip_source`'s.
     """
     installed = {
         normalise(line.partition("==")[0].partition(" @ ")[0])
@@ -420,7 +444,48 @@ def install_pip_pins(python: str, freeze: str, env: dict[str, str], cwd: Path) -
     }
     missing = [pin for name, pin in sorted(pip_pins(freeze).items()) if name not in installed]
     if missing:
-        run([python, "-m", "pip", "install", "--no-deps", *missing], env, cwd=cwd)
+        run([python, "-m", "pip", "install", "--no-deps", *source, *missing], env, cwd=cwd)
+
+
+WHEEL_SUMS = "SHA256SUMS"
+
+
+def check_wheels(directory: Path) -> dict[str, str]:
+    """Wheel file name -> sha256, for a ``--wheels`` directory whose wheels all match.
+
+    The wheels were fetched and hashed elsewhere and then copied: this is the check at this
+    end. Every line of ``SHA256SUMS`` must name a wheel in the directory with that hash, and
+    every wheel there must have a line, or pip could install one nobody hashed.
+    """
+    sums = directory / WHEEL_SUMS
+    if not sums.is_file():
+        raise SystemExit(f"--wheels {directory}: no {WHEEL_SUMS} there")
+    listed: dict[str, str] = {}
+    for number, line in enumerate(sums.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        digest, _, name = line.partition("  ")
+        name = name.removeprefix("*")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest) or not name or "/" in name:
+            raise SystemExit(f"{sums}:{number}: not '<sha256>  <file name>': {line!r}")
+        listed[name] = digest
+    present = {path.name for path in directory.glob("*.whl")}
+    if not present:
+        raise SystemExit(f"--wheels {directory}: no wheels there")
+    if unlisted := sorted(present - set(listed)):
+        raise SystemExit(f"--wheels {directory}: not in {WHEEL_SUMS}: {', '.join(unlisted)}")
+    for name, digest in sorted(listed.items()):
+        path = directory / name
+        if not path.is_file():
+            raise SystemExit(f"--wheels {directory}: {WHEEL_SUMS} lists {name}, which is absent")
+        if (found := hashlib.sha256(path.read_bytes()).hexdigest()) != digest:
+            raise SystemExit(f"--wheels {directory}: {name} has sha256 {found}, not {digest}")
+    return listed
+
+
+def pip_source(wheels: Path | None) -> list[str]:
+    """pip's options for where packages come from: the checked wheels alone, or the index."""
+    return ["--no-index", "--find-links", str(wheels.resolve())] if wheels else []
 
 
 def without_af(freeze: str) -> list[str]:
@@ -906,6 +971,8 @@ def write_release_file(
     numerics: Numerics,
     original: Original,
     fonts: Fonts,
+    *,
+    wheels: Mapping[str, str] | None = None,
 ) -> None:
     python = python_of(release)
     af_version = capture([python, "-I", "-c", "import af; print(af.__version__)"], env).strip()
@@ -929,6 +996,7 @@ def write_release_file(
         "fonts_courier_prime_url": fonts.courier_prime_url,
         "fonts_courier_prime_sha256": fonts.courier_prime_sha256,
         "fonts_courier_prime_version": fonts.courier_prime_version,
+        "pip_wheels": [f"{digest}  {name}" for name, digest in sorted((wheels or {}).items())],
         "micromamba": capture([str(args.micromamba), "--version"], env).strip(),
         "extras": args.extras,
         "host": platform.node(),
