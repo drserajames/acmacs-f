@@ -1,6 +1,7 @@
 """tools/make-release.py's linkage gate, on real otool/ldd output (Linux can't run here)."""
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -765,3 +766,99 @@ def test_release_skips_the_tools_ci_skips_on_macos(mr: ModuleType) -> None:
     assert sorted(re.findall(r"--skip-tool (\S+?)\"?(?=\s|;|$)", lines[0])) == sorted(
         mr.UNPROVIDED_TOOLS
     )
+
+
+def wheel_dir(tmp_path: Path, wheels: dict[str, bytes], sums: str | None = None) -> Path:
+    """A ``--wheels`` directory of invented wheels, with a SHA256SUMS that matches unless given."""
+    directory = tmp_path / "wheels"
+    directory.mkdir()
+    for name, content in wheels.items():
+        (directory / name).write_bytes(content)
+    if sums is None:
+        sums = "".join(
+            f"{hashlib.sha256(content).hexdigest()}  {name}\n" for name, content in wheels.items()
+        )
+    (directory / "SHA256SUMS").write_text(sums)
+    return directory
+
+
+WHEELS = {"pytest-9.0.0-py3-none-any.whl": b"one", "ruff-0.16.0-py3-none-any.whl": b"two"}
+
+
+def test_checked_wheels_are_recorded_in_the_release_file(
+    mr: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheels = mr.check_wheels(wheel_dir(tmp_path, WHEELS))
+    assert wheels == {name: hashlib.sha256(data).hexdigest() for name, data in WHEELS.items()}
+    monkeypatch.setattr(mr, "capture", lambda command, env: "something 1.0\n")
+    monkeypatch.setattr(mr, "_stages", [("record", mr.time.monotonic())])
+    args = argparse.Namespace(rev="a-branch", micromamba=Path("micromamba"), extras="dev")
+    numerics, original = mr.Numerics("", ()), mr.Original("", mr.NOT_COMPARED, "")
+    fonts = mr.Fonts("", "", "", "", "", "")
+    for given, expected in (
+        (wheels, [f"{wheels[name]}  {name}" for name in sorted(WHEELS)]),
+        (None, []),  # from the index: nothing to list
+    ):
+        mr.write_release_file(
+            args, tmp_path, "0" * 40, "then", {}, numerics, original, fonts, wheels=given
+        )
+        written = tomllib.loads((tmp_path / "RELEASE.toml").read_text())
+        assert written["pip_wheels"] == expected
+
+
+@pytest.mark.parametrize(
+    ("wheels", "sums", "says"),
+    [
+        (WHEELS, f"{'0' * 64}  pytest-9.0.0-py3-none-any.whl\n", "not in SHA256SUMS: ruff"),
+        (
+            WHEELS,
+            "".join(f"{'0' * 64}  {name}\n" for name in WHEELS),
+            "has sha256",
+        ),
+        (
+            {"pytest-9.0.0-py3-none-any.whl": b"one"},
+            f"{hashlib.sha256(b'one').hexdigest()}  pytest-9.0.0-py3-none-any.whl\n"
+            f"{'0' * 64}  ruff-0.16.0-py3-none-any.whl\n",
+            "lists ruff-0.16.0-py3-none-any.whl, which is absent",
+        ),
+        (WHEELS, "not a hash line\n", "not '<sha256>  <file name>'"),
+        (WHEELS, f"{'0' * 64}  ../elsewhere.whl\n", "not '<sha256>  <file name>'"),
+        ({}, "", "no wheels there"),
+    ],
+    ids=["unlisted", "mismatch", "absent", "malformed", "path", "empty"],
+)
+def test_a_wheel_nobody_hashed_or_that_does_not_match_stops_the_release(
+    mr: ModuleType, tmp_path: Path, wheels: dict[str, bytes], sums: str, says: str
+) -> None:
+    with pytest.raises(SystemExit, match=re.escape(says)):
+        mr.check_wheels(wheel_dir(tmp_path, wheels, sums))
+
+
+def test_no_sums_file_stops_the_release(mr: ModuleType, tmp_path: Path) -> None:
+    (tmp_path / "a-1.0-py3-none-any.whl").write_bytes(b"one")
+    with pytest.raises(SystemExit, match="no SHA256SUMS"):
+        mr.check_wheels(tmp_path)
+
+
+def test_wheels_are_checked_before_anything_is_made(mr: ModuleType, tmp_path: Path) -> None:
+    release = tmp_path / "releases" / "0123456789ab"
+    args = argparse.Namespace(wheels=wheel_dir(tmp_path, WHEELS, f"{'0' * 64}  x.whl\n"))
+    with pytest.raises(SystemExit, match="not in SHA256SUMS"):
+        mr.build(args, tmp_path, "0" * 40, release)
+    assert not release.exists()
+
+
+def test_pins_come_from_the_wheels_alone_when_given(
+    mr: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(mr, "capture", lambda command, env: "numpy==2.0\n")
+    monkeypatch.setattr(mr, "run", lambda command, env, cwd=None: commands.append(command))
+    directory = wheel_dir(tmp_path, WHEELS)
+    mr.install_pip_pins("python", FREEZE, {}, tmp_path, mr.pip_source(directory))
+    mr.install_pip_pins("python", FREEZE, {}, tmp_path)
+    from_wheels, from_index = commands
+    assert from_wheels[from_wheels.index("--find-links") + 1] == str(directory.resolve())
+    assert "--no-index" in from_wheels and from_wheels[-2:] == ["pytest==9.0.0", "ruff==0.16.0"]
+    assert "--no-index" not in from_index and "--find-links" not in from_index
+    assert mr.pip_source(None) == []
