@@ -236,6 +236,34 @@ class CladeSet:
                     )
         return aliases
 
+    def resolve_alias(self, name: str) -> str | None:
+        """The subclade an older or aliased name stands for, from upstream's own path.
+
+        Upstream renames a clade by *aliasing* it (D.3.1.1 became E) and records each
+        subclade's ``unaliased_name``, the full Pango path the alias abbreviates. A name this
+        set no longer defines is expanded through its longest prefix that is still a subclade
+        (``D.3.1.1`` through ``D.3.1``, whose path is ``A.2.1.1.1.3.1``), and the result is the
+        subclade carrying that path. That is the nomenclature's own statement, so no table of
+        renames is kept here and a future alias resolves the same way.
+
+        Returns the name itself when this set defines it, ``None`` when no path matches
+        (design rule 1: the caller decides that is an error), and raises when two subclades
+        claim one path.
+        """
+        if name in self.subclades:
+            return name
+        parts = name.split(".")
+        for cut in range(len(parts) - 1, 0, -1):
+            prefix = self.subclades.get(".".join(parts[:cut]))
+            if prefix is None or prefix.unaliased_name is None:
+                continue
+            path = ".".join((prefix.unaliased_name, *parts[cut:]))
+            matches = [n for n, c in self.subclades.items() if c.unaliased_name == path]
+            if len(matches) > 1:
+                raise ValueError(f"{self.subtype}: {name!r} resolves to several clades: {matches}")
+            return matches[0] if matches else None
+        return None
+
     def unexpressible(self) -> dict[str, tuple[Unexpressible, ...]]:
         """Clades with defining mutations no mature-HA sequence can carry (design rule 1)."""
         return {

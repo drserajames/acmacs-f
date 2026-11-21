@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import csv
 import json
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,8 @@ class FallbackCounts:
     assigned: int = 0
     unassigned: int = 0
     qc_bad: int = 0
+    renamed: tuple[tuple[str, str, int], ...] = ()
+    """(name Nextclade reported, name the pin gives it, sequences): every resolved rename."""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -69,6 +72,7 @@ class FallbackCounts:
             "assigned": self.assigned,
             "unassigned": self.unassigned,
             "qc_bad": self.qc_bad,
+            "renamed": [list(item) for item in self.renamed],
         }
 
 
@@ -111,7 +115,7 @@ def check_dataset_agrees(dataset_dir: Path, clade_set: CladeSet) -> set[str]:
     the tree engine will still assign it. It is reported by the caller, not refused here.
     """
     dataset = dataset_subclades(dataset_dir)
-    unknown = sorted(name for name in dataset if name not in clade_set)
+    unknown = sorted(name for name in dataset if clade_set.resolve_alias(name) is None)
     if unknown:
         raise FallbackError(
             f"the Nextclade dataset at {dataset_dir} can assign {len(unknown)} clade(s) that "
@@ -119,7 +123,7 @@ def check_dataset_agrees(dataset_dir: Path, clade_set: CladeSet) -> set[str]:
             "The dataset and the nomenclature pin are out of step; update the pin, or use the "
             "dataset release built from it."
         )
-    return dataset & set(clade_set.names)
+    return {clade_set.resolve_alias(name) or name for name in dataset} & set(clade_set.names)
 
 
 def read_rows(tsv: Path) -> list[dict[str, str]]:
@@ -144,6 +148,7 @@ def assign_from_rows(
     """
     assignments: dict[str, Assignment] = {}
     sequences = assigned = unassigned = qc_bad = 0
+    renamed: Counter[tuple[str, str]] = Counter()
     for row in rows:
         name = row.get(NAME_COLUMN)
         if not name:
@@ -158,6 +163,10 @@ def assign_from_rows(
         if clade is None:
             unassigned += 1
         else:
+            resolved = clade_set.resolve_alias(clade)
+            if resolved is not None and resolved != clade:
+                renamed[(clade, resolved)] += 1
+                clade = resolved
             if clade not in clade_set:
                 raise FallbackError(
                     f"Nextclade assigned {clade!r} to {name}, which {clade_set.subtype} does not "
@@ -167,7 +176,14 @@ def assign_from_rows(
         assignments[identifier] = Assignment(node=identifier, clade=clade)
     if not sequences:
         raise FallbackError("the Nextclade output has no rows")
-    return assignments, FallbackCounts(sequences, assigned, unassigned, qc_bad)
+    counts = FallbackCounts(
+        sequences,
+        assigned,
+        unassigned,
+        qc_bad,
+        tuple((old, new, n) for (old, new), n in sorted(renamed.items())),
+    )
+    return assignments, counts
 
 
 def assign_from_tsv(

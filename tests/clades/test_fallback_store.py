@@ -74,7 +74,13 @@ def test_assigns_from_the_stored_calls(tmp_path: Path) -> None:
     assert result.assignments[("EPI_ISL_900011", "EPI900011")].clade is None
     assert ("EPI_ISL_900012", "EPI900012") not in result.assignments  # no call, no row
     assert result.no_call == 1
-    assert result.counts.to_json() == {"sequences": 7, "assigned": 5, "unassigned": 2, "qc_bad": 1}
+    assert result.counts.to_json() == {
+        "sequences": 7,
+        "assigned": 5,
+        "unassigned": 2,
+        "qc_bad": 1,
+        "renamed": [],
+    }
 
 
 def one(tag: str) -> list[tuple[str, str, str | None, str | None]]:
