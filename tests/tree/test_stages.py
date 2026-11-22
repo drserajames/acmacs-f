@@ -459,7 +459,7 @@ def test_a_pin_the_clone_is_not_at_is_refused(tmp_path: Path) -> None:
     # WS4 labels only a tree whose leaves it can find in a sequence version.
     config = exported_project(tmp_path / "p")
     with_clades(config, pin="0000000")
-    with pytest.raises(Exception, match="not the pinned"):
+    with pytest.raises(Exception, match="does not have the pinned commit"):
         stages.run(config)
 
 

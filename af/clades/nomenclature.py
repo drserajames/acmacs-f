@@ -21,7 +21,10 @@ recognise is an error naming the file and the line, because a silently skipped
 
 from __future__ import annotations
 
+import io
 import subprocess
+import tarfile
+import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -308,9 +311,11 @@ def load_clade_set(
 ) -> CladeSet:
     """Load ``subtype``'s subclades from the clone under ``clones``.
 
-    ``clones`` is the directory holding the ``influenza-clade-nomenclature`` clones. The
-    clone must be at ``pin.commit``; pass ``check_commit=False`` only in tests that build
-    a directory by hand.
+    ``clones`` is the directory holding the ``influenza-clade-nomenclature`` clones. With a
+    pin the files are read at ``pin.commit`` from the clone's history, whatever its HEAD or
+    working tree is, and the commit must exist in the clone; without one the working tree is
+    read as it stands. ``check_commit=False`` reads the working tree even with a pin, for
+    tests that build a directory by hand.
     """
     try:
         name = repository or (pin.repository if pin else nomenclature_repository(subtype))
@@ -321,15 +326,18 @@ def load_clade_set(
     root = Path(clones) / name
     if not root.is_dir():
         raise NomenclatureError(f"upstream clone not found: {root}")
+    pinned = pin is not None
     if pin is None:
         pin = Pin(subtype=subtype, repository=name, commit=head_commit(root))
-    elif check_commit:
-        _check_commit(root, pin)
     coordinates = coordinates_for(subtype)
-    subclades = _read_directory(root / "subclades", coordinates, root)
-    if not subclades:
-        raise NomenclatureError(f"no subclade files under {root / 'subclades'}")
-    legacy = _read_directory(root / "clades", coordinates, root)
+    if pinned and check_commit:
+        # Read the files AT the pinned commit, never the working tree: the clones are shared
+        # and get pulled, and a pin must give the same clade set whatever HEAD is today.
+        with tempfile.TemporaryDirectory() as tmp:
+            export = _export_commit(root, pin, Path(tmp))
+            subclades, legacy = _read_both(export, coordinates, export)
+    else:
+        subclades, legacy = _read_both(root, coordinates, root)
     ancestors = _ancestry(subclades, root)
     return CladeSet(
         subtype=subtype,
@@ -356,13 +364,47 @@ def head_commit(repository: Path) -> str:
     return finished.stdout.strip()
 
 
-def _check_commit(repository: Path, pin: Pin) -> None:
-    head = head_commit(repository)
-    if not head.startswith(pin.commit) and not pin.commit.startswith(head):
-        raise NomenclatureError(
-            f"{repository} is at {head[:12]}, not the pinned {pin.commit[:12]}. "
-            "Check out the pinned commit, or update the pin deliberately."
+def _read_both(
+    base: Path, coordinates: Coordinates, root: Path
+) -> tuple[dict[str, Subclade], dict[str, Subclade]]:
+    """The ``subclades/`` and (older-name) ``clades/`` levels under ``base``."""
+    subclades = _read_directory(base / "subclades", coordinates, root)
+    if not subclades:
+        raise NomenclatureError(f"no subclade files under {base / 'subclades'}")
+    return subclades, _read_directory(base / "clades", coordinates, root)
+
+
+def _export_commit(repository: Path, pin: Pin, into: Path) -> Path:
+    """The two clade directories as they were at ``pin.commit``, written under ``into``.
+
+    ``git archive`` rather than the working tree, so a clone that has been pulled, or is on
+    another branch, still gives exactly the pinned nomenclature. A clone that lacks the
+    commit altogether is an error (it needs fetching, or the pin is wrong).
+    """
+    base = ["git", "-C", str(repository)]
+    try:
+        subprocess.run(
+            [*base, "cat-file", "-e", f"{pin.commit}^{{commit}}"], capture_output=True, check=True
         )
+    except (OSError, subprocess.CalledProcessError):
+        raise NomenclatureError(
+            f"{repository} does not have the pinned commit {pin.commit[:12]}: fetch it, "
+            "or update the pin deliberately."
+        ) from None
+    present = subprocess.run(
+        [*base, "ls-tree", "--name-only", pin.commit, "subclades", "clades"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    archive = subprocess.run(
+        [*base, "archive", "--format=tar", pin.commit, *present],
+        capture_output=True,
+        check=True,
+    ).stdout
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        tar.extractall(into, filter="data")
+    return into
 
 
 def _read_directory(directory: Path, coordinates: Coordinates, root: Path) -> dict[str, Subclade]:

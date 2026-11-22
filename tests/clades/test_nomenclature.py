@@ -104,7 +104,7 @@ def test_version_names_the_repository_and_commit(tmp_path: Path) -> None:
 def test_pin_mismatch_is_fatal(tmp_path: Path) -> None:
     clones = synthetic(tmp_path)[0]
     pin = Pin(subtype=SUBTYPE, repository="synthetic_HA", commit="0" * 40)
-    with pytest.raises(NomenclatureError, match="not the pinned"):
+    with pytest.raises(NomenclatureError, match="does not have the pinned commit"):
         load_clade_set(SUBTYPE, clones, pin)
 
 
@@ -190,3 +190,29 @@ def test_legacy_aliases_refuse_one_name_for_two_subclades(tmp_path: Path) -> Non
     broken = dataclasses.replace(clade_set, legacy_clades={"Q": legacy, "R": other})
     with pytest.raises(ValueError, match="old name 'Q' aliases both 'P.1' and 'P.2'"):
         broken.legacy_aliases()
+
+
+def test_a_pin_is_read_at_its_commit_not_from_the_working_tree(tmp_path: Path) -> None:
+    """A pull (or any later commit or edit) in the shared clone must not change a pinned read."""
+    import subprocess
+
+    from .synthetic import commit_command, write_clade
+
+    clones, _, commit = synthetic(tmp_path)
+    clone = clones / "synthetic_HA"
+    before = load_clade_set(SUBTYPE, clones, Pin(SUBTYPE, "synthetic_HA", commit))
+    write_clade(
+        clone / "subclades",
+        "NEWER",
+        "name: NEWER\nparent: P\ndefining_mutations:\n- locus: HA1\n  position: 9\n"
+        "  state: T\nclade: none",
+    )
+    subprocess.run(["git", "-C", str(clone), "add", "-A"], check=True)
+    subprocess.run(commit_command(clone, "a later commit"), check=True)
+    at_pin = load_clade_set(SUBTYPE, clones, Pin(SUBTYPE, "synthetic_HA", commit))
+    assert "NEWER" not in at_pin
+    assert at_pin.names == before.names
+    assert at_pin.version == f"synthetic_HA@{commit}"
+    assert "NEWER" in load_clade_set(
+        SUBTYPE, clones, repository="synthetic_HA"
+    )  # no pin: the clone as it stands
