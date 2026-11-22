@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from af.clades.local import extend_from_file
-from af.clades.nomenclature import CladeSet, NomenclatureError
+from af.clades.nomenclature import CladeSet
 from af.clades.store import CladeRow, CladeStoreError, clade_set_for, publish
 from af.store import Store, StoreRef
 
@@ -70,15 +70,16 @@ def test_a_local_file_for_a_table_built_without_one_is_an_error(tmp_path: Path) 
         clade_set_for(store, ref, directory, local=local)
 
 
-def test_a_clone_that_has_moved_on_is_an_error(tmp_path: Path) -> None:
+def test_a_clone_that_has_moved_on_still_gives_the_recorded_clade_set(tmp_path: Path) -> None:
+    """A pull moves the shared clone's HEAD; the recorded pin is read from its history."""
     directory = clones(tmp_path)
-    store, ref = published(tmp_path, load_synthetic(directory))
+    clade_set = load_synthetic(directory)
+    store, ref = published(tmp_path, clade_set)
     clone = directory / "synthetic_HA"
     (clone / "README").write_text("moved\n")
     subprocess.run(["git", "-C", str(clone), "add", "-A"], check=True)
     subprocess.run(commit_command(clone, "move"), check=True)
-    with pytest.raises(NomenclatureError):
-        clade_set_for(store, ref, directory)
+    assert clade_set_for(store, ref, directory).version == clade_set.version
 
 
 def test_only_a_clades_version(tmp_path: Path) -> None:

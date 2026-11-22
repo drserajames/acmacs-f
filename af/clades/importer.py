@@ -323,6 +323,11 @@ def _resolve(
     bare = candidate.split(" (")[0].strip()
     if bare in clade_set:
         return bare
+    # an older name upstream has since aliased (D.3.1.1 -> E): resolved through its own path
+    for attempt in (candidate, bare):
+        aliased = clade_set.resolve_alias(attempt)
+        if aliased is not None:
+            return aliased
     if local and (candidate in local or bare in local):
         report.needs_local.append(
             DeadRow(

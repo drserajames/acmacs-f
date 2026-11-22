@@ -332,3 +332,18 @@ def test_caller_names_add_to_upstreams(tmp_path: Path) -> None:
     )
     names = {group.name: group.anchor for group in report.groups[SUBTYPE]}
     assert names["GONE 20V"] == "P.2" and names["Q 22K"] == "P.1"
+
+
+def test_a_name_upstream_has_aliased_resolves_by_its_path(tmp_path: Path) -> None:
+    """A table written under a name upstream has since aliased resolves through upstream's
+    own path; an unresolvable name stays dead (rules 1 and 9)."""
+    from af.clades.importer import ImportReport, _resolve
+
+    from .test_alias_rename import build
+
+    clades = build(tmp_path)
+    report = ImportReport()
+    assert _resolve("X.2.1", {}, clades, report, SUBTYPE, 0, "row") == "Z"
+    assert not report.dead
+    _resolve("X.2.7", {}, clades, report, SUBTYPE, 1, "row")
+    assert len(report.dead) == 1

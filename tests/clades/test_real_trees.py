@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from af.clades.assign import Node, TreeAssignment, assign_tree
-from af.clades.nomenclature import load_clade_set
+from af.clades.nomenclature import CladeSet, Pin, load_clade_set
 from af.clades.sequence import AlignedSequence, GapSupport
 
 CLONES = Path.home() / "AC/eu/influenza-clade-nomenclature"
@@ -78,12 +78,20 @@ def leaf_rows(directory: Path, key: str) -> dict[str, dict[str, str]]:
         return {row["label"]: row for row in csv.DictReader(stream, delimiter="\t")}
 
 
+def fixture_clade_set(expected: dict) -> CladeSet:
+    """The clade set at the commit the fixture records, read from the clone's history: a pull
+    that moves the shared clone's HEAD must not fail these tests."""
+    repository, _, commit = expected["clade_set_version"].partition("@")
+    pin = Pin(expected["subtype"], repository, commit)
+    return load_clade_set(expected["subtype"], CLONES, pin, repository=repository)
+
+
 def run(af_data: Path, key: str) -> tuple[TreeAssignment, dict, dict[str, dict[str, str]]]:
     directory = fixture_directory(af_data)
     expected = expectations(af_data)["subtypes"][key]
     if not CLONES.is_dir():
         pytest.skip(f"nomenclature clones not found at {CLONES}")
-    clade_set = load_clade_set(expected["subtype"], CLONES)
+    clade_set = fixture_clade_set(expected)
     if clade_set.version != expected["clade_set_version"]:
         # Not a skip. The day the pin moves is the day this test is most worth running,
         # and a skipped test reads as a passing one: the fixture would sit unregenerated
@@ -134,7 +142,7 @@ def test_every_assigned_clade_is_within_its_parents_clade(af_data: Path, key: st
     """
     directory = fixture_directory(af_data)
     result, expected, _ = run(af_data, key)
-    clade_set = load_clade_set(expected["subtype"], CLONES)
+    clade_set = fixture_clade_set(expected)
     parents: dict[str, str | None] = {}
     for suffix in ("nodes.tsv", "leaves.tsv"):
         with (directory / f"{key}.{suffix}").open() as stream:
@@ -182,6 +190,6 @@ def test_the_agreement_guard_passes_the_round_trees(af_data: Path, key: str) -> 
         for leaf, row in leaves.items()
     }
     limit = limit_for(load_agreement_limits(limits_path), expected["subtype"])
-    clade_set = load_clade_set(expected["subtype"], CLONES)  # run() checked it is the pin
+    clade_set = fixture_clade_set(expected)
     check = check_agreement(tree, fallback, clade_set, limit)
     assert not check.exceeded
