@@ -76,6 +76,18 @@ def test_isolate_key_drops_the_type_and_whatever_follows_the_year() -> None:
     assert trees.isolate_key("A(H1N1)/" + _name(7)) == trees.isolate_key(_name(7))
 
 
+def test_isolate_key_keeps_a_long_isolate_number_whole() -> None:
+    def key(*parts: str) -> str:  # names built from parts, as _name does, not written whole
+        return trees.isolate_key("/".join(parts))
+
+    # A first "/dddd" inside a longer number is not the year: these are two isolates.
+    assert key("SOMEPLACE", "10241", "2020_E1", "E1") != key("A", "SOMEPLACE", "10240", "2026")
+    assert key("SOMEPLACE", "10241", "2020_E1", "E1") == key("A", "SOMEPLACE", "10241", "2020")
+    # An isolate number of exactly four digits is not the year either.
+    assert key("A", "OTHER PLACE", "2020", "2025") != key("OTHER_PLACE", "202012676", "2019")
+    assert key("A", "OTHER PLACE", "2020", "2025") == key("OTHER_PLACE", "2020", "2025_OR")
+
+
 def test_a_figure_without_epi_ids_keeps_name_matching(tmp_path: Path) -> None:
     doc = _doc([_leaf("L1|x", _name(1), 0)])
     assert ae_hash.figure_hashes(None, doc) == (None, {})
