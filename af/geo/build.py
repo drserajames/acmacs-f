@@ -20,7 +20,7 @@ from typing import Any
 
 from af.geo.figures import clade_key, write_geo_figures
 from af.geo.records import DotRule, Month, partial_title
-from af.geo.style import read_geo_looks
+from af.geo.style import read_geo_looks, read_geo_placements
 from af.map.colouring import StoreColours
 from af.map.config import ColouringConfig
 from af.seq.matching_rules import matching_rules
@@ -86,6 +86,7 @@ def build_geo(
         raise ValueError(f"allow_empty names slots that are not drawn: {unknown}")
     empty_ok = sorted(s for s, slot in slots.items() if slot in allow_empty)
     looks = read_geo_looks(figure_config, set(slots.values()))
+    placements = read_geo_placements(figure_config, set(slots.values()))
     fonts = load_fonts(figure_config)
     with store.reading("geo-build", kinds=KINDS_READ, override=ignore_busy) as guard:
         # the maps' one read of the join and the user's tables (design rule 6): a virus is the
@@ -166,6 +167,7 @@ def build_geo(
             written = write_geo_figures(
                 doc, slot, report.coordinates, coastline, figures, slot_provenance,
                 look=looks[slot], scheme=", ".join(s.name for s in slot_schemes),
+                placement=placements[slot],
             )  # fmt: skip
         files += written.files
         key[slot] = clade_key(doc, slot_schemes, looks[slot])
@@ -177,6 +179,8 @@ def build_geo(
             "hidden_by_neighbours": {m: h.to_json() for m, h in sorted(written.hiding.items())},
             "no_coordinates": dict(sorted(written.no_coordinates.items())),
             "moved_inside_edge": dict(sorted(written.moved_inside.items())),
+            # per month, the placement rule and its cost, when the slot names one (Q280)
+            **({"placement": dict(sorted(written.placement.items()))} if written.placement else {}),
             "undated": doc["undated"],
             "no_location": len(doc["no_location"]),
             "empty": not any(written.drawn.values()),
@@ -249,6 +253,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )  # fmt: skip
     for slot, info in record["slots"].items():
         print(f"{slot:6s} {sum(info['drawn'].values()):6d} dots  {info['drawn']}")
+        if "placement" in info:
+            first = next(iter(info["placement"].values()))
+            print(f"{'':6s} placed by {first['rule']}: " + ", ".join(
+                f"{m} {p['locations_off_point']} off their point, p90 {p['move_km']['p90']:,.0f} km"
+                for m, p in info["placement"].items()
+            ))  # fmt: skip
         hidden = info["hidden_by_neighbours"].values()
         unreadable = sum(h["mostly_covered"] for h in hidden)
         if unreadable:  # said out loud, as the unpainted clades are: never a silent count

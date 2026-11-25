@@ -26,6 +26,10 @@ A cluster that would cross the map's edge (a place near the seam at 168.24 W, su
 central Pacific) is moved inward just far enough that every dot is drawn whole, and counted
 per location in ``moved_inside``. Cut at the frame, part of it read as missing dots (R4
 review, 18 Oct 2026); ae drew such a place off the canvas, so it showed even less.
+
+Where the dots go is a named rule (:mod:`af.geo.placement`, Q280): each location's own pile,
+as above, or one lattice shared by the whole page. A page drawn with no rule given is drawn as
+it always was; a page given one reports what its placement cost (:class:`PeriodDrawn`).
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from af.geo.placement import LATTICE, Dot, Placement, displacement, lattice_positions
 from af.geo.records import CLADE_NOT_DEFINED, CLADE_NOT_IN_SCHEME, NOT_SEQUENCED, UNCOLOURED_CLASSES
 
 Coordinates = Callable[[str], "tuple[float, float] | None"]
@@ -119,6 +124,9 @@ class PeriodDrawn:
 
     dots: int = 0
     hiding: Hiding = field(default_factory=Hiding)
+    # the rule's parameters and what it cost in position (af.geo.placement.displacement), when
+    # a rule was given; None draws and records exactly as before Q280
+    placement: dict[str, Any] | None = None
 
 
 @dataclass
@@ -138,6 +146,7 @@ def render_geo(
     out_dir: Path,
     prefix: str,
     look: Look | None = None,
+    placement: Placement | None = None,
 ) -> RenderReport:
     """Write ``<out_dir>/<prefix>-<YYYY-MM>.pdf`` for every period of ``doc``."""
     look = look if look is not None else Look()
@@ -147,8 +156,9 @@ def render_geo(
     for period in doc["periods"]:
         path = out_dir / f"{prefix}-{period['period']}.pdf"
         got = _render_period(
-            period, coordinates, shapes, path, look, report.no_coordinates, report.moved_inside
-        )
+            period, coordinates, shapes, path, look, report.no_coordinates, report.moved_inside,
+            placement,
+        )  # fmt: skip
         report.drawn[period["period"]] = got.dots
         report.hiding[period["period"]] = got.hiding
         report.files.append(path)
@@ -163,6 +173,7 @@ def render_period(
     look: Look | None = None,
     no_coordinates: Counter[str] | None = None,
     moved_inside: Counter[str] | None = None,
+    placement: Placement | None = None,
 ) -> PeriodDrawn:
     """Draw one period of an I7 ``geo`` document to ``path``: the dots drawn, and how much of
     them neighbouring locations cover (:class:`Hiding`).
@@ -174,7 +185,8 @@ def render_period(
     unplaced = no_coordinates if no_coordinates is not None else Counter()
     moved = moved_inside if moved_inside is not None else Counter()
     look = look if look is not None else Look()
-    return _render_period(period, coordinates, _coastline(coastline), path, look, unplaced, moved)
+    shapes = _coastline(coastline)
+    return _render_period(period, coordinates, shapes, path, look, unplaced, moved, placement)
 
 
 #: Samples across a dot when measuring how much of it several neighbours together cover. A
@@ -325,6 +337,7 @@ def _render_period(
     look: Look,
     no_coordinates: Counter[str],
     moved_inside: Counter[str],
+    placement: Placement | None = None,
 ) -> PeriodDrawn:
     import cartopy.crs as ccrs
     import matplotlib
@@ -332,9 +345,6 @@ def _render_period(
     matplotlib.use("pdf")
     import matplotlib.pyplot as plt
 
-    if look.packing not in PACKINGS:
-        raise GeoRenderError(f"unknown packing {look.packing!r}: one of {sorted(PACKINGS)}")
-    pack = PACKINGS[look.packing]
     plate = ccrs.PlateCarree()
     # Dots are placed in the map's own coordinates (degrees from its centre), so a cluster is
     # packed in one piece and an edge cuts it rather than splitting it across the map.
@@ -353,54 +363,148 @@ def _render_period(
             shapes, crs=plate, facecolor="none", edgecolor=look.outline_colour,
             linewidth=look.outline_width,
         )  # fmt: skip
+        groups = _piles(period, coordinates, look, no_coordinates)
+        lattice = placement is not None and placement.rule == LATTICE
+        for group in groups:
+            if group.shifted and not lattice:  # a lattice never hands out a cell the edge cuts
+                moved_inside[group.name] += len(group.xs)
+        kept = 0
+        if lattice:
+            assert placement is not None
+            kept = _to_lattice(groups, placement, look)
         drawn = 0
         placed: list[PlacedDot] = []
-        for order, location in enumerate(period["locations"]):
-            dots = [p for p in location["points"] for _ in range(int(p["count"]))]
-            where = coordinates(location["name"])
-            if where is None:
-                no_coordinates[location["name"]] += len(dots)
-                continue
-            x0 = wrap_longitude(where[0], look.central_longitude)
-            xs, ys, fills, edges, widths = [], [], [], [], []
-            for (dx, dy), point in zip(pack(len(dots), look.ring_step), dots, strict=True):
-                xs.append(x0 + dx * lon_per_point)
-                ys.append(where[1] + dy * lat_per_point)
-                if "uncoloured" in point:
-                    fill, edge, width = uncoloured_style(look, point["uncoloured"])
-                elif point["color"] == "transparent":  # no class: colours not joined
-                    fill, edge, width = uncoloured_style(look, NOT_SEQUENCED)
-                else:
-                    fill, edge, width = point["color"], look.coloured_edge, look.coloured_edge_width
-                fills.append(fill)
-                edges.append(edge)
-                widths.append(width)
-            # the dot's outer edge: its fill and the outer half of its ring
-            reach = look.dot_diameter / 2.0 + max(widths) / 2.0
-            shift_x = inward_shift(min(xs), max(xs), reach * lon_per_point, 180.0)
-            shift_y = inward_shift(min(ys), max(ys), reach * lat_per_point, 90.0)
-            if shift_x or shift_y:
-                xs = [x + shift_x for x in xs]
-                ys = [y + shift_y for y in ys]
-                moved_inside[location["name"]] += len(dots)
+        for group in groups:
+            xs, ys, fills = group.xs, group.ys, group.fills
             ax.scatter(
-                xs, ys, s=look.dot_diameter**2, c=fills, edgecolors=edges, linewidths=widths,
-                transform=centred, zorder=3,
+                xs, ys, s=look.dot_diameter**2, c=fills, edgecolors=group.edges,
+                linewidths=group.widths, transform=centred, zorder=3,
             )  # fmt: skip
             # the same dots in figure points, where a dot is a circle, for what hides what
             placed += [
-                PlacedDot(location["name"], order, x / lon_per_point, y / lat_per_point,
+                PlacedDot(group.name, group.order, x / lon_per_point, y / lat_per_point,
                           fill != "none")
                 for x, y, fill in zip(xs, ys, fills, strict=True)
             ]  # fmt: skip
-            drawn += len(dots)
+            drawn += len(xs)
         _title(fig, ax, period.get("title", period["period"]), look)
         fig.savefig(path)
     finally:
         plt.close(fig)
     if not path.is_file() or path.stat().st_size == 0:
         raise GeoRenderError(f"no map written: {path}")
-    return PeriodDrawn(drawn, hiding(placed, look.dot_diameter / 2.0))
+    hidden = hiding(placed, look.dot_diameter / 2.0)
+    record = None
+    if placement is not None:
+        record = {
+            **placement.to_json(),
+            "kept_by_cap": kept,
+            "unreadable": hidden.mostly_covered,
+            "invisible_locations": hidden.invisible_locations,
+            **displacement(
+                _dots(groups, look), {g.name: g.home[1] for g in groups},
+                *_per_point(look), look.dot_diameter / 2.0,
+            ),
+        }  # fmt: skip
+    return PeriodDrawn(drawn, hidden, record)
+
+
+@dataclass
+class _Pile:
+    """One location's dots as its pile packs them, in degrees from the map's centre."""
+
+    order: int
+    name: str
+    home: tuple[float, float]  # the location's point: (longitude from the centre, latitude)
+    xs: list[float]
+    ys: list[float]
+    fills: list[str]
+    edges: list[str]
+    widths: list[float]
+    shifted: bool  # moved inward so the map's edge cuts no dot
+
+
+def _per_point(look: Look) -> tuple[float, float]:
+    """Degrees per figure point, across and up: the map fills the figure, as ae's does."""
+    return 360.0 / look.width_points, 180.0 / (look.width_points * look.aspect)
+
+
+def _piles(
+    period: Mapping[str, Any], coordinates: Coordinates, look: Look, no_coordinates: Counter[str]
+) -> list[_Pile]:
+    """Every location's dots packed around its own point, in the period's draw order."""
+    if look.packing not in PACKINGS:
+        raise GeoRenderError(f"unknown packing {look.packing!r}: one of {sorted(PACKINGS)}")
+    pack = PACKINGS[look.packing]
+    lon_per_point, lat_per_point = _per_point(look)
+    out = []
+    for order, location in enumerate(period["locations"]):
+        dots = [p for p in location["points"] for _ in range(int(p["count"]))]
+        where = coordinates(location["name"])
+        if where is None:
+            no_coordinates[location["name"]] += len(dots)
+            continue
+        x0 = wrap_longitude(where[0], look.central_longitude)
+        xs, ys, fills, edges, widths = [], [], [], [], []
+        for (dx, dy), point in zip(pack(len(dots), look.ring_step), dots, strict=True):
+            xs.append(x0 + dx * lon_per_point)
+            ys.append(where[1] + dy * lat_per_point)
+            if "uncoloured" in point:
+                fill, edge, width = uncoloured_style(look, point["uncoloured"])
+            elif point["color"] == "transparent":  # no class: colours not joined
+                fill, edge, width = uncoloured_style(look, NOT_SEQUENCED)
+            else:
+                fill, edge, width = point["color"], look.coloured_edge, look.coloured_edge_width
+            fills.append(fill)
+            edges.append(edge)
+            widths.append(width)
+        # the dot's outer edge: its fill and the outer half of its ring
+        reach = look.dot_diameter / 2.0 + max(widths) / 2.0
+        shift_x = inward_shift(min(xs), max(xs), reach * lon_per_point, 180.0)
+        shift_y = inward_shift(min(ys), max(ys), reach * lat_per_point, 90.0)
+        if shift_x or shift_y:
+            xs = [x + shift_x for x in xs]
+            ys = [y + shift_y for y in ys]
+        out.append(
+            _Pile(order, location["name"], (x0, where[1]), xs, ys, fills, edges, widths,
+                  bool(shift_x or shift_y))
+        )  # fmt: skip
+    return out
+
+
+def _dots(groups: list[_Pile], look: Look) -> list[Dot]:
+    """Every dot in figure points, with its location's point, in draw order."""
+    lon_per_point, lat_per_point = _per_point(look)
+    return [
+        Dot(g.name, x / lon_per_point, y / lat_per_point, g.home[0] / lon_per_point,
+            g.home[1] / lat_per_point)
+        for g in groups
+        for x, y in zip(g.xs, g.ys, strict=True)
+    ]  # fmt: skip
+
+
+def _to_lattice(groups: list[_Pile], placement: Placement, look: Look) -> int:
+    """Move every dot to its cell on the page's shared lattice, in place; returns how many
+    dots a ``max_move`` cap kept in their piles."""
+    assert placement.pitch is not None and placement.reserve_point is not None
+    lon_per_point, lat_per_point = _per_point(look)
+    half_w, half_h = look.width_points / 2.0, look.width_points * look.aspect / 2.0
+    widest = max((w for g in groups for w in g.widths), default=0.0)
+    reach = look.dot_diameter / 2.0 + widest / 2.0
+
+    def inside(x: float, y: float) -> bool:
+        return abs(x) + reach <= half_w and abs(y) + reach <= half_h
+
+    positions, kept = lattice_positions(
+        _dots(groups, look), placement.pitch, reserve_point=placement.reserve_point,
+        max_move=placement.max_move, inside=inside,
+    )  # fmt: skip
+    at = iter(positions)
+    for group in groups:
+        moved = [next(at) for _ in group.xs]
+        group.xs = [x * lon_per_point for x, _ in moved]
+        group.ys = [y * lat_per_point for _, y in moved]
+    return kept
 
 
 def _title(fig: Any, ax: Any, title: str, look: Look) -> None:

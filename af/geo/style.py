@@ -14,10 +14,25 @@ report slot, beside the fonts (08-maps' ``[fonts]``, read and checked by its own
     clade_not_defined_edge = "#606060"   # told apart from a not-sequenced one
     clade_not_defined_edge_width = 0.6
 
-Every key is required and an unknown one is an error (design rule 4: no silent defaults), as is
-a slot drawn with no table or a table for a slot not drawn (rule 1), and a look whose two kinds
-of uncoloured dot would draw alike (Sarah, Q215: they are keyed on different lines). The look each
-slot was drawn with goes into its figures' provenance (:func:`look_record`), with the file's hash.
+Where the dots go is a named rule (Q280, :mod:`af.geo.placement`), and the one optional part of
+the table, so a round that does not name one draws exactly as it did before Q280:
+
+    placement = "lattice"             # or "piles": each location's own pile (the default)
+    lattice_pitch = 6.4               # figure points between cells: the ring step
+    lattice_order = "nearest-offer-first"
+    lattice_reserve_point = true      # each location takes one cell on its point first
+    lattice_max_move = 20.0           # optional: no dot moved further (figure points); unset
+                                      # is uncapped, the decided rule
+
+Reverting is one line: ``placement = "piles"`` (recorded as such in every figure), or no
+``placement`` key at all (drawn and recorded exactly as before). The ``lattice_*`` keys are
+required with ``"lattice"`` and an error without it (design rule 1).
+
+Every other key is required and an unknown one is an error (design rule 4: no silent
+defaults), as is a slot drawn with no table or a table for a slot not drawn (rule 1), and a look
+whose two kinds of uncoloured dot would draw alike (Sarah, Q215: they are keyed on different
+lines). The look each slot was drawn with goes into its figures' provenance
+(:func:`look_record`), with the file's hash.
 """
 
 from __future__ import annotations
@@ -29,6 +44,7 @@ from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
+from af.geo.placement import LATTICE, ORDERS, PILES, RULES, Placement
 from af.geo.records import CLADE_NOT_DEFINED, NOT_SEQUENCED
 from af.geo.render import PACKINGS, Look, uncoloured_style
 
@@ -36,6 +52,9 @@ KEYS = (
     "packing", "coloured_edge", "coloured_edge_width", "uncoloured_edge_width",
     "clade_not_defined_fill", "clade_not_defined_edge", "clade_not_defined_edge_width",
 )  # fmt: skip
+PLACEMENT_KEYS = ("placement", "lattice_pitch", "lattice_order", "lattice_reserve_point",
+                  "lattice_max_move")  # fmt: skip
+LATTICE_REQUIRED = ("lattice_pitch", "lattice_order", "lattice_reserve_point")
 UNLIKE = (NOT_SEQUENCED, CLADE_NOT_DEFINED)  # keyed on different lines, so drawn apart
 WIDTHS = ("coloured_edge_width", "uncoloured_edge_width", "clade_not_defined_edge_width")
 _COLOUR = re.compile(r"#[0-9a-fA-F]{6}")
@@ -47,6 +66,18 @@ class GeoStyleError(ValueError):
 
 def read_geo_looks(path: Path, slots: Collection[str]) -> dict[str, Look]:
     """The look for each of ``slots`` from ``path``'s ``[geo.<slot>]`` tables."""
+    tables = _tables(path, slots)
+    return {slot: _look(path, slot, tables[slot]) for slot in sorted(slots)}
+
+
+def read_geo_placements(path: Path, slots: Collection[str]) -> dict[str, Placement | None]:
+    """The placement rule for each of ``slots``; None where the table names none, which draws
+    and records exactly as before Q280."""
+    tables = _tables(path, slots)
+    return {slot: _placement(path, slot, tables[slot]) for slot in sorted(slots)}
+
+
+def _tables(path: Path, slots: Collection[str]) -> dict[str, Any]:
     if not path.is_file():
         raise GeoStyleError(f"figure-style file not found: {path}")
     with path.open("rb") as f:
@@ -58,15 +89,56 @@ def read_geo_looks(path: Path, slots: Collection[str]) -> dict[str, Look]:
         raise GeoStyleError(f"{path}: no [geo.<slot>] table for drawn slots {missing}")
     if unused := sorted(set(tables) - set(slots)):
         raise GeoStyleError(f"{path}: [geo.<slot>] tables for slots not drawn: {unused}")
-    return {slot: _look(path, slot, tables[slot]) for slot in sorted(slots)}
+    return tables
+
+
+def _number(where: str, key: str, value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        raise GeoStyleError(f"{where}: {key} {value!r}: a distance in points, more than 0")
+    return float(value)
+
+
+def _placement(path: Path, slot: str, table: Any) -> Placement | None:
+    where = f"{path} [geo.{slot}]"
+    if not isinstance(table, dict):
+        raise GeoStyleError(f"{where}: not a table")
+    lattice_keys = sorted(k for k in table if k.startswith("lattice_"))
+    if "placement" not in table:
+        if lattice_keys:
+            raise GeoStyleError(f'{where}: {lattice_keys} given without placement = "lattice"')
+        return None
+    rule = table["placement"]
+    if rule not in RULES:
+        raise GeoStyleError(f"{where}: placement {rule!r}: one of {list(RULES)}")
+    if rule == PILES:
+        if lattice_keys:
+            raise GeoStyleError(f'{where}: {lattice_keys} given with placement = "piles"')
+        return Placement(PILES)
+    assert rule == LATTICE
+    if missing := [k for k in LATTICE_REQUIRED if k not in table]:
+        raise GeoStyleError(f'{where}: placement = "lattice" needs {missing}')
+    order, reserve = table["lattice_order"], table["lattice_reserve_point"]
+    if order not in ORDERS:
+        raise GeoStyleError(f"{where}: lattice_order {order!r}: one of {list(ORDERS)}")
+    if not isinstance(reserve, bool):
+        raise GeoStyleError(f"{where}: lattice_reserve_point {reserve!r}: true or false")
+    cap = table.get("lattice_max_move")
+    return Placement(
+        LATTICE,
+        pitch=_number(where, "lattice_pitch", table["lattice_pitch"]),
+        order=order,
+        reserve_point=reserve,
+        max_move=None if cap is None else _number(where, "lattice_max_move", cap),
+    )
 
 
 def _look(path: Path, slot: str, table: Any) -> Look:
     where = f"{path} [geo.{slot}]"
     if not isinstance(table, dict):
         raise GeoStyleError(f"{where}: not a table")
-    if unknown := sorted(set(table) - set(KEYS)):
-        raise GeoStyleError(f"{where}: unknown keys {unknown} (known: {', '.join(KEYS)})")
+    if unknown := sorted(set(table) - set(KEYS) - set(PLACEMENT_KEYS)):
+        known = ", ".join(KEYS + PLACEMENT_KEYS)
+        raise GeoStyleError(f"{where}: unknown keys {unknown} (known: {known})")
     if missing := [k for k in KEYS if k not in table]:
         raise GeoStyleError(f"{where}: missing keys {missing}")
     packing, edge = table["packing"], table["coloured_edge"]
