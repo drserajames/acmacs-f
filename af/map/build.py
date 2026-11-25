@@ -50,14 +50,24 @@ from af.map.addenda import (
     run_addenda,
 )
 from af.map.colouring import MapColouringError, StoreColours
-from af.map.config import FrameShiftConfig, MapConfig, MapsConfig, TitlesConfig
+from af.map.config import (
+    TARGET_SHIPPED,
+    FrameShiftConfig,
+    MapConfig,
+    MapsConfig,
+    MoveToConfig,
+    TitlesConfig,
+)
 from af.map.curate import (
     SETTLED_AT_START,
     BlockOffset,
     CurationError,
     MoveOverride,
+    MoveToOverride,
+    MoveToResult,
     apply_block_offset,
     apply_move,
+    apply_move_to,
     near_cap_flags,
 )
 from af.map.editor import editor_path, save_name
@@ -66,7 +76,13 @@ from af.map.finish import EditorRequest, finish_map, shared_frame
 from af.map.hand import load_hand_labels
 from af.map.labels import LabelAbbreviations, label_text
 from af.map.new_antigens import new_antigen_styles, outlines_on_page
-from af.map.orient import Orientation, RotationOverride, drawn_pairs, orient
+from af.map.orient import (
+    Orientation,
+    OrientationError,
+    RotationOverride,
+    drawn_pairs,
+    orient,
+)
 from af.map.render import DEFAULT_LOOK, PointStyle
 from af.map.style import ColourRow, ColourScheme, PointIn, SequenceLink, Window
 from af.map.vaccines import (
@@ -336,6 +352,283 @@ def apply_moves(
     return layout, flags, reports
 
 
+@dataclass(frozen=True)
+class PendingMoveTo:
+    """A move_to that has been applied, waiting for the map's final layout to be measured in the
+    frame its target was stated in (check_moves_to)."""
+
+    config: MoveToConfig
+    result: MoveToResult
+    movers: tuple[str, ...]
+    requested: np.ndarray  # shipped: reference_round's DRAWN positions; [x, y]: this map's drawn
+    placement_rmsd: float  # the fit that carried the targets into the raw layout
+    placement_common: int
+    frame: str  # which frame requested/achieved are in
+    # shipped only: the reference's drawn layout and the (row here, row there) pairs, movers
+    # excluded, to refit the final layout onto; and what was fitted to
+    reference_drawn: np.ndarray | None = None
+    reference_pairs: NDArray[np.intp] | None = None
+    reference_record: dict[str, str] | None = None
+
+
+def _serum_movers(chart: Chart, wanted: Sequence[str], designations: Sequence[str]) -> list[str]:
+    """Movers that name no antigen but do name a serum: moves_to moves antigens only (Q354 Q6),
+    and saying so beats "matches 0 antigens"."""
+    sera = {designation(s) for s in chart.sera} | {s.name for s in chart.sera}
+    return [w for w in wanted if w not in designations and w in sera]
+
+
+def _shipped_reference(
+    chart: Chart, m: MoveToConfig, folder: str, scheme_name: str, at: str
+) -> tuple[np.ndarray, NDArray[np.intp], dict[str, str]]:
+    """The reference round's drawn map, the drawn common points with it, and the record of what
+    was read. Missing folder, missing styled.ace: BuildError (design rule 4)."""
+    assert m.reference_round is not None
+    if not m.reference_round.is_dir():
+        raise BuildError(f"{at}: reference_round {m.reference_round} is not a directory")
+    styled = m.reference_round / folder / "styled.ace"
+    if not styled.is_file():
+        raise BuildError(f"{at}: reference_round has no {folder}/styled.ace ({styled})")
+    ref = read_chart(styled)
+    pairs, drawn = common_points(chart, ref, scheme_name)
+    record = {
+        "round": m.reference_round.name,
+        "path": str(styled),
+        "sha256": content_hash(styled),
+    }
+    return from_y_down(ref.projections[0].transformed_layout()), drawn_pairs(pairs, drawn), record
+
+
+def _refit(
+    layout: np.ndarray, reference_drawn: np.ndarray, pairs: NDArray[np.intp], at: str, need: int
+) -> Orientation:
+    try:
+        return orient(layout, reference_drawn, pairs, reference=at, min_common=need)
+    except OrientationError as exc:
+        raise BuildError(f"{at}: {exc}") from exc
+
+
+def apply_moves_to(
+    chart: Chart,
+    layout: np.ndarray,
+    cfg: MapConfig,
+    config: MapsConfig,
+    relax: Any,
+    stress: Any,
+) -> tuple[np.ndarray, list[PendingMoveTo]]:
+    """Run the map's moves_to in order (after moves, before blocks).
+
+    Each target is carried into the raw layout by a rigid fit that leaves this move's movers
+    out, so they do not steer the fit that places them:
+
+    * "shipped": a fit of this map onto ``reference_round``'s drawn map over the points both
+      draw. That round need not be the one the build orients to (Q354 Q1').
+    * [x, y]: the map's own orientation (orientation_for: the same previous round and rotations),
+      computed without the movers. The final orientation is made later, unchanged.
+
+    check_moves_to measures the result in the same frame after every other step.
+
+    Unlike moves and blocks, which flag a refusal on the figure and carry on, every failure here
+    is a BuildError (00-v21, Q354 plan Q2). This form exists to put a point somewhere specific,
+    so a refused or empty move means the figure is not the one that was decided.
+    """
+    if not cfg.moves_to:
+        return layout, []
+    where = cfg.folder
+    designations = mover_designations(chart)
+    moved_by_moves = {d for m in cfg.moves for d in m.load_movers()}
+    need = config.defaults.min_common_points
+    pending: list[PendingMoveTo] = []
+    for m in cfg.moves_to:
+        at = f"{where}: move_to {m.name!r}"
+        movers = m.load_movers()
+        if both := sorted(moved_by_moves & set(movers)):
+            raise BuildError(f"{at}: {both[0]!r} is also moved by a moves rule")
+        if sera := _serum_movers(chart, movers, designations):
+            raise BuildError(f"{at}: {sera[0]!r} is a serum; moves_to moves antigens only")
+        rows = []
+        for want in movers:
+            hits = [i for i, d in enumerate(designations) if d == want]
+            if len(hits) != 1:
+                raise BuildError(f"{at}: mover {want!r} matches {len(hits)} antigens")
+            rows.append(hits[0])
+        extra: dict[str, Any] = {}
+        if m.target == TARGET_SHIPPED:
+            ref_drawn, ref_pairs, record = _shipped_reference(chart, m, where, cfg.clade_scheme, at)
+            there = {int(i): int(j) for i, j in ref_pairs}
+            if missing := [w for w, r in zip(movers, rows, strict=True) if r not in there]:
+                raise BuildError(
+                    f"{at}: mover {missing[0]!r} is not drawn, once, on {record['round']}'s map"
+                )
+            requested = ref_drawn[[there[r] for r in rows]]
+            if not np.isfinite(requested).all():
+                raise BuildError(f"{at}: a mover has no position on {record['round']}'s map")
+            without = ref_pairs[~np.isin(ref_pairs[:, 0], rows)]
+            fit = _refit(layout, ref_drawn, without, at, need).fit
+            matrix, translation, rmsd, common = fit.matrix, fit.translation, fit.rmsd, fit.n_common
+            frame = f"{record['round']} drawn"
+            extra = dict(
+                reference_drawn=ref_drawn, reference_pairs=without, reference_record=record
+            )
+        else:
+            assert isinstance(m.target, tuple)
+            previous_round = config.defaults.previous_round
+            if previous_round is None or not (previous_round / where / "styled.ace").is_file():
+                raise BuildError(
+                    f"{at}: an [x, y] target is read in the frame of the previous round it was "
+                    "decided against, but this build orients to none"
+                )
+            if m.reference != previous_round.name:
+                raise BuildError(
+                    f"{at} was decided against {m.reference}, but this build orients to "
+                    f"{previous_round.name}: re-decide it against {previous_round.name}"
+                )
+            in_force = tuple(r.name for r in cfg.rotations)
+            if m.frame_rotations != in_force:
+                raise BuildError(
+                    f"{at}: its coordinates were read with rotations "
+                    f"{list(m.frame_rotations or ())}, but the map now has {list(in_force)}: "
+                    "re-read them in the current frame"
+                )
+            ori = orientation_for(chart, layout, cfg, config, cfg.clade_scheme, exclude=rows)
+            assert ori is not None  # a previous round exists, checked above
+            requested = np.tile(np.asarray(m.target, dtype=float), (len(rows), 1))
+            matrix, translation = ori.matrix, ori.translation
+            rmsd, common, frame = ori.fit.rmsd, ori.fit.n_common, "this map drawn"
+        targets = (requested - translation) @ matrix.T  # orthogonal: the inverse is the transpose
+        rule = MoveToOverride(
+            m.name,
+            m.reason,
+            m.decided.isoformat(),
+            tuple(movers),
+            m.max_stress_rise,
+            m.max_from_target,
+            m.relax,
+        )
+        try:
+            result = apply_move_to(
+                rule,
+                layout,
+                designations,
+                targets,
+                stress_before=stress(layout),
+                stress=stress,
+                relax=relax,
+            )
+        except CurationError as exc:
+            raise BuildError(f"{where}: {str(exc).split('; layout left')[0]}") from exc
+        layout = result.layout
+        pending.append(
+            PendingMoveTo(m, result, tuple(movers), requested, rmsd, common, frame, **extra)
+        )
+    return layout, pending
+
+
+def check_moves_to(
+    pending: Sequence[PendingMoveTo],
+    layout: np.ndarray,
+    ori: Orientation | None,
+    folder: str,
+    min_common: int,
+) -> list[dict[str, Any]]:
+    """Measure every applied move_to in its target's frame, from the map's FINAL layout, and
+    record it (design rule 9).
+
+    from_target_final is the distance between where the mover finally sits and where it was asked
+    to be. For a shipped target, that is after refitting the final layout onto the reference's
+    drawn map, movers left out. For an [x, y] target, it is through the map's final orientation,
+    rotations included, which is where it is drawn. It is checked against the same
+    max_from_target as the relative distance (apply_move_to), because blocks, or the final
+    orientation, which keeps the movers in it, can still pull a mover off.
+    """
+    out = []
+    for p in pending:
+        at = f"{folder}: move_to {p.config.name!r}"
+        if p.reference_drawn is not None:
+            assert p.reference_pairs is not None
+            final = _refit(layout, p.reference_drawn, p.reference_pairs, at, min_common).fit
+            m, t, final_rmsd, final_common = (
+                final.matrix,
+                final.translation,
+                final.rmsd,
+                final.n_common,
+            )
+        else:
+            if ori is None:  # cannot happen: an [x, y] move_to needs the previous round
+                raise BuildError(f"{at}: no final orientation")
+            m, t, final_rmsd, final_common = (
+                ori.matrix,
+                ori.translation,
+                ori.fit.rmsd,
+                ori.fit.n_common,
+            )
+        achieved = layout[list(p.result.rows)] @ m + t
+        from_target = np.linalg.norm(achieved - p.requested, axis=1)
+        if (worst := float(from_target.max())) > p.config.max_from_target:
+            k = int(np.argmax(from_target))
+            raise BuildError(
+                f"{at}: mover {p.movers[k]!r} ends {worst:.3f} from its target in the final "
+                f"layout (cap {p.config.max_from_target}; relative to the rest it is "
+                f"{p.result.relative_from_target[k]:.3f})"
+            )
+        r = p.result
+        rise = r.stress_after - r.stress_before
+        shipped = p.config.target == TARGET_SHIPPED
+        out.append(
+            {
+                "override": p.config.name,
+                "reason": p.config.reason,
+                "decided": p.config.decided.isoformat(),
+                "applied": True,
+                "target": p.config.target if shipped else list(p.config.target),
+                "reference": p.reference_record if shipped else p.config.reference,
+                "relax": p.config.relax,
+                "movers": len(p.movers),
+                "stress_before": round(float(r.stress_before), 4),
+                "stress_after": round(float(r.stress_after), 4),
+                "stress_rise": round(float(rise), 4),
+                "stress_rise_pct": round(100 * float(rise) / float(r.stress_before), 4)
+                if r.stress_before
+                else None,
+                # the frame every relative distance is in: the rest of the map, aligned
+                "rest_alignment": {
+                    "rmsd": round(r.rest_fit_rmsd, 4),
+                    "det": round(r.rest_fit_det, 4),
+                    "largest_other_move": round(r.largest_other_move, 4),
+                },
+                # requested/achieved are in this frame: the one the target was stated in
+                "frame": p.frame,
+                "fit": {
+                    "placement_rmsd": round(p.placement_rmsd, 4),
+                    "placement_common": p.placement_common,
+                    "final_rmsd": round(float(final_rmsd), 4),
+                    "final_common": final_common,
+                },
+                "per_mover": [
+                    {
+                        "designation": p.movers[k],
+                        "requested": [round(float(v), 4) for v in p.requested[k]],
+                        "achieved": [round(float(v), 4) for v in achieved[k]],
+                        "moved_relative": round(r.relative_moved[k], 4),
+                        "from_target_relative": round(r.relative_from_target[k], 4),
+                        "from_target_final": round(float(from_target[k]), 4),
+                    }
+                    for k in range(len(p.movers))
+                ],
+                "checks": [c.fields() for c in r.checks]
+                + [
+                    {
+                        "guard": "from_target_final",
+                        "measured": round(worst, 4),
+                        "limit": p.config.max_from_target,
+                        "bound": "max",
+                    }
+                ],
+            }
+        )
+    return out
+
+
 def hidden_by_rules(chart: Chart, cfg: MapConfig) -> dict[int, str]:
     """Named hides, by designation. Every listed designation must match, or the build fails:
     a hide list that silently stops matching is how the old index-based hides went wrong."""
@@ -358,14 +651,23 @@ def hidden_by_rules(chart: Chart, cfg: MapConfig) -> dict[int, str]:
 
 
 def orientation_for(
-    chart: Chart, layout: np.ndarray, cfg: MapConfig, config: MapsConfig, scheme_name: str
+    chart: Chart,
+    layout: np.ndarray,
+    cfg: MapConfig,
+    config: MapsConfig,
+    scheme_name: str,
+    exclude: Sequence[int] = (),
 ) -> Orientation | None:
     """Fit to the previous round's map, over the points that map actually DREW.
 
     A hand rotation turns the map from where the fit to ITS reference leaves it, so it is refused
     against any other reference, which may already carry the turn (M2's B/Vic map drew turned
     132° when one was carried to a round oriented on the map that held it), and refused when
-    there is no reference at all, where it would silently not be applied."""
+    there is no reference at all, where it would silently not be applied.
+
+    ``exclude`` (rows of this chart) leaves points out of the fit: a move_to carries its targets
+    with a fit that the movers themselves must not steer (apply_moves_to). Empty for the map's
+    own orientation, which is unchanged by it."""
     previous = (
         None
         if config.defaults.previous_round is None
@@ -388,6 +690,8 @@ def orientation_for(
             )
     prev = read_chart(previous)
     pairs, prev_drawn = common_points(chart, prev, scheme_name)
+    if len(exclude):
+        pairs = pairs[~np.isin(pairs[:, 0], np.asarray(exclude, dtype=np.intp))]
     overrides = tuple(
         RotationOverride(r.name, r.degrees, r.reason, r.decided.isoformat(), r.reflect, r.reference)
         for r in cfg.rotations
@@ -627,6 +931,7 @@ def build_map(
     layout, flags, move_reports = apply_moves(chart, layout, cfg, scheme, painted, relax, stress)
     if move_reports:
         decisions["moves"] = move_reports
+    layout, moves_to = apply_moves_to(chart, layout, cfg, config, relax, stress)
     for b in cfg.blocks:
         row_b = next((r for r in scheme.rows if r.legend == b.target_legend), None)
         if row_b is None and not (b.settled_against == SETTLED_AT_START and not b.target_legend):
@@ -688,6 +993,10 @@ def build_map(
 
     ori = orientation_for(chart, layout, cfg, config, cfg.clade_scheme)
     xy = layout @ ori.matrix + ori.translation if ori else layout
+    if moves_to:
+        decisions["moves_to"] = check_moves_to(
+            moves_to, layout, ori, cfg.folder, config.defaults.min_common_points
+        )
 
     counts, latest = table_counts(chart)
     ags = [

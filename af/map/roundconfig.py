@@ -29,6 +29,7 @@ from af.map.config import (
     MapConfig,
     MapsConfig,
     MoveConfig,
+    MoveToConfig,
     NoteConfig,
     RotationConfig,
     TitlesConfig,
@@ -235,6 +236,68 @@ def _colouring(c: dict[str, Any] | None, base: Path) -> ColouringConfig:
         raise ConfigError(str(exc)) from exc
 
 
+_MOVE_TO_KEYS = {
+    "name",
+    "reason",
+    "decided",
+    "movers",
+    "movers_file",
+    "target",
+    "reference",
+    "reference_round",
+    "max_stress_rise",
+    "max_from_target",
+    "relax",
+    "frame_rotations",
+}
+
+
+def _move_to(mv: dict[str, Any], base: Path, where: str) -> MoveToConfig:
+    """One ``[[maps.moves_to]]`` row (af.map.config.MoveToConfig). Where the target comes from
+    (``reference_round`` for "shipped", ``reference`` for [x, y]) and ``relax`` are required: what
+    the coordinates mean and what the cost includes have to be in the record."""
+    name = mv.get("name", "?")
+    at = f"{where} move_to {name!r}"
+    _known(mv, _MOVE_TO_KEYS, f"{where} move_to")
+    for key in ("name", "reason", "decided", "target", "max_stress_rise", "max_from_target",
+                "relax"):  # fmt: skip
+        if key not in mv:
+            raise ConfigError(f"{at}: needs {key}")
+    if not isinstance(mv["relax"], bool):
+        raise ConfigError(f"{at}: relax must be true or false, got {mv['relax']!r}")
+    target = mv["target"]
+    if isinstance(target, list):
+        if len(target) != 2 or not all(isinstance(v, int | float) for v in target):
+            raise ConfigError(f'{at}: target must be "shipped" or [x, y], got {target!r}')
+        target = (float(target[0]), float(target[1]))
+    elif not isinstance(target, str):
+        raise ConfigError(f'{at}: target must be "shipped" or [x, y], got {target!r}')
+    rotations = mv.get("frame_rotations")
+    if rotations is not None and (
+        not isinstance(rotations, list) or not all(isinstance(r, str) for r in rotations)
+    ):
+        raise ConfigError(f"{at}: frame_rotations must be a list of rotation names")
+    try:
+        cfg = MoveToConfig(
+            str(mv["name"]),
+            str(mv["reason"]),
+            _date(mv["decided"], at),
+            tuple(mv.get("movers", ())),
+            target,
+            str(mv["reference"]) if "reference" in mv else None,
+            float(mv["max_stress_rise"]),
+            float(mv["max_from_target"]),
+            mv["relax"],
+            _path(mv["movers_file"], base) if "movers_file" in mv else None,
+            tuple(rotations) if rotations is not None else None,
+            _path(mv["reference_round"], base) if "reference_round" in mv else None,
+        )
+        cfg.load_movers()  # none, or both movers and movers_file: refused here, not at build
+    except (ValueError, OSError) as exc:
+        raise ConfigError(f"{where} {exc}") from exc
+    return cfg
+
+
 def _map(m: dict[str, Any], base: Path) -> MapConfig:
     where = f"map {m.get('folder', '?')}"
     _known(
@@ -250,6 +313,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
             "title",
             "column_bases",
             "moves",
+            "moves_to",
             "blocks",
             "hides",
             "rotations",
@@ -291,6 +355,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
                 _path(mv["movers_file"], base) if "movers_file" in mv else None,
             )
         )
+    moves_to = [_move_to(mv, base, where) for mv in m.get("moves_to", ())]
     blocks = []
     for b in m.get("blocks", ()):
         _known(
@@ -467,6 +532,7 @@ def _map(m: dict[str, Any], base: Path) -> MapConfig:
         title=m.get("title"),
         column_bases=tuple(column_bases),
         moves=tuple(moves),
+        moves_to=tuple(moves_to),
         blocks=tuple(blocks),
         hides=tuple(hides),
         rotations=tuple(rotations),

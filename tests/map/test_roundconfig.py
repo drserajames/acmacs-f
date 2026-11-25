@@ -398,3 +398,63 @@ def test_a_rotation_is_refused_against_another_reference_or_none(tmp_path: Path)
     config, _ = load_maps_config(write(tmp_path / "cfg", text))
     with pytest.raises(BuildError, match="but this build orients to none"):
         orientation_for(chart, cast(Any, None), config.maps[0], config, "clades-v2")
+
+
+MOVE_TO = """
+  [[maps.moves_to]]
+  name = "back where shipped"
+  reason = "decided at the meeting"
+  decided = 2026-11-24
+  movers = ["ONE"]
+  target = "shipped"
+  reference_round = "rounds/2025-0921-example"
+  max_stress_rise = 5.0
+  max_from_target = 0.5
+  relax = false
+"""
+
+
+def test_moves_to_reads_both_target_forms(tmp_path: Path) -> None:
+    config, _ = load_maps_config(write(tmp_path, GOOD + MOVE_TO))
+    (m,) = config.maps[0].moves_to
+    assert (m.target, m.reference, m.relax, m.frame_rotations) == ("shipped", None, False, None)
+    assert m.reference_round == (tmp_path / "rounds/2025-0921-example").resolve()
+    assert m.load_movers() == ("ONE",)
+    xy = MOVE_TO.replace(
+        'target = "shipped"', "target = [1.5, -2]\n  frame_rotations = []"
+    ).replace('reference_round = "rounds/2025-0921-example"', 'reference = "2025-0825-previous"')
+    config, _ = load_maps_config(write(tmp_path, GOOD + xy))
+    (m,) = config.maps[0].moves_to
+    assert m.target == (1.5, -2.0) and m.frame_rotations == ()
+    assert (m.reference, m.reference_round) == ("2025-0825-previous", None)
+
+
+@pytest.mark.parametrize(
+    "old, new, message",
+    [
+        ("relax = false", "", "needs relax"),
+        ("relax = false", 'relax = "no"', "relax must be true or false"),
+        ('reference_round = "rounds/2025-0921-example"', "", "needs reference_round"),
+        (
+            'reference_round = "rounds/2025-0921-example"',
+            'reference_round = "rounds/x"\n  reference = "x"',
+            "and no reference",
+        ),
+        ('target = "shipped"', 'target = "median"', 'expected "shipped" or'),
+        ('target = "shipped"', "target = [1.0]", "target must be"),
+        ('target = "shipped"', "target = [1.0, 2.0]", "needs frame_rotations"),
+        (
+            'target = "shipped"',
+            "target = [1.0, 2.0]\n  frame_rotations = []",
+            "and no reference_round",
+        ),
+        ("relax = false", "relax = false\n  frame_rotations = []", "for an \\[x, y\\] target only"),
+        ("relax = false", "relax = false\n  relaxed = true", "unknown key"),
+        ('movers = ["ONE"]', "", "no movers"),
+        ('movers = ["ONE"]', 'movers = ["ONE"]\n  movers_file = "m.txt"', "not both"),
+    ],
+)
+def test_moves_to_refuses(tmp_path: Path, old: str, new: str, message: str) -> None:
+    (tmp_path / "m.txt").write_text("ONE\n")
+    with pytest.raises(ConfigError, match=message):
+        load_maps_config(write(tmp_path, GOOD + MOVE_TO.replace(old, new)))

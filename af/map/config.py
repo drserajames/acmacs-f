@@ -13,6 +13,7 @@ between rounds (the curated vaccine list, colour schemes) live in the shared dat
 from __future__ import annotations
 
 import datetime as dt
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -92,6 +93,86 @@ class MoveConfig:
 
     def load_movers(self) -> tuple[str, ...]:
         """The movers, inline or from a file beside the config: a long list is unreadable inline."""
+        return _movers(self.name, self.movers, self.movers_file)
+
+
+#: ``MoveToConfig.target`` naming the antigen's own position on the reference round's drawn map.
+TARGET_SHIPPED = "shipped"
+
+
+@dataclass(frozen=True)
+class MoveToConfig:
+    """Move named antigens to GIVEN positions, then optionally relax (Sarah, Q354, 24 Nov 2026:
+    "need to implement ability to move to a given position").
+
+    Why a sibling of :class:`MoveConfig` rather than an option on it: a legend-row median is the
+    only target ``moves`` can express, and it is often not the position that was decided. And the
+    relax that ``moves`` always runs can walk the movers straight back. On one map, five antigens
+    placed at their shipped positions cost +0.6% stress, while the legend-median move of the same
+    five did nothing at all.
+
+    ``target`` is one of two forms:
+
+    * ``"shipped"``: each mover's own position on the DRAWN map of ``reference_round`` (a
+      round directory, given explicitly). That map is its ``<folder>/styled.ace``, read y down
+      as ae draws it. The position is carried into this map by a rigid fit to that map over the
+      points both draw, the movers left out. This is often NOT the round the build orients to:
+      a rebuilt round orients to the round before it but restores positions from the map it
+      shipped (00-v21, Q354 Q1'). So it is never inferred from ``previous_round``.
+    * ``(x, y)``: one position for every mover, in this map's drawn frame (y up, after
+      orientation and rotations). ``reference`` must name the round the build orients to, and
+      ``frame_rotations`` the rotations in force when the numbers were read. Coordinates read in
+      one frame mean nothing in another, so the build refuses if either has changed since.
+
+    ``relax`` has no default because the cost differs completely with and without it, so the
+    record has to say which was used.
+    """
+
+    name: str
+    reason: str
+    decided: dt.date
+    movers: tuple[str, ...]
+    target: str | tuple[float, float]
+    reference: str | None  # [x, y]: the previous round's name
+    max_stress_rise: float
+    max_from_target: float
+    relax: bool
+    movers_file: Path | None = None
+    frame_rotations: tuple[str, ...] | None = None
+    reference_round: Path | None = None  # "shipped": the round whose drawn map holds the targets
+
+    def __post_init__(self) -> None:
+        if isinstance(self.target, str):
+            if self.target != TARGET_SHIPPED:
+                raise ValueError(
+                    f"move_to {self.name!r}: target {self.target!r}: expected "
+                    f'"{TARGET_SHIPPED}" or [x, y]'
+                )
+            if self.frame_rotations is not None:
+                raise ValueError(
+                    f"move_to {self.name!r}: frame_rotations is for an [x, y] target only; a "
+                    "shipped target follows the reference round's own drawing"
+                )
+            if self.reference_round is None or self.reference is not None:
+                raise ValueError(
+                    f"move_to {self.name!r}: a shipped target needs reference_round (the round "
+                    "directory whose drawn map holds the positions) and no reference"
+                )
+        else:
+            if len(self.target) != 2 or not all(math.isfinite(v) for v in self.target):
+                raise ValueError(f"move_to {self.name!r}: target must be two finite numbers")
+            if self.frame_rotations is None:
+                raise ValueError(
+                    f"move_to {self.name!r}: an [x, y] target needs frame_rotations, the map's "
+                    "rotations (by name; [] for none) when the coordinates were read"
+                )
+            if self.reference is None or self.reference_round is not None:
+                raise ValueError(
+                    f"move_to {self.name!r}: an [x, y] target needs reference (the round this "
+                    "map orients to, whose frame the numbers were read in) and no reference_round"
+                )
+
+    def load_movers(self) -> tuple[str, ...]:
         return _movers(self.name, self.movers, self.movers_file)
 
 
@@ -269,9 +350,11 @@ class MapConfig:
     scheme_stand_in: Path | None = None
     title: str | None = None  # default: built from the chart's own lab/subtype/assay
     # Steps run in the order a recipe needs: column bases first (they change what the stress
-    # means), then moves and block offsets in the order given, then hides.
+    # means), then moves, moves_to and block offsets in the order given, then hides.
     column_bases: tuple[ColumnBaseConfig, ...] = ()
     moves: tuple[MoveConfig, ...] = ()
+    # after moves, before blocks (00-v21, Q354 plan Q5)
+    moves_to: tuple[MoveToConfig, ...] = ()
     blocks: tuple[BlockOffsetConfig, ...] = ()
     hides: tuple[HideConfig, ...] = ()
     rotations: tuple[RotationConfig, ...] = ()
