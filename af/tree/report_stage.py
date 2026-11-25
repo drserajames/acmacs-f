@@ -1,22 +1,20 @@
 """The report tree as its own dataset, derived from a published tree version without rebuilding.
 
     python -m af.tree.report_stage <store> <source dataset@version> <export dir> <purpose>
-        --cutoff 2021-01-01 --tables-through 2026-09-21 --table-subtype "A(H1N1)"
         --locations <acmacs-f-data>/rules/locations --placement-limits <.../trees/placement.tsv>
-        [--table-lineage VICTORIA] [--trim <acmacs-f-data>/trees/trim.tsv]
+        [--trim <acmacs-f-data>/trees/trim.tsv]
 
-Today's pipeline makes the report tree from the weekly tree in its W8 ``pdf`` step: leaves
-collected before 2021 are dropped unless a WHO CC table holds them (af.tree.report_filter, task
-5.5). This step does the same to a *published* version, named by its id, never by CURRENT, so a
-round's report tree says exactly which weekly tree it came from, and publishes the result as
-``trees/<subtype>/<purpose>``.
+The report tree is derived from a *published* tree version, named by its id, never by CURRENT, so
+a round's report tree says exactly which weekly tree it came from, and the result is published as
+``trees/<subtype>/<purpose>``. It holds every leaf of its source unless ``--trim`` cuts it at a node
+(af.tree.report_filter). There is **no date rule and no titre table** (Sarah, 25 Nov 2026: a report
+tree must not drop sequences that were not titrated, and "the tables shoud not affect the trees"):
+the shipped pipeline's ``--remove-leaves-isolated-before 2021 --important <titrated>`` is not
+reproduced, no tables dataset is read, and none is an input of the published version.
 
 - The leaves' sequences come from the export the source was built from; the export must be the
   one the source records (same sequence-store version, same leaf count), and its files the ones it
   wrote (af.tree.export.check_matches).
-- Titrated means held by a table in the tables store dated on or before ``--tables-through`` (the
-  round's tables, not later ones), matched by the lab's EPI_ISL or by location/isolate/year
-  (af.seq.matching's key, the one editable copy).
 - Continent comes from acmacs-f-data's location tables (country spelling -> ISO3 -> scheme
   ``continent``). A leaf with none is kept and counted by reason, never guessed.
 - Clock direction, placement and the clock's own leaf flags are re-measured on the pruned tree
@@ -31,7 +29,7 @@ round's report tree says exactly which weekly tree it came from, and publishes t
   on the cut branch alone, the clock flagged 1,004 B/Vic leaves instead of 286, nearly all of them
   the current fast-moving clade, an artefact of the cut. The clock direction is checked on the
   trimmed tree. A trim file with no row for the subtype is an error. Without ``--trim`` nothing
-  changes.
+  changes. Which node is cut is that file's row for the subtype: config, never code.
 - The source version is an input in PROVENANCE.json and in HISTORY.jsonl's publish event; the
   store's ``parent`` field is the previous version of this same dataset.
 """
@@ -39,22 +37,18 @@ round's report tree says exactly which weekly tree it came from, and publishes t
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import datetime
 import json
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 from af.seq.locations import LocationTables
-from af.seq.matching import location_forms_key, name_key
 from af.seq.places import PlacesError
 from af.store import Provenance, Store, StoreRef
 from af.store.ref import ExternalInput
 from af.store.store import MANIFEST, Manifest
-from af.tables.model import Table
-from af.tables.store import current_tables, read_table
 from af.tree.clock import (
     ClockSettings,
     InvertedClockError,
@@ -67,7 +61,7 @@ from af.tree.io import i6
 from af.tree.io.fasta import read_alignment
 from af.tree.placement import PlacementError, check_placement, limit_for, load_placement_limits
 from af.tree.populate import CONTINENTS, LeafRecord, PopulatedTree
-from af.tree.report_filter import TitratedIndex, report_tree
+from af.tree.report_filter import report_tree
 from af.tree.stages import build_record
 from af.tree.trim import TrimError, TrimMatch, find_trim_node, load_trim_rules, rule_for
 
@@ -92,38 +86,6 @@ def pinned(store: Store, kind: str, spec: str) -> StoreRef:
     ref = StoreRef(kind, dataset, version, Manifest.from_bytes(manifest.read_bytes()).sha256())
     store.verify(ref)
     return ref
-
-
-def report_name_key(name: str) -> str:
-    """location/isolate/year with the location's spacing and punctuation dropped.
-
-    A name of another shape keys as itself, so it can only match the identical name.
-    """
-    key = name_key(name)
-    return f"unparsed:{name}" if key is None else "/".join(location_forms_key(key))
-
-
-def round_tables(
-    tables: Iterable[Table], subtype: str, lineage: str, through: datetime.date
-) -> tuple[list[Table], dict[str, int]]:
-    """One subtype's tables dated on or before ``through``; B antigens of other lineages out."""
-    kept: list[Table] = []
-    counts: Counter[str] = Counter()
-    for table in tables:
-        if table.subtype != subtype:
-            continue
-        if datetime.date.fromisoformat(table.date) > through:
-            counts["tables_after_through"] += 1
-            continue
-        if lineage:
-            antigens = [a for a in table.antigens if (a.lineage or table.lineage) == lineage]
-            counts["antigens_other_lineage"] += len(table.antigens) - len(antigens)
-            table = dataclasses.replace(table, antigens=antigens)
-        kept.append(table)
-    counts["tables_used"] = len(kept)
-    if not kept:
-        raise ReportStageError(f"no {subtype} {lineage} tables dated on or before {through}")
-    return kept, dict(counts)
 
 
 def continent_lookup(
@@ -213,8 +175,6 @@ def source_clock_settings(version: Path) -> ClockSettings:
 
 def derive(
     populated: PopulatedTree,
-    cutoff: datetime.date,
-    titrated: TitratedIndex,
     continent_of: Callable[[LeafRecord], str | None],
     missing: Counter[str],
     placement_limits: Path,
@@ -228,14 +188,12 @@ def derive(
     # Placement needs the outgroup, so with a trim it is measured on the untrimmed report tree.
     # Continents are not looked up there: the lookup counts its misses, and this tree is not kept.
     untrimmed = (
-        report_tree(populated, cutoff, titrated)
+        report_tree(populated)
         if trim is not None
-        else report_tree(populated, cutoff, titrated, continent_of=continent_of)
+        else report_tree(populated, continent_of=continent_of)
     )
     result = (
-        untrimmed
-        if trim is None
-        else report_tree(populated, cutoff, titrated, continent_of=continent_of, trim=trim)
+        untrimmed if trim is None else report_tree(populated, continent_of=continent_of, trim=trim)
     )
     for reason, count in sorted(missing.items()):
         result.counts[f"continent_unassigned_{reason}"] = count
@@ -312,12 +270,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("export", type=Path, help="the export the source was built from")
     parser.add_argument("purpose", help="the new dataset's purpose, e.g. report-round-af-2026-0921")
-    parser.add_argument("--cutoff", required=True, type=datetime.date.fromisoformat)
-    parser.add_argument("--tables-through", required=True, type=datetime.date.fromisoformat)
-    parser.add_argument(
-        "--table-subtype", required=True, help='Table.subtype: "A(H1N1)", "A(H3N2)", "B"'
-    )
-    parser.add_argument("--table-lineage", default="", help="B only: VICTORIA or YAMAGATA")
     parser.add_argument(
         "--locations", required=True, type=Path, help="acmacs-f-data rules/locations"
     )
@@ -345,15 +297,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     alignment, alignment_path = checked_alignment(meta, args.export)
     populated = i6.read(version, alignment)
 
-    held = current_tables(store)
-    tables, table_counts = round_tables(
-        (read_table(path) for _, path in held.values()),
-        args.table_subtype,
-        args.table_lineage,
-        args.tables_through,
-    )
-    table_refs = sorted({ref for ref, _ in held.values()}, key=lambda r: r.dataset)
-    titrated = TitratedIndex.from_tables(tables, report_name_key)
     continent_of, missing = continent_lookup(LocationTables.read(args.locations))
     trim: TrimMatch | None = None
     if args.trim is not None:
@@ -365,15 +308,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ReportStageError(str(error)) from error
     result = derive(
         populated,
-        args.cutoff,
-        titrated,
         continent_of,
         missing,
         args.placement_limits,
         source_clock_settings(version),
         trim,
     )
-    result.counts.update({f"report_{k}": v for k, v in table_counts.items()})
     extra_inputs: list[StoreRef | ExternalInput] = []
     if args.build_record is not None:
         if populated.build is not None:
@@ -386,34 +326,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parameters = {
         "source": source_ref.to_json(),
-        "cutoff": args.cutoff.isoformat(),
-        "tables_through": args.tables_through.isoformat(),
-        "table_subtype": args.table_subtype,
-        "table_lineage": args.table_lineage,
-        "name_key": "af.seq.matching location/isolate/year, location forms",
+        # Said in the record, because report trees made before 25 Nov 2026 carry a date rule.
+        "date_rule": "none: no leaf is dropped for its date or for having no titres; "
+        "only a node cut (trim) makes the tree smaller (Sarah, 25 Nov 2026)",
         "continent": f"{args.locations} scheme {CONTINENT_SCHEME}, country source {COUNTRY_SOURCE}",
     }
     if trim is not None:
         parameters["trim"] = {"file": str(args.trim), **trim.to_json()}
         extra_inputs.append(ExternalInput.of(args.trim))
     leaves, internal = result.tree.count()
-    report = {
-        k: result.counts.get(k)
-        for k in sorted(result.counts)
-        if not k.startswith("titrated_leaves_")
-    }
+    report = {k: result.counts.get(k) for k in sorted(result.counts)}
     print(
         f"{source_ref}: {populated.tree.count()[0]} leaves -> {leaves} leaves, {internal} internal"
     )
     for key in (
-        "removed_before_cutoff",
-        "kept_titrated_before_cutoff",
-        "kept_undated",
-        "titrated_leaves",
-        "titrated_by_epi_isl",
-        "titrated_by_name",
-        "titre_index_tables",
-        "titre_index_antigens",
         "clock_flagged",
         "clock_long_branches",
         "clock_clock_outliers",
@@ -426,8 +352,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             else (
                 "trim",
                 "removed_by_trim",
-                "removed_by_trim_titrated",
-                "removed_by_trim_otherwise_kept",
                 "removed_by_trim_by_year",
             )
         ),
@@ -435,7 +359,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"  {key:<28} {report.get(key)}")
     print(f"  continents                   {result.counts.get('continents')}")
     for key, value in report.items():
-        if key.startswith("continent_unassigned_") or key.startswith("report_"):
+        if key.startswith("continent_unassigned_"):
             print(f"  {key:<28} {value}")
     print(f"  clock_direction              {result.counts['clock_direction']}")
     placement = result.counts["placement"]
@@ -455,7 +379,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             ExternalInput.of(args.locations / "countries.tsv"),
             ExternalInput.of(args.locations / "regions.tsv"),
             *extra_inputs,
-            *table_refs,
         ],
         parameters,
         started,

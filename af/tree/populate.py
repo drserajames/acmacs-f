@@ -161,6 +161,8 @@ class PopulatedTree:
     """Sequences the pre-build filter dropped, by name (WS11: "dropped" must differ from "lost")."""
     titrated: dict[str, bool] = field(default_factory=dict)
     titrated_by: dict[str, list[str]] = field(default_factory=dict)
+    """Read back from report trees published before 25 Nov 2026, which carried them. Nothing fills
+    them now: the titre tables do not reach a tree (af.tree.report_filter), so I6 writes null."""
     counts: dict[str, Any] = field(default_factory=dict)
     gaps_reconstructed: bool = True
     build: dict[str, Any] | None = None
