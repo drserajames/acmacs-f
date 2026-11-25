@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from af.geo.colours import placement_warning, unpainted_warning
+from af.geo.placement import Placement
 from af.geo.records import CLADE_NOT_DEFINED, CLADE_NOT_IN_SCHEME, NOT_SEQUENCED
 from af.geo.render import Coordinates, Hiding, Look, render_period, uncoloured_style
 from af.geo.style import look_record
@@ -85,6 +86,8 @@ class FiguresReport:
     drawn: dict[str, int] = field(default_factory=dict)  # month -> dots drawn
     # month -> how many of those dots neighbouring locations cover (af.geo.render.Hiding)
     hiding: dict[str, Hiding] = field(default_factory=dict)
+    # month -> the placement rule and what it cost (af.geo.placement), when one was given
+    placement: dict[str, dict[str, Any]] = field(default_factory=dict)
     no_coordinates: Counter[str] = field(default_factory=Counter)  # location -> dots
     # location -> dots in clusters moved inward so the map's edge cuts none (af.geo.render)
     moved_inside: Counter[str] = field(default_factory=Counter)
@@ -101,6 +104,7 @@ def write_geo_figures(
     variant: str = "af",
     look: Look | None = None,
     scheme: str | None = None,
+    placement: Placement | None = None,
 ) -> FiguresReport:
     """Write every period of one subtype's I7 ``geo`` document as a report figure.
 
@@ -111,6 +115,9 @@ def write_geo_figures(
     A month with dots left unpainted by clade evidence
     gets ``provenance.decisions.unpainted_clades`` with the warning, and the warning is printed
     (Sarah, 8 Oct 2026: a warning, never a silent count); ``scheme`` names the colour scheme.
+
+    ``placement``: the rule that places the dots (Q280). Given, each I7 records it with what
+    it cost (``provenance.placement``); None draws and records exactly as before Q280.
     """
     report = FiguresReport()
     for period in doc["periods"]:
@@ -120,8 +127,10 @@ def write_geo_figures(
         pdf = folder / "figure.pdf"
         unplaced: Counter[str] = Counter()
         moved: Counter[str] = Counter()
-        got = render_period(period, coordinates, coastline, pdf, look, unplaced, moved)
+        got = render_period(period, coordinates, coastline, pdf, look, unplaced, moved, placement)
         report.drawn[month] = got.dots
+        if got.placement is not None:
+            report.placement[month] = got.placement
         report.hiding[month] = got.hiding
         report.no_coordinates.update(unplaced)
         report.moved_inside.update(moved)
@@ -152,6 +161,8 @@ def write_geo_figures(
                 "no_coordinates": dict(sorted(unplaced.items())),
                 # a cluster at the seam (168.24 W) moved inward until no dot is cut: its dots
                 "moved_inside_edge": dict(sorted(moved.items())),
+                # which rule placed the dots, and what it cost in position (Q280)
+                **({"placement": got.placement} if got.placement is not None else {}),
                 **({"decisions": decisions} if decisions else {}),
             },
             "geo": {

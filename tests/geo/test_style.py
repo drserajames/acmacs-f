@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from af.geo.placement import LATTICE, PILES, Placement
 from af.geo.render import Look
-from af.geo.style import GeoStyleError, look_record, read_geo_looks
+from af.geo.style import GeoStyleError, look_record, read_geo_looks, read_geo_placements
 
 SHIPPED = """
 [fonts]  # 08-maps' table: not geo's to read
@@ -112,3 +113,56 @@ def test_no_file_or_no_geo_tables_is_an_error(tmp_path: Path) -> None:
         read_geo_looks(tmp_path / "missing.toml", {"h3"})
     with pytest.raises(GeoStyleError, match="no"):
         read_geo_looks(_file(tmp_path, "[fonts]\nsans = 'x'\n"), {"h3"})
+
+
+LATTICE_KEYS = """placement = "lattice"
+lattice_pitch = 6.4
+lattice_order = "nearest-offer-first"
+lattice_reserve_point = true
+"""
+
+
+def _with(text: str, extra: str, slot: str = "h3") -> str:
+    """``text`` with ``extra`` lines added to ``[geo.<slot>]``."""
+    return text.replace(f"[geo.{slot}]\n", f"[geo.{slot}]\n{extra}", 1)
+
+
+def test_a_slot_naming_no_placement_is_drawn_as_before(tmp_path: Path) -> None:
+    path = _file(tmp_path, SHIPPED)
+    assert read_geo_placements(path, {"h3", "bvic"}) == {"h3": None, "bvic": None}
+    # and the look is untouched by the placement keys, so the figure's look record is too
+    plain = read_geo_looks(path, {"h3", "bvic"})
+    named = read_geo_looks(_file(tmp_path, _with(SHIPPED, LATTICE_KEYS)), {"h3", "bvic"})
+    assert plain == named
+
+
+def test_the_lattice_and_its_parameters_come_from_config(tmp_path: Path) -> None:
+    text = _with(_with(SHIPPED, LATTICE_KEYS), "lattice_max_move = 20\n" + LATTICE_KEYS, "bvic")
+    got = read_geo_placements(_file(tmp_path, text), {"h3", "bvic"})
+    assert got["h3"] == Placement(LATTICE, 6.4, "nearest-offer-first", True, None)
+    assert got["bvic"] is not None and got["bvic"].max_move == 20.0
+    piles = read_geo_placements(
+        _file(tmp_path, _with(SHIPPED, 'placement = "piles"\n')), {"h3", "bvic"}
+    )
+    assert piles["h3"] == Placement(PILES) and piles["h3"].to_json() == {"rule": "piles"}
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ('placement = "scatter"\n', "placement 'scatter'"),
+        ('placement = "piles"\nlattice_pitch = 6.4\n', "given with placement"),
+        ("lattice_pitch = 6.4\n", "given without placement"),
+        ('placement = "lattice"\n', "needs"),
+        (LATTICE_KEYS.replace("6.4", "0"), "lattice_pitch 0"),
+        (LATTICE_KEYS.replace("nearest-offer-first", "largest-first"), "lattice_order"),
+        (LATTICE_KEYS.replace("true", '"yes"'), "lattice_reserve_point"),
+        (LATTICE_KEYS + "lattice_max_move = -1\n", "lattice_max_move -1"),
+        (LATTICE_KEYS + "lattice_spacing = 2\n", "unknown keys"),
+    ],
+)
+def test_a_wrong_placement_is_an_error(tmp_path: Path, extra: str, message: str) -> None:
+    path = _file(tmp_path, _with(SHIPPED, extra))
+    with pytest.raises(GeoStyleError, match=message):
+        read_geo_placements(path, {"h3", "bvic"})
+        read_geo_looks(path, {"h3", "bvic"})
