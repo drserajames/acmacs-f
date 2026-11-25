@@ -23,7 +23,7 @@ workstream 6) plugs in without this module knowing how stress is minimised.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -272,6 +272,206 @@ def apply_move(
         mover_rows=tuple(rows),
         target_points=len(group),
         worst_from_target=worst,
+        largest_other_move=largest_other,
+        checks=checks,
+    )
+
+
+@dataclass(frozen=True)
+class MoveToOverride:
+    """Move named antigens to GIVEN raw positions, then optionally relax (Q354).
+
+    Unlike :class:`MoveOverride`, the target is given, not computed from a painted group, and
+    the relax can be switched off. With the relax on, the whole map settles, the movers
+    included, so a mover whose titres hold it elsewhere walks back. That is what made one
+    legend-median move a no-op. With it off, the cost is the arrangement itself.
+
+    ``movers`` follow the same matching as ``moves``: each must name exactly one antigen.
+    Distance from the target is NOT checked here. The build measures it in the map's final drawn
+    frame, after orientation, because that is the frame the target was stated in
+    (af.map.build.apply_moves_to).
+    """
+
+    name: str
+    reason: str
+    decided: str
+    movers: tuple[str, ...]
+    max_stress_rise: float
+    max_from_target: float
+    relax: bool
+
+
+#: A move_to whose movers all shift less than ``max(NO_OP_FLOOR, NO_OP_RMSD_FACTOR x the rest's
+#: alignment rmsd)`` RELATIVE TO THE REST OF THE MAP did nothing, and fails. A fixed 0.01 u (what
+#: flags a no-op ``moves`` rule) is inside the alignment's own scatter: on a real map the aligned
+#: non-movers showed residuals up to 0.023 u (08, 25 Nov 2026).
+NO_OP_FLOOR = 0.05
+NO_OP_RMSD_FACTOR = 2.0
+
+
+@dataclass(frozen=True)
+class MoveToResult:
+    layout: Array
+    stress_before: float
+    stress_after: float
+    rows: tuple[int, ...]  # the movers' rows, in rule order
+    targets: Array  # raw targets, one per mover
+    moved: tuple[float, ...]  # how far each mover travelled from where it was (raw)
+    # Relative to the rest of the map: the result aligned onto the pre-move layout over the
+    # NON-movers only, then each mover's displacement and its distance from its target.
+    relative_moved: tuple[float, ...]
+    relative_from_target: tuple[float, ...]
+    rest_fit_rmsd: float  # how far the rest of the map changed shape (the alignment's residual)
+    rest_fit_det: float  # +1: the alignment is a rotation, never a mirror
+    largest_other_move: float  # in that same frame
+    checks: tuple[GuardCheck, ...] = ()
+
+
+def _one_row_each(name: str, movers: Sequence[str], designations: Sequence[str]) -> list[int]:
+    if not movers:
+        raise CurationError(
+            f"move_to {name!r}: no movers", guard="movers", measured=0, limit=1, bound="min"
+        )
+    rows = []
+    for want in movers:
+        hits = [i for i, d in enumerate(designations) if d == want]
+        if len(hits) != 1:
+            raise CurationError(
+                f"move_to {name!r}: mover {want!r} matches {len(hits)} antigens",
+                guard="mover_match",
+                measured=len(hits),
+                limit=1,
+                bound="exact",
+            )
+        rows.append(hits[0])
+    if len(set(rows)) != len(rows):
+        raise CurationError(
+            f"move_to {name!r}: a mover is listed twice",
+            guard="mover_match",
+            measured=len(rows) - len(set(rows)),
+            limit=0,
+            bound="exact",
+        )
+    return rows
+
+
+def apply_move_to(
+    rule: MoveToOverride,
+    layout: Array,
+    designations: Sequence[str],
+    targets: Array,
+    *,
+    stress_before: float,
+    stress: Callable[[Array], float],
+    relax: Relax,
+) -> MoveToResult:
+    """Place each mover of ``rule`` at its row of ``targets`` (raw coordinates of the PRE-move
+    layout, in rule order), relax if ``rule.relax``, and check the result.
+
+    Why the distances are measured relative to the rest of the map: raw coordinates are not
+    comparable across a relax. A group of movers that keeps its own shape can be "satisfied" by a
+    rigid motion of everything else, and then the map has not changed at all while every mover
+    sits on its absolute target. This was measured on a real map: holding five such movers at
+    target and relaxing the rest cost +0.0065% and changed nothing. So the result is aligned
+    onto the pre-move layout over the non-movers, and the guards read that frame.
+
+    Raises :class:`CurationError` before returning anything if:
+    - a mover matches 0 or several antigens;
+    - a mover has no coordinates (a disconnected point takes no part in the map);
+    - the stress rises past the cap;
+    - a mover ends further than ``max_from_target`` from its target, relative to the rest; or
+    - no mover moved more than the no-op floor relative to the rest (:data:`NO_OP_FLOOR`).
+
+    The two relative guards catch different failures. A relax that carries the rest of the map
+    rigidly onto the movers leaves them displaced by a little relative to the rest, but far from
+    their targets: from_target_relative catches it. Movers left free that spring back to where
+    they were: moved_relative catches it.
+    """
+    targets = np.asarray(targets, dtype=float)
+    rows = _one_row_each(rule.name, rule.movers, designations)
+    if targets.shape != (len(rows), 2) or not np.isfinite(targets).all():
+        raise ValueError(f"move_to {rule.name!r}: need one finite target per mover")
+    has_xy = rows_with_coordinates(layout)
+    if not has_xy[rows].all():
+        missing = [rule.movers[k] for k, r in enumerate(rows) if not has_xy[r]]
+        raise CurationError(
+            f"move_to {rule.name!r}: mover {missing[0]!r} has no coordinates (disconnected)",
+            guard="mover_coordinates",
+            measured=len(missing),
+            limit=0,
+            bound="exact",
+        )
+    start = layout.copy()
+    start[rows] = targets
+    if rule.relax:
+        out, stress_after = relax(start, has_xy)
+        out = np.asarray(out, dtype=float)
+    else:
+        out, stress_after = start, float(stress(start))
+    moved = tuple(float(d) for d in np.linalg.norm(out[rows] - layout[rows], axis=1))
+    mover_set = set(rows)
+    others = np.array(
+        [i for i in range(len(layout)) if i not in mover_set and has_xy[i]], dtype=np.intp
+    )
+    rest = procrustes(out[others], layout[others], reflection=False)  # raises if < 3 others
+    no_op = max(NO_OP_FLOOR, NO_OP_RMSD_FACTOR * rest.rmsd)
+    aligned = out @ rest.matrix + rest.translation
+    rel_moved = np.linalg.norm(aligned[rows] - layout[rows], axis=1)
+    rel_from = np.linalg.norm(aligned[rows] - targets, axis=1)
+    largest_other = float(np.linalg.norm(aligned[others] - layout[others], axis=1).max())
+    checks = (
+        GuardCheck("stress_rise", stress_after - stress_before, rule.max_stress_rise, "max"),
+        GuardCheck("from_target_relative", float(rel_from.max()), rule.max_from_target, "max"),
+        GuardCheck("moved_relative", float(rel_moved.max()), no_op, "min"),
+    )
+    if not checks[0].passed:
+        raise CurationError(
+            f"move_to {rule.name!r}: stress rose {stress_after - stress_before:.3f} "
+            f"(cap {rule.max_stress_rise}, relax {'on' if rule.relax else 'off'}); "
+            "layout left unchanged",
+            guard="stress_rise",
+            measured=stress_after - stress_before,
+            limit=rule.max_stress_rise,
+            bound="max",
+            checks=checks,
+        )
+    if not checks[2].passed:
+        raise CurationError(
+            f"move_to {rule.name!r}: a no-op: relative to the rest of the map no mover moved "
+            f"more than {rel_moved.max():.4f} u (needs {no_op:.4f}; relax "
+            f"{'on' if rule.relax else 'off'}); they end {rel_from.min():.3f} to "
+            f"{rel_from.max():.3f} u from their targets, stress "
+            f"{stress_after - stress_before:+.3f}; layout left unchanged",
+            guard="moved_relative",
+            measured=float(rel_moved.max()),
+            limit=no_op,
+            bound="min",
+            checks=checks,
+        )
+    if not checks[1].passed:
+        worst = int(np.argmax(rel_from))
+        raise CurationError(
+            f"move_to {rule.name!r}: mover {rule.movers[worst]!r} ends {rel_from[worst]:.3f} from "
+            f"its target relative to the rest of the map (cap {rule.max_from_target}; it moved "
+            f"{rel_moved[worst]:.3f}; relax {'on' if rule.relax else 'off'}); "
+            "layout left unchanged",
+            guard="from_target_relative",
+            measured=float(rel_from[worst]),
+            limit=rule.max_from_target,
+            bound="max",
+            checks=checks,
+        )
+    return MoveToResult(
+        layout=out,
+        stress_before=stress_before,
+        stress_after=float(stress_after),
+        rows=tuple(rows),
+        targets=targets,
+        moved=moved,
+        relative_moved=tuple(float(d) for d in rel_moved),
+        relative_from_target=tuple(float(d) for d in rel_from),
+        rest_fit_rmsd=float(rest.rmsd),
+        rest_fit_det=float(np.linalg.det(rest.matrix)),
         largest_other_move=largest_other,
         checks=checks,
     )
