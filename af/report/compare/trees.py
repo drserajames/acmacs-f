@@ -261,14 +261,16 @@ def _figure_leaves(doc: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], int]
     return unique, sum(n for n in counts.values() if n > 1)
 
 
-ISOLATE = re.compile(r"^(?:[AB](?:\([^)]*\))?/)?(.*?/\d{4})")
+ISOLATE = re.compile(r"^(?:[AB](?:\([^)]*\))?/)?(.*/\d{4})(?=_|$)")
 
 
 def isolate_key(name: str) -> str:
     """Type prefix and anything after the year dropped, spelling-normalised.
 
     ae's leaf names carry the passage after the year (``<place>/<number>/<year>_<passage>``);
-    af's carry the type before the place. Both reduce to the isolate.
+    af's carry the type before the place. Both reduce to the isolate. The year is the LAST four
+    digits before the passage (or the end): stopping at the first ``/dddd`` cut a longer isolate
+    number short, so ``<place>/10241/2020`` and ``<place>/10240/2026`` shared one key and paired.
     """
     from af.report.compare.maps import spelling_key
 
