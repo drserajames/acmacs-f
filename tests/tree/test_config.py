@@ -26,7 +26,6 @@ outgroup = "EPI_ISL_70001|EPI70001"
 branch_scale = "mutations"
 long_branch_threshold = 0.006
 long_branch_reason = "an invented override for this test"
-report_cutoff = "2021-01-01"
 
 [subtypes.h1]
 outgroup = "EPI_ISL_70002|EPI70002"
@@ -51,7 +50,6 @@ def test_a_config_loads_per_subtype_settings(tmp_path: Path) -> None:
     h3 = settings.for_subtype("h3")
     assert h3.branch_scale == "mutations"
     assert h3.long_branch == 0.006
-    assert h3.report_cutoff == "2021-01-01"
     assert settings.for_subtype("h1").asr_backend == "treetime"
 
 
@@ -147,3 +145,10 @@ def test_the_typed_scale_accessor_matches_what_populate_takes() -> None:
 
     for scale in BRANCH_SCALES:
         assert SubtypeSettings(outgroup="X", branch_scale=scale).scale == scale
+
+
+def test_a_report_cutoff_is_refused_now_that_there_is_no_date_rule(tmp_path: Path) -> None:
+    """Sarah, 25 Nov 2026: report trees keep untitrated sequences, so a cutoff means nothing."""
+    text = EXAMPLE.replace("[subtypes.h1]", 'report_cutoff = "2021-01-01"\n\n[subtypes.h1]')
+    with pytest.raises(ConfigError, match="report_cutoff"):
+        load_tree_config(write(tmp_path, text))

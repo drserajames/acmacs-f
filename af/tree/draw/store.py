@@ -29,7 +29,11 @@ class StoreTree:
     branch_scale: str = ""  # tree.json's branch_scale ("ml", "mutations"): the unit of edge lengths
 
     def centre_leaves(self, centre: str) -> frozenset[str]:
-        """Leaf ids titrated by ``centre``; a centre with no leaf is an error (design rule 1)."""
+        """Leaf ids titrated by ``centre``; a centre with no leaf is an error (design rule 1).
+
+        Only report trees published before 25 Nov 2026 carry these marks; on a newer tree every
+        centre is an error. A centre-marked figure must take its centre sets as a figure input.
+        """
         ids = frozenset(leaf for leaf, labs in self.titrated_by.items() if centre in labs)
         if not ids:
             known = sorted({lab for labs in self.titrated_by.values() for lab in labs})

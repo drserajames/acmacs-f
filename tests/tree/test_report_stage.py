@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import datetime
 import json
 from collections import Counter
@@ -12,45 +11,14 @@ import pytest
 
 from af.seq.locations import LocationTables
 from af.store import Store, StoreRef
-from af.tables.model import Antigen
 from af.tree import report_stage as R
 from af.tree.populate import LeafRecord
 
-from .test_report_filter import table
-
-THROUGH = datetime.date(2026, 9, 21)
+STARTED = datetime.date(2026, 9, 21)
 
 
 def record(country: str | None) -> LeafRecord:
     return LeafRecord("EPI_ISL_1", "EPI1", "A/EXAMPLETOWN/1/2024", "ACGT", country=country)
-
-
-def test_the_name_key_ignores_location_punctuation_and_the_subtype_prefix() -> None:
-    assert R.report_name_key("A/EXAMPLETOWN/12/2020") == R.report_name_key(
-        "A(H1N1)/EXAMPLE-TOWN/12/2020"
-    )
-    assert R.report_name_key("A/EXAMPLETOWN/12/2020") != R.report_name_key("A/EXAMPLETOWN/13/2020")
-
-
-def test_a_name_of_another_shape_only_matches_itself() -> None:
-    assert R.report_name_key("odd name") == "unparsed:odd name"
-    assert R.report_name_key("odd name") != R.report_name_key("other odd name")
-
-
-def test_round_tables_keep_the_subtype_up_to_the_round_and_one_b_lineage() -> None:
-    old = table(Antigen("B/EXAMPLETOWN/1/2020", "x", lineage="VICTORIA"),
-                Antigen("B/EXAMPLETOWN/2/2014", "x", lineage="YAMAGATA"))  # fmt: skip
-    old = dataclasses.replace(old, subtype="B", date="2026-01-01")
-    late = dataclasses.replace(old, date="2026-10-01")
-    other = dataclasses.replace(old, subtype="A(H1N1)")
-    kept, counts = R.round_tables([old, late, other], "B", "VICTORIA", THROUGH)
-    assert [len(t.antigens) for t in kept] == [1]
-    assert counts == {"tables_after_through": 1, "antigens_other_lineage": 1, "tables_used": 1}
-
-
-def test_no_round_tables_is_an_error() -> None:
-    with pytest.raises(R.ReportStageError, match="no A\\(H3N2\\)"):
-        R.round_tables([table()], "A(H3N2)", "", datetime.date(2000, 1, 1))
 
 
 def locations(tmp_path: Path) -> LocationTables:
@@ -88,7 +56,7 @@ def test_the_source_must_be_a_named_version(tmp_path: Path) -> None:
 def test_a_report_tree_never_replaces_its_source(tmp_path: Path, purpose: str) -> None:
     source = StoreRef("trees", "h1/report-x", "0123456789abcdef", "0123456789abcdef" + "0" * 48)
     with pytest.raises(R.ReportStageError, match="never replaces its source"):
-        R.publish(Store.create(tmp_path), None, purpose, source, {}, [], {}, THROUGH)  # type: ignore[arg-type]
+        R.publish(Store.create(tmp_path), None, purpose, source, {}, [], {}, STARTED)  # type: ignore[arg-type]
 
 
 def write_step_record(version: Path, step: str, clock: dict[str, object] | None) -> Path:
@@ -150,7 +118,7 @@ def test_with_a_trim_placement_is_measured_before_it_and_the_clock_after(tmp_pat
     from af.tree.clock import ClockSettings
     from af.tree.trim import TrimRule, find_trim_node
 
-    from .test_report_filter import CUTOFF, full, index
+    from .test_report_filter import full
 
     populated, ids = full()
     populated.aa_subs[ids["x"]] = ["P3S"]
@@ -160,7 +128,7 @@ def test_with_a_trim_placement_is_measured_before_it_and_the_clock_after(tmp_pat
     clock = ClockSettings(
         z_threshold=4.0, branch_threshold=None, earliest=datetime.date(1977, 1, 1), min_leaves=20
     )
-    args = (populated, CUTOFF, index(), lambda record: None, Counter[str](), limits, clock)
+    args = (populated, lambda record: None, Counter[str](), limits, clock)
     plain = R.derive(*args)
     trimmed = R.derive(*args, trim)
     assert trimmed.counts["placement"]["measured_on"].startswith("the untrimmed report tree")
@@ -182,7 +150,7 @@ def test_with_a_trim_the_clock_flags_come_from_the_untrimmed_fit(
     from af.tree import clock as C
     from af.tree.trim import TrimRule, find_trim_node
 
-    from .test_report_filter import CUTOFF, full, index
+    from .test_report_filter import full
 
     populated, ids = full()
     populated.aa_subs[ids["x"]] = ["P3S"]
@@ -203,7 +171,7 @@ def test_with_a_trim_the_clock_flags_come_from_the_untrimmed_fit(
     settings = C.ClockSettings(
         z_threshold=4.0, branch_threshold=None, earliest=datetime.date(1977, 1, 1), min_leaves=20
     )
-    args = (populated, CUTOFF, index(), lambda record: None, Counter[str](), limits, settings)
+    args = (populated, lambda record: None, Counter[str](), limits, settings)
     trimmed = R.derive(*args, trim)
     assert len(scored) == 1 and outgroup in scored[0]  # scored once, on the untrimmed tree
     kept = {leaf.name for leaf in trimmed.tree.leaves()}
@@ -214,3 +182,94 @@ def test_with_a_trim_the_clock_flags_come_from_the_untrimmed_fit(
     assert trimmed.counts["clock_flags_on_kept_leaves"] == {C.CLOCK_OUTLIER: len(kept)}
     plain = R.derive(*args)
     assert "clock_flags_measured_on" not in plain.counts
+
+
+def test_a_tables_publish_does_not_change_the_report_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sarah, 25 Nov 2026: "the tables shoud not affect the trees". End to end through main():
+    the same source before and after a tables publish (one that titrates a leaf) gives the same
+    version, and the published version names no tables dataset as an input."""
+    from af.store import Provenance
+    from af.tables.identity import Manifest as TablesManifest
+    from af.tables.model import Antigen, Table
+    from af.tables.store import publish as publish_tables
+    from af.tree.io import i6
+
+    from .test_report_filter import full
+    from .tree_fixtures import KEYS, LEAF_SEQ
+
+    now = datetime.datetime(2026, 11, 25, tzinfo=datetime.UTC)
+
+    def provenance(step: str) -> Provenance:
+        return Provenance(step=step, inputs=(), parameters={}, started=now, finished=now)
+
+    store = Store.create(tmp_path / "store")
+    populated, _ = full()
+    with store.build("trees", "h3/weekly") as build:
+        i6.write(populated, build.path, "weekly", {"sequences": {}, "leaves": 5})
+        clock = {"z_threshold": 4.0, "earliest": "1977-01-01", "min_leaves": 20}
+        write_step_record(build.path, "h3.populate", clock)
+        source = build.publish(provenance("test weekly"))
+    alignment = {KEYS[n]: LEAF_SEQ[n] for n in "oabcd"}
+    fasta = tmp_path / "alignment.fasta"
+    fasta.write_text("")
+    monkeypatch.setattr(R, "checked_alignment", lambda meta, export: (alignment, fasta))
+    (tmp_path / "locations").mkdir()
+    locations(tmp_path / "locations")
+    limits = tmp_path / "placement.tsv"
+    limits.write_text("subtype\tmin_correlation\treason\ttrees\nh3\t0.5\tinvented\t1\n")
+    argv = [
+        str(store.root),
+        f"h3/weekly@{source.version}",
+        str(tmp_path / "export"),
+        "report-x",
+        "--locations",
+        str(tmp_path / "locations"),
+        "--placement-limits",
+        str(limits),
+    ]
+
+    def titrating(leaf: str, day: str) -> Table:
+        return Table(
+            table_id=f"h3-hint-examplelab-{day}",
+            group="h3-hint-examplelab",
+            lab="EXAMPLELAB",
+            subtype="A(H3N2)",
+            lineage="",
+            assay="HINT",
+            rbc="",
+            date=f"{day[:4]}-{day[4:6]}-{day[6:]}",
+            date_suffix=1,
+            source_key="example 1",
+            antigens=[Antigen(name=populated.leaves[KEYS[leaf]].name, raw_name="x")],
+            sera=[],
+            titres=[],
+        )
+
+    def tables_state(tables: list[Table]) -> None:
+        manifest = TablesManifest.from_tables(tables, inputs=[])
+        publish_tables(store, tables, manifest, provenance("test tables"))
+
+    # Two tables states, both present when a report tree is derived; the second titrates another
+    # (old, year-only) leaf and adds a table dated after the first.
+    tables_state([titrating("a", "20261101")])
+    assert R.main(argv) == 0
+    before = store.current("trees", "h3/report-x")
+    tables_state([titrating("a", "20261101"), titrating("b", "20261124")])
+    assert R.main(argv) == 0
+    after = store.current("trees", "h3/report-x")
+
+    assert after == before
+    published = json.loads((store.resolve(before) / "PROVENANCE.json").read_text())
+    kinds = {i["store"]["kind"] for i in published["inputs"] if "store" in i}
+    assert kinds == {"trees"}
+    assert published["parameters"]["date_rule"].startswith("none")
+    for gone in ("cutoff", "tables_through", "table_subtype", "table_lineage"):
+        assert gone not in published["parameters"]
+
+
+@pytest.mark.parametrize("option", ["--cutoff", "--tables-through", "--table-subtype"])
+def test_the_date_rule_and_tables_options_are_gone(option: str) -> None:
+    with pytest.raises(SystemExit):
+        R.main(["store", "h3/weekly@0123456789abcdef", "export", "report-x", option, "x"])

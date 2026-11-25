@@ -1,47 +1,18 @@
-"""The report tree: older untitrated leaves pruned, topology and states kept. Synthetic only."""
+"""The report tree: every leaf of its source, no date rule and no tables. Synthetic only.
+
+Sarah, 25 Nov 2026: a report tree must not drop sequences that were not titrated, and "the tables
+shoud not affect the trees". A tree is made smaller only by a node cut (tests/tree/test_trim.py).
+"""
 
 from __future__ import annotations
 
-import datetime
+import inspect
 
-import pytest
-
-from af.tables.model import Antigen, Table
+from af.tree import report_filter
 from af.tree.populate import CladeCall, CladeResult, populate
-from af.tree.report_filter import TitratedIndex, collected_before, report_tree
+from af.tree.report_filter import report_tree
 
 from .tree_fixtures import KEYS, built, records, states_for
-
-CUTOFF = datetime.date(2023, 6, 1)
-
-
-def table(*antigens: Antigen) -> Table:
-    return Table(
-        table_id="h3-hint-examplelab-20260901",
-        group="h3-hint-examplelab",
-        lab="EXAMPLELAB",
-        subtype="A(H3N2)",
-        lineage="",
-        assay="HINT",
-        rbc="",
-        date="2026-09-01",
-        date_suffix=1,
-        source_key="example 1",
-        antigens=list(antigens),
-        sera=[],
-        titres=[],
-    )
-
-
-def index() -> TitratedIndex:
-    recs = records()
-    by_name = Antigen(name=recs[KEYS["a"]].name.lower(), raw_name="x")  # matched by name
-    by_epi = Antigen(
-        name="A/EXAMPLEVILLE/9/2020", raw_name="x", source={"epi": recs[KEYS["c"]].epi_isl}
-    )
-    return TitratedIndex.from_tables(
-        [table(by_name, by_epi)], name_key=str.upper, epi_fields=["epi"]
-    )
 
 
 def full(assign: bool = False):
@@ -62,41 +33,50 @@ def full(assign: bool = False):
     ), ids
 
 
-def test_the_interval_decides_before_the_cutoff() -> None:
-    recs = records()
-    assert collected_before(recs[KEYS["b"]], datetime.date(2022, 1, 1)) is True
-    assert collected_before(recs[KEYS["b"]], datetime.date(2021, 6, 1)) is False  # year-only 2021
-
-
-def test_untitrated_old_leaves_go_and_the_rest_stay() -> None:
+def test_every_leaf_is_kept_whatever_its_date() -> None:
+    """o (2020), a (2021), b (year-only 2021) are as old as the fixture gets; none is dropped."""
     populated, _ = full()
-    result = report_tree(populated, CUTOFF, index())
-    kept = {leaf.name for leaf in result.tree.leaves()}
-    assert kept == {KEYS["o"], KEYS["a"], KEYS["c"], KEYS["d"]}
-    assert result.counts["removed_before_cutoff"] == 1
-    assert result.counts["kept_titrated_before_cutoff"] == 2
-    assert result.counts["titrated_by_epi_isl"] == 1 and result.counts["titrated_by_name"] == 1
-    assert result.titrated[KEYS["a"]] and not result.titrated[KEYS["d"]]
-    assert result.titrated_by[KEYS["c"]] == ["EXAMPLELAB"] and result.titrated_by[KEYS["d"]] == []
-    assert result.counts["titrated_leaves_EXAMPLELAB"] == 2
+    result = report_tree(populated)
+    assert {leaf.name for leaf in result.tree.leaves()} == set(KEYS.values())
+    for gone in ("removed_before_cutoff", "kept_titrated_before_cutoff", "report_cutoff"):
+        assert gone not in result.counts
     # the input is untouched
     assert len(list(populated.tree.leaves())) == 5
 
 
-def test_a_spliced_branch_carries_the_net_change_and_its_length() -> None:
-    """y lost b, so a hangs from x: its branch is y's plus a's, and K2E moves onto it."""
-    populated, ids = full()
-    result = report_tree(populated, CUTOFF, index())
-    a = next(leaf for leaf in result.tree.leaves() if leaf.name == KEYS["a"])
-    x = next(child for child in result.tree.root.children if not child.is_leaf)
-    assert a.parent is x
-    assert a.branch_length == pytest.approx(0.05 + 0.2)
-    assert result.aa_subs[a.node_id] == ["K2E"]
+def test_no_leaf_is_marked_titrated_so_i6_writes_null_as_on_a_weekly_tree() -> None:
+    populated, _ = full()
+    result = report_tree(populated)
+    assert result.titrated == {} and result.titrated_by == {}
+    assert not any(key.startswith("titrated") or key.startswith("titre_") for key in result.counts)
+
+
+def test_nothing_here_takes_a_titre_table() -> None:
+    """The tables cannot reach the tree through this function: it has no parameter for them."""
+    assert set(inspect.signature(report_tree).parameters) == {
+        "populated",
+        "backend",
+        "assign_clades",
+        "continent_of",
+        "trim",
+    }
+    assert "af.tables" not in inspect.getsource(report_filter)
+
+
+def test_without_a_trim_the_tree_is_its_source_leaf_for_leaf() -> None:
+    populated, _ = full()
+    result = report_tree(populated)
+    by_name = {leaf.name: leaf for leaf in populated.tree.leaves()}
+    for leaf in result.tree.leaves():
+        source = by_name[leaf.name]
+        assert leaf.branch_length == source.branch_length
+        assert result.aa_subs[leaf.node_id] == populated.aa_subs[source.node_id]
+    assert result.tree.count() == populated.tree.count()
 
 
 def test_clades_are_carried_without_rerunning_the_engine() -> None:
     populated, ids = full(assign=True)
-    result = report_tree(populated, CUTOFF, index())
+    result = report_tree(populated)
     x = next(child for child in result.tree.root.children if not child.is_leaf)
     assert result.clades[x.id_hex].clade == "J.2"
     assert result.clade_set_version == "v1"
@@ -104,7 +84,8 @@ def test_clades_are_carried_without_rerunning_the_engine() -> None:
     assert result.counts["leaves_without_clade"] == 0
 
 
-def test_the_outgroup_is_kept_even_when_old_and_untitrated() -> None:
+def test_the_outgroup_is_kept_without_a_trim() -> None:
     populated, _ = full()
-    result = report_tree(populated, datetime.date(2030, 1, 1), index())
+    result = report_tree(populated)
     assert KEYS["o"] in {leaf.name for leaf in result.tree.leaves()}
+    assert result.counts["outgroup"] == KEYS["o"]

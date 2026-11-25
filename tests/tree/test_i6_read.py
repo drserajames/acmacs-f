@@ -11,7 +11,6 @@ from af.tree.io import i6
 from af.tree.populate import CladeCall, CladeResult, populate
 from af.tree.report_filter import report_tree
 
-from .test_report_filter import CUTOFF, index
 from .tree_fixtures import KEYS, LEAF_SEQ, built, records, states_for
 
 ALIGNMENT = {KEYS[n]: LEAF_SEQ[n] for n in "oabcd"}
@@ -55,10 +54,23 @@ def test_a_read_version_writes_back_identically(tmp_path: Path, scale: str) -> N
     )
 
 
-def test_a_report_tree_with_titres_round_trips(tmp_path: Path) -> None:
-    report = report_tree(labelled("ml"), CUTOFF, index())
+def test_a_version_written_with_titrated_marks_still_round_trips(tmp_path: Path) -> None:
+    """Report trees published before 25 Nov 2026 carry titrated marks; they must still read."""
+    report = labelled("ml")
+    report.titrated = {key: key == KEYS["a"] for key in report.leaves}
+    report.titrated_by = {key: ["EXAMPLELAB"] if key == KEYS["a"] else [] for key in report.leaves}
     first, second = round_trip(report, tmp_path)
     assert (first / i6.NODES_FILE).read_bytes() == (second / i6.NODES_FILE).read_bytes()
+    back = i6.read(first, ALIGNMENT)
+    assert back.titrated[KEYS["a"]] and back.titrated_by[KEYS["a"]] == ["EXAMPLELAB"]
+
+
+def test_a_report_tree_today_writes_null_titrated_marks(tmp_path: Path) -> None:
+    i6.write(report_tree(labelled("ml")), tmp_path, "report")
+    nodes = i6.read_nodes(tmp_path, columns=["is_leaf", "titrated"])
+    leaves = [t for leaf, t in zip(nodes["is_leaf"].to_pylist(), nodes["titrated"].to_pylist(),
+                                   strict=True) if leaf]  # fmt: skip
+    assert leaves and all(t is None for t in leaves)
 
 
 def test_a_report_tree_from_a_read_version_equals_one_from_the_original(tmp_path: Path) -> None:
@@ -66,8 +78,8 @@ def test_a_report_tree_from_a_read_version_equals_one_from_the_original(tmp_path
     original = labelled("ml")
     (tmp_path / "w").mkdir()
     i6.write(original, tmp_path / "w", "weekly")
-    from_store = report_tree(i6.read(tmp_path / "w", ALIGNMENT), CUTOFF, index())
-    in_memory = report_tree(original, CUTOFF, index())
+    from_store = report_tree(i6.read(tmp_path / "w", ALIGNMENT))
+    in_memory = report_tree(original)
     for directory, populated in (("a", from_store), ("b", in_memory)):
         (tmp_path / directory).mkdir()
         i6.write(populated, tmp_path / directory, "report")
@@ -98,7 +110,7 @@ def test_the_build_record_survives_reading_and_the_report_filter(tmp_path: Path)
     i6.write(populated, tmp_path / "w", "weekly")
     reread = i6.read(tmp_path / "w", ALIGNMENT)
     assert reread.build == populated.build
-    assert report_tree(reread, CUTOFF, index()).build == populated.build
+    assert report_tree(reread).build == populated.build
 
 
 def test_no_build_record_writes_no_build_key(tmp_path: Path) -> None:

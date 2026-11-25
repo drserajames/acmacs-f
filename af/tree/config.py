@@ -93,8 +93,6 @@ class SubtypeSettings:
     drop_long_branches: bool = True
     """Sarah, 25 Sep: long branches go before the tree is built. Off only for a deliberate
     comparison with a tree that kept them."""
-    report_cutoff: str | None = None
-    """ISO date. Leaves collected wholly before it are kept only if titrated (task 5.5)."""
     resources: dict[str, Resources] = field(default_factory=dict)
     """Per stage (``build``, ``asr``, ``populate``): what its job asks the scheduler for. The three
     subtypes differ several-fold in size, so wall-times and memory are set per subtype. A stage

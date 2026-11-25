@@ -6,7 +6,6 @@ The fixture's branch x->y carries K2E with two tips under it (a, b); the rule ``
 
 from __future__ import annotations
 
-import datetime
 from pathlib import Path
 
 import pytest
@@ -22,10 +21,9 @@ from af.tree.trim import (
     rule_for,
 )
 
-from .test_report_filter import CUTOFF, full, index
+from .test_report_filter import full
 from .tree_fixtures import KEYS
 
-EARLY = datetime.date(2000, 1, 1)  # nothing is old enough for the date rule
 HEADER = "subtype\tsubstitution\tmin_tips\treason\n"
 
 
@@ -44,7 +42,7 @@ def test_the_one_branch_carrying_the_substitution_is_picked() -> None:
 
 def test_the_trimmed_tree_is_rooted_at_the_cut_and_has_no_outgroup() -> None:
     populated, ids = full()
-    result = report_tree(populated, EARLY, index(), trim=find_trim_node(populated, rule()))
+    result = report_tree(populated, trim=find_trim_node(populated, rule()))
     assert {leaf.name for leaf in result.tree.leaves()} == {KEYS["a"], KEYS["b"]}
     assert result.tree.root.node_id == ids["y"] and result.tree.root.branch_length == 0.0
     assert "outgroup" not in result.counts
@@ -54,40 +52,34 @@ def test_the_trimmed_tree_is_rooted_at_the_cut_and_has_no_outgroup() -> None:
     a = next(leaf for leaf in result.tree.leaves() if leaf.name == KEYS["a"])
     assert a.branch_length == pytest.approx(0.2)
     assert result.counts["removed_by_trim"] == 2  # c and d; the outgroup is recorded apart
-    assert result.counts["removed_by_trim_titrated"] == 1  # c, by EPI_ISL
-    assert result.counts["removed_by_trim_otherwise_kept"] == 2
+    assert "removed_by_trim_titrated" not in result.counts  # no tables: nothing is titrated
     assert result.counts["removed_by_trim_by_year"] == {"2023": 1, "2024": 1}
     assert result.counts["trim"]["outgroup_removed"] == KEYS["o"]
     assert result.counts["trim"]["substitution"] == "2E"
 
 
-def test_the_date_rule_runs_inside_the_cut_and_counts_apart() -> None:
-    """A cut at x (a substitution put on x->root) keeps a, b, c, d; b then goes by date."""
+def test_inside_the_cut_every_leaf_is_kept_whatever_its_date() -> None:
+    """A cut at x (a substitution put on x->root) keeps a, b, c, d: no date rule runs inside it."""
     populated, ids = full()
     populated.aa_subs[ids["x"]] = ["P3S"]
-    trimmed = report_tree(populated, CUTOFF, index(), trim=find_trim_node(populated, rule("3S", 4)))
-    untrimmed = report_tree(populated, CUTOFF, index())
-    assert {leaf.name for leaf in trimmed.tree.leaves()} == {KEYS["a"], KEYS["c"], KEYS["d"]}
-    # x is the root; b went, so its id moved, and a hangs from it directly (y spliced out)
-    assert sorted(len(c.children) for c in trimmed.tree.root.children) == [0, 2]
-    assert trimmed.counts["removed_before_cutoff"] == 1  # b: year-only 2021, untitrated
-    assert trimmed.counts["kept_titrated_before_cutoff"] == 2  # a and c
-    for key in ("removed_before_cutoff", "kept_titrated_before_cutoff", "kept_undated"):
-        assert trimmed.counts[key] == untrimmed.counts[key]
+    trimmed = report_tree(populated, trim=find_trim_node(populated, rule("3S", 4)))
+    assert {leaf.name for leaf in trimmed.tree.leaves()} == {
+        KEYS["a"],
+        KEYS["b"],
+        KEYS["c"],
+        KEYS["d"],
+    }
+    # x is the root, with y (a, b) and z (c, d) under it, unchanged
+    assert sorted(len(c.children) for c in trimmed.tree.root.children) == [2, 2]
     assert trimmed.counts["removed_by_trim"] == 0
     assert trimmed.counts["removed_by_trim_by_year"] == {}
-
-
-def test_a_cut_the_date_rule_leaves_one_leaf_in_is_refused() -> None:
-    populated, _ = full()
-    with pytest.raises(ValueError, match="1 leaf left"):
-        report_tree(populated, CUTOFF, index(), trim=find_trim_node(populated, rule()))
+    assert "removed_before_cutoff" not in trimmed.counts
 
 
 def test_without_a_trim_the_report_tree_is_unchanged(tmp_path: Path) -> None:
     populated, _ = full(assign=True)
-    first = report_tree(populated, CUTOFF, index())
-    second = report_tree(populated, CUTOFF, index(), trim=None)
+    first = report_tree(populated)
+    second = report_tree(populated, trim=None)
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
     i6.write(first, tmp_path / "a", "report-x", {})
@@ -99,7 +91,7 @@ def test_without_a_trim_the_report_tree_is_unchanged(tmp_path: Path) -> None:
 
 def test_a_trimmed_tree_round_trips_through_i6_with_no_outgroup(tmp_path: Path) -> None:
     populated, _ = full(assign=True)
-    result = report_tree(populated, EARLY, index(), trim=find_trim_node(populated, rule()))
+    result = report_tree(populated, trim=find_trim_node(populated, rule()))
     i6.write(result, tmp_path, "report-x", {})
     assert i6.read_metadata(tmp_path)["outgroup"] is None
     alignment = {key: record.nucleotides for key, record in populated.leaves.items()}
